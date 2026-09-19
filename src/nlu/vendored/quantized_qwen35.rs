@@ -228,6 +228,40 @@ impl Mlp {
     }
 }
 
+/// Position index for every rotary pair under a multimodal RoPE split.
+///
+/// Qwen-VL gives each token three indices — temporal, height and width — and
+/// assigns a contiguous run of rotary pairs to each. `sections` lists those runs
+/// in pairs. Any pair beyond the declared sections keeps the temporal index,
+/// which is what a text-only model would have used throughout.
+///
+/// With `t == h == w`, every pair gets the same index and the result is
+/// indistinguishable from ordinary 1-D RoPE. That identity is why the current
+/// text-only forward pass is correct while ignoring the sections entirely.
+pub(crate) fn mrope_pair_positions(
+    sections: &[usize],
+    pairs: usize,
+    t: usize,
+    h: usize,
+    w: usize,
+) -> Vec<usize> {
+    let mut out = Vec::with_capacity(pairs);
+    let indices = [t, h, w];
+    for (section, width) in sections.iter().enumerate() {
+        let index = indices.get(section).copied().unwrap_or(t);
+        for _ in 0..*width {
+            if out.len() == pairs {
+                return out;
+            }
+            out.push(index);
+        }
+    }
+    while out.len() < pairs {
+        out.push(t);
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 struct PartialRope {
     cos: Tensor,
@@ -867,6 +901,16 @@ pub(crate) struct Config {
     pub(crate) head_count_kv: usize,
     pub(crate) head_dim: usize,
     pub(crate) rope_dim: usize,
+    /// Multimodal RoPE section widths, in rotary *pairs*, as the GGUF declares
+    /// them. Qwen-VL splits the rotary dimensions between temporal, height and
+    /// width position indices. Empty when the model declares none.
+    ///
+    /// Text-only inference does not need them: a text token's three indices are
+    /// all its sequence position, so every section rotates by the same angle and
+    /// the split collapses to ordinary 1-D RoPE. Image tokens are what make the
+    /// sections observable, which is why the current forward pass is correct
+    /// without them and cannot stay so once images arrive.
+    pub(crate) rope_sections: Vec<usize>,
     pub(crate) rope_freq_base: f32,
     pub(crate) rms_norm_eps: f64,
     pub(crate) full_attention_interval: usize,
@@ -905,6 +949,19 @@ impl Config {
         let head_dim = usize_value("qwen35.attention.key_length")?;
         let value_dim = usize_value("qwen35.attention.value_length")?;
         let rope_dim = usize_value("qwen35.rope.dimension_count")?;
+        let rope_sections: Vec<usize> = match metadata.get("qwen35.rope.dimension_sections") {
+            Some(value) => value
+                .to_vec()
+                .map_err(|e| candle_core::Error::msg(format!("rope.dimension_sections: {e}")))?
+                .iter()
+                .map(|v| {
+                    v.to_u32()
+                        .map(|v| v as usize)
+                        .map_err(|e| candle_core::Error::msg(format!("rope section: {e}")))
+                })
+                .collect::<Result<Vec<usize>>>()?,
+            None => Vec::new(),
+        };
         let full_attention_interval = usize_value("qwen35.full_attention_interval")?;
         let state_size = usize_value("qwen35.ssm.state_size")?;
         let value_head_count = usize_value("qwen35.ssm.time_step_rank")?;
@@ -930,6 +987,17 @@ impl Config {
         }
         if head_dim != value_dim {
             candle_core::bail!("Qwen35 key/value head widths differ ({head_dim} vs {value_dim})")
+        }
+        // Sections are counted in rotary pairs, so they must account for every
+        // pair of the rotary width. A mismatch means the split we would apply to
+        // image positions does not describe this model.
+        let section_pairs: usize = rope_sections.iter().sum();
+        if !rope_sections.is_empty() && section_pairs * 2 != rope_dim {
+            candle_core::bail!(
+                "Qwen35 rope sections {rope_sections:?} cover {section_pairs} pairs, \
+                 but the rotary width {rope_dim} needs {}",
+                rope_dim / 2
+            )
         }
         if rope_dim == 0 || !rope_dim.is_multiple_of(2) || rope_dim > head_dim {
             candle_core::bail!(
@@ -958,6 +1026,7 @@ impl Config {
             head_count_kv,
             head_dim,
             rope_dim,
+            rope_sections,
             rope_freq_base: f32_value("qwen35.rope.freq_base")?,
             rms_norm_eps: f32_value("qwen35.attention.layer_norm_rms_epsilon")? as f64,
             full_attention_interval,
@@ -1982,6 +2051,35 @@ pub(crate) mod tests {
             "ratio {}",
             plain as f64 / stored as f64
         );
+    }
+
+    #[test]
+    fn mrope_collapses_to_one_dimensional_rope_when_the_indices_agree() {
+        // The exact Ptah model's declared split: 11 temporal, 11 height, 10
+        // width pairs, covering all 32 pairs of a 64-wide rotary dimension.
+        let sections = [11usize, 11, 10, 0];
+        assert_eq!(sections.iter().sum::<usize>() * 2, 64);
+
+        // A text token carries the same index three times, so every pair
+        // rotates by the same angle and the split is unobservable.
+        let text = mrope_pair_positions(&sections, 32, 7, 7, 7);
+        assert_eq!(text, vec![7usize; 32]);
+
+        // An image token's indices differ, and the split becomes visible at
+        // exactly the declared boundaries.
+        let image = mrope_pair_positions(&sections, 32, 3, 5, 9);
+        assert_eq!(&image[..11], &[3usize; 11]);
+        assert_eq!(&image[11..22], &[5usize; 11]);
+        assert_eq!(&image[22..32], &[9usize; 10]);
+    }
+
+    #[test]
+    fn mrope_falls_back_to_the_temporal_index_beyond_the_declared_sections() {
+        // Short sections leave a tail; a model with none declared is all text.
+        assert_eq!(mrope_pair_positions(&[2, 1], 5, 1, 2, 3), vec![1, 1, 2, 1, 1]);
+        assert_eq!(mrope_pair_positions(&[], 3, 4, 5, 6), vec![4, 4, 4]);
+        // Over-long sections are truncated to the rotary width, never past it.
+        assert_eq!(mrope_pair_positions(&[9], 2, 1, 2, 3), vec![1, 1]);
     }
 
     static Q8_ROUTE_ENV: Mutex<()> = Mutex::new(());
