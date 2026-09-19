@@ -2305,6 +2305,12 @@ impl CandleBackend {
             uncompressed_bytes: live.uncompressed_bytes,
             positions: live.positions,
             layers: live.layers,
+            fidelity: live.fidelity.map(|measured| KvPagedFidelity {
+                vectors: measured.vectors,
+                min_cosine: measured.min_cosine,
+                mean_cosine: measured.mean_cosine(),
+                max_relative_l2: measured.max_relative_l2,
+            }),
         })
     }
 
@@ -4277,6 +4283,23 @@ pub struct KvPageResidency {
     /// Paged positions summed over layers, so layers x positions per layer.
     pub positions: usize,
     pub layers: usize,
+    /// Agreement between the live paged reconstruction and the exact rows it
+    /// replaced. Present only when `AKH_QWEN35_KV_PAGE_FIDELITY=1`, since
+    /// measuring costs a device-to-host copy per absorbed chunk.
+    pub fidelity: Option<KvPagedFidelity>,
+}
+
+/// Agreement between what the paged path reconstructs and what it replaced.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct KvPagedFidelity {
+    pub vectors: usize,
+    /// Worst cosine over every absorbed vector. This is the figure the 0.9999
+    /// gate applies to.
+    pub min_cosine: f64,
+    pub mean_cosine: f64,
+    /// Worst relative L2 error, `||x - x'|| / ||x||`.
+    pub max_relative_l2: f64,
 }
 
 /// Per-layer PolarQuant round-trip quality for one resident KV cache.

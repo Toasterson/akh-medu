@@ -140,7 +140,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "layers":residency.layers,"paged_positions":residency.positions,
                 "stored_bytes":residency.stored_bytes,
                 "uncompressed_bytes":residency.uncompressed_bytes,
-                "ratio":residency.uncompressed_bytes as f64 / residency.stored_bytes as f64})
+                "ratio":residency.uncompressed_bytes as f64 / residency.stored_bytes as f64,
+                "fidelity":residency.fidelity})
         );
     }
     if args.continuation {

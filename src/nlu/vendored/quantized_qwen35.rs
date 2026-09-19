@@ -391,6 +391,59 @@ impl CodeLayout {
     }
 }
 
+/// How faithfully the live paged path reconstructs what it replaced.
+///
+/// Accumulated at the moment positions are absorbed, which is the only point
+/// where the exact rows and their device decode both exist. Measuring here
+/// means the figure covers the real codes, the real layout and the real device
+/// arithmetic, rather than a host simulation of them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KvPageFidelity {
+    pub vectors: usize,
+    pub min_cosine: f64,
+    pub sum_cosine: f64,
+    pub max_relative_l2: f64,
+}
+
+impl Default for KvPageFidelity {
+    fn default() -> Self {
+        Self {
+            vectors: 0,
+            min_cosine: f64::INFINITY,
+            sum_cosine: 0.0,
+            max_relative_l2: 0.0,
+        }
+    }
+}
+
+impl KvPageFidelity {
+    fn merge(&mut self, other: &Self) {
+        self.vectors += other.vectors;
+        self.min_cosine = self.min_cosine.min(other.min_cosine);
+        self.sum_cosine += other.sum_cosine;
+        self.max_relative_l2 = self.max_relative_l2.max(other.max_relative_l2);
+    }
+
+    pub fn mean_cosine(&self) -> f64 {
+        if self.vectors == 0 {
+            f64::NAN
+        } else {
+            self.sum_cosine / self.vectors as f64
+        }
+    }
+}
+
+/// Measuring costs a device-to-host copy per absorbed chunk, so it is opt-in.
+fn kv_page_fidelity_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("AKH_QWEN35_KV_PAGE_FIDELITY")
+            .map(|value| value == "1")
+            .unwrap_or(false)
+    })
+}
+
 /// What compressed KV pages occupy right now, summed over attention layers.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct KvPageResidency {
@@ -400,6 +453,8 @@ pub(crate) struct KvPageResidency {
     /// Paged positions summed over layers, so layers x positions per layer.
     pub positions: usize,
     pub layers: usize,
+    /// Present only when `AKH_QWEN35_KV_PAGE_FIDELITY=1`.
+    pub fidelity: Option<KvPageFidelity>,
 }
 
 /// Pack rows of codes three to a `u32` word, lowest lane in the low byte.
@@ -439,6 +494,8 @@ struct KvPages {
     layout: CodeLayout,
     /// What one code element costs on the device holding it.
     code_element_bytes: usize,
+    /// Present only when fidelity measurement is switched on.
+    fidelity: Option<KvPageFidelity>,
     positions: usize,
 }
 
@@ -465,6 +522,7 @@ impl KvPages {
             quantizer,
             layout: CodeLayout::for_device(device, dim),
             code_element_bytes: CodeLayout::code_element_bytes(device),
+            fidelity: kv_page_fidelity_enabled().then(KvPageFidelity::default),
             positions: 0,
         })
     }
@@ -597,6 +655,67 @@ impl KvPages {
             .broadcast_mul(&norms.reshape((batch * heads * positions, 1))?)?
             .matmul(rotation)?
             .reshape((batch, heads, positions, dim))
+    }
+
+    /// Compare a freshly absorbed chunk against the exact rows it replaces.
+    ///
+    /// Runs the same `decode_on_device` the live path runs, so what is scored is
+    /// the reconstruction attention will actually read, not an approximation of
+    /// it. No-op unless measurement is switched on.
+    fn record_fidelity(
+        &mut self,
+        exact: &Tensor,
+        codes: &Tensor,
+        norms: &Tensor,
+        count: usize,
+    ) -> Result<()> {
+        if self.fidelity.is_none() || count == 0 {
+            return Ok(());
+        }
+        let (batch, heads, _, dim) = exact.dims4()?;
+        let decoded = Self::decode_on_device(
+            codes,
+            norms,
+            &self.codebook,
+            &self.rotation,
+            self.layout,
+            batch,
+            heads,
+            count,
+            dim,
+        )?;
+        let want: Vec<f32> = exact
+            .narrow(2, 0, count)?
+            .contiguous()?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1()?;
+        let got: Vec<f32> = decoded.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+        let stats = self
+            .fidelity
+            .as_mut()
+            .expect("fidelity presence checked above");
+        for (original, restored) in want.chunks_exact(dim).zip(got.chunks_exact(dim)) {
+            let (mut dot, mut left, mut right, mut diff) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            for (a, b) in original.iter().zip(restored) {
+                let (a, b) = (f64::from(*a), f64::from(*b));
+                dot += a * b;
+                left += a * a;
+                right += b * b;
+                diff += (a - b) * (a - b);
+            }
+            // A zero row has no direction to agree about; skip rather than
+            // score it as perfect or as total disagreement.
+            if left == 0.0 || right == 0.0 {
+                continue;
+            }
+            stats.vectors += 1;
+            let cosine = dot / (left.sqrt() * right.sqrt());
+            stats.min_cosine = stats.min_cosine.min(cosine);
+            stats.sum_cosine += cosine;
+            stats.max_relative_l2 = stats.max_relative_l2.max(diff.sqrt() / left.sqrt());
+        }
+        Ok(())
     }
 
     /// The stored keys and values, reconstructed.
@@ -741,6 +860,8 @@ impl FullAttention {
                 if overflow > 0 {
                     let (key_codes, key_norms) = pages.absorb(&key, overflow)?;
                     let (value_codes, value_norms) = pages.absorb(&value, overflow)?;
+                    pages.record_fidelity(&key, &key_codes, &key_norms, overflow)?;
+                    pages.record_fidelity(&value, &value_codes, &value_norms, overflow)?;
                     KvPages::extend(&mut pages.key_codes, key_codes)?;
                     KvPages::extend(&mut pages.key_norms, key_norms)?;
                     KvPages::extend(&mut pages.value_codes, value_codes)?;
@@ -1607,6 +1728,12 @@ impl InferenceSession {
             residency.uncompressed_bytes += uncompressed;
             residency.positions += pages.positions();
             residency.layers += 1;
+            if let Some(measured) = pages.fidelity.as_ref() {
+                residency
+                    .fidelity
+                    .get_or_insert_with(KvPageFidelity::default)
+                    .merge(measured);
+            }
         }
         (residency.layers > 0).then_some(residency)
     }
@@ -2396,6 +2523,46 @@ pub(crate) mod tests {
             "ratio {}",
             plain as f64 / stored as f64
         );
+    }
+
+    #[test]
+    fn paged_fidelity_tracks_the_bit_width_it_is_measuring() {
+        let device = Device::Cpu;
+        let (heads, positions, dim) = (2usize, 8usize, 64usize);
+        // Smoothly varying rows, so a coarse codebook has something to lose.
+        let values: Vec<f32> = (0..heads * positions * dim)
+            .map(|i| ((i % 97) as f32 / 48.0) - 1.0)
+            .collect();
+        let tensor = Tensor::from_vec(values, (1, heads, positions, dim), &device).unwrap();
+
+        let measure = |bits: u8| {
+            let mut pages =
+                KvPages::new(KvQuantization { bits, recent: 2 }, dim, &device).unwrap();
+            // Switch measurement on directly; the env flag is read once per
+            // process and a test cannot rely on winning that race.
+            pages.fidelity = Some(KvPageFidelity::default());
+            let (codes, norms) = pages.absorb(&tensor, 6).unwrap();
+            pages.record_fidelity(&tensor, &codes, &norms, 6).unwrap();
+            pages.fidelity.unwrap()
+        };
+
+        let coarse = measure(2);
+        let fine = measure(8);
+        assert_eq!(coarse.vectors, heads * 6);
+        assert_eq!(fine.vectors, heads * 6);
+        // More bits must reconstruct at least as well on every summary.
+        assert!(
+            fine.min_cosine > coarse.min_cosine,
+            "8-bit {} against 2-bit {}",
+            fine.min_cosine,
+            coarse.min_cosine
+        );
+        assert!(fine.mean_cosine() > coarse.mean_cosine());
+        assert!(fine.max_relative_l2 < coarse.max_relative_l2);
+        // A cosine is a cosine, whatever the width.
+        for stats in [coarse, fine] {
+            assert!(stats.min_cosine > -1.000_001 && stats.min_cosine < 1.000_001);
+        }
     }
 
     #[test]

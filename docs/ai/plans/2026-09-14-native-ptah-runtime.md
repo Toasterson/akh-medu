@@ -192,8 +192,30 @@ the chronological evidence further down is retained as written.
   other uncompressed. Measuring only Vulkan would have let me report token
   identity as a property of 4-bit paging when it is luck at one prompt. Whether
   4-bit paging is acceptable is **unsettled**: it needs the 0.9999 cosine gate run
-  against paged reconstruction on both devices. The device disagreement under
-  identical codes is itself unexplained and not chased.
+  against paged reconstruction on both devices.
+
+- **Compressed KV fails the 0.9999 cosine gate at every bit-width, including 8**
+  (2026-09-19). Fidelity is now measured on the live path, at the moment
+  positions are absorbed, running the same device decode attention reads
+  (`AKH_QWEN35_KV_PAGE_FIDELITY=1`). Worst cosine over 16 layers: **0.99788** at
+  8 bits, 0.98540 at 4, 0.96627 at 3, 0.91491 at 2. Mean at 8 bits is 0.99994 and
+  grazes the gate, but the gate is on the worst vector. This had never been
+  measured - the 4/3/2-bit canary is behavioural, and the quality report
+  simulates a host round trip rather than reading the live path.
+
+  That the 0.9999 gate is a **parity** gate, which a lossy compressor cannot meet
+  by construction, is a real argument - and it is an argument that compressed KV
+  needs its **own acceptance criterion**, not that it passes this one. That
+  criterion does not exist and is a decision to take deliberately. **Compressed
+  KV stays off by default and is not proposed for enabling.**
+
+  **Retracted:** I guessed the HIP/Vulkan token divergence came from the page
+  decode's device arithmetic. The two devices reconstruct identically to 8
+  decimal places at every width (largest gap 6.1e-08), so that is wrong. At 4
+  bits only, identical reconstructions give different text on the two devices -
+  a knife-edge near a token boundary, not a quality difference. Greedy agreement
+  there reported "nothing changed" on one device and "something changed" on the
+  other from the same codes: not merely a weak signal but a misleading one.
 
   Three corrections this produced. **The byte layout never ran on Vulkan at
   all**: `to_dtype` had no `U8 -> U32` arm, so the decode aborted the first time

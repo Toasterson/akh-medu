@@ -68,12 +68,12 @@ agreement is aimed at, arriving from the reassuring direction: the weaker signal
 said pass on the device I was working on, and the same signal says fail one
 device over.
 
-Why the two devices differ under identical codes is **unexplained**. The
-quantizer is seeded identically and the paging schedule is the same, so the codes
-should match; what differs is the arithmetic of the page decode. Not chased here.
 HIP's behaviour is unchanged by this work - its layout, absorb and decode paths
 are byte-for-byte what they were - so this is a pre-existing property of 4-bit
 paging that this comparison exposed, not a regression.
+
+I guessed the cause was the page decode's device arithmetic. **That was wrong**,
+and the section below measures it.
 
 ## Two accounting errors, both flattering
 
@@ -121,3 +121,54 @@ cannot separate the unpack from the decode.
 - 4x per word is still unreachable through public tensor ops, since the f32
   route caps at three codes. A WGSL integer expression would reach it; the
   existing `elementwise` helper could express one without a new kernel file.
+
+## The gate, measured on the live path
+
+`kv_turboquant_report` simulates a round trip on the host against the exact
+resident cache. It cannot see the real codes, the real layout or the device's
+arithmetic - the three things in question. So fidelity is now recorded where both
+sides actually exist: at the moment positions are absorbed, running the same
+`decode_on_device` the live path runs. Off by default behind
+`AKH_QWEN35_KV_PAGE_FIDELITY=1`, since it costs a device-to-host copy per chunk.
+
+Worst cosine over every absorbed vector, 16 layers:
+
+| bits | HIP min | Vulkan min | mean (Vulkan) | worst rel. L2 |
+| --- | --- | --- | --- | --- |
+| 8 | 0.9978774081 | 0.9978774694 | 0.99994 | 0.067 |
+| 4 | 0.9854002256 | 0.9854002150 | 0.99535 | 0.178 |
+| 3 | 0.9662678587 | 0.9662678670 | 0.98289 | 0.259 |
+| 2 | 0.9149084325 | 0.9149084347 | 0.94008 | 0.404 |
+
+### Compressed KV does not clear the 0.9999 gate at any width
+
+Not at 4 bits, not at 8. Mean cosine at 8 bits is 0.99994 and grazes it, but the
+gate is on the worst vector and that is 0.99788. This had never been measured:
+the canary that passed at 4, 3 and 2 bits is behavioural - it recalls the right
+number after eviction - and the quality report simulates rather than reads the
+live path.
+
+The argument that the 0.9999 gate is a **parity** gate, meant for exact paths
+against a reference, and that a lossy compressor cannot meet it by construction,
+is a real argument. It is also an argument that compressed KV needs its own
+acceptance criterion, not that it passes this one. Defining that criterion is a
+decision to be taken deliberately, not inferred from a feature wanting to ship.
+Compressed KV remains off by default.
+
+### The devices reconstruct identically, so my explanation was wrong
+
+HIP and Vulkan agree to 8 decimal places at every width - the largest gap is
+6.1e-08, at 8 bits. The page decode is not where they diverge, so the guess above
+is retracted.
+
+What remains is that at **4 bits only**, the two devices emit different text from
+reconstructions identical to eight decimals: Vulkan matches its uncompressed run,
+HIP does not. At 8 bits both match uncompressed; at 3 and 2 bits both differ from
+uncompressed and agree with each other. That pattern is a knife-edge, not a
+quality difference - 4 bits happens to sit near a token boundary for this prompt,
+where any difference in the base decode arithmetic flips it.
+
+Which is the sharpest form of the standing rule's point. Greedy-token agreement,
+at 4 bits, reported "nothing changed" on one device and "something changed" on
+the other, from the same codes and the same reconstruction. It is not a weak
+quality signal here; it is an actively misleading one.
