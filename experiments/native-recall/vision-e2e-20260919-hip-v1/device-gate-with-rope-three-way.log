@@ -1,0 +1,17 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+VULKAN_BUILD_EXIT=
+"all_finite":true
+"forward_seconds":0.154994766
+wrote 20480 values to /tmp/vision/rope_vulkan.f32
+=== three-way gate with rope ===
+20480 elements per projection
+
+pair                        cosine      rel L2   worst abs  gate
+cpu vs hip            1.0000000000   4.885e-06   4.425e-04  PASS
+cpu vs vulkan         1.0000000000   4.935e-06   7.248e-04  PASS
+hip vs vulkan         1.0000000000   3.293e-06   2.823e-04  PASS
+
+all pairs meet the 0.9999 cosine gate
+GATE_EXIT=0
+
+[exited with code 0]

@@ -495,9 +495,10 @@ impl VisionTower {
             .add(&self.interpolated_positions(grid_h, grid_w)?)
             .map_err(|e| map(e, "position embedding"))?;
 
+        let rope = VisionRope::new(grid_h, grid_w, self.config.head_dim(), pixels.device())?;
         let mut hidden = hidden;
         for block in &self.blocks {
-            hidden = self.block_forward(block, &hidden)?;
+            hidden = self.block_forward(block, &hidden, &rope)?;
         }
         let hidden = layer_norm(
             &hidden,
@@ -515,7 +516,12 @@ impl VisionTower {
             .map_err(|e| map(e, "merger second layer"))
     }
 
-    fn block_forward(&self, block: &VisionBlock, hidden: &Tensor) -> NluResult<Tensor> {
+    fn block_forward(
+        &self,
+        block: &VisionBlock,
+        hidden: &Tensor,
+        rope: &VisionRope,
+    ) -> NluResult<Tensor> {
         let map = |e: candle_core::Error, what: &str| NluError::ModelLoadFailed {
             reason: format!("vision {what}: {e}"),
         };
@@ -540,6 +546,9 @@ impl VisionTower {
                 .map_err(|e| map(e, "qkv contiguous"))
         };
         let (query, key, value) = (split(0)?, split(1)?, split(2)?);
+        // After the bias, before the scale - as both references do.
+        let query = apply_vision_rope(&query, rope).map_err(|e| map(e, "query rope"))?;
+        let key = apply_vision_rope(&key, rope).map_err(|e| map(e, "key rope"))?;
 
         // No causal mask: the tower attends over all patches bidirectionally.
         let scores = query
@@ -639,6 +648,87 @@ impl VisionTower {
     }
 }
 
+/// Rotary base for the vision blocks. Not in the GGUF: llama.cpp hard-codes it
+/// for this projector type, and HF's vision config carries the same value.
+const VISION_ROPE_THETA: f64 = 10_000.0;
+
+/// 2D rotary tables for every patch, in the tower's row-major patch order.
+///
+/// The head is rotated whole. Pair `i` couples dims `i` and `i + head_dim/2`;
+/// pairs below `head_dim/4` turn by the patch's row, the rest by its column,
+/// each with frequencies `theta^(-2k / (head_dim/2))` restarting at the axis
+/// boundary. That is HF's `recomposition_frequencies` - cos laid out as
+/// `[h, w, h, w]` with `rotate_half` over the full head - and ggml's vision
+/// rope mode, verified against both sources rather than either alone.
+///
+/// Without this the tower's attention knows patch positions only through the
+/// learned absolute table: coarse layout survives, shapes built from which
+/// patches neighbour which do not.
+#[derive(Debug, Clone)]
+struct VisionRope {
+    /// `(1, patches, head_dim)`, broadcast over heads.
+    cos: Tensor,
+    sin: Tensor,
+}
+
+impl VisionRope {
+    fn new(grid_h: usize, grid_w: usize, head_dim: usize, device: &Device) -> NluResult<Self> {
+        let (cos, sin) = vision_rope_tables(grid_h, grid_w, head_dim, VISION_ROPE_THETA);
+        let patches = grid_h * grid_w;
+        let map = |e: candle_core::Error| NluError::ModelLoadFailed {
+            reason: format!("vision rope tables: {e}"),
+        };
+        Ok(Self {
+            cos: Tensor::from_vec(cos, (1, patches, head_dim), device).map_err(map)?,
+            sin: Tensor::from_vec(sin, (1, patches, head_dim), device).map_err(map)?,
+        })
+    }
+}
+
+/// The cos and sin tables, `(patches, head_dim)` flattened, host side.
+fn vision_rope_tables(
+    grid_h: usize,
+    grid_w: usize,
+    head_dim: usize,
+    theta: f64,
+) -> (Vec<f32>, Vec<f32>) {
+    let half = head_dim / 2;
+    let quarter = half / 2;
+    let patches = grid_h * grid_w;
+    let mut cos = vec![0.0f32; patches * head_dim];
+    let mut sin = vec![0.0f32; patches * head_dim];
+    for patch in 0..patches {
+        let (row, col) = ((patch / grid_w) as f64, (patch % grid_w) as f64);
+        for pair in 0..half {
+            // Which axis, and the frequency index within it.
+            let (position, k) = if pair < quarter { (row, pair) } else { (col, pair - quarter) };
+            let inv_freq = theta.powf(-(2.0 * k as f64) / half as f64);
+            let angle = position * inv_freq;
+            let base = patch * head_dim;
+            // Both halves of the pair share the angle, as rotate_half implies.
+            cos[base + pair] = angle.cos() as f32;
+            cos[base + pair + half] = angle.cos() as f32;
+            sin[base + pair] = angle.sin() as f32;
+            sin[base + pair + half] = angle.sin() as f32;
+        }
+    }
+    (cos, sin)
+}
+
+/// `x * cos + rotate_half(x) * sin` over `(heads, patches, head_dim)`.
+///
+/// Only narrow, neg, cat and the binary ops, all of which every backend
+/// already implements.
+fn apply_vision_rope(x: &Tensor, rope: &VisionRope) -> candle_core::Result<Tensor> {
+    let head_dim = x.dim(2)?;
+    let half = head_dim / 2;
+    let first = x.narrow(2, 0, half)?;
+    let second = x.narrow(2, half, half)?;
+    let rotated = Tensor::cat(&[&second.neg()?, &first], 2)?;
+    x.broadcast_mul(&rope.cos)?
+        .add(&rotated.broadcast_mul(&rope.sin)?)
+}
+
 /// GELU, tanh approximation, on whichever device holds the tensor.
 ///
 /// Vulkan has no unary gelu, so it is composed from primitives the backend does
@@ -698,6 +788,7 @@ fn layer_norm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::IndexOp;
 
     fn pinned_projector() -> Option<std::path::PathBuf> {
         let model = Path::new(
@@ -893,4 +984,128 @@ mod tests {
         assert!(names.contains(&"v.blk.2.attn_qkv.weight".to_string()));
         assert!(names.contains(&"mm.2.bias".to_string()));
     }
+    // --- 2D rotary: pinned without a reference, on properties a wrong table
+    // would break and a summary statistic would not notice. ---
+
+    fn rotate(grid_h: usize, grid_w: usize, head_dim: usize, x: &candle_core::Tensor)
+        -> candle_core::Tensor
+    {
+        let rope = VisionRope::new(grid_h, grid_w, head_dim, &candle_core::Device::Cpu).unwrap();
+        apply_vision_rope(x, &rope).unwrap()
+    }
+
+    /// One deterministic vector per (heads, patches, head_dim) slot, with a
+    /// distinct vector per patch only when `per_patch` is set; otherwise every
+    /// patch holds the same vector, so differences after rotation come from
+    /// position alone.
+    fn field(heads: usize, patches: usize, head_dim: usize, seed: usize, per_patch: bool)
+        -> candle_core::Tensor
+    {
+        let values: Vec<f32> = (0..heads * patches * head_dim)
+            .map(|i| {
+                let d = i % head_dim;
+                let p = if per_patch { (i / head_dim) % patches } else { 0 };
+                (((d * 31 + p * 17 + seed * 7) % 101) as f32 / 50.0) - 1.0
+            })
+            .collect();
+        candle_core::Tensor::from_vec(values, (heads, patches, head_dim), &candle_core::Device::Cpu)
+            .unwrap()
+    }
+
+    fn dot(a: &candle_core::Tensor, b: &candle_core::Tensor, pa: usize, pb: usize) -> f32 {
+        let va: Vec<f32> = a.i((0, pa, ..)).unwrap().to_vec1().unwrap();
+        let vb: Vec<f32> = b.i((0, pb, ..)).unwrap().to_vec1().unwrap();
+        va.iter().zip(&vb).map(|(x, y)| x * y).sum()
+    }
+
+    #[test]
+    fn vision_rope_is_the_identity_at_the_origin() {
+        let (cos, sin) = vision_rope_tables(1, 1, 72, VISION_ROPE_THETA);
+        assert!(cos.iter().all(|c| (*c - 1.0).abs() < 1e-7));
+        assert!(sin.iter().all(|s| s.abs() < 1e-7));
+        let x = field(2, 1, 72, 3, true);
+        let y = rotate(1, 1, 72, &x);
+        let (xs, ys): (Vec<f32>, Vec<f32>) = (
+            x.flatten_all().unwrap().to_vec1().unwrap(),
+            y.flatten_all().unwrap().to_vec1().unwrap(),
+        );
+        assert_eq!(xs, ys, "a patch at (0, 0) must not be rotated at all");
+    }
+
+    #[test]
+    fn vision_rope_preserves_every_vector_norm() {
+        let (h, w, d) = (3, 4, 72);
+        let x = field(2, h * w, d, 5, true);
+        let y = rotate(h, w, d, &x);
+        let norm = |t: &candle_core::Tensor| -> Vec<f32> {
+            t.sqr().unwrap().sum(2).unwrap().sqrt().unwrap().flatten_all().unwrap().to_vec1().unwrap()
+        };
+        for (a, b) in norm(&x).iter().zip(norm(&y).iter()) {
+            assert!((a - b).abs() < 1e-4, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn vision_rope_scores_depend_only_on_relative_position() {
+        let (h, w, d) = (4, 5, 72);
+        // Same query vector at every patch, same key vector at every patch, so
+        // any difference between two dot products is position and nothing else.
+        let q = rotate(h, w, d, &field(1, h * w, d, 1, false));
+        let k = rotate(h, w, d, &field(1, h * w, d, 2, false));
+        let at = |r: usize, c: usize| r * w + c;
+        // Both pairs are one row down and two columns right.
+        let same_delta_a = dot(&q, &k, at(0, 0), at(1, 2));
+        let same_delta_b = dot(&q, &k, at(1, 1), at(2, 3));
+        assert!(
+            (same_delta_a - same_delta_b).abs() < 1e-3,
+            "equal offsets must score equally: {same_delta_a} vs {same_delta_b}"
+        );
+        // And a different offset must not - otherwise the test cannot fail.
+        let other = dot(&q, &k, at(0, 0), at(2, 1));
+        assert!((same_delta_a - other).abs() > 1e-3, "rope is inert: {same_delta_a} vs {other}");
+    }
+
+    #[test]
+    fn vision_rope_keeps_height_and_width_as_distinct_axes() {
+        let (h, w, d) = (4, 4, 72);
+        let q = rotate(h, w, d, &field(1, h * w, d, 1, false));
+        let k = rotate(h, w, d, &field(1, h * w, d, 2, false));
+        let at = |r: usize, c: usize| r * w + c;
+        // One step down against one step right. If the two axes shared a
+        // section these would be identical, and a transposed image would
+        // attend exactly like the original.
+        let down = dot(&q, &k, at(0, 0), at(1, 0));
+        let right = dot(&q, &k, at(0, 0), at(0, 1));
+        assert!((down - right).abs() > 1e-3, "axes collapsed: {down} vs {right}");
+    }
+
+    #[test]
+    fn vision_rope_tables_match_an_independent_reference_recomposition() {
+        // HF, written the way HF writes it rather than the way the table does:
+        // inverse frequencies over spatial_dim = head_dim / 2 stepping by two,
+        // then freq_hw = cat(h * f, w * f), then cat(freq_hw, freq_hw).
+        let (grid_h, grid_w, head_dim, theta) = (3usize, 5usize, 72usize, 10_000.0f64);
+        let spatial = head_dim / 2;
+        let inv_freq: Vec<f64> = (0..spatial)
+            .step_by(2)
+            .map(|i| 1.0 / theta.powf(i as f64 / spatial as f64))
+            .collect();
+        let mut expected_cos = Vec::new();
+        for patch in 0..grid_h * grid_w {
+            let (hp, wp) = ((patch / grid_w) as f64, (patch % grid_w) as f64);
+            let freq_h: Vec<f64> = inv_freq.iter().map(|f| hp * f).collect();
+            let freq_w: Vec<f64> = inv_freq.iter().map(|f| wp * f).collect();
+            let mut hw = freq_h.clone();
+            hw.extend(freq_w);
+            let mut emb = hw.clone();
+            emb.extend(hw);
+            expected_cos.extend(emb.iter().map(|a| a.cos() as f32));
+        }
+        let (cos, _) = vision_rope_tables(grid_h, grid_w, head_dim, theta);
+        assert_eq!(cos.len(), expected_cos.len());
+        for (i, (a, b)) in cos.iter().zip(&expected_cos).enumerate() {
+            assert!((a - b).abs() < 1e-6, "slot {i}: {a} vs {b}");
+        }
+    }
+
 }

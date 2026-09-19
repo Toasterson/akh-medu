@@ -417,6 +417,24 @@ the chronological evidence further down is retained as written.
   slice next, with the four images as the before. See
   [vision device gate](../research/2026-09-19-vision-device-gate.md).
 
+- **Item 5: 2D rotary added to every vision block; shapes now read correctly**
+  (2026-09-19). HF's `recomposition_frequencies` and ggml's vision rope mode
+  were read from source and agree - pair `i` with `i + head_dim/2`, height on
+  the first half of the pairs, width on the second, theta 10,000 - so the
+  GGUF's q/k rows are HF's and no permutation is needed. (llama.cpp's
+  `build_rope_2d` pairs differently; `qwen3vl` does not use it.) Row-major
+  patch order is kept: equivalent to the references' merge-window order under
+  permutation-equivariance. Narrow, neg, cat and broadcast multiplies only.
+
+  Pinned by five reference-free properties (identity at origin, norm
+  preservation, offset-only scores, distinct axes, table equal to an independent
+  HF re-implementation) and the real weights on CPU. Device gate with rope:
+  cpu/hip cosine 1.0000000000. Against the pre-rope output cosine **0.70** - not
+  inert. All four geometry images now correct in shape, orientation and bar
+  side; the original smoke too. Residual: a horizontally-centred square is
+  called "upper right" three times - "upper" right, "right" wrong, no axis
+  mirrored. Unexplained, recorded. 3,460 tests pass.
+
 - **Item 4: the seam had a silent fallback; the topology fork is confirmed real**
   (2026-09-19). `context_budgeted` existed in exactly one place in the tree -
   `native_window.rs` and its own tests. **The core never emitted it.** So once

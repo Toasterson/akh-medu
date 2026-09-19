@@ -223,6 +223,60 @@ about, found by the behavioural check the gate cannot replace.
 
 Fixing the tower is its own slice, with these four images as the before.
 
+## The tower fix: 2D rotary in every vision block
+
+Both references were read from source rather than recalled. HF's
+`Qwen3VLVisionRotaryEmbedding` builds inverse frequencies over `head_dim/2`,
+multiplies by each patch's `(h, w)`, and `recomposition_frequencies` lays cos
+out as `[h, w, h, w]` with `rotate_half` over the whole head - pair `i` with
+`i + head_dim/2`. ggml's `GGML_ROPE_TYPE_VISION` does the same: `rotate_pairs`
+over all `ne0` dims with offset `n_dims = ne0/2`, sectors 0..17 on the first
+position stream and 18..35 on the second, the frequency restarting at the
+boundary. The two agree, so no converter permutation exists and the GGUF's q/k
+rows are HF's. The theta is 10,000 in both and in neither artifact key.
+
+One trap avoided by reading rather than searching: llama.cpp also has a
+`build_rope_2d` that applies two NEOX ropes and therefore pairs `i` with
+`i + 18` - a different layout. The `qwen3vl` graph does not use it.
+
+The tables are built host-side per forward in the tower's row-major patch
+order, which is equivalent to the references' merge-window order because
+attention is permutation-equivariant given correct per-patch positions, and the
+absolute embedding and the merger already use row-major consistently. The
+rotation itself is narrow, neg, cat and two broadcast multiplies - no new
+kernel on either backend.
+
+### Pinned without a reference
+
+Five properties a wrong table breaks and a summary statistic would not notice:
+identity at the origin, norm preserved for every vector, scores depending only
+on the offset between two patches, height and width distinct (one step down
+must not score like one step right - a transposed image would otherwise attend
+like the original), and the table matching an independent re-implementation of
+HF's recomposition written the way HF writes it. All pass. The three pinned
+projector tests pass on the real weights on CPU.
+
+### Measured
+
+| check | result |
+| --- | --- |
+| device gate, cpu vs hip, with rope | cosine 1.0000000000, rel. L2 4.9e-06 |
+| device gate, three-way, with rope | cpu/hip/vulkan all cosine 1.0000000000, worst rel. L2 4.9e-06 |
+| new output vs pre-rope output | cosine **0.70** - the rope is not inert |
+
+| image | before | after |
+| --- | --- | --- |
+| red square, blue bar bottom | "pixelated French flag, fragmented" | "solid red square ... solid blue horizontal bar spanning the entire width along the bottom edge" |
+| red square, blue bar left | "diagonal stripe pattern, alternating blocks" | "vertical blue bar on the left side and a solid red square" |
+| three vertical stripes | correct | correct |
+| three horizontal stripes | correct | correct |
+
+Shapes, orientation and which edge the bar sits on are now right in every
+case. **One residual:** three descriptions place the horizontally-centred square
+in the "upper right quadrant". "Upper" is right - it sits slightly above
+centre - "right" is not. Bar sides read correctly, so no axis is mirrored.
+Unexplained; recorded rather than chased.
+
 ## The external reference exists after all
 
 Recorded twice as "no external consumer is installed". There is no transformers,
