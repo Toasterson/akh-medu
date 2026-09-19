@@ -152,9 +152,12 @@ the chronological evidence further down is retained as written.
   while the host converts. The canary passes only because its 1,024-token window
   ages almost nothing out. On-device decode is therefore a precondition for
   enabling this, not an optimization - and it needs a **backend kernel**, not
-  just composition: HIP implements no u8 casts at all and Vulkan cannot reach
-  u32 from u8, so a device-resident index array would be four bytes per value
-  and save nothing against the f32 cache it replaces. See
+  just composition, and the two backends need different work. HIP stores `u8`
+  at one byte per element and needs only a `u8 -> u32` cast kernel. **Vulkan
+  allocates four bytes per element for every dtype**, so `u8` saves nothing
+  there before any cast happens; it needs packed small-integer storage and an
+  unpacking gather. Compressed resident KV is therefore achievable on HIP and
+  not on Vulkan without backend storage work. See
   [lossy KV gate](../research/2026-09-19-lossy-kv-canary.md).
   See [TurboQuant](../research/2026-09-19-turboquant-kv.md).
 - **KV quantization quality measured, and it fails** (2026-09-19): PolarQuant
