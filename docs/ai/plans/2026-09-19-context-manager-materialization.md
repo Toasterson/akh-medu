@@ -155,3 +155,48 @@ time, the first shape becomes necessary and the call moves behind `/v1/context`.
    `ContextWindowStats` in place of the bare `dropped_messages` integer.
 4. Acceptance: the five-daemon canary's `final_dropped_messages` and
    `max_materialized_spans` must still hold, on both devices.
+
+## Correction: the third shape is not implementable
+
+The resolution above rests on a guard that does not hold. `EpisodeState` carries
+a non-optional `engine: &Engine`, and the assemble path genuinely uses it:
+
+- `src/agent/context/safety.rs:57` — `SafetyEnforced::assemble` classifies every
+  dropped span with `self.classifier.classify(episode.engine, anchor)` and fails
+  the turn with `SafetyPinViolation` if a safety-pinned span was evicted.
+- `src/agent/context/compacting.rs:187` — the default strategy reads
+  `crate::schema::digest(episode.engine)` while compacting.
+- `src/agent/context/virtual_ctx.rs:94` — reads core memory through the engine.
+
+akhsessd has no `Engine`; that is akhomed's cognitive core. So executing the seam
+in the session process means either giving the session daemon an Engine, which is
+precisely the second cognitive core the ledger forbids, or running `assemble`
+without safety-pin classification, which weakens the one invariant the
+`SafetyEnforced` decorator exists to hold. Neither is acceptable, and the second
+is worse for being quiet.
+
+**The decision is therefore the first shape: the core assembles.** Only the core
+can classify safety pins and read the schema digest, so materialization has to
+happen where the Engine is.
+
+The bounded-exchange objection is answered rather than avoided: what crosses is
+the live assembly window, which the model's own context bounds, not the durable
+history, which stays with the session loop and is never sent in full. The core
+receives a working copy to assemble and returns the assembled result; it does not
+become the owner of record.
+
+## Remaining steps, corrected
+
+1. Done: `native_window::verify` behind the `context_budgeted` marker.
+2. Extend the `/v1/context` request with the turn's candidate messages, the tool
+   catalog and a `TokenBudget`, and its response with assembled messages plus
+   `ContextWindowStats`. Keep the existing instructions-only response accepted so
+   a mixed pair interoperates, as step 1 does on the other side.
+3. Build `EpisodeState` in `core_service::context` from the request and the live
+   engine, assemble through `SafetyEnforced`, count with `CandleTokenCounter`,
+   and set `context_budgeted` on the result.
+4. Call `commit` with a real `TurnOutcome` after the native turn reports back,
+   and report `ContextWindowStats` in place of `dropped_messages`.
+5. Acceptance: the five-daemon canary's `final_dropped_messages` and
+   `max_materialized_spans` must still hold on both devices, and a dropped
+   safety-pinned span must fail the turn rather than pass silently.
