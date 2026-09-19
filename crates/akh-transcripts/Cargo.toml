@@ -27,6 +27,9 @@ thiserror = "2"
 walkdir = "2"
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# `.jsonl` -> `.jsonl.zst` rotation fallback (source-file-lifecycle.md); not
+# observed locally but must be handled defensively.
+zstd = "0.13"
 
 # Embedding (shared with seshat)
 akh-embed = { path = "../akh-embed" }
