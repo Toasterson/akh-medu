@@ -89,8 +89,19 @@ mod tests {
     /// with `MALLOC_CONF` the response must be a non-trivial gzipped pprof,
     /// without it a 503 — never a silent empty 200, which would look like a
     /// healthy scrape target that reports nothing.
+    /// Held live across the dump so the sampler has something to attribute.
+    /// `inline_never` keeps the frame in the stack, which is what makes this a
+    /// real symbolization check rather than a check that bytes came back.
+    #[inline(never)]
+    fn allocate_profiling_ballast() -> Vec<Vec<u8>> {
+        (0..64).map(|_| vec![7u8; 1024 * 1024]).collect()
+    }
+
     #[tokio::test]
     async fn heap_endpoint_serves_pprof_or_says_why_not() {
+        // 64 MiB against the default 512 KiB sample interval, so the profile
+        // cannot be empty for lack of allocations.
+        let ballast = allocate_profiling_ballast();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router()).await });
@@ -119,6 +130,10 @@ mod tests {
             );
             // pprof is gzip-wrapped protobuf; check the magic rather than the length alone.
             assert_eq!(&body[..2], &[0x1f, 0x8b], "expected gzip-wrapped pprof");
+            // Written out so the container check can assert the profile is
+            // symbolized; an unsymbolized dump still passes every check above.
+            let _ = std::fs::write("/tmp/heap-test.pprof", &body);
+            drop(ballast);
         } else {
             assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
             assert!(
