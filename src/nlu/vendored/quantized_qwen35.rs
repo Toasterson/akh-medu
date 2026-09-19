@@ -755,6 +755,24 @@ impl KvPages {
     }
 }
 
+/// Tokens forwarded per prefill step.
+///
+/// Each chunk re-expands the whole K and V cache through `repeat_kv` in every
+/// attention layer, so the expansion traffic scales with
+/// `(prompt / chunk) * positions`: halving the chunk count halves it. 128 was
+/// the standing value; `AKH_QWEN35_PREFILL_CHUNK` makes it measurable.
+fn prefill_chunk_size() -> usize {
+    use std::sync::OnceLock;
+    static CHUNK: OnceLock<usize> = OnceLock::new();
+    *CHUNK.get_or_init(|| {
+        std::env::var("AKH_QWEN35_PREFILL_CHUNK")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(128)
+    })
+}
+
 /// Fixed seed so a rotation is identical across every layer and restart.
 const KV_PAGE_SEED: u64 = 0x7EED_5EED;
 
@@ -1846,7 +1864,8 @@ impl InferenceSession {
         let input =
             Tensor::new(&tokens[reused..], self.weights.norm.weight.device())?.unsqueeze(0)?;
         let collector = collector.filter(|collector| collector.span.start >= reused);
-        let (logits, _) = self.prefill_at_position(&input, reused, 128, check, collector)?;
+        let (logits, _) =
+            self.prefill_at_position(&input, reused, prefill_chunk_size(), check, collector)?;
         self.text = Some(TextState {
             tokens: tokens.to_vec(),
             logits: logits.clone(),

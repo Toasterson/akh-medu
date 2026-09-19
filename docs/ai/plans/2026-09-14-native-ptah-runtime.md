@@ -275,6 +275,28 @@ the chronological evidence further down is retained as written.
   before memory becomes the binding constraint. Item 7, not addressed. See
   [long-context gate](../research/2026-09-19-long-context-gate.md).
 
+- **Item 7: half of prefill is the repeated KV expansion, and the ceiling is 2x**
+  (2026-09-19). Prefill chunks were hard-coded to 128, so a 10,417-token prompt
+  runs as 82 forwards, each re-expanding the whole accumulated K and V through
+  `repeat_kv` in all 16 attention layers. Doubling the chunk predicted 2x if that
+  dominated; it gave **1.32x** (271.4 s -> 205.3 s, 38.4 -> 50.7 tok/s), which by
+  Amdahl puts the chunk-count-proportional share at **49%**. The rest is
+  per-token weight-bound matmul that no chunking change touches.
+
+  So eliminating the expansion entirely - broadcasting kv-heads inside the
+  attention matmul instead of materialising a copy - is worth about **1.95x**,
+  roughly 75 tok/s, taking a 10k prompt from ~271 s to ~140 s. Worth doing, and
+  **not enough to make long context interactive**. It is a numerical-path change
+  and would need the 0.9999 cosine gate against the current implementation, not
+  greedy agreement. Not attempted.
+
+  Chunks of 512 and 1024 both fail on allocation: peak prefill memory scales with
+  `chunk x positions`, the same term that makes a token cost 547.5 KiB against
+  128 KiB of KV. **The default stays 128** - the 1.32x was measured at one
+  context length, and raising it on one data point would repeat a mistake already
+  made twice today. `AKH_QWEN35_PREFILL_CHUNK` makes it selectable for
+  measurement. See [prefill cost](../research/2026-09-19-prefill-cost.md).
+
   Three corrections this produced. **The byte layout never ran on Vulkan at
   all**: `to_dtype` had no `U8 -> U32` arm, so the decode aborted the first time
   a position aged out. Compressed KV there was failing closed, not saving
