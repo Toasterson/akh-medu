@@ -327,90 +327,102 @@ struct AttentionState {
     pages: Option<KvPages>,
 }
 
-/// Compressed older positions for one attention layer.
+/// Compressed older positions for one attention layer, resident on the device.
+///
+/// Codes are `u8`, one byte each, and the decode widens them for the gather
+/// rather than storing them wide. Nothing returns to the host after the initial
+/// quantization, which is what makes this usable in the decode loop: the
+/// host-side version starved the GPU badly enough that a six-turn benchmark did
+/// not finish in thirty minutes.
 #[derive(Debug, Clone)]
 struct KvPages {
-    key: Vec<crate::nlu::turbo_quant::KvPageStore>,
-    value: Vec<crate::nlu::turbo_quant::KvPageStore>,
-    heads: usize,
-    dim: usize,
+    /// `(batch, heads, positions, dim)` of codebook indices.
+    key_codes: Option<Tensor>,
+    value_codes: Option<Tensor>,
+    /// `(batch, heads, positions, 1)` full-precision norms.
+    key_norms: Option<Tensor>,
+    value_norms: Option<Tensor>,
+    /// Shared across both tensors and every slot.
+    codebook: Tensor,
+    rotation: Tensor,
+    quantizer: std::sync::Arc<crate::nlu::turbo_quant::TurboQuant>,
+    positions: usize,
 }
 
 impl KvPages {
-    fn new(policy: KvQuantization, slots: usize, heads: usize, dim: usize) -> Self {
-        // One prepared quantizer shared by every slot, and by both tensors.
+    fn new(policy: KvQuantization, dim: usize, device: &Device) -> Result<Self> {
         let quantizer = std::sync::Arc::new(crate::nlu::turbo_quant::TurboQuant::new(
             dim,
             policy.bits,
             KV_PAGE_SEED,
         ));
-        let make = || {
-            (0..slots)
-                .map(|_| {
-                    crate::nlu::turbo_quant::KvPageStore::with_quantizer(quantizer.clone())
-                })
-                .collect()
-        };
-        Self {
-            key: make(),
-            value: make(),
-            heads,
-            dim,
-        }
+        let codebook = Tensor::from_vec(
+            quantizer.codebook().to_vec(),
+            (quantizer.codebook().len(),),
+            device,
+        )?;
+        let rotation = Tensor::from_vec(quantizer.rotation().to_vec(), (dim, dim), device)?;
+        Ok(Self {
+            key_codes: None,
+            value_codes: None,
+            key_norms: None,
+            value_norms: None,
+            codebook,
+            rotation,
+            quantizer,
+            positions: 0,
+        })
     }
 
     fn positions(&self) -> usize {
-        self.key.first().map(|store| store.positions()).unwrap_or(0)
+        self.positions
     }
 
-    /// Bytes held against the f32 equivalent, summed over every slot.
-    fn stored_and_uncompressed_bytes(&self) -> (usize, usize) {
-        self.key
-            .iter()
-            .chain(&self.value)
-            .fold((0, 0), |(stored, plain), store| {
-                (
-                    stored + store.stored_bytes(),
-                    plain + store.uncompressed_bytes(),
-                )
-            })
+    /// Resident code bytes against the f32 they replace.
+    fn stored_and_uncompressed_bytes(&self, heads: usize, dim: usize, batch: usize) -> (usize, usize) {
+        let vectors = batch * heads * self.positions;
+        // One byte per code, plus an f32 norm per vector, for key and value.
+        let stored = 2 * (vectors * dim + vectors * std::mem::size_of::<f32>());
+        (stored, 2 * vectors * dim * std::mem::size_of::<f32>())
     }
 
-    /// Append the oldest `count` positions of `tensor` into the given stores.
-    fn absorb(
-        stores: &mut [crate::nlu::turbo_quant::KvPageStore],
-        tensor: &Tensor,
-        count: usize,
-    ) -> Result<()> {
+    /// Quantize the oldest `count` positions of `tensor` and append them.
+    ///
+    /// Quantization stays on the host because it happens once per position as it
+    /// ages out, not once per decode step. Only the decode is hot.
+    fn absorb(&self, tensor: &Tensor, count: usize) -> Result<(Tensor, Tensor)> {
         let (batch, heads, positions, dim) = tensor.dims4()?;
         let values: Vec<f32> = tensor.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+        let mut codes = Vec::with_capacity(batch * heads * count * dim);
+        let mut norms = Vec::with_capacity(batch * heads * count);
         for b in 0..batch {
             for head in 0..heads {
-                let slot = b * heads + head;
                 let base = (b * heads + head) * positions * dim;
-                let rows = &values[base..base + count * dim];
-                stores[slot]
-                    .push_rows(rows)
-                    .map_err(candle_core::Error::msg)?;
+                for position in 0..count {
+                    let row = &values[base + position * dim..base + (position + 1) * dim];
+                    let (row_codes, norm) = self.quantizer.quantize_row(row);
+                    codes.extend_from_slice(&row_codes);
+                    norms.push(norm);
+                }
             }
         }
-        Ok(())
+        let device = tensor.device();
+        Ok((
+            Tensor::from_vec(codes, (batch, heads, count, dim), device)?,
+            Tensor::from_vec(norms, (batch, heads, count, 1), device)?,
+        ))
     }
 
-    /// Rebuild `(batch, heads, positions, dim)` from the stores.
-    fn decode(
-        stores: &[crate::nlu::turbo_quant::KvPageStore],
-        heads: usize,
-        dim: usize,
-        device: &Device,
-    ) -> Result<Tensor> {
-        let positions = stores[0].positions();
-        let batch = stores.len() / heads;
-        let mut values = Vec::with_capacity(batch * heads * positions * dim);
-        for store in stores {
-            values.extend_from_slice(&store.decode());
-        }
-        Tensor::from_vec(values, (batch, heads, positions, dim), device)
+    /// Append freshly quantized pages to whatever is already held.
+    fn extend(
+        existing: &mut Option<Tensor>,
+        addition: Tensor,
+    ) -> Result<()> {
+        *existing = Some(match existing.take() {
+            None => addition,
+            Some(held) => Tensor::cat(&[&held, &addition], 2)?.contiguous()?,
+        });
+        Ok(())
     }
 
     /// Decode compressed pages without leaving the device.
@@ -441,6 +453,22 @@ impl KvPages {
             .broadcast_mul(&norms.reshape((batch * heads * positions, 1))?)?
             .matmul(rotation)?
             .reshape((batch, heads, positions, dim))
+    }
+
+    /// The stored keys and values, reconstructed.
+    fn decode_pair(&self, batch: usize, heads: usize, dim: usize) -> Result<Option<(Tensor, Tensor)>> {
+        let (Some(kc), Some(kn), Some(vc), Some(vn)) = (
+            self.key_codes.as_ref(),
+            self.key_norms.as_ref(),
+            self.value_codes.as_ref(),
+            self.value_norms.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some((
+            Self::decode_on_device(kc, kn, &self.codebook, &self.rotation, batch, heads, self.positions, dim)?,
+            Self::decode_on_device(vc, vn, &self.codebook, &self.rotation, batch, heads, self.positions, dim)?,
+        )))
     }
 }
 
@@ -506,10 +534,14 @@ impl FullAttention {
 
         let (key, value) = match state.as_ref() {
             Some(state) if index_pos > 0 => {
-                if state.key.dim(2)? != index_pos {
+                // The resident tensors hold only the exact window once older
+                // positions have been paged out, so the invariant is over the
+                // total the state represents, not the length of what is held.
+                let resident = state.key.dim(2)?;
+                let held = resident + state.pages.as_ref().map_or(0, |p| p.positions());
+                if held != index_pos {
                     candle_core::bail!(
-                        "Qwen35 attention state is at position {}, cannot append at {index_pos}",
-                        state.key.dim(2)?
+                        "Qwen35 attention state is at position {held}, cannot append at {index_pos}"
                     )
                 }
                 (
@@ -537,30 +569,29 @@ impl FullAttention {
             }
             Some(policy) => {
                 let (batch, heads, positions, dim) = key.dims4()?;
-                let mut pages = state
-                    .take()
-                    .and_then(|previous| previous.pages)
-                    .unwrap_or_else(|| KvPages::new(policy, batch * heads, heads, dim));
+                let mut pages = match state.take().and_then(|previous| previous.pages) {
+                    Some(pages) => pages,
+                    None => KvPages::new(policy, dim, key.device())?,
+                };
                 let overflow = positions.saturating_sub(policy.recent);
                 if overflow > 0 {
-                    KvPages::absorb(&mut pages.key, &key, overflow)?;
-                    KvPages::absorb(&mut pages.value, &value, overflow)?;
+                    let (key_codes, key_norms) = pages.absorb(&key, overflow)?;
+                    let (value_codes, value_norms) = pages.absorb(&value, overflow)?;
+                    KvPages::extend(&mut pages.key_codes, key_codes)?;
+                    KvPages::extend(&mut pages.key_norms, key_norms)?;
+                    KvPages::extend(&mut pages.value_codes, value_codes)?;
+                    KvPages::extend(&mut pages.value_norms, value_norms)?;
+                    pages.positions += overflow;
                 }
                 let recent_key = key.narrow(2, overflow, positions - overflow)?.contiguous()?;
                 let recent_value =
                     value.narrow(2, overflow, positions - overflow)?.contiguous()?;
-                let device = key.device().clone();
-                let full = if pages.positions() > 0 {
-                    let old_key = KvPages::decode(&pages.key, heads, dim, &device)?
-                        .to_dtype(key.dtype())?;
-                    let old_value = KvPages::decode(&pages.value, heads, dim, &device)?
-                        .to_dtype(value.dtype())?;
-                    (
-                        Tensor::cat(&[&old_key, &recent_key], 2)?,
-                        Tensor::cat(&[&old_value, &recent_value], 2)?,
-                    )
-                } else {
-                    (recent_key.clone(), recent_value.clone())
+                let full = match pages.decode_pair(batch, heads, dim)? {
+                    Some((old_key, old_value)) => (
+                        Tensor::cat(&[&old_key.to_dtype(key.dtype())?, &recent_key], 2)?,
+                        Tensor::cat(&[&old_value.to_dtype(value.dtype())?, &recent_value], 2)?,
+                    ),
+                    None => (recent_key.clone(), recent_value.clone()),
                 };
                 *state = Some(AttentionState {
                     key: recent_key,
@@ -2129,12 +2160,18 @@ pub(crate) mod tests {
         let tensor = Tensor::from_vec(values.clone(), (1, heads, positions, dim), &device).unwrap();
 
         let policy = KvQuantization { bits: 4, recent: 3 };
-        let mut pages = KvPages::new(policy, heads, heads, dim);
+        let mut pages = KvPages::new(policy, dim, &device).unwrap();
         let overflow = positions - policy.recent;
-        KvPages::absorb(&mut pages.key, &tensor, overflow).unwrap();
+        let (kc, kn) = pages.absorb(&tensor, overflow).unwrap();
+        KvPages::extend(&mut pages.key_codes, kc).unwrap();
+        KvPages::extend(&mut pages.key_norms, kn).unwrap();
+        let (vc, vn) = pages.absorb(&tensor, overflow).unwrap();
+        KvPages::extend(&mut pages.value_codes, vc).unwrap();
+        KvPages::extend(&mut pages.value_norms, vn).unwrap();
+        pages.positions += overflow;
         assert_eq!(pages.positions(), overflow);
 
-        let decoded = KvPages::decode(&pages.key, heads, dim, &device).unwrap();
+        let (decoded, _) = pages.decode_pair(1, heads, dim).unwrap().unwrap();
         assert_eq!(decoded.dims(), &[1, heads, overflow, dim]);
         let got: Vec<f32> = decoded.flatten_all().unwrap().to_vec1().unwrap();
 
@@ -2157,10 +2194,10 @@ pub(crate) mod tests {
             }
         }
 
-        // Compression is real, not an unpacked index array.
-        let (stored, plain) = pages.stored_and_uncompressed_bytes();
+        // Compression is real: one byte per code, not four.
+        let (stored, plain) = pages.stored_and_uncompressed_bytes(heads, dim, 1);
         assert!(
-            plain as f64 / stored as f64 > 5.0,
+            plain as f64 / stored as f64 > 3.5,
             "ratio {}",
             plain as f64 / stored as f64
         );

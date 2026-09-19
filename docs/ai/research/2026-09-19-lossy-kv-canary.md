@@ -219,3 +219,48 @@ gating already allows since the path is off unless configured.
 
 Until then the paged path stays correct, gated off by default, and unusable for
 long context — which is where the earlier measurement already left it.
+
+
+## Device decode measured: viable, at about a third of decode throughput
+
+The same six-turn keyed benchmark that **did not finish in thirty minutes** with
+host-side decode now completes:
+
+| Turn | End context | No paging | Device paging, 4-bit |
+| ---: | ---: | ---: | ---: |
+| 0 | 58 | 17.35 | 11.60 |
+| 1 | ~127 | 17.13 | 11.14 |
+| 2 | ~190 | 16.25 | 11.20 |
+| 3 | ~250 | 13.06 | 10.42 |
+| 4 | ~318 | 8.05 | 11.21 |
+| 5 | ~378 | 12.24 | 7.50 |
+
+So the decode is no longer the obstacle: it went from starving the GPU at 10%
+busy and never finishing, to completing in ordinary time. What it costs is
+visible in the first three turns, which the variance analysis showed are the
+stable ones: roughly **11.2 against 16.5 steps/s, about a third of decode
+throughput**, in exchange for holding paged positions at one byte per code
+instead of four.
+
+Later turns are not comparable at this resolution. The baseline's 8.05 at turn 4
+is one of the outliers the variance work identified, and both columns are single
+runs, which is exactly the comparison that misled earlier today. The early-turn
+figure is the one to quote.
+
+Context lengths differ slightly between the columns because a lossy cache
+changes the generated text, so turns tokenize to different lengths. That is
+expected, and it is another reason to compare the stable early turns rather than
+matching turn indices at the tail.
+
+### A bug the canary could not have caught
+
+The first run with real paging failed immediately: *"attention state is at
+position 16, cannot append at 17"*. Once older positions page out, the state's
+key tensor no longer holds every position, so the append invariant — which
+compared that tensor's length against the absolute position — was wrong. It now
+counts paged positions alongside resident ones.
+
+The canary had passed at 4, 3 and 2 bits before this. It never exercised paging
+at all: its 1,024-token window means nothing ages out of a 16-position exact
+window in five short turns. The gate established quality, which was its purpose,
+and said nothing about whether the paging mechanism worked.
