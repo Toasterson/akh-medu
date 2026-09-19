@@ -314,8 +314,23 @@ session service sends no messages, so behaviour is unchanged and the canary's
 
 ### Remaining
 
-Three steps, each gated by the canary: have `core_service::context` build an
-`EpisodeState` with the supplied messages and assemble through the configured
-strategy; have the session service send its history and a budget, and use the
-returned messages; and set `context_budgeted` on the result so the runtime
-verifies rather than evicts.
+**The core now assembles** when a request carries messages.
+`core_service::assemble_context` builds an `EpisodeState` from them, selects
+through `SafetyEnforced(SelectingManager)` — the same wrapping every shipped
+strategy gets, so a safety-pinned span cannot be dropped silently — and returns
+the chosen messages with a dropped count and per-section tokens. Two tests cover
+it: a tight budget drops history while keeping the pinned instruction and the
+current turn, and a budget too small for those two is a `context_assembly` fault
+rather than a truncation.
+
+Counting uses the heuristic counter, since the core does not hold the model's
+tokenizer. That is safe in one direction only, and deliberately so: the runtime
+re-counts with the exact tokenizer and fails closed, so an under-count surfaces
+as a capacity error rather than as silently lost context, while an over-count
+only wastes window. Giving the core the exact counter would tighten it.
+
+### Remaining
+
+Two steps, both gated by the canary: have the session service send its history
+and a budget and use the returned messages, and set `context_budgeted` on the
+result so the runtime verifies rather than evicts.

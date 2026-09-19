@@ -301,20 +301,69 @@ async fn context(
             "\n\nSession tools and their exact schemas:\n{}",
             serde_json::to_string(&request.tools).map_err(error)?
         ));
+        // Assembly is opt-in: only a caller that supplied messages gets a
+        // decision back, so a session that predates the field never sees it.
+        let assembled = if request.messages.is_empty() {
+            None
+        } else {
+            Some(assemble_context(&engine, &request)?)
+        };
         Ok::<_, Fault>(ContextResponse {
             schema_version: SCHEMA_VERSION,
             instructions,
             model: config.model.clone(),
             evidence,
-            // Assembly is opt-in: only a caller that supplied messages gets a
-            // decision back, so a session that predates the field never sees it.
-            assembled: None,
+            assembled,
         })
     })
     .await
     .map_err(error)??;
     Ok(Json(response))
 }
+/// Choose which of a turn's messages fit the budget, in the cognitive core.
+///
+/// Selection, never rewriting: the runtime reuses an exact token prefix, which
+/// any rewrite of earlier turns would invalidate. `SelectingManager` is wrapped
+/// in `SafetyEnforced` like every other shipped strategy, so a safety-pinned
+/// span can never be dropped silently.
+///
+/// Counting uses the heuristic counter rather than the model's tokenizer, which
+/// the core does not hold. That is safe in one direction only: the runtime
+/// re-counts with the exact tokenizer and fails closed if the result does not
+/// fit, so an under-count surfaces as a capacity error rather than as silently
+/// truncated context. An over-count merely wastes window.
+fn assemble_context(
+    engine: &crate::engine::Engine,
+    request: &ContextRequest,
+) -> Result<akh_session_types::AssembledContext> {
+    use crate::agent::context::{
+        manager::{ContextManager, HeuristicTokenCounter},
+        safety::SafetyEnforced,
+        selecting::SelectingManager,
+        types::{EpisodeState, TokenBudget},
+    };
+
+    let budget = request
+        .budget
+        .map(|b| TokenBudget::new(b.window_tokens, b.reserved_output_tokens))
+        .unwrap_or_default();
+    let episode = EpisodeState::new(&request.akh, &request.input.text, engine)
+        .with_messages(Some(&request.messages));
+    let manager = SafetyEnforced::new(SelectingManager);
+    let assembled = manager
+        .assemble(&episode, &budget, &HeuristicTokenCounter)
+        .map_err(|e| Fault::new("context_assembly", e.to_string()))?;
+    Ok(akh_session_types::AssembledContext {
+        dropped_messages: assembled.dropped.len(),
+        section_tokens: assembled
+            .section_tokens
+            .iter()
+            .map(|(section, tokens)| (section.as_str().to_string(), *tokens))
+            .collect(),
+        messages: assembled.messages,
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 struct Operation {
     request: Value,
@@ -542,6 +591,78 @@ mod tests {
         http::Request,
     };
     use tower::ServiceExt;
+    #[test]
+    fn the_core_selects_within_budget_and_keeps_the_current_turn() {
+        let engine = Engine::new(Default::default()).unwrap();
+        let history = vec![
+            serde_json::json!({"role": "system", "content": "standing rules"}),
+            serde_json::json!({"role": "user", "content": "an old question that is quite long"}),
+            serde_json::json!({"role": "assistant", "content": "an old answer, also long"}),
+            serde_json::json!({"role": "user", "content": "the current question"}),
+        ];
+        let request = ContextRequest {
+            request_id: "r".into(),
+            akh: "a".into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            input: TurnInput {
+                origin: akh_session_types::InputOrigin::Human {
+                    principal: "p".into(),
+                },
+                text: "the current question".into(),
+                data: None,
+                artifacts: vec![],
+            },
+            tools: vec![],
+            messages: history.clone(),
+            budget: Some(akh_session_types::ContextBudget {
+                window_tokens: 24,
+                reserved_output_tokens: 8,
+            }),
+        };
+
+        let assembled = assemble_context(&engine, &request).unwrap();
+        // Something was dropped, and what survives keeps the pinned rules and
+        // the turn being answered.
+        assert!(assembled.dropped_messages > 0, "{assembled:?}");
+        assert_eq!(assembled.messages.first().unwrap()["content"], "standing rules");
+        assert_eq!(
+            assembled.messages.last().unwrap()["content"],
+            "the current question"
+        );
+        assert!(!assembled.section_tokens.is_empty());
+    }
+
+    #[test]
+    fn a_budget_that_cannot_hold_the_current_turn_is_a_fault_not_a_truncation() {
+        let engine = Engine::new(Default::default()).unwrap();
+        let request = ContextRequest {
+            request_id: "r".into(),
+            akh: "a".into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            input: TurnInput {
+                origin: akh_session_types::InputOrigin::Human {
+                    principal: "p".into(),
+                },
+                text: "x".into(),
+                data: None,
+                artifacts: vec![],
+            },
+            tools: vec![],
+            messages: vec![
+                serde_json::json!({"role": "system", "content": "a very long standing instruction"}),
+                serde_json::json!({"role": "user", "content": "the current question"}),
+            ],
+            budget: Some(akh_session_types::ContextBudget {
+                window_tokens: 2,
+                reserved_output_tokens: 1,
+            }),
+        };
+        let error = assemble_context(&engine, &request).unwrap_err();
+        assert_eq!(error.code, "context_assembly", "{error:?}");
+    }
+
     struct Backend {
         engine: Arc<Engine>,
         config: Arc<AkhConfig>,
