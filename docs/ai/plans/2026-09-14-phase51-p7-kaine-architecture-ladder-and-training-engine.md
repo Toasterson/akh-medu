@@ -109,3 +109,8 @@ P7.13 then becomes a row in every architecture rung's RESULT table.
 - P7.13's gate must fit the ≤ 12 h M2 evaluation budget or state the excess; any pod use is its own ADR 105 WI with a dollar cap.
 - Dojo tenancy resources (Anima project, board tenancy tokens, dojo repository) are created once and named in the P7.10 RESULT.
 
+## Extension 2026-09-19 — theory-first policy (ADR 112)
+
+P7.14–P7.18 (Theory engine object, decision-seam spike, `foresight` + `theory_first` family, inference hooks, replay-improved controller) live in
+[2026-09-19-phase51-p7-kaine-theory-first-policy.md](2026-09-19-phase51-p7-kaine-theory-first-policy.md); P7.13 gains the interventional-prediction axis.
+Same P6 gate, same HITL rule.
