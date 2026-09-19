@@ -978,6 +978,11 @@ int akh_cast_bf16_f16(const hip_bfloat16* x, __half* y, size_t n) {
 }
 int akh_cast_f32_u32(const float* x, uint32_t* y, size_t n) { AKH_CAST_LAUNCH(float, uint32_t, x, y, n); }
 int akh_cast_u32_f32(const uint32_t* x, float* y, size_t n) { AKH_CAST_LAUNCH(uint32_t, float, x, y, n); }
+// Widen packed codebook indices for index_select, which takes u32 ids. Without
+// this a compressed KV page has to be stored four bytes per code, which costs
+// exactly what the f32 cache it replaces costs.
+int akh_cast_u8_u32(const uint8_t* x, uint32_t* y, size_t n) { AKH_CAST_LAUNCH(uint8_t, uint32_t, x, y, n); }
+int akh_cast_u32_u8(const uint32_t* x, uint8_t* y, size_t n) { AKH_CAST_LAUNCH(uint32_t, uint8_t, x, y, n); }
 int akh_cast_f32_i64(const float* x, int64_t* y, size_t n) { AKH_CAST_LAUNCH(float, int64_t, x, y, n); }
 int akh_cast_i64_f32(const int64_t* x, float* y, size_t n) { AKH_CAST_LAUNCH(int64_t, float, x, y, n); }
 

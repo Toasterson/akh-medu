@@ -189,8 +189,18 @@ model, not an added kernel.
 The work is not the three-op decode; that part is straightforward. It is a
 backend kernel:
 
-- **HIP, small**: a `u8 -> u32` cast kernel alongside the existing
-  `cast_f32_u32`, buying the 4x resident saving. This is the tractable half.
+- **HIP: done.** `akh_cast_u8_u32` and `akh_cast_u32_u8` are implemented in
+  `vendor/candle-core/src/hip_kernels/elementwise.hip` with the existing
+  `AKH_CAST_LAUNCH` macro, bound in `hip_backend.rs`, and covered by a device
+  test that widens byte codes and drives `index_select` over a 256-entry
+  codebook with them. 46 HIP backend tests pass. This is what lets a page hold
+  one byte per code and still feed a gather that only takes u32 ids.
+
+  Writing the test found two further gaps worth knowing: **F32 -> U8 and
+  U8 -> F32 do not exist on HIP either**. Neither blocks the use case, because
+  a page store already holds its codes as bytes on the host and uploads them
+  directly, but it means u8 tensors on this backend can only be created from
+  host bytes and read back as host bytes.
 - **Vulkan, large**: packed small-integer storage and an unpacking gather,
   because its allocator gives `u8` no saving to begin with.
 

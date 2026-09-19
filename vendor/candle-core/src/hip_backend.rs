@@ -1407,6 +1407,8 @@ pub(crate) mod runtime {
         cast_bf16_f16: CastFn,
         cast_f32_u32: CastFn,
         cast_u32_f32: CastFn,
+        cast_u8_u32: CastFn,
+        cast_u32_u8: CastFn,
         cast_f32_i64: CastFn,
         cast_i64_f32: CastFn,
         index_select_u32_f32: IndexSelectF32,
@@ -1477,6 +1479,8 @@ pub(crate) mod runtime {
                 let cast_bf16_f16: CastFn = cast_sym!(b"akh_cast_bf16_f16\0");
                 let cast_f32_u32: CastFn = cast_sym!(b"akh_cast_f32_u32\0");
                 let cast_u32_f32: CastFn = cast_sym!(b"akh_cast_u32_f32\0");
+                let cast_u8_u32: CastFn = cast_sym!(b"akh_cast_u8_u32\0");
+                let cast_u32_u8: CastFn = cast_sym!(b"akh_cast_u32_u8\0");
                 let cast_f32_i64: CastFn = cast_sym!(b"akh_cast_f32_i64\0");
                 let cast_i64_f32: CastFn = cast_sym!(b"akh_cast_i64_f32\0");
                 let index_select_u32_f32: IndexSelectF32 = *lib
@@ -1537,6 +1541,8 @@ pub(crate) mod runtime {
                     cast_bf16_f16,
                     cast_f32_u32,
                     cast_u32_f32,
+                    cast_u8_u32,
+                    cast_u32_u8,
                     cast_f32_i64,
                     cast_i64_f32,
                     index_select_u32_f32,
@@ -1761,6 +1767,10 @@ pub(crate) mod runtime {
                 (BF16, F16) => self.cast_bf16_f16,
                 (F32, U32) => self.cast_f32_u32,
                 (U32, F32) => self.cast_u32_f32,
+                // Compressed KV pages hold one byte per code and widen them for
+                // index_select, which only takes u32 ids.
+                (U8, U32) => self.cast_u8_u32,
+                (U32, U8) => self.cast_u32_u8,
                 (F32, I64) => self.cast_f32_i64,
                 (I64, F32) => self.cast_i64_f32,
                 _ => {
@@ -5552,6 +5562,50 @@ mod op_tests {
         let cb = Tensor::from_vec(b, (2, 3, 4), &Device::Cpu)?;
         let c = ca.matmul(&cb)?.flatten_all()?.to_vec1::<f32>()?;
         close(&g, &c, 5e-2, "matmul_f16_batched");
+        Ok(())
+    }
+
+    /// Widening u8 codes to u32 is what lets a compressed KV page hold one
+    /// byte per code and still feed index_select, which takes u32 ids. Without
+    /// it the page must be four bytes per code, exactly what the f32 cache it
+    /// replaces costs, so this cast is the difference between a saving and none.
+    #[test]
+    fn cast_u8_u32_roundtrip() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        // Spans the byte range including both endpoints. Built directly from
+        // bytes, which is how a page store uploads codes: F32 -> U8 does not
+        // exist on this backend and is not needed, since the host already holds
+        // the codes as bytes.
+        let bytes: Vec<u8> = vec![0, 1, 7, 15, 128, 254, 255, 3];
+        let codes: Vec<f32> = bytes.iter().map(|b| *b as f32).collect();
+        let as_u8 = Tensor::from_vec(bytes, (8,), &dev)?;
+        assert_eq!(as_u8.dtype(), DType::U8);
+        let widened = as_u8.to_dtype(DType::U32)?;
+        assert_eq!(widened.dtype(), DType::U32);
+        let back: Vec<f32> = widened.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        close(&back, &codes, 0.0, "cast_u8_u32");
+
+        // And the narrowing direction. Read back as bytes rather than via f32:
+        // U8 -> F32 does not exist here either, and a page store reads codes as
+        // bytes anyway.
+        let narrowed: Vec<u8> = widened.to_dtype(DType::U8)?.to_vec1::<u8>()?;
+        assert_eq!(
+            narrowed,
+            codes.iter().map(|c| *c as u8).collect::<Vec<u8>>(),
+            "cast_u32_u8"
+        );
+
+        // The point of the cast: u32 ids drive index_select over a codebook.
+        let codebook = Tensor::from_vec(
+            (0..256).map(|i| i as f32 * 0.5).collect::<Vec<f32>>(),
+            (256,),
+            &dev,
+        )?;
+        let picked: Vec<f32> = codebook.index_select(&widened, 0)?.to_vec1::<f32>()?;
+        let expected: Vec<f32> = codes.iter().map(|c| c * 0.5).collect();
+        close(&picked, &expected, 1e-6, "index_select_by_u8_codes");
         Ok(())
     }
 
