@@ -72,7 +72,7 @@ sidecar derived by `mmproj_path()`. Three separate reasons it does not carry ove
    manifest for different weights never contributes its projector. Four CPU
    tests plus an ignored artifact test that resolves the real pinned Ptah
    projector and checks its size.
-2. **Preprocessing — resolved.** Read from the implementation that consumes
+2. **Preprocessing — resolved and implemented** (`src/nlu/vision_preprocess.rs`). Read from the implementation that consumes
    this GGUF, `ggml-org/llama.cpp` `tools/mtmd`:
 
    - It is **dynamic resolution**, not a fixed square. The projector is driven by
@@ -94,10 +94,15 @@ sidecar derived by `mmproj_path()`. Three separate reasons it does not carry ove
      Qwen2/2.5 branch is the different one, at `(8, 4096)` with bicubic resize.
      That gives **min 262,144 px and max 16,777,216 px**.
 
+   `ResizePolicy::qwen3vl()` carries the policy and six CPU tests pin it:
+   alignment, aspect preservation within one alignment step, the maximum-area
+   pull-down, the minimum-area push-up, a sliver keeping a full merge block, the
+   bounds being independently disablable, and the byte-range normalization.
+
    The token-limit pair was read from search fragments rather than a contiguous
-   region, so confirm the two lines are in the `PROJECTOR_TYPE_QWEN3VL` case
-   before relying on them, then pin the whole policy with a fixture whose patch
-   count is asserted.
+   region, so confirm the two lines sit in the `PROJECTOR_TYPE_QWEN3VL` case
+   before trusting the exact bounds; the tests assert the *properties*, so a
+   corrected bound changes one constructor rather than the algorithm.
 
 3. **Vision tower forward** in Candle: patch embed, position embed, 27
    pre-norm blocks with fused QKV, post-norm. Needs HIP and Vulkan coverage and
