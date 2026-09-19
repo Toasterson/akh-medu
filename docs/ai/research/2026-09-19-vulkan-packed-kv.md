@@ -56,10 +56,24 @@ probe, which is what the figures below are read from: 16 attention layers holdin
 
 Against 4,849,664 bytes of f32.
 
-Greedy output was byte-identical across all three arms, same stop reason and
-same token count. 4-bit TurboQuant paging behind an 8-position exact window did
-not move a single token at this length. That is agreement at one short prompt,
-not a quality gate.
+Greedy output was byte-identical across all three Vulkan arms, same stop reason
+and same token count. **On HIP the same policy changes the output**: the
+uncompressed run gives `Hello, it's great to meet you!` in 30 tokens, the 4-bit
+paged run gives `Hello!` in 23. Both devices agree with each other uncompressed.
+
+So token agreement on Vulkan was luck at one prompt, not a property of 4-bit
+paging - and had I measured only Vulkan I would have reported it as one. This is
+the failure mode the standing rule about not weakening numerical gates on greedy
+agreement is aimed at, arriving from the reassuring direction: the weaker signal
+said pass on the device I was working on, and the same signal says fail one
+device over.
+
+Why the two devices differ under identical codes is **unexplained**. The
+quantizer is seeded identically and the paging schedule is the same, so the codes
+should match; what differs is the arithmetic of the page decode. Not chased here.
+HIP's behaviour is unchanged by this work - its layout, absorb and decode paths
+are byte-for-byte what they were - so this is a pre-existing property of 4-bit
+paging that this comparison exposed, not a regression.
 
 ## Two accounting errors, both flattering
 
@@ -99,8 +113,11 @@ cannot separate the unpack from the decode.
   an identical preamble, but this is not a repeat-count that supports a claim
   about a 5% difference. The 5% packing overhead is within what single runs can
   show; the 2.94x storage ratio is exact arithmetic, not a timing.
-- Token-identity at one prompt is not a numerical gate. The 0.9999 cosine gate
-  is unchanged and this does not touch it.
+- Token-identity at one prompt is not a numerical gate, and the HIP result above
+  shows it failing in practice. The 0.9999 cosine gate is unchanged and this does
+  not touch it. Whether 4-bit paging is acceptable for quality is **not settled
+  by anything here** and needs the cosine gate run against paged reconstruction
+  on both devices.
 - 4x per word is still unreachable through public tensor ops, since the f32
   route caps at three codes. A WGSL integer expression would reach it; the
   existing `elementwise` helper could express one without a new kernel file.

@@ -183,7 +183,17 @@ the chronological evidence further down is retained as written.
   against 4,849,664, 16 layers, 592 paged positions) for about 5% of decode.
   Warm decode is 13.38 steps/s uncompressed, 8.33 with the byte layout, 7.98
   packed - so nearly all of the ~40% cost is the page decode both layouts share,
-  not the unpack. Greedy output was byte-identical across all three arms.
+  not the unpack. HIP is unaffected and still reports an honest 3.94x, a `u8`
+  really being one byte there.
+
+  **Greedy agreement is not evidence of quality here.** Output was byte-identical
+  across all three Vulkan arms, but the same 4-bit policy on HIP changes it -
+  30 tokens uncompressed against 23 paged, from two devices that agree with each
+  other uncompressed. Measuring only Vulkan would have let me report token
+  identity as a property of 4-bit paging when it is luck at one prompt. Whether
+  4-bit paging is acceptable is **unsettled**: it needs the 0.9999 cosine gate run
+  against paged reconstruction on both devices. The device disagreement under
+  identical codes is itself unexplained and not chased.
 
   Three corrections this produced. **The byte layout never ran on Vulkan at
   all**: `to_dtype` had no `U8 -> U32` arm, so the decode aborted the first time
