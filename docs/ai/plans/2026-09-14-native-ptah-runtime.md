@@ -66,6 +66,8 @@ the chronological evidence further down is retained as written.
   hold a growing KV cache (`full_attention_interval = 4`); the other 48 are
   constant-memory recurrent. At F32 that is 128 KiB per token, so this 24 GiB
   card holds roughly 40,000 tokens against an advertised 262,144 — a 6x gap.
+  The runtime now reports this itself at load (`kv_bytes_per_token`), returning
+  131,072 bytes and projecting 34.36 GB at full context, verified on device.
   The PolarQuant helpers remain called from nowhere, and their stated reason for
   deferral (forking candle-transformers) is obsolete now the model is vendored.
   Quality is unmeasured and a lossy KV path needs a different acceptance gate
