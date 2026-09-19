@@ -673,7 +673,7 @@ pub fn env_var_registry() -> &'static [EnvVarSpec] {
         },
         EnvVarSpec {
             name: "AKH_CONTEXT_STRATEGY",
-            description: "Which ContextManager strategy to use (Phase 44): compacting|passive|virtual.",
+            description: "Which ContextManager strategy to use (Phase 44): compacting|passive|virtual|selecting. 'selecting' reads by selection over a message array, preserving tool traffic and an exact token prefix, and requires a caller that attaches EpisodeState::messages.",
             default: "\"compacting\"",
         },
         EnvVarSpec {

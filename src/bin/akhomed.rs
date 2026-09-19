@@ -3055,6 +3055,13 @@ impl ServerState {
                     Box::new(SafetyEnforced::new(VirtualContextManager::default()))
                 }
                 "compacting" => Box::new(SafetyEnforced::new(CompactingManager)),
+                // Reading by selection: chooses whole turns from a message
+                // array and never rewrites their content, so an exact token
+                // prefix survives for a resident keyed cache to reuse. Needs a
+                // caller that attaches EpisodeState::messages.
+                "selecting" => Box::new(SafetyEnforced::new(
+                    akh_medu::agent::context::selecting::SelectingManager,
+                )),
                 other => {
                     // Loud, because a typo here silently downgrades the akh to a
                     // different strategy than the operator selected — which would

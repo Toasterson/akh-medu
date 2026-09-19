@@ -284,7 +284,12 @@ earlier turns would invalidate it every time.
 
 ### Remaining
 
-`SelectingManager` is not yet selected by `AKH_CONTEXT_STRATEGY` or wired into
-the native path, and the `context_budgeted` marker from step 1 is still unset by
-any caller. Those are the connection, and they are what the five-daemon canary's
-`final_dropped_messages` assertion would gate.
+`AKH_CONTEXT_STRATEGY=selecting` now builds it, wrapped in `SafetyEnforced` like
+every other shipped strategy, and the environment documentation lists it with
+its precondition.
+
+What is still unconnected: no caller attaches `EpisodeState::messages`, so
+selecting the strategy would fail closed with the `MissingMessages` diagnostic
+rather than silently misbehaving, and the `context_budgeted` marker from step 1
+is still unset. Wiring the native path to supply both is the remaining join, and
+the five-daemon canary's `final_dropped_messages` assertion is its gate.
