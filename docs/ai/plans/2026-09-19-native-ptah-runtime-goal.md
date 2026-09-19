@@ -1,0 +1,291 @@
+# Native Ptah runtime — recovered handoff and goal brief (2026-09-19)
+
+Astra's 2026-09-15 handoff was written to `/tmp/ptah-handoff.kVtTm6/HANDOFF.md`
+and that directory no longer exists. The full text was recovered verbatim from
+the Claude Code transcript
+`~/.claude/projects/-home-toasty-ws-ptah/18288d3d-ecde-4da6-924a-669a78e9861f.jsonl`
+and is reproduced in the appendix below so it stops living only in `/tmp`.
+
+Read this brief together with, not instead of, the master ledger
+`docs/ai/plans/2026-09-14-native-ptah-runtime.md`. That ledger has not been
+updated since 2026-09-14 22:41 and its "latest checkpoint" section is stale;
+three further working sessions landed after it.
+
+## What happened after the handoff
+
+The handoff named the **native tap -> projection -> retrieval -> prompt loop**
+as the next feature. That loop was built and validated:
+
+| Commit | Date | Content |
+| --- | --- | --- |
+| `e8d87782` | 09-15 | exact-model recall budget failure exposed on HIP and Vulkan |
+| `bc52dd47` | 09-15 | ranked recall fitted without losing the top fact |
+| `200e4548` | 09-15 | note interpretation isolated; explicit instructions validated |
+| `fc1c5fe8` | 09-15 | native recall validated through five private daemons |
+| `e291ab44` | 09-15 | native Candle HIP/Vulkan implementation checkpointed |
+| `8f6f9d24` | 09-15 | clean-source builds and checkpoint review recorded |
+| `9347805b` | 09-15 | Vulkan resident pipeline cache bounded with LRU eviction |
+| `bb2c6a2a` | 09-18 | full-model HIP/Vulkan resident-idle acceptance recorded |
+
+Evidence lives in `docs/ai/research/2026-09-15-*.md` and
+`docs/ai/research/2026-09-18-resident-gpu-acceptance.md`. Current HEAD is
+`bb2c6a2a`; nothing has been pushed; 17 untracked paths (research drafts,
+experiments) remain in the tree and must be preserved.
+
+Measured at `9347805b` with the exact pinned Q4_K_M artifact: model load 23.9 s
+HIP / 30.6 s Vulkan; fresh-call warm decode 20.2 steps/s HIP, 13.5 Vulkan;
+resident idle 10.0 W / 0 % busy on both, fans stopped. Those are **fresh unkeyed**
+calls — keyed Qwen continuation still uses the scoped-f32 HIP guard and has never
+been benchmarked. The old 30.7 steps/s llama-server reference came from a
+different fixture and is not a like-for-like comparison.
+
+## State after 2026-09-19
+
+Rewritten at the end of that day's work. The nine-item list this section used to
+hold is superseded by what follows; the ledger
+`2026-09-14-native-ptah-runtime.md` carries the per-slice evidence.
+
+### Done, with committed evidence
+
+1. **Keyed measurement.** First keyed throughput figures for both devices, plus
+   shader-cache counters. Two findings: prefix reuse is lost whenever a turn ends
+   at its output cap, and keyed HIP decode looked non-monotonic in context — see
+   item 7 for how that second one resolved.
+2. **Long residency.** 160 keyed requests over 14m42s, decode flat, RSS flat at
+   0.600 GB, device VRAM flat, resident-idle gate still passing. The apparent
+   prefill drift was a one-time warm-up.
+3. **Daemon acceptance.** Five daemons rebuilt and the private canary passing on
+   HIP and Vulkan.
+6. **Live KV compression — complete on HIP.** TurboQuant (arXiv:2504.19874)
+   implemented and validated against the paper's own centroids and distortion
+   rates; 0.9954 mean cosine at 4 bits on real KV, beating the previous
+   PolarQuant path at 3 bits while using 2. Bit-packed host storage, a
+   `u8 <-> u32` HIP cast kernel, and on-device decode proven equivalent to the
+   host within 1e-4. A benchmark that never finished with host decode now
+   completes at about a third of decode throughput, and the canary passes with
+   `recent=4` so paging is genuinely exercised.
+
+### Blocked on a decision from the user
+
+4. **ContextManager materialization.** Every piece is built and inert: the
+   runtime verifies a core-budgeted prompt instead of evicting, `SelectingManager`
+   selects over messages preserving tool traffic, `AKH_CONTEXT_STRATEGY=selecting`
+   builds it, the `/v1/context` contract carries assembly compatibly, and the core
+   assembles when messages are supplied.
+
+   The join cannot be finished without choosing a topology, because **no party
+   currently holds both the history and the policy**: the durable conversation
+   lives in akhrtd's own `Store`, and akhrtd has no core client. Either give
+   akhrtd a core client, or move the conversation into the session record. See
+   `2026-09-19-context-manager-materialization.md`.
+
+### Blocked on something this machine does not have
+
+5. **Vision.** The tower runs on CPU, HIP and Vulkan agreeing within 8.1e-06,
+   preprocessing matches llama.cpp's dynamic-resolution policy, the projector is
+   located through its manifest layer, and the model's mrope sections are read and
+   validated. Deepstack turned out to be absent from this artifact, which removed
+   a whole step.
+
+   It is **not numerically validated**, and cannot be here: that needs an external
+   consumer of this GGUF for a known image, and none is installed. A second
+   in-house implementation was rejected because it would share the same
+   comprehension errors and read as validation while proving much less.
+
+### Open, and smaller than it looked
+
+7. **Performance.** The non-monotonic keyed decode was **not** a kernel effect:
+   pooling seven runs showed the three severe outliers all came from the single
+   run invoked through `resident-probe.py`, whose continuation-check preamble
+   leaves a different resident state. The rule that came out of it — *compare runs
+   with identical preambles* — matters more than the anomaly. One narrow effect
+   survives, at 510 context positions only, reproducing 3/3 per configuration and
+   unexplained.
+
+### Not started
+
+8. **Reproducible release bundle.**
+9. **Homelab canary and cutover.** Still needs shared services; ask first.
+
+Also open: **Vulkan cannot benefit from KV compression** without packed
+small-integer storage, because its allocator gives every dtype four bytes per
+element. That is a storage-model change, not another kernel.
+
+
+## Standing constraints (unchanged)
+
+- Implementation repo is `/home/toasty/ws/agi/akh-medu`; `/home/toasty/ws/ptah`
+  is an unrelated TUI editor prototype. Read `AGENTS.md` first.
+- No psql / direct Anima Postgres queries; tracker access via the Anima MCP only.
+- Local commits authorized; pushing is not. Never blanket stage, reset or clean —
+  other sessions edit this tree concurrently.
+- No package/driver/kernel/sysctl changes. GPU probes run serially; no CPU
+  compilation during throughput or idle acceptance runs; do not swap daemon
+  binaries while the integration harness is running.
+- Do not weaken the 0.9999 cosine gates on greedy-token agreement alone, and keep
+  the HIP scoped-f32 continuation guard. HIP recurrence fusion stays rejected.
+- Keep one cognitive core, bounded exchanges, authoritative history in the durable
+  session loop. No raw hidden-state retention by default.
+- Fable consultation: `/home/toasty/.local/bin/claude`, model `claude-fable-5`,
+  tools/MCP disabled; treat its output as hypotheses to verify against source.
+- Update the master ledger as work lands; it is the durable record, not chat.
+
+---
+
+## Appendix — recovered handoff, verbatim (2026-09-15)
+
+> # Ptah native runtime handoff — 2026-09-15
+>
+> ## Objective and current request
+>
+> Finish the native resident Candle runtime in `akhrtd`: HIP and Vulkan, quiet GPU
+> idle, exact Ptah model fidelity and quantization/compression, session-daemon
+> integration, and eventual obsolete Ollama/llama-server/akhomed deployment cleanup.
+> The project is **not finished**. The user wants autonomous work, features before
+> performance, and Fable architectural consultation when useful. They requested
+> this handoff so another agent can continue.
+>
+> The durable goal in this thread still reports `usageLimited`, including after
+> the user's `/goal resume`. Recorded usage is 1,543,863 tokens; remaining allowance
+> is null. Available goal tools cannot resume or reset allowance. Do not falsely
+> complete/replace this unfinished goal to bypass that state or claim unattended
+> execution is active. Ordinary explicitly requested work has remained possible.
+>
+> ## Workspace and authority
+>
+> - Actual Git repository: `/home/toasty/ws/agi/akh-medu`.
+> - Supplied working directory `/home/toasty/ws/ptah` is not the implementation repo.
+> - Read repository `AGENTS.md` first. Hard rule: **no psql/direct Anima Postgres queries**.
+> - Local work only. Leave Archibald and Forgejo alone; other sessions own those.
+> - Ptah downtime is allowed. Earlier shared session/core/sandbox restart approval
+>   was followed by local-only direction; the current ledger explicitly pauses
+>   shared-service changes. Reconcile scope before eventual shared cutover.
+> - Local commits and rebases are explicitly authorized. No push authorization
+>   was inferred. No rebase was needed: branch had no recorded upstream divergence.
+> - Preserve all uncommitted/untracked work. Do not blanket stage, reset, or clean.
+>   Other sessions may modify files. No packages/drivers/kernel/sysctl changes.
+> - Run GPU probes serially. No CPU compilation during throughput/idle acceptance.
+>   Do not replace daemon binaries during the integration harness: it restarts them.
+> - Use `apply_patch` for edits, `/bin/bash` with `login:false` for shell calls.
+>
+> ## Read these existing artifacts; they contain the detailed evidence
+>
+> All paths below are relative to the implementation repository. Do not restart
+> completed investigations or reconstruct evidence already recorded here.
+>
+> 1. `docs/ai/plans/2026-09-14-native-ptah-runtime.md` — master ledger, exact artifacts,
+>    hardware, ordered acceptance gates, operational state and numerical results.
+> 2. `docs/ai/research/2026-09-14-native-span-annex.md` — newest completed feature,
+>    actual protocol/storage trust boundaries, tests and remaining wiring.
+> 3. `docs/ai/research/2026-09-14-native-continuation.md` — prefix reuse, session
+>    ownership, HIP precision regression, scoped fix and daemon/idle evidence.
+> 4. `docs/ai/research/2026-09-14-native-same-pass-taps.md` — bounded pooled taps,
+>    numerical gates and capture semantics.
+> 5. `docs/ai/research/2026-09-14-native-vsa-space-assessment.md` and
+>    `docs/ai/research/2026-09-14-native-taps-fable-assessment.md` — projection-space
+>    and architecture decisions; important limitations on Fable's suggestions.
+> 6. `docs/ai/plans/2026-08-24-candle-qwen38-rdna3-inference.md`, ADR 098 and ADR 065
+>    (locate with `rg --files`) — accepted architecture and feature requirements.
+> 7. `examples/native-ptah/README.md` — staged bundle/testing instructions, not a
+>    production deployment. Related research docs cover Vulkan, tokenizer and perf.
+>
+> ## Git checkpoint and latest verification
+>
+> Verified HEAD: `9a3984e2 feat(core): add bounded session-scoped neural span annex`.
+> Previous: `1a30a453 fix(observability): remove duplicate OTLP imports`.
+> Both were created locally after user authorization; nothing pushed or rebased.
+> The annex commit selectively staged only its shared-types hunks, leaving native
+> provider configuration changes unstaged. The index is empty at handoff creation.
+> There are still 32 modified tracked files and numerous untracked implementation,
+> experiment, deployment-example and evidence files. `git diff --stat` excludes the
+> untracked files: inspect both before staging any subsequent checkpoint.
+>
+> Latest rerun passed all 21 relevant tests and the session-daemon check:
+>
+> ```bash
+> CARGO_BUILD_JOBS=2 cargo test --offline -p akh-session-types -p akh-service-store --lib
+> env -u AKH_TRANSCRIPT_CAPTURE CARGO_BUILD_JOBS=2 cargo test --offline --lib --no-default-features --features core-server core_service::tests -- --nocapture --test-threads=1
+> CARGO_BUILD_JOBS=2 cargo check --offline -p akh-session-services --no-default-features --features session --bin akhsessd
+> ```
+>
+> Counts: 17 Store tests, 2 shared-types tests, 2 core HTTP tests. These are not a
+> full project suite or an external PostgreSQL integration pass. Existing warnings
+> remain. `git diff --check` passed. No builds/probes from this session are left
+> running; recheck processes before new work because the workspace is shared.
+>
+> ## Where to continue
+>
+> The next feature is the **native tap → projection → retrieval → prompt loop**.
+> The annex is real, tested storage/API infrastructure, not completed neural recall.
+>
+> - `crates/akh-session-types/src/neural_spans.rs` defines representation pins and
+>   bounded wire types. `crates/akh-service-store/src/neural_spans.rs` stores them
+>   in the existing core Store. `src/core_service.rs` exposes authenticated
+>   capabilities, acceptance and query routes.
+> - `crates/akh-session-services/src/server/sessions.rs` currently sends an empty
+>   `span_captures` vector. Capability negotiation, native transport and delivery
+>   are still unwired. Empty captures preserve the old wire payload/fingerprint.
+> - `src/nlu/vendored/quantized_qwen35.rs` implements immutable shared weights,
+>   private inference sessions/checkpoints, exact-token continuation and bounded
+>   same-pass taps. `src/nlu/candle_backend.rs` and
+>   `crates/akh-session-services/src/internal_native.rs` own generation integration.
+> - Query staging needs actual design: current `/v1/context` precedes runtime
+>   dispatch, but a hidden-state query only exists after prefill. Keep one cognitive
+>   core, bounded exchanges, authoritative history and correct prompt templating.
+>   Recall buckets include service-principal identity; direct runtime queries with
+>   a different principal cannot see the session service's accepted spans.
+> - Do not substitute a random projector for the learned symbolic ItemMemory
+>   space and claim equivalent grounding. Version the complete representation and
+>   validate semantic retrieval quality. Same-space neural-span hits are not
+>   automatically symbolic concept matches. No raw hidden-state retention by default.
+> - Cached requested tap spans return no taps instead of silently replaying prefill.
+>   Respect this when designing query capture and accurate text/token boundaries.
+> - Core operation retries with an interrupted/unknown outcome remain fail-closed
+>   409, not automatically replayed. Pins identify recipes but are not attestation.
+>   Capture opt-out gates access/writes; it does not retroactively erase stored data.
+>
+> After that loop: real ContextManager commit/materialization, exact vision path,
+> live attention KV compression and long-context gates, then performance tuning,
+> full validation and canonical deployment/cleanup. Consult the ledger rather than
+> treating this list as a replacement specification.
+>
+> ## Critical numerical and operational cautions
+>
+> Keyed HIP continuation deliberately uses scoped f32 activation arithmetic:
+> mixed Q8 decode/f32 prefill failed recurrent-state parity. The weight format
+> remains Q4_K_M. Historical ~20 HIP / ~13 Vulkan decode figures predate this keyed
+> guard and are **not current keyed performance measurements**. Near-reference
+> performance remains unfinished. Do not remove the precision guard on the basis
+> of greedy-token agreement alone. HIP recurrence fusion remains rejected by its
+> combined-Q8 gate. Exact-device continuation, tap and resident-idle evidence is
+> recorded in the referenced docs.
+>
+> The old local system `ptah-inference.service` and old local akhomed were stopped
+> and disabled. No production native daemon was installed. Model, projector and
+> draft artifacts remain preserved. No obsolete model/binary deletion has occurred.
+> The deployed `/home/toasty/src/akh-medu` is a different, older non-Git tree.
+> Earlier relocated bundle `/tmp/ptah-native-bundle.bKJjz5` predates continuation
+> and taps; do not deploy it as the latest build. Release binaries also predate the
+> new annex changes; rebuild and verify exact deployment artifacts before cutover.
+>
+> ## Fable consultation
+>
+> User explicitly requested Fable; it is available through the local Claude CLI
+> at `/home/toasty/.local/bin/claude`, model `claude-fable-5`. Prior consultations
+> used safe mode, no tools/MCP and no persistent sessions. Briefs and assessed
+> responses are under `docs/ai/plans/2026-09-14-*-fable-brief.md` and the research
+> paths above. Latest raw annex review: `/tmp/ptah-fable-span-annex-review.json`.
+> Treat suggestions as hypotheses: its evicted-turn replay concern was disproved
+> by a full HTTP regression because the durable journal retains request identity.
+>
+> ## Suggested skills
+>
+> - `implement` and `tdd`: implement the next vertical feature with focused tests.
+> - `codebase-design`: place the staged retrieval boundary without a second Engine.
+> - `diagnosing-bugs`: numerical/performance regressions and measured experiments.
+> - `mattpocock-skills:research`: primary-source backend/compression research if needed.
+> - `review`: review a defined checkpoint once implemented and tested.
+> - `openai-docs`: only if troubleshooting the product goal controls again.
+>
+> Read each applicable skill fully before acting. This handoff was intentionally
+> written to an OS temporary directory, not committed into the repository.
