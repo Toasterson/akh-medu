@@ -376,6 +376,48 @@ pub struct ContextRequest {
     pub turn_id: String,
     pub input: TurnInput,
     pub tools: Vec<ToolSpec>,
+    /// Candidate messages for this turn, newest last, when the caller wants the
+    /// cognitive core to assemble rather than deciding locally.
+    ///
+    /// Empty preserves the original payload exactly, so a core that predates
+    /// this field still accepts the request and a session that predates it
+    /// still gets the old behaviour.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<Value>,
+    /// Token budget the assembled context must fit. `None` leaves the core to
+    /// its own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<ContextBudget>,
+}
+
+/// Window and output reservation for one assembly.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextBudget {
+    /// The model's full context window, in tokens.
+    pub window_tokens: usize,
+    /// Tokens held back for the reply.
+    pub reserved_output_tokens: usize,
+}
+
+impl ContextBudget {
+    /// Tokens available for the prompt.
+    pub fn available(&self) -> usize {
+        self.window_tokens.saturating_sub(self.reserved_output_tokens)
+    }
+}
+
+/// What the core decided to include, when it assembled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssembledContext {
+    /// Messages to send, in order, already within budget.
+    pub messages: Vec<Value>,
+    /// How many candidate messages were left out.
+    pub dropped_messages: usize,
+    /// Tokens per context section, for telemetry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub section_tokens: BTreeMap<String, usize>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -384,6 +426,10 @@ pub struct ContextResponse {
     pub instructions: String,
     pub model: Option<String>,
     pub evidence: Vec<String>,
+    /// Present only when the request supplied messages, so a session that did
+    /// not ask for assembly never receives a field it would reject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembled: Option<AssembledContext>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -657,6 +703,93 @@ pub fn validate_key(key: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_context_request_without_assembly_serializes_exactly_as_before() {
+        let request = ContextRequest {
+            request_id: "r".into(),
+            akh: "a".into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            input: TurnInput {
+                origin: InputOrigin::Human {
+                    principal: "p".into(),
+                },
+                text: "hello".into(),
+                data: None,
+                artifacts: vec![],
+            },
+            tools: vec![],
+            messages: vec![],
+            budget: None,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        let object = json.as_object().unwrap();
+        // The new fields must be absent, not null: a core that predates them
+        // uses deny_unknown_fields and would reject the request.
+        assert!(!object.contains_key("messages"), "{json}");
+        assert!(!object.contains_key("budget"), "{json}");
+        assert_eq!(
+            serde_json::from_value::<ContextRequest>(json).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn a_context_response_without_assembly_omits_the_field() {
+        let response = ContextResponse {
+            schema_version: SCHEMA_VERSION,
+            instructions: "be helpful".into(),
+            model: None,
+            evidence: vec![],
+            assembled: None,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("assembled"), "{json}");
+        assert_eq!(
+            serde_json::from_value::<ContextResponse>(json).unwrap(),
+            response
+        );
+    }
+
+    #[test]
+    fn assembly_round_trips_when_present() {
+        let response = ContextResponse {
+            schema_version: SCHEMA_VERSION,
+            instructions: String::new(),
+            model: None,
+            evidence: vec![],
+            assembled: Some(AssembledContext {
+                messages: vec![serde_json::json!({"role": "user", "content": "hi"})],
+                dropped_messages: 3,
+                section_tokens: BTreeMap::from([("History".to_string(), 12)]),
+            }),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        let back: ContextResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back, response);
+        assert_eq!(back.assembled.unwrap().dropped_messages, 3);
+    }
+
+    #[test]
+    fn a_budget_reserves_output_from_the_window() {
+        let budget = ContextBudget {
+            window_tokens: 1024,
+            reserved_output_tokens: 256,
+        };
+        assert_eq!(budget.available(), 768);
+        // Never negative, however the operator configures it.
+        assert_eq!(
+            ContextBudget {
+                window_tokens: 10,
+                reserved_output_tokens: 99
+            }
+            .available(),
+            0
+        );
+    }
+
     use super::*;
     #[test]
     fn client_cannot_claim_external_input_authority() {

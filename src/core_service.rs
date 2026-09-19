@@ -306,6 +306,9 @@ async fn context(
             instructions,
             model: config.model.clone(),
             evidence,
+            // Assembly is opt-in: only a caller that supplied messages gets a
+            // decision back, so a session that predates the field never sees it.
+            assembled: None,
         })
     })
     .await

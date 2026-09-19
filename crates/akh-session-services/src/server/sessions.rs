@@ -616,6 +616,11 @@ impl SessionApp {
                                 turn_id: turn.id.clone(),
                                 input: turn.input.clone(),
                                 tools: current.tools.clone(),
+                                // Local selection still decides this turn; the
+                                // core assembles only once this carries the
+                                // session's messages.
+                                messages: Vec::new(),
+                                budget: None,
                             },
                         )
                         .await?;

@@ -293,3 +293,29 @@ selecting the strategy would fail closed with the `MissingMessages` diagnostic
 rather than silently misbehaving, and the `context_budgeted` marker from step 1
 is still unset. Wiring the native path to supply both is the remaining join, and
 the five-daemon canary's `final_dropped_messages` assertion is its gate.
+
+
+## The wire now carries assembly, inertly
+
+`ContextRequest` gained `messages` and `budget`; `ContextResponse` gained
+`assembled`, holding the chosen messages, a dropped count and per-section
+tokens. `ContextBudget` reserves output from the window and never goes negative.
+
+All three are skipped when unset, which matters because both types use
+`deny_unknown_fields`: an unset request serializes **byte-identically** to the
+original payload, so a core that predates the fields still accepts it, and the
+core only returns `assembled` when the request asked for it, so a session that
+predates the field never receives one it would reject. Two tests assert the
+absence of the keys rather than trusting the attribute.
+
+Nothing sets them yet. `core_service::context` returns `assembled: None` and the
+session service sends no messages, so behaviour is unchanged and the canary's
+`final_dropped_messages` still reflects the runtime's own selection.
+
+### Remaining
+
+Three steps, each gated by the canary: have `core_service::context` build an
+`EpisodeState` with the supplied messages and assemble through the configured
+strategy; have the session service send its history and a budget, and use the
+returned messages; and set `context_budgeted` on the result so the runtime
+verifies rather than evicts.
