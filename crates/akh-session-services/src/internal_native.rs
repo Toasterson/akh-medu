@@ -205,11 +205,21 @@ pub(super) fn completion(
     let count_prompt = backend.completion_prompt_counter();
     let prompt_budget = config.max_context_tokens.checked_sub(config.max_output_tokens as usize)
         .ok_or_else(|| Fault::invalid("output reservation exceeds native context"))?;
-    let window = crate::native_window::select(messages, prompt_budget, |candidate| {
+    let count_window = |candidate: &[Value]| {
         let rendered = render_prompt(candidate, tools, family)?;
         count_prompt(&rendered).map_err(|e| Fault::new("model_context", e.to_string()))
-    })?;
-    tracing::debug!(dropped_messages = window.dropped_messages, prompt_tokens = window.prompt_tokens,
+    };
+    // akhomed owns eviction once it assembles to budget; the runtime then only
+    // checks the fit against the model's own tokenizer and fails closed. The
+    // local selector remains for payloads from a core that has not moved yet.
+    let budgeted_by_core = crate::native_window::core_budgeted(messages);
+    let window = if budgeted_by_core {
+        crate::native_window::verify(messages, prompt_budget, count_window)?
+    } else {
+        crate::native_window::select(messages, prompt_budget, count_window)?
+    };
+    tracing::debug!(budgeted_by_core, dropped_messages = window.dropped_messages,
+        prompt_tokens = window.prompt_tokens,
         "selected native prompt window; durable history retained");
     let messages = window.messages.as_slice();
     let (prompt, user_span) = render_prompt_with_user_span(messages, tools, family)?;

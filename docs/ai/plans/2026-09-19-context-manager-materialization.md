@@ -59,9 +59,14 @@ second Engine the ledger rules out.
 
 ## First implementable slice
 
-1. Give `native_window::select` a mode that verifies rather than evicts, and
-   fail `capacity` on overflow. Keep the evicting path behind the existing
-   callers until akhomed supplies budgeted messages, so nothing regresses.
+1. **Done** (`native_window::verify`, wired in `internal_native::completion`).
+   The runtime verifies instead of evicting whenever a message carries
+   `"context_budgeted": true`, and fails `capacity` with the measured and
+   budgeted token counts. Absent the marker it takes the existing evicting
+   path, so a core that has not moved yet is unaffected: the five-daemon canary
+   reran on HIP with the identical result, four dropped messages and the
+   correct post-restart answer. Six `native_window` tests and the 25-test
+   runtime suite pass.
 2. Emit `ContextWindowStats` for native turns from whichever side owns the
    decision, replacing `dropped_messages` in the native response shape.
 3. Call `commit` with a real `TurnOutcome` after each native turn.

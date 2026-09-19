@@ -64,6 +64,41 @@ pub(crate) fn select(
     })
 }
 
+/// True when akhomed marked this message list as already assembled to budget.
+///
+/// Absent on the legacy payload, which keeps a mixed akhomed/akhrtd pair
+/// interoperating while the seam moves, the same discipline the span annex used.
+pub(crate) fn core_budgeted(messages: &[Value]) -> bool {
+    messages
+        .iter()
+        .any(|message| message.get("context_budgeted") == Some(&Value::Bool(true)))
+}
+
+/// Check a prompt the cognitive core already budgeted, without ever dropping.
+///
+/// akhomed owns which turns and recalled spans survive; a runtime that quietly
+/// evicts on top of that decision is a second context policy. This verifies the
+/// core's decision against the model's own tokenizer and fails the turn when it
+/// does not fit, so an overflow surfaces instead of silently losing context.
+pub(crate) fn verify(
+    messages: &[Value],
+    budget: usize,
+    mut count: impl FnMut(&[Value]) -> Result<usize>,
+) -> Result<Window> {
+    let tokens = count(messages)?;
+    if tokens > budget {
+        return Err(Fault::new(
+            "capacity",
+            format!("assembled context is {tokens} tokens against a {budget} token prompt budget"),
+        ));
+    }
+    Ok(Window {
+        messages: messages.to_vec(),
+        dropped_messages: 0,
+        prompt_tokens: tokens,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +148,50 @@ mod tests {
                 history[4].clone(),
                 history[5].clone()
             ]
+        );
+    }
+
+    #[test]
+    fn core_budgeted_marker_is_opt_in_and_absent_on_legacy_payloads() {
+        assert!(!core_budgeted(&[json!({"role":"user","content":"hi"})]));
+        assert!(!core_budgeted(&[json!({"role":"system","context_budgeted":false})]));
+        assert!(core_budgeted(&[
+            json!({"role":"system","context_budgeted":true}),
+            json!({"role":"user","content":"hi"})
+        ]));
+    }
+
+    #[test]
+    fn verify_accepts_a_budgeted_prompt_and_never_drops() {
+        let history = vec![
+            json!({"role":"system","content":"rules"}),
+            json!({"role":"user","content":"current"}),
+        ];
+        let window = verify(&history, 2, |m| Ok(m.len())).unwrap();
+        assert_eq!(window.messages, history);
+        assert_eq!(window.dropped_messages, 0);
+        assert_eq!(window.prompt_tokens, 2);
+    }
+
+    #[test]
+    fn verify_fails_closed_instead_of_evicting_what_the_core_chose() {
+        let history = vec![
+            json!({"role":"system","content":"rules"}),
+            json!({"role":"user","content":"old"}),
+            json!({"role":"assistant","content":"done"}),
+            json!({"role":"user","content":"current"}),
+        ];
+        // select() would drop the old turn to fit; verify() must not.
+        assert_eq!(select(&history, 2, |m| Ok(m.len())).unwrap().dropped_messages, 2);
+        let fault = verify(&history, 2, |m| Ok(m.len())).err().unwrap();
+        assert_eq!(fault.code, "capacity");
+        assert!(fault.message.contains("4 tokens"), "{}", fault.message);
+        assert_eq!(
+            verify(&history, 100, |_| Err(Fault::invalid("counter failed")))
+                .err()
+                .unwrap()
+                .message,
+            "counter failed"
         );
     }
 
