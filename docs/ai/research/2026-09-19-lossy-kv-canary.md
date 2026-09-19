@@ -288,3 +288,43 @@ What it still does not establish is quality at length. Five short turns with a
 1,024-token window is a small amount of compressed context, so this says the
 mechanism is sound, not that a long conversation stays coherent under it. A
 needle-in-a-haystack run remains the test that would say that.
+
+## Correction: Vulkan is not blocked after all
+
+Earlier entries concluded Vulkan needs "packed small-integer storage, a change
+to the storage model rather than an added kernel", and treated that as blocking.
+Checking which operations the backend actually has shows that was wrong.
+
+The obstacle is real: `VulkanDevice::alloc` gives every dtype four bytes per
+element, so a `u8` tensor saves nothing. But codes do not have to be stored one
+per element. Several can be packed into each `u32` word and unpacked during
+decode, and every operation that needs is already implemented:
+
+| Step | Operation | Present |
+| --- | --- | --- |
+| Scale by a power of 256 | `affine` | yes |
+| Truncate | unary `floor` | yes, `"floor" => "floor(x)"` |
+| Extract a byte | binary subtract and multiply | yes |
+| Widen for the gather | `to_dtype` f32 to u32 | yes |
+| Gather centroids | `index_select` | yes |
+
+So `code_i = floor(packed / 256^i) - 256 * floor(packed / 256^(i+1))`,
+composed from ops the backend already has. No new kernel.
+
+**The constraint is f32 precision, not the op set.** Unpacking goes through f32,
+which represents integers exactly only to 2^24, so a word may carry at most
+**three** 8-bit codes, not four. Three codes per four-byte word is 1.33 bytes per
+code, a **3x** saving against the f32 cache — less than HIP's 4x with native
+`u8`, but real, and reachable without touching the backend.
+
+This corrects the earlier assessment in both directions: the storage-model
+change is not required, and the saving available is 3x rather than the 4x quoted
+for the packed host format.
+
+## Not established
+
+Nothing above has been implemented or measured. The arithmetic is four extra
+elementwise passes per decode on top of the gather, scale and rotation, and on a
+backend whose decode is already the hot path that cost could exceed the benefit.
+The measurement that would settle it is the same six-turn benchmark run on
+Vulkan with packing on and off, interleaved, per the preamble rule.
