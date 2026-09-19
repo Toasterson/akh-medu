@@ -32,17 +32,18 @@ the chronological evidence further down is retained as written.
   The Vulkan shader cache now reports counters: 99.44% hit rate, saturated at its
   2,048-entry limit with every miss evicting. See
   [keyed measurement](../research/2026-09-19-keyed-session-measurement.md).
-- **Performance defect identified** (2026-09-19): the non-monotonic keyed HIP
-  decode is the **Q8 activation GEMV**. Per-step timing shows no outlier steps
-  anywhere (max 1.4x median, none over 2x), so the slowdown is uniform, not a
-  periodic reallocation. With `AKH_HIP_Q8_GEMV=0` the curve is smooth and
-  monotonic, 17.2 to 11.7 steps/s across 58 to 510 positions, and the collapses
-  at 256, 440 and 510 vanish - f32 is roughly twice as fast there and never
-  slower. Keyed figures recorded with it enabled are understated. Why the kernel
-  degrades is open, but where it helps is now measured: prefill is unaffected and
-  **unkeyed** decode is 15-25% faster with it on (18.35 vs 15.4 steps/s). So the
-  fix is per-path routing - f32 for keyed completions, quantized GEMV for fresh
-  ones - not a global default change. See
+- **Performance: claim retracted, question narrowed** (2026-09-19). An earlier
+  entry blamed the non-monotonic keyed HIP decode on the Q8 activation GEMV.
+  Four interleaved runs show that was wrong: at 191, 256 and 440 positions the
+  flag makes no difference at all, because keyed completions already run inside
+  `with_full_precision_activations`. The apparent effect was run-to-run
+  variance. A real, reproducible 1.6x difference remains at 510 positions only,
+  unexplained. The morning's wild profile did not reproduce either, so keyed
+  decode at large context is **unstable between processes** and single-run
+  comparisons of it cannot support causal claims. Per-step timing still shows no
+  outlier steps, so whatever varies shifts the whole distribution. Unkeyed
+  results stand: prefill unaffected, unkeyed decode 15-25% faster with the
+  quantized GEMV. See
   [decode anomaly](../research/2026-09-19-hip-decode-anomaly.md).
 - **Superseded note.** Keyed HIP decode is non-monotonic in context
   position: about 17 steps/s below 200 positions, 8.2 at 256, 13.0 at 322-381,

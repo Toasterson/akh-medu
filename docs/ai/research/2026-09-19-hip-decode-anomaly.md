@@ -33,7 +33,47 @@ median and not one step anywhere exceeds twice it. The slowdown is uniform
 across every step of an affected turn: the median itself moves, from 0.059 s to
 0.164 s. A reallocation, a cache miss or any other periodic event is excluded.
 
-## Disabling the Q8 GEMV removes it entirely
+## Correction: the single-run comparison was mostly noise
+
+An earlier version of this document claimed, from one run per configuration,
+that disabling the Q8 GEMV removed the anomaly at 256, 440 and 510 positions.
+**That claim was wrong**, and reading the code should have prevented it:
+`candle_backend.rs` already wraps every keyed completion in
+`with_full_precision_activations`, which forces `q8_gemv_enabled()` false
+regardless of the environment variable. The flag cannot affect most of the keyed
+path, so a large apparent effect there should have been treated as suspect
+rather than published.
+
+Four interleaved runs, two per configuration, alternating so drift cannot favour
+either:
+
+| End context | Q8 on, pass 1 | Q8 off, pass 1 | Q8 on, pass 2 | Q8 off, pass 2 |
+| ---: | ---: | ---: | ---: | ---: |
+| 191 | 16.77 | 16.76 | 16.74 | 16.74 |
+| 256 | 14.00 | 14.11 | 13.88 | 14.18 |
+| 440 | 11.90 | 11.65 | 11.86 | 11.90 |
+| 510 | **7.26** | **11.64** | **7.41** | **11.51** |
+
+At 191, 256 and 440 positions the two configurations are **indistinguishable**,
+within 2%. The earlier reading of 7.19 against 14.24 at 256 positions was
+run-to-run variance, not an effect of the flag.
+
+At 510 positions the difference **is** real and reproduces in both passes: about
+7.3 with the quantized route against about 11.6 without it, a consistent 1.6x.
+Why one context length is sensitive when the others are not is unexplained, and
+that is now the narrow open question rather than the broad one.
+
+Two further consequences. The morning's wild non-monotonic profile — 8.2 at 256
+positions rising to 13.0 at 322 — **did not reproduce** in any of these four
+runs, which all show a nearly monotonic decline. So keyed decode at larger
+contexts is **unstable between processes**, and any single-run comparison of it,
+including several recorded earlier today, cannot support a causal claim.
+
+The per-step evidence below stands, because it is within-run structure rather
+than a between-run comparison: no turn contains an outlier step, so whatever
+varies moves the whole distribution rather than adding a periodic spike.
+
+## Superseded: the original single-run comparison
 
 Same eight turns with `AKH_HIP_Q8_GEMV=0`, which routes activations through f32
 instead of the quantized GEMV:
@@ -85,19 +125,18 @@ pipeline, and this clean rerun supersedes it.
 
 ## Consequence, revised
 
-The Q8 activation GEMV is not simply a pessimization. It is **right for unkeyed
-decode and wrong for keyed decode**, and irrelevant to prefill:
+The unkeyed measurements stand, since they compare the path the flag actually
+governs: prefill is unaffected, and unkeyed decode is 15-25% faster with the
+quantized GEMV on. Keeping it enabled for fresh generation is supported.
 
-| Path | Q8 GEMV |
-| --- | --- |
-| Prefill | no measurable effect |
-| Unkeyed decode | ~18.35 vs ~15.4 steps/s — keep it |
-| Keyed decode at 256, 440, 510 positions | 7.2/7.0/5.8 vs 14.2/11.9/11.7 — disable it |
+For keyed decode, no change is justified. The flag is already neutralized there
+by the full-precision scope at every context measured except 510 positions, and
+that single point needs explaining before anything is built on it.
 
-So the actionable change is to select the route **per path** rather than by a
-single process-wide flag: keyed completions take the f32 route, fresh unkeyed
-ones keep the quantized GEMV. A global default cannot be right for both, which
-is why neither disabling nor keeping the current flag is the answer.
+What this leaves is a real but much narrower open question, and a methodological
+one: keyed decode at large context varies enough between processes that
+measurements need repetition and interleaving. Every keyed comparison recorded
+earlier today was a single run per configuration.
 
 ## Not established
 
