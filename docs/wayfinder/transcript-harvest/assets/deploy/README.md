@@ -73,26 +73,28 @@ Range verified free on 2026-09-19 by ping sweep plus ARP — nothing answered on
 `.60`-`.70` on this L2 segment (all entries `INCOMPLETE`). That cannot prove the
 router will not later lease them, so **keep this range outside the DHCP scope**.
 
-### Blocked: the cluster's GitOps stack is unhealthy
+### Deployed and verified — 2026-09-19
 
-The manifests are committed/staged and validate (`kubectl kustomize`,
-`kubectl apply --dry-run=server`), but **Flux cannot apply them**.
-`source-controller` is crash-looping — 31 restarts, readiness probe refused on
-:9090, exit code 2 (not OOM; it has a 1Gi limit). While it is down, every
-Kustomization fails artifact download with
-`dial tcp 10.99.141.29:80: connect: no route to host`, so `infrastructure`
-flaps between ready and not-ready and everything depending on it — including
-`cloudnativepg` — never applies.
+`harvest-pg` is **live**: 2 instances, "Cluster in healthy state", database
+`transcripts`. Verified in-cluster rather than assumed:
 
-This predates and is unrelated to the transcript-harvest change: the same error
-hits `akh-medu`, `anima`, `cloud`, `external-secrets`, `forgejo` and others.
-`harvest-pg` will reconcile on its own once source-controller is stable.
+```
+timescaledb 2.25.1      vector 0.8.2      PostgreSQL 18.3
+shared_preload_libraries = timescaledb
+create_hypertable('_smoke','t') -> ok
+```
 
-## Open question this reopens
+The hypertable smoke test matters: ADR 091 documents `akhomed_mutation_log` as a
+hypertable while it has been a plain table for 769,001 rows, because the guarded
+migration warned and no-opped and nobody checked afterwards. Here the capability
+is proven, not inferred from the image tag.
 
-With a TimescaleDB-capable cluster, session 5's choice to put `observed_at` in
-the raw primary key **regains its justification**: compression becomes available,
-so the partly-synthetic key column buys something again. The flag on
-[store schema](../../tickets/store-schema.md) can be cleared if this cluster is
-built. If it is not, dropping `observed_at` from the key remains the
-recommendation.
+**Getting there was not smooth.** Flux stalled fleet-wide for hours:
+`source-controller` crash-looped (31 restarts at first diagnosis, 68 later, exit
+code 2, readiness refused on :9090, not OOM at a 1Gi limit). While it is down
+every Kustomization fails artifact download with
+`dial tcp 10.99.141.29:80: connect: no route to host`, so `infrastructure` flaps
+ready/not-ready and everything depending on it — `cloudnativepg`, `akh-medu`,
+`anima`, `cloud`, `external-secrets`, `forgejo`, `valkey` — never applies.
+Reconciliation succeeds on retry once source-controller happens to be up.
+**That instability is unresolved and independent of this work.**
