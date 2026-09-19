@@ -407,6 +407,20 @@ impl ContextBudget {
     }
 }
 
+/// Marks a message the cognitive core already assembled to budget.
+///
+/// The core sets it on every message it returns; the runtime reads it to decide
+/// whether to verify the fit or run its own selector. It lives here because both
+/// sides must agree on the spelling: as two independent string literals in two
+/// crates, a change on one side would silently turn assembly off rather than
+/// fail to compile, and the runtime would quietly re-evict on top of the core's
+/// decision - a second context policy, which is the thing this seam exists to
+/// prevent.
+///
+/// Absent on legacy payloads, so a core and runtime at different versions
+/// interoperate: an unmarked list is selected locally exactly as before.
+pub const CONTEXT_BUDGETED: &str = "context_budgeted";
+
 /// What the core decided to include, when it assembled.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

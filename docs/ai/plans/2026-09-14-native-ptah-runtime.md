@@ -322,6 +322,30 @@ the chronological evidence further down is retained as written.
   Position-triple threading for image tokens is also untouched. See
   [vision device gate](../research/2026-09-19-vision-device-gate.md).
 
+- **Item 4: the seam had a silent fallback; the topology fork is confirmed real**
+  (2026-09-19). `context_budgeted` existed in exactly one place in the tree -
+  `native_window.rs` and its own tests. **The core never emitted it.** So once
+  the topology lands and messages flow, the core would assemble, and the runtime
+  would read `core_budgeted == false` and run its own selector over a list the
+  core had already decided: two context policies disagreeing, silently, with the
+  turn still succeeding on different context than the core chose.
+
+  `assemble_context` now marks every message it returns, and strips any inbound
+  marker first so a flag echoed back in history cannot describe an assembly that
+  did not happen. The constant moved to `akh-session-types` as
+  `CONTEXT_BUDGETED` and both crates use it - as two string literals, a change
+  on one side would not fail to compile, it would quietly restore the double
+  eviction. Four tests cover it on the core side, six on the runtime side.
+
+  **The fork is not resolvable by reading the code.** `RuntimeJobRequest` carries
+  `input`, `instructions` and `tools` and has **no message array**: akhsessd
+  holds turns, not a rendered conversation, while the message array is built in
+  `internal.rs` in the agent loop, which has no core client. No party holds both
+  the conversation and a line to the core. Either the agent loop gains a core
+  client or the conversation moves into the session record - **a user decision**.
+  Everything above is required under both. See
+  [context seam marker](../research/2026-09-19-context-seam-marker.md).
+
   Three corrections this produced. **The byte layout never ran on Vulkan at
   all**: `to_dtype` had no `U8 -> U32` arm, so the decode aborted the first time
   a position aged out. Compressed KV there was failing closed, not saving

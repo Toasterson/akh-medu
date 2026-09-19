@@ -320,6 +320,8 @@ async fn context(
     .map_err(error)??;
     Ok(Json(response))
 }
+use akh_session_types::CONTEXT_BUDGETED;
+
 /// Choose which of a turn's messages fit the budget, in the cognitive core.
 ///
 /// Selection, never rewriting: the runtime reuses an exact token prefix, which
@@ -347,12 +349,35 @@ fn assemble_context(
         .budget
         .map(|b| TokenBudget::new(b.window_tokens, b.reserved_output_tokens))
         .unwrap_or_default();
+    // Strip any marker echoed back in history before deciding anything. A
+    // marker that survived from an earlier turn would describe an assembly that
+    // did not happen for this one.
+    let inbound: Vec<Value> = request
+        .messages
+        .iter()
+        .map(|message| {
+            let mut message = message.clone();
+            if let Some(object) = message.as_object_mut() {
+                object.remove(CONTEXT_BUDGETED);
+            }
+            message
+        })
+        .collect();
     let episode = EpisodeState::new(&request.akh, &request.input.text, engine)
-        .with_messages(Some(&request.messages));
+        .with_messages(Some(&inbound));
     let manager = SafetyEnforced::new(SelectingManager);
-    let assembled = manager
+    let mut assembled = manager
         .assemble(&episode, &budget, &HeuristicTokenCounter)
         .map_err(|e| Fault::new("context_assembly", e.to_string()))?;
+    // Tell the runtime this list is already budgeted, so it verifies the fit
+    // rather than evicting again on top of the decision just made. Without the
+    // marker the runtime silently falls back to its own selector, which is a
+    // second context policy disagreeing with this one.
+    for message in &mut assembled.messages {
+        if let Some(object) = message.as_object_mut() {
+            object.insert(CONTEXT_BUDGETED.into(), Value::Bool(true));
+        }
+    }
     Ok(akh_session_types::AssembledContext {
         dropped_messages: assembled.dropped.len(),
         section_tokens: assembled
@@ -631,6 +656,103 @@ mod tests {
             "the current question"
         );
         assert!(!assembled.section_tokens.is_empty());
+    }
+
+    #[test]
+    fn the_core_marks_what_it_assembled_so_the_runtime_verifies_instead_of_evicting() {
+        let engine = Engine::new(Default::default()).unwrap();
+        let request = ContextRequest {
+            request_id: "r".into(),
+            akh: "a".into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            input: TurnInput {
+                origin: akh_session_types::InputOrigin::Human {
+                    principal: "p".into(),
+                },
+                text: "the current question".into(),
+                data: None,
+                artifacts: vec![],
+            },
+            tools: vec![],
+            messages: vec![
+                serde_json::json!({"role": "system", "content": "standing rules"}),
+                serde_json::json!({"role": "user", "content": "the current question"}),
+            ],
+            budget: Some(akh_session_types::ContextBudget {
+                window_tokens: 64,
+                reserved_output_tokens: 8,
+            }),
+        };
+
+        let assembled = assemble_context(&engine, &request).unwrap();
+        assert!(!assembled.messages.is_empty());
+        // This is the exact predicate the runtime applies. Without it the
+        // runtime runs its own selector over a list the core already decided.
+        let runtime_sees_it_as_budgeted = assembled
+            .messages
+            .iter()
+            .any(|message| message.get(CONTEXT_BUDGETED) == Some(&Value::Bool(true)));
+        assert!(
+            runtime_sees_it_as_budgeted,
+            "assembled context must be marked: {assembled:?}"
+        );
+        // The marker must not disturb what the prompt renders from.
+        for message in &assembled.messages {
+            assert!(message.get("role").is_some(), "{message}");
+            assert!(message.get("content").is_some(), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_marker_echoed_back_in_history_does_not_survive_into_a_new_assembly() {
+        let engine = Engine::new(Default::default()).unwrap();
+        // A previous turn's assembled output, fed back as history. Its marker
+        // describes an assembly that did not happen for this turn.
+        let request = ContextRequest {
+            request_id: "r".into(),
+            akh: "a".into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            input: TurnInput {
+                origin: akh_session_types::InputOrigin::Human {
+                    principal: "p".into(),
+                },
+                text: "the current question".into(),
+                data: None,
+                artifacts: vec![],
+            },
+            tools: vec![],
+            messages: vec![
+                serde_json::json!({"role": "system", "content": "standing rules"}),
+                serde_json::json!({
+                    "role": "user",
+                    "content": "a stale turn carrying a stale marker",
+                    "context_budgeted": true
+                }),
+                serde_json::json!({"role": "user", "content": "the current question"}),
+            ],
+            budget: Some(akh_session_types::ContextBudget {
+                window_tokens: 20,
+                reserved_output_tokens: 6,
+            }),
+        };
+
+        let assembled = assemble_context(&engine, &request).unwrap();
+        // Whatever survives is marked because this assembly marked it, not
+        // because a stale marker rode in: the dropped ones cannot carry it out.
+        assert!(assembled.dropped_messages > 0, "{assembled:?}");
+        for message in &assembled.messages {
+            assert_eq!(
+                message.get(CONTEXT_BUDGETED),
+                Some(&Value::Bool(true)),
+                "every surviving message is marked by this assembly: {message}"
+            );
+        }
+        assert_eq!(
+            assembled.messages.last().unwrap()["content"],
+            "the current question"
+        );
     }
 
     #[test]
