@@ -365,14 +365,48 @@ it explains the marker's purpose better than the original note did:
 `context_budgeted` says "the prefix below this point was budgeted by the core;
 verify the whole, do not re-select it".
 
+### Correction: the history is in akhrtd, not the session service
+
+The step above assumed the session service could hand the core a prefix. It
+cannot, and following the data one level further shows why.
+
+The durable message history is the `Conversation` record in **akhrtd's own
+`Store`**, keyed `internal/<provider-session>`, and it accumulates across turns
+as the provider-session continuation. `run_loop` loads it, appends the new user
+message, and persists it. The session service never sees it, and akhrtd has **no
+core client at all** — it receives cognitive context second-hand, already
+rendered into `RuntimeJobRequest::instructions`.
+
+So there is no point in the current topology where the party holding the history
+can reach the party holding the policy. That is the actual obstacle, and it was
+invisible from the `/v1/context` signature alone.
+
+### Two viable flows
+
+**Give akhrtd a core client.** It asks akhomed to assemble its conversation at
+the start of a turn and uses the returned prefix. This puts the request where
+the history already is, costs one round trip per turn, and matches the module's
+own statement that cognitive context comes from akhomed. It widens akhrtd's
+trust surface: it would now call the core directly rather than only receiving
+what the session broker passes it.
+
+**Move the conversation into the session record.** The session service would own
+the durable history, send it with `/v1/context`, and pass the assembled prefix
+through `RuntimeJobRequest`. No new client, and it puts authoritative history in
+the durable session loop where the ledger says it belongs — but it relocates
+provider-session continuation state that akhrtd currently owns for good reasons,
+including the exact-prefix reuse the keyed cache depends on.
+
+The second is closer to the stated architecture; the first is far less invasive.
+Deciding needs the user, because it trades a trust boundary against a state
+relocation and both readings of "authoritative history stays in the durable
+session loop" are defensible.
+
 ### Remaining, restated
 
-1. Carry the assembled prefix from `/v1/context` into `RuntimeJobRequest`, which
-   today has nowhere to put it.
-2. Have akhrtd seed `conversation.messages` from that prefix instead of the raw
-   conversation, and set `context_budgeted` so its verify path runs.
-3. Gate on the canary's `final_dropped_messages`, which today reports the
+1. Decide between those two flows.
+2. Carry the assembled prefix to akhrtd, by whichever route.
+3. Seed `conversation.messages` from it, set `context_budgeted`, and let the
+   step-1 verify path re-check with the exact tokenizer.
+4. Gate on the canary's `final_dropped_messages`, which today reports the
    runtime's own selection and would then report the core's.
-
-Step 1 is another wire change, this time to the dispatch record rather than the
-context call. Nothing above it changes until that lands.
