@@ -44,6 +44,28 @@ fn cache_stats(_backend: &CandleBackend) -> Option<serde_json::Value> {
     None
 }
 
+/// Shape of the per-step decode times, not just their average.
+///
+/// A periodic expensive step and a uniformly slower kernel produce the same
+/// mean; they differ in the spread and in how many steps sit far above the
+/// median, which is what this reports.
+fn step_profile(steps: &[f64]) -> serde_json::Value {
+    if steps.is_empty() {
+        return serde_json::Value::Null;
+    }
+    let mut sorted = steps.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite step times"));
+    let median = sorted[sorted.len() / 2];
+    serde_json::json!({
+        "steps": sorted.len(),
+        "median_seconds": median,
+        "min_seconds": sorted[0],
+        "max_seconds": sorted[sorted.len() - 1],
+        "max_over_median": if median > 0.0 { sorted[sorted.len() - 1] / median } else { 0.0 },
+        "steps_over_twice_median": sorted.iter().filter(|s| **s > 2.0 * median).count(),
+    })
+}
+
 #[derive(Default)]
 struct Group {
     requests: usize,
@@ -195,6 +217,7 @@ pub fn run(
                 "decode_seconds":reply.decode_time.as_secs_f64(),
                 "decode_steps_including_eos":reply.decode_steps,
                 "decode_steps_per_second":rate,
+                "step_profile":step_profile(&reply.step_seconds),
                 "finish":format!("{:?}",reply.finish_reason)})
         );
     }

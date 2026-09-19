@@ -32,7 +32,16 @@ the chronological evidence further down is retained as written.
   The Vulkan shader cache now reports counters: 99.44% hit rate, saturated at its
   2,048-entry limit with every miss evicting. See
   [keyed measurement](../research/2026-09-19-keyed-session-measurement.md).
-- **Open performance defect.** Keyed HIP decode is non-monotonic in context
+- **Performance defect identified** (2026-09-19): the non-monotonic keyed HIP
+  decode is the **Q8 activation GEMV**. Per-step timing shows no outlier steps
+  anywhere (max 1.4x median, none over 2x), so the slowdown is uniform, not a
+  periodic reallocation. With `AKH_HIP_Q8_GEMV=0` the curve is smooth and
+  monotonic, 17.2 to 11.7 steps/s across 58 to 510 positions, and the collapses
+  at 256, 440 and 510 vanish - f32 is roughly twice as fast there and never
+  slower. Keyed figures recorded with it enabled are understated. Why the kernel
+  degrades, and where it does help, are open. See
+  [decode anomaly](../research/2026-09-19-hip-decode-anomaly.md).
+- **Superseded note.** Keyed HIP decode is non-monotonic in context
   position: about 17 steps/s below 200 positions, 8.2 at 256, 13.0 at 322-381,
   then 7.8 and 6.9 at 440 and 510. Vulkan declines smoothly over the identical
   sequence, 12.35 to 9.01. Reproducible, HIP-specific, and independent of

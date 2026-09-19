@@ -186,6 +186,14 @@ pub struct CandleCompletion {
     pub decode_time: std::time::Duration,
     /// Sampled positions after the first, including EOS (unlike tokens_generated).
     pub decode_steps: u32,
+    /// Seconds per decode step, in order, one per position counted by
+    /// `decode_steps`. Measured at the sampling point, which reads the result
+    /// back and therefore includes the queued GPU work for that step.
+    ///
+    /// This is the resolution needed to tell a periodic expensive step, such as
+    /// a cache reallocation, from a uniformly slower kernel: the aggregate rate
+    /// cannot distinguish them.
+    pub step_seconds: Vec<f64>,
     /// Pooled residual means of the requested prompt span, when it was newly
     /// forwarded by this call. `None` is an explicit miss, never a replay.
     pub prompt_span_taps: Option<PromptSpanTaps>,
@@ -2578,6 +2586,8 @@ impl CandleBackend {
         let mut generated = Vec::new();
         let mut finish_reason = CandleFinishReason::Length;
         let mut first_sample_at = None;
+        let mut last_sample_at = None;
+        let mut step_seconds: Vec<f64> = Vec::new();
         let mut decode_steps = 0;
         for index in 0..max_tokens {
             check()?;
@@ -2597,11 +2607,16 @@ impl CandleBackend {
             };
             // Sampling reads the result back and therefore includes queued GPU
             // work. Timing forward's return alone would measure enqueue time.
+            let sampled_now = std::time::Instant::now();
             if first_sample_at.is_none() {
-                first_sample_at = Some(std::time::Instant::now());
+                first_sample_at = Some(sampled_now);
             } else {
                 decode_steps += 1;
+                if let Some(previous) = last_sample_at {
+                    step_seconds.push(sampled_now.duration_since(previous).as_secs_f64());
+                }
             }
+            last_sample_at = Some(sampled_now);
             if eos.contains(&token) {
                 finish_reason = CandleFinishReason::Stop;
                 break;
@@ -2649,6 +2664,7 @@ impl CandleBackend {
             finish_reason,
             time_to_first_token: first_sample_at.unwrap().duration_since(started),
             decode_time: sampled_at.duration_since(first_sample_at.unwrap()),
+            step_seconds,
             decode_steps,
             prompt_span_taps,
         })
