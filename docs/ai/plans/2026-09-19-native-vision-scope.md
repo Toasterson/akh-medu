@@ -72,8 +72,21 @@ sidecar derived by `mmproj_path()`. Three separate reasons it does not carry ove
    manifest for different weights never contributes its projector. Four CPU
    tests plus an ignored artifact test that resolves the real pinned Ptah
    projector and checks its size.
-2. **Preprocessing** — 768 px, patch 16, spatial merge 2, mean and std 0.5 per
-   channel. Deterministic and CPU-testable against fixed fixtures.
+2. **Preprocessing** — blocked on a reference, not on effort. The GGUF supplies
+   the normalization constants and geometry (mean and std 0.5 per channel, patch
+   16, spatial merge 2, `clip.vision.image_size = 768`) but **not the resize
+   policy**. Whether 768 is a fixed square or an upper bound for a
+   dynamic-resolution smart resize to multiples of patch x merge = 32 is not
+   answerable from the artifact, and getting it wrong silently misaligns every
+   patch. The model's `params` layer holds only sampling settings
+   (`stop`, `temperature`, `top_k`, `top_p`), and the `license` layer is one
+   line, so neither helps.
+
+   The authority is whatever consumes this GGUF today — llama.cpp's clip/mtmd
+   path, which ollama drives. That source is not vendored here and Context7 has
+   no Qwen3-VL image-processor entry. Resolve by reading that implementation
+   directly before writing the resize, and pin the answer with a fixture whose
+   patch count is asserted, so a policy change fails loudly.
 3. **Vision tower forward** in Candle: patch embed, position embed, 27
    pre-norm blocks with fused QKV, post-norm. Needs HIP and Vulkan coverage and
    the same exact-agreement gate the text path uses.
