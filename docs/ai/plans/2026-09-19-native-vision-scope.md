@@ -72,28 +72,48 @@ sidecar derived by `mmproj_path()`. Three separate reasons it does not carry ove
    manifest for different weights never contributes its projector. Four CPU
    tests plus an ignored artifact test that resolves the real pinned Ptah
    projector and checks its size.
-2. **Preprocessing** — blocked on a reference, not on effort. The GGUF supplies
-   the normalization constants and geometry (mean and std 0.5 per channel, patch
-   16, spatial merge 2, `clip.vision.image_size = 768`) but **not the resize
-   policy**. Whether 768 is a fixed square or an upper bound for a
-   dynamic-resolution smart resize to multiples of patch x merge = 32 is not
-   answerable from the artifact, and getting it wrong silently misaligns every
-   patch. The model's `params` layer holds only sampling settings
-   (`stop`, `temperature`, `top_k`, `top_p`), and the `license` layer is one
-   line, so neither helps.
+2. **Preprocessing — resolved.** Read from the implementation that consumes
+   this GGUF, `ggml-org/llama.cpp` `tools/mtmd`:
 
-   The authority is whatever consumes this GGUF today — llama.cpp's clip/mtmd
-   path, which ollama drives. That source is not vendored here and Context7 has
-   no Qwen3-VL image-processor entry. Resolve by reading that implementation
-   directly before writing the resize, and pin the answer with a fixture whose
-   patch count is asserted, so a policy change fails loudly.
+   - It is **dynamic resolution**, not a fixed square. The projector is driven by
+     `mtmd_image_preprocessor_dyn_size`, and `clip.vision.image_size = 768` is
+     not the resize target.
+   - `calc_size_preserved_ratio` in `mtmd-image.cpp` is the transformers
+     `smart_resize`: round each side to a multiple of `align_size`, then if the
+     area exceeds `max_pixels` scale by `beta = sqrt(h*w / max_pixels)` and floor
+     each side by the factor, or if it falls below `min_pixels` scale up by
+     `beta = sqrt(min_pixels / (h*w))` and ceil by the factor. Sides are clamped
+     to at least `align_size`.
+   - `align_size = patch_size * n_merge` = 16 * 2 = **32**.
+   - `patch_area = patch_size^2 * n_merge^2` = **1024**, and
+     `image_{min,max}_pixels = n_tokens_{min,max} * patch_area`.
+   - Our mmproj carries **no** `clip.vision.image_min_pixels` or
+     `image_max_pixels` key, so the projector defaults apply. The Qwen3-VL branch
+     of `clip.cpp` sets `set_limit_image_tokens(256, 16384)` alongside
+     `FFN_GELU`, which matches this artifact's `clip.use_gelu = true`; the
+     Qwen2/2.5 branch is the different one, at `(8, 4096)` with bicubic resize.
+     That gives **min 262,144 px and max 16,777,216 px**.
+
+   The token-limit pair was read from search fragments rather than a contiguous
+   region, so confirm the two lines are in the `PROJECTOR_TYPE_QWEN3VL` case
+   before relying on them, then pin the whole policy with a fixture whose patch
+   count is asserted.
+
 3. **Vision tower forward** in Candle: patch embed, position embed, 27
    pre-norm blocks with fused QKV, post-norm. Needs HIP and Vulkan coverage and
    the same exact-agreement gate the text path uses.
-4. **Merger** — the `mm.*` stack projecting 1152 to 5120 so image embeddings
-   enter the LLM's embedding space.
-5. **Deepstack routing** — selected vision layers feed multiple LLM layers. This
-   requires changes inside `quantized_qwen35.rs`, not just a sidecar module.
+4. **Merger — smaller than assumed.** The `mm.*` stack is just
+   `mm.0.{weight,bias}` and `mm.2.{weight,bias}`: a two-layer MLP with the GELU
+   that `clip.use_gelu` announces between them, taking the merged patch width
+   (1152 x merge^2 = 4608) to the LLM's 5120.
+
+5. **Deepstack routing — not needed for this artifact.** All 27 entries of
+   `clip.vision.is_deepstack_layers` are false, and the tensor inventory
+   contains no `deepstack` tensors at all. llama.cpp loads them optionally
+   (`TN_DEEPSTACK_NORM`, fetched with `required = false`). So this projector
+   has no deepstack routing to implement, and the step that would have required
+   changes inside `quantized_qwen35.rs` drops out.
+
 6. **Positional handling** for image tokens in the text model, which does not
    exist today. The artifact already declares it: the model GGUF carries
    `qwen35.rope.dimension_sections = [11, 11, 10, 0]` alongside
@@ -116,3 +136,10 @@ Step 6 overlaps goal item 6, live KV compression and long-context gates, because
 both change position handling in the same file. Doing vision positions first and
 compression second, against the same exact-agreement gate, avoids two
 simultaneous edits to the position path.
+
+## Revised size
+
+With deepstack out and the merger reduced to two linear layers, the remaining
+work is preprocessing, a 27-block ViT forward, a two-layer projection, and
+honouring the mrope sections the model already declares. Only the last touches
+`quantized_qwen35.rs` and therefore the existing exact-agreement gates.
