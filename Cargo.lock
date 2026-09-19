@@ -11877,6 +11877,7 @@ dependencies = [
 name = "seshat"
 version = "0.1.0"
 dependencies = [
+ "akh-embed",
  "axum 0.8.8",
  "candle-core 0.8.4",
  "candle-nn 0.8.4",
@@ -11885,12 +11886,10 @@ dependencies = [
  "flate2",
  "grug-data",
  "miette 7.6.0",
- "ndarray 0.17.2",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
- "ort",
  "rmcp",
  "schemars 0.8.22",
  "sea-orm",
@@ -11902,7 +11901,6 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.18",
- "tokenizers",
  "tokio",
  "toml 0.8.23",
  "tower 0.5.3",
