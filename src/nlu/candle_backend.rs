@@ -2216,6 +2216,28 @@ impl CandleBackend {
         crate::vsa::polar_quant::decompress(qvec, seed, std_dev_hint)
     }
 
+    /// Resident KV bytes this model adds per additional context token.
+    ///
+    /// Only the attention blocks grow with context; the recurrent blocks hold a
+    /// fixed-size state. `None` for families whose growth is not modelled here.
+    /// The figure covers key and value tensors only, not activations, weights or
+    /// allocator overhead, so it is a floor for planning rather than a
+    /// prediction of device occupancy.
+    #[cfg(feature = "candle-backend")]
+    pub fn kv_bytes_per_token(&self) -> Option<usize> {
+        match &self.model {
+            LoadedModel::Qwen35(model) => Some(model.kv_bytes_per_token()),
+            _ => None,
+        }
+    }
+
+    /// Resident KV bytes for a full `tokens`-long context, when modelled.
+    #[cfg(feature = "candle-backend")]
+    pub fn projected_kv_bytes(&self, tokens: usize) -> Option<usize> {
+        self.kv_bytes_per_token()
+            .map(|per_token| per_token.saturating_mul(tokens))
+    }
+
     /// Round-trip quality of PolarQuant on this model's resident KV cache.
     ///
     /// Measurement only: nothing is compressed in the live path. The unit is the

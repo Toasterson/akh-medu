@@ -103,7 +103,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     println!(
         "{}",
-        serde_json::json!({"phase":"loaded","seconds":start.elapsed().as_secs_f64(),"family":format!("{:?}",backend.family()),"context_length":backend.context_length()})
+        serde_json::json!({"phase":"loaded","seconds":start.elapsed().as_secs_f64(),"family":format!("{:?}",backend.family()),"context_length":backend.context_length(),
+            "kv_bytes_per_token":backend.kv_bytes_per_token(),
+            "projected_kv_bytes_at_full_context":backend.projected_kv_bytes(backend.context_length())})
     );
     let mut first = None;
     for round in 0..2 {

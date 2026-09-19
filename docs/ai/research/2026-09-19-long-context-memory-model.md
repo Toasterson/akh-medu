@@ -35,6 +35,18 @@ Per token, per attention block: (256 + 256) x 4 = 2,048 f32 = 8 KiB.
 Across the 16 target attention blocks: **128 KiB per token**; including the MTP
 block, 136 KiB.
 
+## The runtime now reports this itself, and it matches
+
+`CandleBackend::kv_bytes_per_token` derives the figure from the layers actually
+loaded rather than from metadata, by summing `2 x kv_heads x head_dim x 4` over
+the attention mixers present. The probe prints it at load. On the exact model it
+returns **131,072 bytes**, matching 16 x 2 x 4 x 256 x 4 exactly, and projects
+**34.36 GB** at the advertised 262,144-token context.
+
+So the arithmetic below is no longer a hand calculation: the loaded model agrees
+with it, and any future change to block layout or head geometry will move the
+reported number with it.
+
 ## What that means on this card
 
 Measured resident footprint with the model loaded is about 20.2 GB on a 24 GiB

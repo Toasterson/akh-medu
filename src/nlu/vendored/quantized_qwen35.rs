@@ -1222,6 +1222,29 @@ impl InferenceSession {
     }
 
     /// Number of target transformer blocks (excludes the MTP block).
+    /// Resident KV bytes added per additional context token.
+    ///
+    /// Only the attention blocks grow: `is_recurrent` puts a fixed-size state in
+    /// every layer whose index is not a multiple of `full_attention_interval`,
+    /// so the per-token cost scales with the attention blocks alone. Keys and
+    /// values are both `head_count_kv x head_dim` f32 per token per such block.
+    /// Recurrent and MTP state are constant in context length and excluded.
+    pub(crate) fn kv_bytes_per_token(&self) -> usize {
+        // Read the real layers rather than recomputing from metadata, so the
+        // figure follows whatever this session actually loaded.
+        self.weights
+            .layers
+            .iter()
+            .filter_map(|layer| match &layer.mixer {
+                Mixer::Attention(attention) => Some(attention),
+                Mixer::GatedDelta(_) => None,
+            })
+            .map(|attention| {
+                2 * attention.kv_head_count * attention.head_dim * std::mem::size_of::<f32>()
+            })
+            .sum()
+    }
+
     pub(crate) fn block_count(&self) -> usize {
         self.weights.layers.len()
     }
