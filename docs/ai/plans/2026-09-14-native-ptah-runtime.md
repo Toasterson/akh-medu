@@ -120,8 +120,12 @@ the chronological evidence further down is retained as written.
   the conservative default. **Real paged storage is now wired into
   `AttentionState`** — bit-packed pages per (batch, head) slot, a shared
   quantizer, the recent window exact — and passes the canary at 4 and 2 bits
-  with 21 model tests still green. Decode still returns to the host; moving it
-  on-device is the remaining performance work. See
+  with 21 model tests still green. **Host-side decode is now measured as not
+  viable**: six keyed turns to 381 positions finished in about 3 minutes with
+  paging off and did not finish in 30 minutes with it on, the GPU idling at 10%
+  while the host converts. The canary passes only because its 1,024-token window
+  ages almost nothing out. On-device decode is therefore a precondition for
+  enabling this, not an optimization. See
   [lossy KV gate](../research/2026-09-19-lossy-kv-canary.md).
   See [TurboQuant](../research/2026-09-19-turboquant-kv.md).
 - **KV quantization quality measured, and it fails** (2026-09-19): PolarQuant

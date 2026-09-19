@@ -102,7 +102,31 @@ The five-daemon canary passes on real paged storage, at 4 and 2 bits:
 Twenty-one model tests still pass, including the bit-exact ones, because the
 compressed path is inert unless configured.
 
-Decode currently returns to the host. The operations it needs — a codebook
-gather, a norm scale and an inverse rotation — are all device primitives, so
-moving it onto the device is the remaining performance work, and it is what a
-throughput measurement should wait for.
+## Measured: host-side decode is not viable in the decode loop
+
+Decode currently returns to the host, and that cost has now been measured rather
+than assumed. Six consecutive keyed turns reaching 381 context positions:
+
+| Configuration | Result |
+| --- | --- |
+| Paged KV off | completed in about 3 minutes; 17.4 to 12.2 steps/s |
+| Paged KV on, 4-bit, 16 exact | **did not finish in 30 minutes**; timed out |
+
+The GPU sat at about 10% busy during the paged run, against 94% in a normal one,
+so the device is starved while the host quantizes and dequantizes. This is worse
+than a slowdown of a few times: it is more than an order of magnitude, and the
+run produced no per-turn figures at all before its deadline.
+
+That reframes the earlier canary result. Those runs passed at 4, 3 and 2 bits
+because the canary uses a 1,024-token window with short turns, so few positions
+ever age out of the exact window. They established quality, which was their
+purpose; they did not exercise the decode cost, and should not be read as
+evidence that the path is usable.
+
+**Consequence.** The paged storage is correct and its compression is real, but
+it cannot be enabled for any workload with meaningful context until decode moves
+onto the device. The operations it needs — a codebook gather, a norm scale and an
+inverse rotation — are all device primitives, so the move is mechanical rather
+than research. The obstacle is that bit-packed indices cannot be gathered
+directly, so a device implementation must either unpack on device or store
+indices unpacked, trading some of the 7.5x back for speed.
