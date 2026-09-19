@@ -125,8 +125,31 @@ evidence that the path is usable.
 
 **Consequence.** The paged storage is correct and its compression is real, but
 it cannot be enabled for any workload with meaningful context until decode moves
-onto the device. The operations it needs — a codebook gather, a norm scale and an
-inverse rotation — are all device primitives, so the move is mechanical rather
-than research. The obstacle is that bit-packed indices cannot be gathered
-directly, so a device implementation must either unpack on device or store
-indices unpacked, trading some of the 7.5x back for speed.
+onto the device.
+
+## The device decode, specified
+
+Op support was checked before designing, since three ops were found missing on
+these backends earlier today. `index_select` **is** implemented on both: HIP
+requires an f32, contiguous source; Vulkan requires **u32** indices. `matmul` is
+available on both. So the decode is three device operations per slot:
+
+1. `codebook.index_select(indices, 0)` — centroids, f32 codebook indexed by code.
+2. broadcast-multiply by the per-position norms.
+3. `matmul` by the rotation, which applies the inverse rotation because
+   `(Pi^T y)^T = y^T Pi`.
+
+The constraint that shapes the design is the index dtype. Vulkan needs u32, and
+**u32 indices are four bytes per value, exactly what f32 costs** — storing them
+that way forfeits the entire saving. The resident form must therefore be `u8`,
+converted to u32 per decode, which keeps residency at one byte per value for a
+4x saving against f32 and makes the u32 copy a transient rather than a
+resident cost.
+
+That 4x is less than the 7.5x bit-packing achieves, and the gap is the price of
+a gather that cannot read packed bits. A device-side unpack would recover it and
+is the more ambitious version.
+
+Before building it, confirm `to_dtype` from u8 to u32 exists on both backends.
+Three ops were already missing today — `conv2d`, `softmax_last_dim` and unary
+`gelu` — so assuming availability is not safe here.
