@@ -2216,6 +2216,33 @@ impl CandleBackend {
         crate::vsa::polar_quant::decompress(qvec, seed, std_dev_hint)
     }
 
+    /// Round-trip quality of PolarQuant on this model's resident KV cache.
+    ///
+    /// Measurement only: nothing is compressed in the live path. The unit is the
+    /// per-head, per-position vector of `head_dim` values, which is what a paged
+    /// KV compressor would actually quantize. Keys are post-RoPE and values are
+    /// not, so they are reported separately rather than pooled.
+    #[cfg(feature = "candle-backend")]
+    pub fn kv_quantization_report(&self, seed: u64) -> NluResult<Vec<KvLayerQuality>> {
+        let LoadedModel::Qwen35(model) = &self.model else {
+            return Err(NluError::ModelLoadFailed {
+                reason: "KV quantization report requires the Qwen35 family".into(),
+            });
+        };
+        let mut report = Vec::new();
+        for (layer, key, value) in model.attention_states() {
+            report.push(KvLayerQuality {
+                layer,
+                positions: key.dim(2).map_err(|e| NluError::ModelLoadFailed {
+                    reason: format!("kv state shape: {e}"),
+                })?,
+                key: measure_kv_tensor(key, seed)?,
+                value: measure_kv_tensor(value, seed)?,
+            });
+        }
+        Ok(report)
+    }
+
     // ── Internal generation loop ─────────────────────────────────────────
 
     /// Generate a session reply without NLU cleanup or blank-line stopping.
@@ -4135,4 +4162,107 @@ Some trailing text."#;
         assert!(!config.extract_hidden);
         assert!(config.hidden_layer.is_none());
     }
+}
+
+
+/// Per-layer PolarQuant round-trip quality for one resident KV cache.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KvLayerQuality {
+    pub layer: usize,
+    pub positions: usize,
+    pub key: KvVectorQuality,
+    pub value: KvVectorQuality,
+}
+
+/// Aggregate error over every per-head, per-position vector in one tensor.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KvVectorQuality {
+    /// Vectors measured.
+    pub vectors: usize,
+    /// Worst cosine similarity between a vector and its round trip.
+    pub min_cosine: f64,
+    /// Mean cosine similarity.
+    pub mean_cosine: f64,
+    /// Worst relative L2 error, `||x - x'|| / ||x||`.
+    pub max_relative_l2: f64,
+    /// Mean relative L2 error.
+    pub mean_relative_l2: f64,
+}
+
+/// Compress and decompress every `head_dim` vector of a `(batch, heads, pos, dim)`
+/// KV tensor and summarize the error. A zero vector is skipped rather than
+/// scored, since cosine is undefined there and it carries no information.
+#[cfg(feature = "candle-backend")]
+fn measure_kv_tensor(tensor: &Tensor, seed: u64) -> NluResult<KvVectorQuality> {
+    let shape = |e: candle_core::Error| NluError::ModelLoadFailed {
+        reason: format!("kv state read: {e}"),
+    };
+    let (_, heads, positions, dim) = tensor.dims4().map_err(shape)?;
+    let flat: Vec<f32> = tensor
+        .to_dtype(DType::F32)
+        .map_err(shape)?
+        .flatten_all()
+        .map_err(shape)?
+        .to_vec1()
+        .map_err(shape)?;
+    let mut vectors = 0usize;
+    let mut min_cosine = f64::INFINITY;
+    let mut sum_cosine = 0.0;
+    let mut max_rel = 0.0f64;
+    let mut sum_rel = 0.0;
+    for head in 0..heads {
+        for position in 0..positions {
+            let start = (head * positions + position) * dim;
+            let original = &flat[start..start + dim];
+            let norm: f64 = original.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
+            if norm == 0.0 {
+                continue;
+            }
+            let mean = original.iter().map(|v| *v as f64).sum::<f64>() / dim as f64;
+            let variance = original
+                .iter()
+                .map(|v| (*v as f64 - mean).powi(2))
+                .sum::<f64>()
+                / dim as f64;
+            let restored = CandleBackend::decompress_kv_vector(
+                &CandleBackend::compress_kv_vector(original, seed),
+                seed,
+                variance.sqrt() as f32,
+            );
+            let mut dot = 0.0f64;
+            let mut restored_norm = 0.0f64;
+            let mut diff = 0.0f64;
+            for (a, b) in original.iter().zip(&restored) {
+                let (a, b) = (*a as f64, *b as f64);
+                dot += a * b;
+                restored_norm += b * b;
+                diff += (a - b) * (a - b);
+            }
+            let cosine = if restored_norm > 0.0 {
+                dot / (norm * restored_norm.sqrt())
+            } else {
+                0.0
+            };
+            let relative = diff.sqrt() / norm;
+            vectors += 1;
+            sum_cosine += cosine;
+            sum_rel += relative;
+            min_cosine = min_cosine.min(cosine);
+            max_rel = max_rel.max(relative);
+        }
+    }
+    if vectors == 0 {
+        return Err(NluError::ModelLoadFailed {
+            reason: "kv state held no non-zero vectors to measure".into(),
+        });
+    }
+    Ok(KvVectorQuality {
+        vectors,
+        min_cosine,
+        mean_cosine: sum_cosine / vectors as f64,
+        max_relative_l2: max_rel,
+        mean_relative_l2: sum_rel / vectors as f64,
+    })
 }

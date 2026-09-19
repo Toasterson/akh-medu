@@ -52,6 +52,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         /// Repeat the whole benchmark from empty histories to expose drift.
         #[arg(long, default_value_t = 1)]
         keyed_repeats: usize,
+        /// Report PolarQuant round-trip error on the resident KV cache.
+        #[arg(long)]
+        kv_quality: bool,
         #[arg(long, default_value_t = 10)]
         idle_samples: usize,
         #[arg(long, default_value_t = 10)]
@@ -125,6 +128,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.continuation {
         continuation::check(&mut backend)?;
+    }
+    if args.kv_quality {
+        // A keyed call leaves the cache resident; an unkeyed one does not.
+        let reply = backend.generate_completion_for_session(
+            "kv:quality",
+            &args.prompt,
+            args.tokens,
+            &mut || Ok(()),
+        )?;
+        let report = backend.kv_quantization_report(0x5eed)?;
+        println!(
+            "{}",
+            serde_json::json!({"phase":"kv_quantization","prompt_tokens":reply.prompt_tokens,
+                "decode_steps":reply.decode_steps,"layers":report})
+        );
     }
     if args.keyed_benchmark {
         keyed_bench::run(

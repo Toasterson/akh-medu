@@ -1082,6 +1082,24 @@ fn load_layer<R: std::io::Read + std::io::Seek>(
 }
 
 impl InferenceSession {
+    /// Resident attention key/value caches, by layer index.
+    ///
+    /// Read-only borrow for measurement: quantization quality has to be judged
+    /// against this model's real cache contents, not synthetic vectors. Layers
+    /// with recurrent mixers, and attention layers that have not run yet, are
+    /// absent. Key tensors are post-RoPE; values are not. Both are shaped
+    /// `(batch, kv_heads, position, head_dim)`.
+    pub(crate) fn attention_states(&self) -> Vec<(usize, &Tensor, &Tensor)> {
+        self.states
+            .iter()
+            .enumerate()
+            .filter_map(|(layer, state)| match state {
+                MixerState::Attention(Some(state)) => Some((layer, &state.key, &state.value)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Capture a span during this operation only, without replaying cached
     /// tokens. Returned values are not archival commits or persistent snapshots.
     pub(crate) fn resume_prompt_with_taps(
