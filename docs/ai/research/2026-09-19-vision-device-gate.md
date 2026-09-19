@@ -65,6 +65,47 @@ Semantic validation. Nothing here establishes that this projector computes what
 Qwen3-VL's does - only that the three backends compute the same thing as each
 other. That still needs an external consumer of this GGUF, and none is installed.
 
-Also untouched: position-triple threading for image tokens. `mrope_pair_positions`
-exists and is tested to collapse to 1-D RoPE when t == h == w, but nothing yet
-threads distinct temporal, height and width indices through an image's tokens.
+## Position-triple threading, since done
+
+`mrope_pair_positions` existed with tests but was called **only from tests** -
+dead in the runtime, which is what "built but not threaded" amounted to.
+
+`PartialRope::apply` now takes `RopePositions`: `Contiguous` for text, or a
+`(temporal, height, width)` triple per token for image tokens, gathered from the
+rope table with `index_select` - an op both device backends already implement,
+so no new kernel.
+
+The property that makes this verifiable without an external reference is that a
+triple with `t == h == w` is the text case written the long way, so it must
+reproduce the contiguous path **exactly**. It does, element for element. A
+genuine image triple must *not* match, or the sections would be inert and image
+tokens silently placed as text - the bug that passes every smoke test. Both are
+asserted.
+
+Two refusals rather than silent fallbacks: a triple count that disagrees with the
+sequence length fails, and an artifact declaring no usable section split refuses
+image positions instead of treating them as text. That second path is reachable -
+this artifact's split is parsed defensively and discarded when it does not
+describe the model.
+
+On the real 27B model the text path is **bit-identical** across the change:
+cosine 1.0000000000, relative L2 0.000e+00, worst absolute 0.000e+00 on the
+post-prefill hidden state, same prompt either side.
+
+A first attempt at that comparison reported cosine 0.4309 and failed. The two
+dumps came from **different prompts**. A cosine gate is only a gate when both
+sides see identical input; otherwise it is an expensive way to confirm that two
+different questions have different answers. The same mistake as this morning's
+recorder-versus-direct comparison, in the opposite direction - it would have made
+me reject correct work rather than accept broken work.
+
+## The external reference exists after all
+
+Recorded twice as "no external consumer is installed". There is no transformers,
+no torch and no llama.cpp - but **ollama is installed** and has this exact model
+registered as `ptah-qwen3.8`, which is where the pinned blob comes from.
+
+Its server is not running. Starting it changes machine state and contends for the
+GPU that probes need serially, so it is flagged rather than started. The accurate
+statement is not "blocked, no reference exists" but "a reference exists and using
+it needs a decision".

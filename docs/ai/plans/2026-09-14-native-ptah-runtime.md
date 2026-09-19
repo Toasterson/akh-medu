@@ -326,8 +326,32 @@ the chronological evidence further down is retained as written.
   **Still open:** semantic validation - nothing here shows this projector computes
   what Qwen3-VL's does, only that the backends agree with each other; a misread
   resize policy or mrope split would be wrong identically everywhere and pass.
-  Position-triple threading for image tokens is also untouched. See
-  [vision device gate](../research/2026-09-19-vision-device-gate.md).
+  See [vision device gate](../research/2026-09-19-vision-device-gate.md).
+
+- **Item 5: image rope positions are threaded, and the external reference exists
+  after all** (2026-09-19). `mrope_pair_positions` was called **only from
+  tests** - dead in the runtime. `PartialRope::apply` now takes `RopePositions`:
+  `Contiguous` for text, or a `(t, h, w)` triple per token gathered from the rope
+  table with `index_select`, which both backends already have. A degenerate
+  triple (`t == h == w`) reproduces the contiguous path **exactly**, a real image
+  triple must not, and both are asserted - the second is what catches inert
+  sections placing image tokens as text. Mismatched counts and an artifact with
+  no usable split both **refuse** rather than fall back to text positions.
+
+  The real model's text path is **bit-identical** across the change: cosine
+  1.0000000000, relative L2 and worst absolute both exactly 0.
+
+  **Correction, twice stated:** "no external consumer is installed" was wrong.
+  No transformers, torch or llama.cpp - but **ollama is installed** with this
+  exact model as `ptah-qwen3.8`, the source of the pinned blob. Its server is
+  down; starting it changes machine state and contends for the GPU, so it is
+  **flagged for a decision** rather than started. Semantic validation is
+  therefore available, not absent.
+
+  A first parity check reported cosine 0.4309 and failed - the two dumps came
+  from **different prompts**. A gate is only a gate when both sides see identical
+  input. Same fault as the morning's recorder-versus-direct comparison, opposite
+  direction: it would have rejected correct work.
 
 - **Item 4: the seam had a silent fallback; the topology fork is confirmed real**
   (2026-09-19). `context_budgeted` existed in exactly one place in the tree -

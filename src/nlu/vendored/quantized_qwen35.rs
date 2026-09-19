@@ -262,11 +262,29 @@ pub(crate) fn mrope_pair_positions(
     out
 }
 
+/// Which rope positions a forward pass uses.
+///
+/// Text advances one index per token and every rotary pair shares it. Image
+/// tokens do not: the temporal, height and width sections advance independently
+/// over the patch grid, so a token's pairs take different positions depending on
+/// which section they fall in.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RopePositions<'a> {
+    /// `seq_len` consecutive indices from this one, all pairs alike.
+    Contiguous(usize),
+    /// A `(temporal, height, width)` triple per token.
+    PerToken(&'a [[usize; 3]]),
+}
+
 #[derive(Debug, Clone)]
 struct PartialRope {
     cos: Tensor,
     sin: Tensor,
     width: usize,
+    /// Rotary pairs per section, empty when the artifact does not declare a
+    /// usable split. Empty means image positions cannot be threaded, which is a
+    /// refusal rather than a silent fallback to text positions.
+    sections: Vec<usize>,
 }
 
 impl PartialRope {
@@ -288,15 +306,64 @@ impl PartialRope {
             cos: angles.cos()?,
             sin: angles.sin()?,
             width: config.rope_dim,
+            sections: config.rope_sections.clone(),
         })
     }
 
-    fn apply(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+    /// Gather one table row per token, each pair taking its section's index.
+    ///
+    /// `index_select` over the flattened table, which both device backends
+    /// implement, so this needs no new kernel. Text never reaches it.
+    fn gathered(&self, positions: &[[usize; 3]], pairs: usize) -> Result<(Tensor, Tensor)> {
+        if self.sections.is_empty() {
+            candle_core::bail!(
+                "this artifact declares no usable rope dimension sections, so image \
+                 positions cannot be threaded; text positions would silently mis-place them"
+            )
+        }
+        let rows = self.cos.dim(0)?;
+        let mut ids = Vec::with_capacity(positions.len() * pairs);
+        for [t, h, w] in positions {
+            for (pair, index) in mrope_pair_positions(&self.sections, pairs, *t, *h, *w)
+                .into_iter()
+                .enumerate()
+            {
+                if index >= rows {
+                    candle_core::bail!("rope position {index} beyond the {rows}-row table")
+                }
+                ids.push((index * pairs + pair) as u32);
+            }
+        }
+        let device = self.cos.device();
+        let ids = Tensor::from_vec(ids, (positions.len() * pairs,), device)?;
+        let take = |table: &Tensor| -> Result<Tensor> {
+            table
+                .flatten_all()?
+                .index_select(&ids, 0)?
+                .reshape((positions.len(), pairs))
+        };
+        Ok((take(&self.cos)?, take(&self.sin)?))
+    }
+
+    fn apply(&self, x: &Tensor, positions: RopePositions<'_>) -> Result<Tensor> {
         let seq_len = x.dim(2)?;
         let head_dim = x.dim(3)?;
         let rotated = x.narrow(3, 0, self.width)?.contiguous()?;
-        let cos = self.cos.narrow(0, index_pos, seq_len)?;
-        let sin = self.sin.narrow(0, index_pos, seq_len)?;
+        let (cos, sin) = match positions {
+            RopePositions::Contiguous(index_pos) => (
+                self.cos.narrow(0, index_pos, seq_len)?,
+                self.sin.narrow(0, index_pos, seq_len)?,
+            ),
+            RopePositions::PerToken(triples) => {
+                if triples.len() != seq_len {
+                    candle_core::bail!(
+                        "{} rope position triples for {seq_len} tokens",
+                        triples.len()
+                    )
+                }
+                self.gathered(triples, self.width / 2)?
+            }
+        };
         #[cfg(feature = "vulkan")]
         let primitive_rope = x.device().is_cuda() || x.device().is_vulkan();
         #[cfg(not(feature = "vulkan"))]
@@ -862,8 +929,9 @@ impl FullAttention {
             .reshape((batch, seq_len, self.kv_head_count, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let query = self.rope.apply(&query, index_pos)?.contiguous()?;
-        let key = self.rope.apply(&key, index_pos)?.contiguous()?;
+        let positions = RopePositions::Contiguous(index_pos);
+        let query = self.rope.apply(&query, positions)?.contiguous()?;
+        let key = self.rope.apply(&key, positions)?.contiguous()?;
 
         let (key, value) = match state.as_ref() {
             Some(state) if index_pos > 0 => {
@@ -2638,6 +2706,73 @@ pub(crate) mod tests {
         for stats in [coarse, fine] {
             assert!(stats.min_cosine > -1.000_001 && stats.min_cosine < 1.000_001);
         }
+    }
+
+    #[test]
+    fn per_token_rope_positions_collapse_onto_the_contiguous_path() {
+        // The real artifact's split: 11 temporal, 11 height, 10 width pairs.
+        let sections = vec![11usize, 11, 10];
+        let device = Device::Cpu;
+        let (width, context) = (64usize, 32usize);
+        let pairs = width / 2;
+        let theta: Vec<f32> = (0..width)
+            .step_by(2)
+            .map(|i| 1.0 / 10_000f32.powf(i as f32 / width as f32))
+            .collect();
+        let theta = Tensor::from_vec(theta, (1, pairs), &device).unwrap();
+        let angles = Tensor::arange(0u32, context as u32, &device)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .reshape((context, 1))
+            .unwrap()
+            .matmul(&theta)
+            .unwrap();
+        let rope = PartialRope {
+            cos: angles.cos().unwrap(),
+            sin: angles.sin().unwrap(),
+            width,
+            sections: sections.clone(),
+        };
+
+        let (batch, heads, seq) = (1usize, 2usize, 5usize);
+        let values: Vec<f32> = (0..batch * heads * seq * width)
+            .map(|i| ((i % 71) as f32 / 35.0) - 1.0)
+            .collect();
+        let x = Tensor::from_vec(values, (batch, heads, seq, width), &device).unwrap();
+
+        // A triple per token with t == h == w is the text case written the long
+        // way, so it must reproduce the contiguous path exactly.
+        let start = 3usize;
+        let degenerate: Vec<[usize; 3]> = (start..start + seq).map(|p| [p, p, p]).collect();
+        let contiguous = rope.apply(&x, RopePositions::Contiguous(start)).unwrap();
+        let per_token = rope
+            .apply(&x, RopePositions::PerToken(&degenerate))
+            .unwrap();
+        assert_eq!(
+            contiguous.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            per_token.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            "a degenerate triple must be the contiguous path exactly"
+        );
+
+        // A genuine image triple must not be the text path, or the sections are
+        // doing nothing and image tokens would be placed as if they were text.
+        let image: Vec<[usize; 3]> = (0..seq).map(|i| [1, 2 + i, 9 - i]).collect();
+        let threaded = rope.apply(&x, RopePositions::PerToken(&image)).unwrap();
+        assert_ne!(
+            contiguous.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            threaded.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            "distinct t/h/w must change the rotation"
+        );
+
+        // Wrong count is a refusal, not a silent truncation.
+        assert!(rope.apply(&x, RopePositions::PerToken(&image[..2])).is_err());
+
+        // And an artifact with no declared split refuses image positions rather
+        // than quietly placing them as text.
+        let unsplit = PartialRope { sections: Vec::new(), ..rope.clone() };
+        assert!(unsplit.apply(&x, RopePositions::PerToken(&image)).is_err());
+        assert!(unsplit.apply(&x, RopePositions::Contiguous(start)).is_ok());
     }
 
     #[test]
