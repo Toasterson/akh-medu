@@ -137,19 +137,15 @@ This belongs to the performance step, not to a feature slice, and it is the
 reason the earlier interleaved pass looked like a collapse: those requests all
 sat above 200 positions.
 
-## Resident drift that is real: time to first token
+## Prefill warm-up, not drift
 
-The same six-repeat soak did show one monotonic drift. For the identical
-23-token opening prompt, time to first token grew 0.80, 0.89, 1.02, 1.10, 1.80,
-1.83 seconds across repeats, roughly 2.3x, while that turn's decode rate held at
-17.1. The 154-token turn drifted 1.96 to 2.48 seconds. Decode is unaffected, so
-this is prefill-side, and it is the drift a longer soak should pursue. Peak
-device VRAM was 24.68 GB and the resident-idle gate still passed at 0% busy and
-10.98 W with the model owned.
-
-Six repeats over four minutes is a short soak. It establishes that prefill cost
-grows within a process; it does not establish a bound, a cause, or that the
-growth continues, flattens, or ends in failure.
+The same six-repeat soak showed time to first token for the identical 23-token
+prompt growing 0.80, 0.89, 1.02, 1.10, 1.80, 1.83 seconds while that turn's
+decode rate held at 17.1. A forty-repeat run has since shown this is a one-time
+warm-up that flattens at about 1.92 s and then holds for 36 repeats, not
+accumulating drift; the six-repeat run ended inside the transition. See the
+[long residency soak](2026-09-19-long-residency-soak.md), which also found RSS
+and device VRAM flat across 160 keyed requests.
 
 ## Shader specialization cache counters
 
