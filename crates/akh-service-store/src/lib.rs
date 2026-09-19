@@ -18,7 +18,7 @@ mod postgres;
 mod redb_backend;
 
 pub(crate) use akh_session_types::{Fault, Result};
-pub use postgres::PostgresConfig;
+pub use postgres::{DEFAULT_CACHE_CAPACITY_BYTES, PostgresConfig};
 use postgres::{PgTxState, PostgresInner};
 use redb_backend::{RedbInner, RedbTxState};
 use serde::{Serialize, de::DeserializeOwned};

@@ -97,7 +97,7 @@
 //!
 //! # Cache
 //!
-//! Each Postgres-backed `Store` keeps an in-memory `HashMap` read cache. It
+//! Each Postgres-backed `Store` keeps a bounded in-memory LRU read cache. It
 //! is populated on a `Store::get` cache miss and written through after a
 //! `Store::transaction` commits successfully; a rolled-back transaction
 //! never touches it, so there is nothing to invalidate on rollback beyond
@@ -108,16 +108,24 @@
 //! time (`Deployment` with `strategy: Recreate`); if that ever changes to
 //! multiple concurrent readers/writers per kind, the cache would need
 //! invalidation across processes (e.g. `LISTEN`/`NOTIFY`) to stay correct.
+//!
+//! The cache is capped by total cached bytes (keys plus values) and evicts
+//! least-recently-used entries once over budget. It was previously an
+//! unbounded `HashMap`, which made it a read-through record of every key the
+//! process had ever touched: `akhsessd` grew roughly a gigabyte a day until
+//! it hit its container limit and was OOM-killed, about every one to two
+//! days. Eviction is always safe here because the cache is read-through — a
+//! miss simply re-reads the row from Postgres.
 use crate::{Fault, Result, failure};
+use lru::LruCache;
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use std::{
     cell::RefCell,
-    collections::HashMap,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, mpsc},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, mpsc},
 };
 
 /// Never produced by [`crate::key`] (which only ever emits printable ASCII),
@@ -140,6 +148,10 @@ pub struct PostgresConfig {
     /// has not already recorded a migration for this `kind`, every key is
     /// imported once.
     pub legacy_redb_path: Option<PathBuf>,
+    /// Ceiling on the in-memory read cache, in bytes of keys plus values.
+    /// `None` uses [`DEFAULT_CACHE_CAPACITY_BYTES`]; `Some(0)` disables
+    /// caching entirely, sending every read to Postgres.
+    pub cache_capacity_bytes: Option<usize>,
 }
 
 pub(crate) struct PostgresInner {
@@ -153,28 +165,64 @@ pub(crate) struct PostgresInner {
     tx_gate: Mutex<()>,
 }
 
+/// Default ceiling for [`ReadCache`], in bytes of keys plus values.
+///
+/// The cache exists to spare Postgres round-trips, not to mirror the store,
+/// so this is deliberately far below any daemon's container limit: 64 MiB
+/// leaves the previous unbounded growth no room to recur while still
+/// absorbing the hot working set.
+pub const DEFAULT_CACHE_CAPACITY_BYTES: usize = 64 * 1024 * 1024;
+
 /// Process-local read-through cache for a single Postgres-backed store
 /// (i.e. a single `kind`). Deliberately not shared across kinds or
 /// processes; see the module docs for why that is safe here. Kept as its
-/// own type so its commit/rollback semantics can be unit tested without a
-/// database.
-#[derive(Default)]
-struct ReadCache(RwLock<HashMap<String, Vec<u8>>>);
+/// own type so its commit/rollback and eviction semantics can be unit tested
+/// without a database.
+///
+/// Bounded by total cached bytes rather than entry count, because entries
+/// are opaque serialised values whose sizes differ by orders of magnitude —
+/// an entry cap would bound the count while leaving memory unbounded, which
+/// is the bug this type exists to prevent.
+struct ReadCache(Mutex<CacheState>);
+
+struct CacheState {
+    entries: LruCache<String, Vec<u8>>,
+    /// Sum of `key.len() + value.len()` over `entries`.
+    bytes: usize,
+    capacity_bytes: usize,
+}
+
+impl Default for ReadCache {
+    fn default() -> Self {
+        Self::with_capacity_bytes(DEFAULT_CACHE_CAPACITY_BYTES)
+    }
+}
 
 impl ReadCache {
-    fn get(&self, key: &str) -> Option<Vec<u8>> {
+    fn with_capacity_bytes(capacity_bytes: usize) -> Self {
+        Self(Mutex::new(CacheState {
+            // Unbounded by count: `CacheState::admit` enforces the byte
+            // budget, which is the only bound that maps to memory.
+            entries: LruCache::unbounded(),
+            bytes: 0,
+            capacity_bytes,
+        }))
+    }
+
+    fn state(&self) -> MutexGuard<'_, CacheState> {
         self.0
-            .read()
+            .lock()
             .expect("akh-service-store Postgres cache lock poisoned")
-            .get(key)
-            .cloned()
+    }
+
+    fn get(&self, key: &str) -> Option<Vec<u8>> {
+        // `LruCache::get` records the access, so this needs the write side of
+        // the lock; that is why this is a `Mutex` and not an `RwLock`.
+        self.state().entries.get(key).cloned()
     }
 
     fn insert(&self, key: String, value: Vec<u8>) {
-        self.0
-            .write()
-            .expect("akh-service-store Postgres cache lock poisoned")
-            .insert(key, value);
+        self.state().admit(key, value);
     }
 
     /// Applies a transaction's staged writes/deletes after it has committed.
@@ -182,19 +230,56 @@ impl ReadCache {
     /// "invalidation" story: a rollback simply never reaches this method, so
     /// the cache keeps whatever it held before the transaction began.
     fn apply_committed(&self, pending: Vec<(String, Option<Vec<u8>>)>) {
-        let mut cache = self
-            .0
-            .write()
-            .expect("akh-service-store Postgres cache lock poisoned");
+        let mut state = self.state();
         for (key, value) in pending {
             match value {
-                Some(bytes) => {
-                    cache.insert(key, bytes);
+                Some(bytes) => state.admit(key, bytes),
+                None => state.evict(&key),
+            }
+        }
+    }
+}
+
+impl CacheState {
+    fn entry_bytes(key: &str, value: &[u8]) -> usize {
+        key.len() + value.len()
+    }
+
+    /// Inserts `key`, then evicts least-recently-used entries until the
+    /// budget is met.
+    ///
+    /// A value too large to ever fit is not cached at all, and any previous
+    /// entry for that key is dropped rather than left behind: serving a
+    /// superseded value would be a correctness bug, where a miss is only a
+    /// Postgres round-trip.
+    fn admit(&mut self, key: String, value: Vec<u8>) {
+        self.evict(&key);
+        if Self::entry_bytes(&key, &value) > self.capacity_bytes {
+            return;
+        }
+        self.bytes += Self::entry_bytes(&key, &value);
+        self.entries.put(key, value);
+        while self.bytes > self.capacity_bytes {
+            match self.entries.pop_lru() {
+                Some((evicted_key, evicted_value)) => {
+                    self.bytes = self
+                        .bytes
+                        .saturating_sub(Self::entry_bytes(&evicted_key, &evicted_value));
                 }
+                // Unreachable while `bytes` tracks `entries`, but looping
+                // forever on an accounting drift would be worse than
+                // tolerating it.
                 None => {
-                    cache.remove(&key);
+                    self.bytes = 0;
+                    break;
                 }
             }
+        }
+    }
+
+    fn evict(&mut self, key: &str) {
+        if let Some(previous) = self.entries.pop(key) {
+            self.bytes = self.bytes.saturating_sub(Self::entry_bytes(key, &previous));
         }
     }
 }
@@ -527,6 +612,7 @@ impl PostgresInner {
             schema,
             kind,
             legacy_redb_path,
+            cache_capacity_bytes,
         } = config;
         let table_for_setup = table.clone();
         let kind_for_setup = kind.clone();
@@ -550,7 +636,9 @@ impl PostgresInner {
             pool,
             table,
             kind,
-            cache: ReadCache::default(),
+            cache: ReadCache::with_capacity_bytes(
+                cache_capacity_bytes.unwrap_or(DEFAULT_CACHE_CAPACITY_BYTES),
+            ),
             tx_gate: Mutex::new(()),
         })
     }
@@ -815,6 +903,61 @@ mod tests {
         ]);
         assert_eq!(cache.get("a"), Some(b"1".to_vec()));
         assert_eq!(cache.get("kept"), None);
+    }
+
+    #[test]
+    fn cache_evicts_least_recently_used_once_over_its_byte_budget() {
+        // Budget fits exactly two 10-byte entries (1-byte key + 9-byte value).
+        let cache = ReadCache::with_capacity_bytes(20);
+        cache.insert("a".to_string(), vec![b'x'; 9]);
+        cache.insert("b".to_string(), vec![b'x'; 9]);
+        // Touch "a" so "b" becomes the least recently used.
+        assert_eq!(cache.get("a"), Some(vec![b'x'; 9]));
+        cache.insert("c".to_string(), vec![b'x'; 9]);
+        assert_eq!(
+            cache.get("b"),
+            None,
+            "least recently used should be evicted"
+        );
+        assert_eq!(cache.get("a"), Some(vec![b'x'; 9]));
+        assert_eq!(cache.get("c"), Some(vec![b'x'; 9]));
+    }
+
+    #[test]
+    fn cache_accounting_survives_overwrites_and_deletes() {
+        let cache = ReadCache::with_capacity_bytes(20);
+        // Overwriting must not double-count the old value's bytes, otherwise
+        // the budget drifts down until the cache holds nothing.
+        for _ in 0..50 {
+            cache.insert("a".to_string(), vec![b'x'; 9]);
+        }
+        cache.insert("b".to_string(), vec![b'x'; 9]);
+        assert_eq!(cache.get("a"), Some(vec![b'x'; 9]));
+        assert_eq!(cache.get("b"), Some(vec![b'x'; 9]));
+        assert_eq!(cache.state().bytes, 20);
+
+        cache.apply_committed(vec![("a".to_string(), None)]);
+        assert_eq!(cache.get("a"), None);
+        assert_eq!(cache.state().bytes, 10);
+    }
+
+    #[test]
+    fn cache_refuses_a_value_too_large_to_ever_fit_and_drops_the_stale_one() {
+        let cache = ReadCache::with_capacity_bytes(20);
+        cache.insert("a".to_string(), vec![b'o'; 9]);
+        // Too big for the budget: it must not be cached, and the superseded
+        // value must not survive to be served in its place.
+        cache.insert("a".to_string(), vec![b'n'; 100]);
+        assert_eq!(cache.get("a"), None);
+        assert_eq!(cache.state().bytes, 0);
+    }
+
+    #[test]
+    fn cache_can_be_disabled_entirely() {
+        let cache = ReadCache::with_capacity_bytes(0);
+        cache.insert("a".to_string(), b"1".to_vec());
+        assert_eq!(cache.get("a"), None);
+        assert_eq!(cache.state().bytes, 0);
     }
 
     #[test]
