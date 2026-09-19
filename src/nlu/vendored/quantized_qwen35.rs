@@ -228,16 +228,22 @@ impl Mlp {
     }
 }
 
-/// Position index for every rotary pair under a multimodal RoPE split.
+/// Which of `(t, h, w)` each rotary pair of one token takes.
 ///
-/// Qwen-VL gives each token three indices — temporal, height and width — and
-/// assigns a contiguous run of rotary pairs to each. `sections` lists those runs
-/// in pairs. Any pair beyond the declared sections keeps the temporal index,
-/// which is what a text-only model would have used throughout.
+/// Qwen3-VL and Qwen3.5 **interleave** the sections: pair `k` takes the height
+/// index when `k % 3 == 1` and `k < 3 * sections[1]`, the width index when
+/// `k % 3 == 2` and `k < 3 * sections[2]`, and the temporal index otherwise.
+/// With this artifact's `[11, 11, 10]` over 32 pairs that is height on
+/// 1, 4, .., 31, width on 2, 5, .., 29, temporal on the rest. Both references
+/// say so - transformers' `recomposition_frequencies` for `qwen3_5`
+/// (`idx = slice(offset, section * 3, 3)`) and llama.cpp's
+/// `LLAMA_ROPE_TYPE_IMROPE` for `LLM_ARCH_QWEN35`.
 ///
-/// With `t == h == w`, every pair gets the same index and the result is
-/// indistinguishable from ordinary 1-D RoPE. That identity is why the current
-/// text-only forward pass is correct while ignoring the sections entirely.
+/// The first version of this laid the sections out as contiguous blocks, the
+/// Qwen2-VL convention. Text never noticed - every pair of a text token shares
+/// one index - but every image token handed the model row and column in the
+/// wrong pairs, and a square placed left, centre or right was called "right"
+/// each time.
 pub(crate) fn mrope_pair_positions(
     sections: &[usize],
     pairs: usize,
@@ -245,21 +251,14 @@ pub(crate) fn mrope_pair_positions(
     h: usize,
     w: usize,
 ) -> Vec<usize> {
-    let mut out = Vec::with_capacity(pairs);
-    let indices = [t, h, w];
-    for (section, width) in sections.iter().enumerate() {
-        let index = indices.get(section).copied().unwrap_or(t);
-        for _ in 0..*width {
-            if out.len() == pairs {
-                return out;
-            }
-            out.push(index);
-        }
-    }
-    while out.len() < pairs {
-        out.push(t);
-    }
-    out
+    let section = |axis: usize| sections.get(axis).copied().unwrap_or(0);
+    (0..pairs)
+        .map(|pair| match pair % 3 {
+            1 if pair < 3 * section(1) => h,
+            2 if pair < 3 * section(2) => w,
+            _ => t,
+        })
+        .collect()
 }
 
 /// Which rope positions a forward pass uses.
@@ -3081,21 +3080,33 @@ pub(crate) mod tests {
         let text = mrope_pair_positions(&sections, 32, 7, 7, 7);
         assert_eq!(text, vec![7usize; 32]);
 
-        // An image token's indices differ, and the split becomes visible at
-        // exactly the declared boundaries.
+        // An image token's indices differ, and the split becomes visible -
+        // interleaved, not blocked: height on pairs 1, 4, .., 31, width on
+        // 2, 5, .., 29, temporal on the rest. Written out rather than derived
+        // from the same rule, so the test is not the implementation restated.
         let image = mrope_pair_positions(&sections, 32, 3, 5, 9);
-        assert_eq!(&image[..11], &[3usize; 11]);
-        assert_eq!(&image[11..22], &[5usize; 11]);
-        assert_eq!(&image[22..32], &[9usize; 10]);
+        let expected = [
+            3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3,
+            5, 9, 3, 5,
+        ];
+        assert_eq!(image, expected.to_vec());
+        assert_eq!(image.iter().filter(|p| **p == 3).count(), 11, "temporal pairs");
+        assert_eq!(image.iter().filter(|p| **p == 5).count(), 11, "height pairs");
+        assert_eq!(image.iter().filter(|p| **p == 9).count(), 10, "width pairs");
+        // The Qwen2-VL block layout is exactly what this must not be.
+        assert_ne!(&image[..11], &[3usize; 11]);
     }
 
     #[test]
     fn mrope_falls_back_to_the_temporal_index_beyond_the_declared_sections() {
-        // Short sections leave a tail; a model with none declared is all text.
-        assert_eq!(mrope_pair_positions(&[2, 1], 5, 1, 2, 3), vec![1, 1, 2, 1, 1]);
+        // A height section of one covers only pair 1; no width section at all.
+        assert_eq!(mrope_pair_positions(&[2, 1], 5, 1, 2, 3), vec![1, 2, 1, 1, 1]);
+        // A model with none declared is all text.
         assert_eq!(mrope_pair_positions(&[], 3, 4, 5, 6), vec![4, 4, 4]);
-        // Over-long sections are truncated to the rotary width, never past it.
+        // A temporal-only split never reaches for height or width.
         assert_eq!(mrope_pair_positions(&[9], 2, 1, 2, 3), vec![1, 1]);
+        // Interleaving never runs past the rotary width.
+        assert_eq!(mrope_pair_positions(&[11, 11, 10], 4, 1, 2, 3), vec![1, 2, 3, 1]);
     }
 
     static Q8_ROUTE_ENV: Mutex<()> = Mutex::new(());

@@ -2325,6 +2325,57 @@ impl CandleBackend {
         }
     }
 
+    /// Admit, and if the device's own allocator cache is what stands in the way,
+    /// give it back and try once more.
+    ///
+    /// `hipMemGetInfo` does not count blocks the pool holds for reuse, so after
+    /// one request the figure can drop by gigabytes that are in fact available:
+    /// a repeat of a request that had just succeeded was refused at a 913-token
+    /// limit. Reclaiming turns those blocks back into driver-free memory, which
+    /// any allocation size can use - the honest figure, where adding the cached
+    /// total to free memory would over-admit whenever cached block sizes do not
+    /// match the new request. It runs only on the refuse path, so the cache
+    /// keeps its value everywhere else. The reclaim checks its own preconditions
+    /// (default stream, no capture) and fails closed; then the original refusal
+    /// stands. Vulkan has no pool and is unchanged.
+    #[cfg(feature = "candle-backend")]
+    fn admit_context_reclaiming(
+        &self,
+        prompt_tokens: usize,
+        max_new_tokens: usize,
+    ) -> NluResult<ContextAdmission> {
+        let first = self.context_admission();
+        let refused = match first.check(prompt_tokens, max_new_tokens) {
+            Ok(()) => return Ok(first),
+            Err(error) => error,
+        };
+        #[cfg(feature = "hip")]
+        if matches!(self.device, Device::Cuda(_)) {
+            match candle_core::cuda::release_cached_memory() {
+                Ok(released) if released > 0 => {
+                    let second = self.context_admission();
+                    return match second.check(prompt_tokens, max_new_tokens) {
+                        Ok(()) => {
+                            tracing::info!(
+                                released_bytes = released,
+                                fits_before = ?first.fits_tokens,
+                                fits_after = ?second.fits_tokens,
+                                "admitted after reclaiming the allocator cache"
+                            );
+                            Ok(second)
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "allocator cache not reclaimable at admission; refusal stands");
+                }
+            }
+        }
+        Err(refused)
+    }
+
     /// Resident KV bytes for a full `tokens`-long context, when modelled.
     #[cfg(feature = "candle-backend")]
     pub fn projected_kv_bytes(&self, tokens: usize) -> Option<usize> {
@@ -2519,7 +2570,7 @@ impl CandleBackend {
         // Same gates as text: the declared window and what the device holds.
         let limit = self.completion_context_limit.unwrap_or(self.context_length);
         validate_completion_budget(total, max_tokens, limit)?;
-        self.context_admission().check(total, max_tokens as usize)?;
+        self.admit_context_reclaiming(total, max_tokens as usize)?;
         check()?;
 
         let pixels = Tensor::from_vec(
@@ -2840,8 +2891,7 @@ impl CandleBackend {
         validate_completion_budget(prompt_tokens.len(), max_tokens, limit)?;
         // The declared window says what the artifact supports; this says what
         // the device can hold. On the pinned model the two differ fivefold.
-        let admission = self.context_admission();
-        admission.check(prompt_tokens.len(), max_tokens as usize)?;
+        let admission = self.admit_context_reclaiming(prompt_tokens.len(), max_tokens as usize)?;
         let token_span = match &capture {
             Some(request) => self.token_span_for_bytes(prompt, &request.byte_span)?,
             None => None,
@@ -3029,7 +3079,7 @@ impl CandleBackend {
         }
         // The declared window is not an admission limit on its own: it is what
         // the artifact advertises, not what fits with the weights resident.
-        self.context_admission().check(prompt_tokens.len(), max_tokens as usize)?;
+        self.admit_context_reclaiming(prompt_tokens.len(), max_tokens as usize)?;
 
         // Prefill: process all prompt tokens at once.
         let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
@@ -3578,7 +3628,7 @@ impl CandleBackend {
         }
         // Prefill sizes the cache to the prompt; what the caller then generates
         // is gated where the generation limit is known.
-        self.context_admission().check(prompt_tokens.len(), 0)?;
+        self.admit_context_reclaiming(prompt_tokens.len(), 0)?;
 
         let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
             .map_err(|e| NluError::LlmGenerationFailed {

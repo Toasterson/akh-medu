@@ -451,6 +451,29 @@ the chronological evidence further down is retained as written.
   (a topology change). **A decision of the same family as item 4, not made
   here.** Nothing was changed in either daemon.
 
+- **Item 5: the LLM-side M-RoPE was the Qwen2-VL layout; fixed, GPU
+  verification pending** (2026-09-19, end of day). The "upper right" residual
+  was not model bias: a red square placed left, centre or right was called
+  "right" all three times. Vertical relations had been right throughout, which
+  pointed at the column axis on the language-model side. `mrope_pair_positions`
+  laid the `[11, 11, 10]` sections out as contiguous blocks; Qwen3.5
+  **interleaves** them - height on pairs 1, 4, .., 31, width on 2, 5, .., 29,
+  temporal on the rest (transformers `qwen3_5`, llama.cpp `IMROPE` for
+  `LLM_ARCH_QWEN35`). Only image tokens take that path, which is why every text
+  gate stayed bit-identical. Rewritten with the expected layout written out
+  literally in the test. **Not yet run on the GPU**; the placement and geometry
+  reruns are tomorrow's first item.
+
+- **Item 6: allocator-cache reclaim on the admission refuse path; GPU
+  verification pending** (2026-09-19, end of day). `release_cached_memory`'s
+  own preconditions make it safe at admission (default stream, no capture, a
+  device sync with nothing in flight), and it frees only the pool's free list.
+  The gate now reclaims and re-checks once when it would otherwise refuse, so
+  cached blocks become driver-free memory any size can use - correct, where
+  adding the cached total to the free figure would over-admit on fragmentation.
+  Vulkan has no pool and is unchanged. The reproduction (10,417 tokens, two
+  rounds) was stopped at load when the day was capped. **Not yet verified.**
+
 - **Item 4: the seam had a silent fallback; the topology fork is confirmed real**
   (2026-09-19). `context_budgeted` existed in exactly one place in the tree -
   `native_window.rs` and its own tests. **The core never emitted it.** So once

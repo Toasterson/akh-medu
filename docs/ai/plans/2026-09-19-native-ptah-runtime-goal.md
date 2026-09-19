@@ -112,6 +112,48 @@ categorised summary.
 
 9. **Homelab canary and cutover.** Needs shared services; ask first.
 
+## Tomorrow starts here (written at the end of 2026-09-19)
+
+Two fixes are committed, unit-tested (3,460 passing) and **not yet verified on
+the GPU** - the session was capped before their runs completed. Run these first,
+serially, before anything else:
+
+1. **Interleaved M-RoPE for image tokens.** The LLM-side section mapping was
+   Qwen2-VL's contiguous blocks; Qwen3.5 interleaves them (transformers
+   `qwen3_5` `recomposition_frequencies`, llama.cpp `LLM_ARCH_QWEN35` ->
+   `IMROPE`). Symptom before the fix: a red square placed left, centre or right
+   was called "right" every time. Verify with the three placements and the four
+   geometry images:
+
+       cargo build --release --features hip --example vision_describe_probe
+       for IMG in square_left square_centre square_right square_bar_bottom \
+                  square_bar_left stripes_vertical stripes_horizontal; do
+         ./target/release/examples/vision_describe_probe --device hip \
+           --model $MODEL --tokenizer $TOK \
+           --image experiments/native-recall/vision-e2e-20260919-hip-v1/images/$IMG.png \
+           --tokens 64
+       done
+
+   Expected: left/centre/right each named correctly; the four geometry images
+   at least as good as the post-rope run in `geometry-after-rope.log`.
+
+2. **Allocator-cache reclaim on the admission refuse path.** Before the fix a
+   repeat of a 10,417-token request that had just succeeded was refused at a
+   913-token limit, because `hipMemGetInfo` excludes the pool's reusable
+   blocks. Verify that round 1 now admits and completes:
+
+       cargo build --release --features hip --example candle_session_probe
+       RUST_LOG=info ./target/release/examples/candle_session_probe --device hip \
+         --model $MODEL --tokenizer $TOK --prompt-file /tmp/ctxsoak/prompt-08k.txt \
+         --tokens 8 --idle-samples 1 --settle-seconds 0 --baseline-settle-seconds 0
+
+   Expected: two generation rounds and an `admitted after reclaiming the
+   allocator cache` log line on the second. (`/tmp/ctxsoak/prompt-08k.txt` is
+   regenerable from `experiments/native-recall/ctxsoak-20260919-hip-v1/run-ladder.sh`
+   if `/tmp` was cleared.)
+
+Then the decisions listed under "Blocked on a decision from the user".
+
 ## Standing constraints (unchanged)
 
 - Implementation repo is `/home/toasty/ws/agi/akh-medu`; `/home/toasty/ws/ptah`

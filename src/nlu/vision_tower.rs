@@ -11,7 +11,6 @@
 
 use candle_core::quantized::gguf_file;
 use candle_core::{DType, Device, Tensor};
-use std::path::Path;
 
 use super::error::{NluError, NluResult};
 
@@ -789,6 +788,7 @@ fn layer_norm(
 mod tests {
     use super::*;
     use candle_core::IndexOp;
+    use std::path::Path;
 
     fn pinned_projector() -> Option<std::path::PathBuf> {
         let model = Path::new(
