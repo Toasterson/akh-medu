@@ -170,8 +170,12 @@ the chronological evidence further down is retained as written.
   **never exercised paging** - a 1,024-token window ages nothing out of a
   16-position exact window - and the first real paging workload failed at once
   on an append invariant that assumed the state holds every position. And the
-  Vulkan half remains blocked: its allocator gives every dtype four bytes per
-  element, so `u8` saves nothing there without packed storage.
+  Vulkan half is **not blocked after all**: its allocator gives every dtype four
+  bytes per element, but three 8-bit codes can be packed per `u32` word and
+  unpacked with `affine`, `floor` and binary ops the backend already has. Three
+  rather than four, because unpacking goes through f32, exact only to 2^24. A 3x
+  saving with no new kernel. Unimplemented and unmeasured: the extra elementwise
+  passes could cost more than they save.
 
   `AttentionState`** — bit-packed pages per (batch, head) slot, a shared
   quantizer, the recent window exact — and passes the canary at 4 and 2 bits
