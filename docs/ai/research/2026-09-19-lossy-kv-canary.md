@@ -196,6 +196,14 @@ backend kernel:
   codebook with them. 46 HIP backend tests pass. This is what lets a page hold
   one byte per code and still feed a gather that only takes u32 ids.
 
+  `KvPages::decode_on_device` now implements the decode with those three
+  primitives - `index_select` over the codebook, a broadcast multiply by the
+  per-position norms, and a `matmul` by the rotation - and a test shows it
+  reproduces the host decode to within 1e-4, which is f32 accumulation order
+  rather than a different approximation. `TurboQuant` exposes its rotation and
+  a `quantize_row` so a store can upload codes without going through the host
+  page representation.
+
   Writing the test found two further gaps worth knowing: **F32 -> U8 and
   U8 -> F32 do not exist on HIP either**. Neither blocks the use case, because
   a page store already holds its codes as bytes on the host and uploads them

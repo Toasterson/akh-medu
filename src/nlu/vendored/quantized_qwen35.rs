@@ -412,6 +412,36 @@ impl KvPages {
         }
         Tensor::from_vec(values, (batch, heads, positions, dim), device)
     }
+
+    /// Decode compressed pages without leaving the device.
+    ///
+    /// Three primitives: gather the centroids the codes point at, scale each
+    /// position by its stored norm, then apply the inverse rotation. The last is
+    /// `rows * Pi` because reconstruction is `Pi^T y` and these rows are
+    /// transposed relative to that.
+    ///
+    /// Codes are held as `u8`, one byte each, and widened to the `u32` that
+    /// `index_select` requires. Holding them as `u32` instead would cost four
+    /// bytes per code, exactly what the f32 cache this replaces costs, so the
+    /// widening is what makes the compression real rather than nominal.
+    fn decode_on_device(
+        codes: &Tensor,
+        norms: &Tensor,
+        codebook: &Tensor,
+        rotation: &Tensor,
+        batch: usize,
+        heads: usize,
+        positions: usize,
+        dim: usize,
+    ) -> Result<Tensor> {
+        let ids = codes.flatten_all()?.to_dtype(DType::U32)?;
+        codebook
+            .index_select(&ids, 0)?
+            .reshape((batch * heads * positions, dim))?
+            .broadcast_mul(&norms.reshape((batch * heads * positions, 1))?)?
+            .matmul(rotation)?
+            .reshape((batch, heads, positions, dim))
+    }
 }
 
 /// Fixed seed so a rotation is identical across every layer and restart.
@@ -2024,6 +2054,70 @@ pub(crate) mod tests {
     use std::io::{BufReader, Cursor, Read};
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn device_decode_reproduces_the_host_decode_exactly() {
+        // Same codes, same codebook, same rotation: the device path must be a
+        // relocation of the arithmetic, not a different approximation. Runs on
+        // CPU here; the device backends use the identical tensor ops.
+        let device = Device::Cpu;
+        let (heads, positions, dim, bits) = (2usize, 5usize, 64usize, 4u8);
+        let quantizer =
+            std::sync::Arc::new(crate::nlu::turbo_quant::TurboQuant::new(dim, bits, 31));
+
+        let mut codes: Vec<u8> = Vec::new();
+        let mut norms: Vec<f32> = Vec::new();
+        let mut host = Vec::new();
+        for slot in 0..heads {
+            let mut store =
+                crate::nlu::turbo_quant::KvPageStore::with_quantizer(quantizer.clone());
+            for position in 0..positions {
+                let row: Vec<f32> = (0..dim)
+                    .map(|d| ((slot * 31 + position * 7 + d) % 53) as f32 / 26.0 - 1.0)
+                    .collect();
+                let (row_codes, norm) = quantizer.quantize_row(&row);
+                codes.extend_from_slice(&row_codes);
+                norms.push(norm);
+                store.push_rows(&row).unwrap();
+            }
+            host.extend(store.decode());
+        }
+
+        let code_tensor = Tensor::from_vec(codes, (1, heads, positions, dim), &device).unwrap();
+        let norm_tensor = Tensor::from_vec(norms, (1, heads, positions, 1), &device).unwrap();
+        let codebook = Tensor::from_vec(
+            quantizer.codebook().to_vec(),
+            (quantizer.codebook().len(),),
+            &device,
+        )
+        .unwrap();
+        let rotation =
+            Tensor::from_vec(quantizer.rotation().to_vec(), (dim, dim), &device).unwrap();
+
+        let on_device = KvPages::decode_on_device(
+            &code_tensor,
+            &norm_tensor,
+            &codebook,
+            &rotation,
+            1,
+            heads,
+            positions,
+            dim,
+        )
+        .unwrap();
+        assert_eq!(on_device.dims(), &[1, heads, positions, dim]);
+        let got: Vec<f32> = on_device.flatten_all().unwrap().to_vec1().unwrap();
+
+        assert_eq!(got.len(), host.len());
+        let worst = host
+            .iter()
+            .zip(&got)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        // f32 accumulation order differs between the loop and the matmul, so
+        // this is agreement rather than bit-identity.
+        assert!(worst < 1e-4, "worst absolute difference {worst}");
+    }
 
     #[test]
     fn kv_pages_absorb_the_oldest_positions_and_decode_them_back_in_order() {

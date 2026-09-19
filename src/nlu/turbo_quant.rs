@@ -102,6 +102,24 @@ impl TurboQuant {
         &self.codebook
     }
 
+    /// The rotation, row-major `dim x dim`.
+    ///
+    /// A device decoder needs it as a tensor: reconstruction is `Pi^T y`, and
+    /// for row-major batches that is `rows * Pi`, so this is uploaded once and
+    /// reused for every page.
+    pub fn rotation(&self) -> &[f32] {
+        &self.rotation
+    }
+
+    /// Quantize a row and return its codes and norm, without storing them.
+    ///
+    /// The page store keeps codes on the device; this gives it the bytes to
+    /// upload without going through the host-side page representation.
+    pub fn quantize_row(&self, values: &[f32]) -> (Vec<u8>, f32) {
+        let quantized = self.quantize(values);
+        (quantized.indices, quantized.norm)
+    }
+
     /// Rotate, then store the nearest centroid index per coordinate.
     pub fn quantize(&self, values: &[f32]) -> QuantizedVector {
         assert_eq!(values.len(), self.dim, "vector does not match this codebook");
