@@ -69,7 +69,10 @@ the chronological evidence further down is retained as written.
   remain. `quantized_qwen35.rs` has no multimodal support today, but this
   artifact needs no deepstack routing (all 27 flags false, no deepstack
   tensors), so that step drops out. Dynamic-resolution preprocessing is
-  resolved against llama.cpp mtmd and implemented with six CPU tests. The tower
+  resolved against llama.cpp mtmd and implemented with six CPU tests. The mrope
+  sections the model declares are now read, validated against the rotary width
+  and mapped per pair, with tests pinning that they collapse to plain 1-D RoPE
+  for text - which is why the bit-exact gates were right to pass. The tower
   forward is implemented and runs the real projector end to end on CPU,
   producing finite embeddings at the language model's 5120 width, and **runs on
   CPU, HIP and Vulkan** agreeing within 8.1e-06 absolute. Getting it onto the
