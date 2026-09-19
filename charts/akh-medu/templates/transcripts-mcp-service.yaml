@@ -1,0 +1,17 @@
+{{- if .Values.transcripts.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-transcripts-mcp
+  labels:
+    {{- include "akh-medu.transcripts.labels" (dict "root" . "role" "mcp") | nindent 4 }}
+spec:
+  type: {{ .Values.transcripts.mcp.service.type }}
+  ports:
+    - port: {{ .Values.transcripts.mcp.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "akh-medu.transcripts.selectorLabels" (dict "root" . "role" "mcp") | nindent 4 }}
+{{- end }}

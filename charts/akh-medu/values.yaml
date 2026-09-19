@@ -452,6 +452,114 @@ sokard:
   affinity: {}
   podAnnotations: {}
 
+# ── transcripts (agent-session transcript harvest, ADR 108) ───────────────
+# Off by default: needs harvest-pg (a dedicated CNPG cluster, not the
+# postgresql/externalPostgresql above) and its per-role client-cert Secrets
+# provisioned first — see docs/wayfinder/transcript-harvest/. This chart only
+# deploys the two in-cluster components (akh-derive, akh-transcripts-mcp);
+# akh-harvest is thin and runs per-machine outside Kubernetes entirely
+# (ingest-transport.md), so it has no template here.
+transcripts:
+  enabled: false
+
+  image:
+    repository: code.aopc.cloud/toasterson/akh-transcripts
+    tag: ""  # defaults to .Chart.AppVersion
+    pullPolicy: IfNotPresent
+
+  # The baked-in ONNX model asset makes this image amd64-only, same reasoning
+  # as seshd.
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+  env:
+    RUST_LOG: "akh_transcripts=info"
+
+  derive:
+    replicaCount: 1
+    intervalSecs: 30
+    batchSize: 200
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+  mcp:
+    replicaCount: 1
+    bind: "0.0.0.0:9500"
+    service:
+      type: ClusterIP
+      port: 9500
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: "1"
+        memory: 768Mi
+
+  # Postgres — mTLS only. harvest-pg's pg_hba is
+  #   hostnossl transcripts all all reject
+  #   hostssl   transcripts all all cert clientcert=verify-full
+  # so there is no password path at all for this database; every connection,
+  # including migrations, authenticates with a client certificate. The DSN is
+  # assembled by the deployment templates from the fields below rather than
+  # built from a chart-managed Secret, because there is no password to carry.
+  #
+  # `harvest-pg-rw.akh-medu.svc` verified live via
+  # `kubectl get svc -n akh-medu` during packaging (2026-09-19) — it is the
+  # CNPG read-write Service for the harvest-pg cluster.
+  database:
+    host: harvest-pg-rw.akh-medu.svc
+    port: 5432
+    name: transcripts
+    sslmode: verify-full
+    # Client-cert Secrets created out-of-band by whatever provisions
+    # harvest-pg's Certificate resources (docs/wayfinder/transcript-harvest);
+    # each holds ca.crt/tls.crt/tls.key. Mounted read-only at certMountPath —
+    # libpq refuses a group/world-readable private key, so tls.key must land
+    # at mode 0400 owned by the container's runAsUser (see
+    # transcripts-derive-deployment.yaml / transcripts-mcp-deployment.yaml).
+    certMountPath: /etc/harvest-pg
+    derive:
+      user: harvest_derive
+      certSecret: harvest-pg-client-harvest-derive
+    read:
+      user: harvest_read
+      certSecret: harvest-pg-client-harvest-read
+    # The migrate initContainer authenticates as the database OWNER
+    # (harvest), not harvest_derive, and mounts its cert at a separate path
+    # from the main container's. Reason: the store's default privileges are
+    # declared `FOR ROLE harvest`, so tables must be *created by* harvest for
+    # harvest_derive and harvest_read to receive their grants automatically —
+    # a table created by a role that merely has harvest's grants (e.g. via
+    # `GRANT harvest TO harvest_derive`) would not trigger those default
+    # privileges. No manual GRANT is needed; the owner cert already exists.
+    owner:
+      user: harvest
+      certSecret: harvest-pg-client-harvest
+    ownerCertMountPath: /etc/harvest-pg-owner
+
+  # AKH_TRANSCRIPTS_BEARER_TOKEN_FILE (akh-transcripts-mcp only). Mounted the
+  # same shape as sokard mounts its ingress token (a single Secret key
+  # projected to one file via subPath, mountPath == the file itself), but
+  # from the akhomed-shared-secret Secret already used by akhomed's ACP/TCP
+  # clients — not this chart's generic `ingressAuth` Secret — so the read MCP
+  # surface accepts the same bearer token the rest of the fleet already
+  # carries. Existence and key verified live via
+  # `kubectl get secret -n akh-medu akhomed-shared-secret` during packaging
+  # (2026-09-19): type Opaque, single key AKHOMED_SHARED_SECRET.
+  bearerToken:
+    existingSecret: akhomed-shared-secret
+    secretKey: AKHOMED_SHARED_SECRET
+    mountPath: /etc/akh-transcripts/token
+
 # ── External PostgreSQL ───────────────────────────────────────────────────
 # Use this when postgresql.enabled=false to point at an existing instance.
 externalPostgresql:
