@@ -167,6 +167,62 @@ or reserves image placeholders during tokenization. The geometry, the positions,
 the projector and the forward all exist and compose; what is missing is the
 front end that turns a user's image into that call.
 
+## The front end: an image goes in, text comes out
+
+`generate_with_image(prompt, image_bytes, max_tokens)` composes every piece:
+
+- `vision_preprocess::prepare_image` decodes PNG/JPEG, resizes to the policy
+  with a Catmull-Rom cubic (the closest the `image` crate has to PIL's bicubic -
+  an approximation, flagged as such) and normalizes channel-major.
+- `vision_prompt::expand_single_image` finds the one bracketed `<|image_pad|>`
+  and expands it to one token per merged patch. Zero, two, or an unbracketed
+  placeholder is refused with the exact string to use - image placement is the
+  caller's, never inferred.
+- The projector's rows are spliced over those tokens; `position_triples` gives
+  every token its `(t, h, w)`; `prefill_embedded` runs it.
+- **Decode continues from the rope cursor, not the cache length.** After an
+  image the two diverge - 7 tokens, cursor at 6 - and `forward_token` needs a
+  tracked text prompt the embedded path never sets. The model now carries
+  `rope_cursor`, set by any per-token prefill and consulted by every subsequent
+  text forward. Asserted directly in a unit test; a fresh text prefill clears it.
+
+The text path is **bit-identical** across all of it on the real model: cosine
+1.0000000000, relative L2 and worst absolute exactly 0, decode 20.2 steps/s
+unchanged. The cursor branch sits in every text forward and costs nothing.
+
+## The first image through: right colours, wrong shapes
+
+Evidence:
+[`vision-e2e-20260919-hip-v1`](../../../experiments/native-recall/vision-e2e-20260919-hip-v1),
+with the exact PNGs used.
+
+The pipeline runs end to end - 273 prompt tokens, 256 of them image, clean stop.
+Four synthetic images, same three colours, different layouts:
+
+| image | described as | geometry |
+| --- | --- | --- |
+| three vertical stripes | "blue left, white centre, red right" | correct |
+| three horizontal stripes | "blue top, white middle, red bottom" | correct |
+| red square, blue bar at the bottom | "pixelated French flag, red fragmented and misaligned" | **wrong** |
+| red square, blue bar at the left | "diagonal stripe pattern, alternating blocks" | **wrong** |
+
+Colours are always right, so pixels reach the model. Coarse layout is right, so
+the learned absolute position embedding works. What fails is any shape that
+depends on which patches are next to which. Every edge in these images lands on
+a 16-pixel patch boundary, so every patch is uniform and no kernel-flatten error
+can be scrambling content; what is lost is *relative* position between patches.
+
+That is what 2D rotary embedding provides in the vision attention, and the
+vendored tower has none - only the absolute table. The projector GGUF declares
+no rope key because llama.cpp hard-codes it for this projector type: its
+`qwen3vl` graph applies `ggml_rope_multi` in vision mode to q and k in every
+block, theta 10000, with the height and width coordinates of each patch. The
+device gate could not see this: all three backends compute the same wrong
+function to ten decimals. This is the class of fault the gate's own note warned
+about, found by the behavioural check the gate cannot replace.
+
+Fixing the tower is its own slice, with these four images as the before.
+
 ## The external reference exists after all
 
 Recorded twice as "no external consumer is installed". There is no transformers,

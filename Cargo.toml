@@ -167,6 +167,9 @@ tar = "0.4"
 # NLU Tier 2: Micro-ML NER (feature-gated)
 ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["std", "load-dynamic"] }
 tokenizers = { version = "0.22", optional = true, default-features = false, features = ["progressbar", "fancy-regex"] }
+# Image decoding for the vision path. PNG and JPEG only; the tower takes
+# normalized pixels, so no other format support is needed here.
+image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg"] }
 
 # NLU Candle backend: GGUF inference with hidden state access (feature-gated)
 candle-core = { version = "0.10", optional = true }
@@ -274,7 +277,7 @@ nlu-full = ["nlu-ml", "nlu-llm"]
 # Unix socket/TCP; there is no HTTP surface). reqwest is dropped entirely:
 # after this change nothing in the workspace references it.
 delegation = ["daemon", "acp"]
-candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers"]
+candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers", "image"]
 nlu-candle = ["candle-backend"]
 # WI-339: composite daemon profile for akhomed hosts that serve Candle-backed
 # akhs (in-process GGUF inference + the Candle token counter). This is THE

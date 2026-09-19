@@ -396,6 +396,27 @@ the chronological evidence further down is retained as written.
   all exist and compose; the front end that turns a user's image into that call
   is what remains.
 
+- **Item 5: the front end exists and the first image exposed a tower fault**
+  (2026-09-19). `generate_with_image` composes decode -> resize -> normalize ->
+  projector -> placeholder expansion -> splice -> positioned prefill -> decode.
+  The one piece that was missing in the model: **decode after an image must
+  continue from the rope cursor, not the cache length** (7 tokens, cursor at 6),
+  and `forward_token` needs a tracked text prompt the embedded path never sets.
+  The model now carries `rope_cursor`, asserted in a unit test. Text path
+  **bit-identical** on the real model across all of it, decode unchanged.
+
+  First image through: **right colours, wrong shapes.** Four synthetic images,
+  same colours: vertical and horizontal stripes described correctly; a red
+  square with a blue bar described as "pixelated, fragmented, diagonal blocks".
+  Every edge sits on a patch boundary so no flatten error can scramble content;
+  what is lost is relative position between patches. **The vendored tower has no
+  2D rotary embedding** - only the absolute table - while llama.cpp's `qwen3vl`
+  graph applies `ggml_rope_multi` in vision mode to q and k in every block. The
+  GGUF declares no rope key because llama.cpp hard-codes it. The cross-device
+  gate cannot see this: all three backends compute the same wrong function. Own
+  slice next, with the four images as the before. See
+  [vision device gate](../research/2026-09-19-vision-device-gate.md).
+
 - **Item 4: the seam had a silent fallback; the topology fork is confirmed real**
   (2026-09-19). `context_budgeted` existed in exactly one place in the tree -
   `native_window.rs` and its own tests. **The core never emitted it.** So once

@@ -159,3 +159,101 @@ mod tests {
         assert!((normalize_channel(128, 0.5, 0.5)).abs() < 0.01);
     }
 }
+
+/// An image decoded, resized to the policy, and normalized for the tower.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone)]
+pub struct PreparedImage {
+    /// `(3, height, width)` in channel-major order, normalized.
+    pub pixels: Vec<f32>,
+    pub width: usize,
+    pub height: usize,
+    /// Merged patch grid: the tokens this image occupies.
+    pub grid: super::vision_positions::ImageGrid,
+}
+
+/// Decode an encoded image and prepare it for the tower.
+///
+/// Resampling uses a Catmull-Rom cubic filter, the closest the `image` crate
+/// offers to the bicubic resize the reference preprocessor uses. That is an
+/// approximation and is flagged as such; no numerical equivalence to the
+/// reference is claimed for the resize itself.
+#[cfg(feature = "candle-backend")]
+pub fn prepare_image(
+    bytes: &[u8],
+    policy: &ResizePolicy,
+    patch_size: usize,
+    merge_size: usize,
+    mean: [f32; 3],
+    std: [f32; 3],
+) -> super::error::NluResult<PreparedImage> {
+    use super::error::NluError;
+    let decoded = image::load_from_memory(bytes).map_err(|e| NluError::LlmGenerationFailed {
+        reason: format!("image decode: {e}"),
+    })?;
+    let (width, height) = policy.target_size(decoded.width(), decoded.height());
+    let resized = decoded
+        .resize_exact(width, height, image::imageops::FilterType::CatmullRom)
+        .to_rgb8();
+
+    let (width, height) = (width as usize, height as usize);
+    let mut pixels = vec![0.0f32; 3 * width * height];
+    for (index, pixel) in resized.pixels().enumerate() {
+        for channel in 0..3 {
+            pixels[channel * width * height + index] =
+                normalize_channel(pixel.0[channel], mean[channel], std[channel]);
+        }
+    }
+    let per_side = patch_size.max(1) * merge_size.max(1);
+    Ok(PreparedImage {
+        pixels,
+        width,
+        height,
+        grid: super::vision_positions::ImageGrid {
+            rows: height / per_side,
+            cols: width / per_side,
+        },
+    })
+}
+
+#[cfg(all(test, feature = "candle-backend"))]
+mod prepare_tests {
+    use super::*;
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(width, height, |x, _| {
+            if x < width / 2 { image::Rgb([255, 0, 0]) } else { image::Rgb([255, 255, 255]) }
+        });
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn a_prepared_image_is_aligned_normalized_and_grid_consistent() {
+        let policy = ResizePolicy::qwen3vl();
+        let prepared = prepare_image(&png(300, 200), &policy, 16, 2, [0.5; 3], [0.5; 3]).unwrap();
+        assert_eq!(prepared.width % 32, 0);
+        assert_eq!(prepared.height % 32, 0);
+        assert_eq!(prepared.pixels.len(), 3 * prepared.width * prepared.height);
+        assert!(prepared.pixels.iter().all(|v| (-1.0..=1.0).contains(v)));
+        assert_eq!(prepared.grid.rows, prepared.height / 32);
+        assert_eq!(prepared.grid.cols, prepared.width / 32);
+        assert!(prepared.grid.tokens() >= 256, "minimum pixel bound implies >= 256 tokens");
+
+        // Channel-major: the left half is red, so at a left-half pixel the red
+        // channel is +1 and green is -1.
+        let (w, h) = (prepared.width, prepared.height);
+        let left = h / 2 * w + w / 8;
+        assert!((prepared.pixels[left] - 1.0).abs() < 1e-6, "red channel");
+        assert!((prepared.pixels[w * h + left] + 1.0).abs() < 1e-6, "green channel");
+    }
+
+    #[test]
+    fn undecodable_bytes_are_refused() {
+        let policy = ResizePolicy::qwen3vl();
+        assert!(prepare_image(b"not an image", &policy, 16, 2, [0.5; 3], [0.5; 3]).is_err());
+    }
+}

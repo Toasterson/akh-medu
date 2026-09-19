@@ -101,6 +101,31 @@ pub enum NluError {
         headroom_bytes: usize,
     },
 
+    /// The prompt does not carry exactly one well-formed image placeholder.
+    ///
+    /// Image tokens are placed by the caller's prompt, never inferred, so a
+    /// prompt that is missing the placeholder, repeats it, or leaves it
+    /// unbracketed is refused with the exact string to use.
+    #[error(
+        "prompt has {found} `<|image_pad|>` placeholder(s), bracketed: {bracketed}; \
+         exactly one bracketed image is supported"
+    )]
+    #[diagnostic(
+        code(akh::nlu::image_placeholder),
+        help(
+            "Put the image where it belongs in the prompt as the literal string \
+             `<|vision_start|><|image_pad|><|vision_end|>`, exactly once. The single \
+             `<|image_pad|>` is expanded to one token per merged patch - {grid_tokens} \
+             tokens for this image - and the text before and after it is tokenized as \
+             usual. Multiple images in one prompt are not supported yet."
+        )
+    )]
+    ImagePlaceholder {
+        found: usize,
+        bracketed: bool,
+        grid_tokens: usize,
+    },
+
     /// The LLM could not produce valid structured output.
     #[error("LLM generation failed: {reason}")]
     #[diagnostic(
@@ -152,6 +177,20 @@ mod byte_rendering_tests {
     use super::human_bytes;
     use super::NluError;
     use miette::Diagnostic;
+
+    #[test]
+    fn the_image_placeholder_refusal_names_the_exact_string_to_use() {
+        let error = NluError::ImagePlaceholder {
+            found: 0,
+            bracketed: false,
+            grid_tokens: 256,
+        };
+        let help = error.help().expect("must carry the remedy").to_string();
+        assert!(help.contains("<|vision_start|><|image_pad|><|vision_end|>"), "{help}");
+        assert!(help.contains("256 tokens"), "{help}");
+        assert!(help.contains("not supported yet"), "{help}");
+        assert!(error.to_string().contains("0 `<|image_pad|>`"), "{error}");
+    }
 
     /// The diagnostic exists to tell an operator what to do, so assert on the
     /// text they will read rather than on the struct's fields.

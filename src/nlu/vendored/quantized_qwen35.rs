@@ -1388,6 +1388,12 @@ pub(crate) struct InferenceSession {
     mask_cache: Option<((usize, usize), Tensor)>,
     checkpoint_owner: Arc<()>,
     text: Option<TextState>,
+    /// Rope index the next text token takes after an image prefill.
+    ///
+    /// An image spans fewer rope positions than it has tokens, so after one the
+    /// cache length and the rope position diverge. `None` means no image has
+    /// been forwarded and the two agree, which is every text session.
+    rope_cursor: Option<usize>,
 }
 
 /// Compatibility name used by Candle's family dispatch; not a second runner.
@@ -2101,6 +2107,7 @@ impl InferenceSession {
             mask_cache: None,
             checkpoint_owner: Arc::new(()),
             text: None,
+            rope_cursor: None,
         }
     }
 
@@ -2175,6 +2182,7 @@ impl InferenceSession {
     fn reset(&mut self) {
         self.mask_cache = None;
         self.text = None;
+        self.rope_cursor = None;
         for state in &mut self.states {
             match state {
                 MixerState::Attention(state) => *state = None,
@@ -2255,6 +2263,18 @@ impl InferenceSession {
         } else {
             None
         };
+        // After an image, text continues from the rope cursor rather than the
+        // cache length: the two diverged when the image took fewer positions
+        // than tokens. Degenerate triples from the cursor are exactly the
+        // contiguous path, just starting from the right place.
+        let continued: Option<Vec<[usize; 3]>> = match (rope, self.rope_cursor) {
+            (None, Some(cursor)) => Some((0..seq_len).map(|i| [cursor + i; 3]).collect()),
+            _ => None,
+        };
+        let rope: Option<&[[usize; 3]]> = match (&continued, rope) {
+            (Some(triples), _) => Some(triples.as_slice()),
+            (None, supplied) => supplied,
+        };
         // Supplied embeddings replace the table lookup wholesale: an image's
         // rows come from the projector, not from any token id.
         let mut hidden = match embedded {
@@ -2276,7 +2296,23 @@ impl InferenceSession {
                 collector.observe(index, &hidden, index_pos)?;
             }
         }
+        // The next text token sits one past the largest index any section
+        // used, which is the cursor `position_triples` would have advanced to.
+        // Only tracked once any per-token positions have been forwarded.
+        if let Some(triples) = rope {
+            let last = triples
+                .iter()
+                .flat_map(|triple| triple.iter().copied())
+                .max()
+                .unwrap_or(index_pos);
+            self.rope_cursor = Some(last + 1);
+        }
         self.weights.norm.forward(&hidden)?.i((.., seq_len - 1, ..))
+    }
+
+    /// Rope index the next text token takes, when an image has been forwarded.
+    pub(crate) fn rope_cursor(&self) -> Option<usize> {
+        self.rope_cursor
     }
 
     fn run_with_hidden(&mut self, tokens: &Tensor, index_pos: usize) -> Result<(Tensor, Tensor)> {
@@ -3526,6 +3562,40 @@ pub(crate) mod tests {
             tiled.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
             vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
         );
+    }
+
+    #[test]
+    fn decode_after_an_image_continues_from_the_rope_cursor_not_the_cache_length() {
+        use crate::nlu::vision_positions::{position_triples, ImageGrid, PromptPiece};
+        let bytes = tiny_gguf();
+        let device = Device::Cpu;
+        let grid = ImageGrid { rows: 2, cols: 3 };
+        let pieces = [PromptPiece::Text(2), PromptPiece::Image(grid), PromptPiece::Text(1)];
+        let positions = position_triples(&pieces);
+        let total = positions.len();
+        // text(2) -> cursor 2; the image spans max(2, 3) = 3 -> cursor 5; text(1)
+        // at 5 -> cursor 6. The cache holds 7 positions. That the two differ is
+        // the whole point of the test.
+        let expected_cursor = 2 + grid.position_span() + 1;
+        assert_ne!(expected_cursor, total);
+
+        let mut model = load_tiny_model(&bytes);
+        assert_eq!(model.rope_cursor(), None, "no image forwarded yet");
+        let tokens = Tensor::from_vec((0..total as u32).map(|i| i % 4).collect::<Vec<_>>(), (1, total), &device).unwrap();
+        let rows = model.embed_tokens(&tokens).unwrap();
+        model.prefill_embedded(&tokens, &rows, &positions).unwrap();
+        assert_eq!(model.rope_cursor(), Some(expected_cursor));
+
+        // A decode step appends at the cache length and advances the cursor by
+        // one. Before this, decode after an image would have rotated the new
+        // token at position 7 while the model believed it was at 6.
+        let next = Tensor::from_vec(vec![1u32], (1, 1), &device).unwrap();
+        model.decode_step(&next, total).unwrap();
+        assert_eq!(model.rope_cursor(), Some(expected_cursor + 1));
+
+        // A fresh text prefill forgets the image entirely.
+        model.prefill(&tokens).unwrap();
+        assert_eq!(model.rope_cursor(), None);
     }
 
     #[test]
