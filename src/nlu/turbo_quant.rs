@@ -284,6 +284,161 @@ fn lloyd_max_codebook(dim: usize, bits: u8) -> Vec<f32> {
     centroids.into_iter().map(|c| c as f32).collect()
 }
 
+/// A packed array of small unsigned integers.
+///
+/// Indices are written at exactly `bits` each with no alignment padding, so a
+/// 3-bit code costs three bits rather than a byte. Kept minimal and local: it
+/// only has to serve [`KvPageStore`].
+#[derive(Debug, Default)]
+struct BitVec {
+    data: Vec<u8>,
+    len: usize,
+}
+
+impl BitVec {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn bytes(&self) -> usize {
+        self.data.len()
+    }
+
+    fn push(&mut self, value: u8, bits: u8) {
+        for bit in 0..bits {
+            let set = (value >> bit) & 1 == 1;
+            let byte = self.len / 8;
+            if byte >= self.data.len() {
+                self.data.push(0);
+            }
+            if set {
+                self.data[byte] |= 1 << (self.len % 8);
+            }
+            self.len += 1;
+        }
+    }
+
+    fn get(&self, index: usize, bits: u8) -> u8 {
+        let mut value = 0u8;
+        for bit in 0..bits {
+            let at = index * bits as usize + bit as usize;
+            if self.data[at / 8] >> (at % 8) & 1 == 1 {
+                value |= 1 << bit;
+            }
+        }
+        value
+    }
+
+    /// Drop the first `count` values, rewriting the remainder.
+    fn drop_front(&mut self, count: usize, bits: u8) {
+        let total = self.len / bits as usize;
+        let mut rebuilt = BitVec::new();
+        for index in count..total {
+            rebuilt.push(self.get(index, bits), bits);
+        }
+        *self = rebuilt;
+    }
+}
+
+/// Device-resident compressed KV pages.
+///
+/// Older cache positions are held as one codebook index per coordinate plus a
+/// full-precision norm, and decoded back to f32 when attention needs them. The
+/// codebook and rotation are shared across every page, so the per-position cost
+/// is `bits` per coordinate plus one norm rather than 32 bits per coordinate.
+///
+/// This is the storage half of KV compression. The quality half is settled
+/// separately by the round-trip gate; a store that decodes to the same values
+/// the in-place path produced inherits that result.
+#[derive(Debug)]
+pub struct KvPageStore {
+    quantizer: TurboQuant,
+    /// Codebook indices packed at `bits` each, with no padding between rows.
+    /// Packing is what makes the saving real: one byte per index would cap a
+    /// 4-bit code at 4x against f32 rather than the ~7.8x it should reach.
+    indices: BitVec,
+    /// Norm per stored position.
+    norms: Vec<f32>,
+    positions: usize,
+}
+
+impl KvPageStore {
+    pub fn new(dim: usize, bits: u8, seed: u64) -> Self {
+        Self {
+            quantizer: TurboQuant::new(dim, bits, seed),
+            indices: BitVec::new(),
+            norms: Vec::new(),
+            positions: 0,
+        }
+    }
+
+    pub fn positions(&self) -> usize {
+        self.positions
+    }
+
+    pub fn dim(&self) -> usize {
+        self.quantizer.dim()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.positions == 0
+    }
+
+    /// Bytes held, against what the same positions would cost as f32.
+    pub fn stored_bytes(&self) -> usize {
+        self.indices.bytes() + self.norms.len() * std::mem::size_of::<f32>()
+    }
+
+    pub fn uncompressed_bytes(&self) -> usize {
+        self.positions * self.quantizer.dim() * std::mem::size_of::<f32>()
+    }
+
+    /// Append `positions` rows, each `dim` values, compressing as they arrive.
+    pub fn push_rows(&mut self, rows: &[f32]) -> Result<(), String> {
+        let dim = self.quantizer.dim();
+        if rows.len() % dim != 0 {
+            return Err(format!("{} values is not a multiple of {dim}", rows.len()));
+        }
+        let bits = self.quantizer.bits();
+        for row in rows.chunks_exact(dim) {
+            let quantized = self.quantizer.quantize(row);
+            for index in &quantized.indices {
+                self.indices.push(*index, bits);
+            }
+            self.norms.push(quantized.norm);
+            self.positions += 1;
+        }
+        Ok(())
+    }
+
+    /// Decode every stored position back to f32, in insertion order.
+    pub fn decode(&self) -> Vec<f32> {
+        let dim = self.quantizer.dim();
+        let bits = self.quantizer.bits();
+        let mut out = Vec::with_capacity(self.positions * dim);
+        for position in 0..self.positions {
+            let start = position * dim;
+            let indices = (0..dim)
+                .map(|i| self.indices.get(start + i, bits))
+                .collect();
+            out.extend_from_slice(&self.quantizer.dequantize(&QuantizedVector {
+                indices,
+                norm: self.norms[position],
+            }));
+        }
+        out
+    }
+
+    /// Drop the oldest `count` positions, as a paging policy would on eviction.
+    pub fn drop_oldest(&mut self, count: usize) {
+        let count = count.min(self.positions);
+        let dim = self.quantizer.dim();
+        self.indices.drop_front(count * dim, self.quantizer.bits());
+        self.norms.drain(..count);
+        self.positions -= count;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +556,61 @@ mod tests {
 
         let zero = vec![0.0f32; 64];
         assert_eq!(quantizer.dequantize(&quantizer.quantize(&zero)), zero);
+    }
+
+    #[test]
+    fn page_store_round_trips_rows_in_order_and_reports_its_saving() {
+        let (dim, rows) = (128usize, 6usize);
+        let mut store = KvPageStore::new(dim, 4, 21);
+        let original: Vec<f32> = (0..rows)
+            .flat_map(|r| unit_vector(dim, 400 + r as u64))
+            .collect();
+        store.push_rows(&original).unwrap();
+        assert_eq!(store.positions(), rows);
+
+        let decoded = store.decode();
+        assert_eq!(decoded.len(), original.len());
+        for r in 0..rows {
+            let a = &original[r * dim..(r + 1) * dim];
+            let b = &decoded[r * dim..(r + 1) * dim];
+            let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
+            let na: f64 = a.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+            let nb: f64 = b.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+            // Rows must not be transposed or reordered: each decodes to itself.
+            assert!(dot / (na * nb) > 0.98, "row {r} cosine {}", dot / (na * nb));
+        }
+
+        // Indices are packed at 4 bits, so two share a byte, plus one norm.
+        assert_eq!(store.stored_bytes(), rows * dim / 2 + rows * 4);
+        assert_eq!(store.uncompressed_bytes(), rows * dim * 4);
+        let ratio = store.uncompressed_bytes() as f64 / store.stored_bytes() as f64;
+        assert!(ratio > 7.0, "compression ratio {ratio}");
+    }
+
+    #[test]
+    fn page_store_evicts_from_the_front() {
+        let dim = 64usize;
+        let mut store = KvPageStore::new(dim, 3, 5);
+        let rows: Vec<f32> = (0..4).flat_map(|r| unit_vector(dim, 700 + r as u64)).collect();
+        store.push_rows(&rows).unwrap();
+        let before = store.decode();
+
+        store.drop_oldest(2);
+        assert_eq!(store.positions(), 2);
+        let after = store.decode();
+        // What remains is exactly the tail of what was there.
+        assert_eq!(after, before[2 * dim..].to_vec());
+
+        store.drop_oldest(99);
+        assert!(store.is_empty());
+        assert!(store.decode().is_empty());
+    }
+
+    #[test]
+    fn page_store_rejects_a_ragged_push() {
+        let mut store = KvPageStore::new(64, 3, 1);
+        assert!(store.push_rows(&vec![0.0; 63]).is_err());
+        assert_eq!(store.positions(), 0);
     }
 
     #[test]

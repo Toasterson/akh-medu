@@ -73,3 +73,15 @@ Replace the in-place round trip with real paged storage: keep the recent window
 as f32 tensors and hold older pages as codebook indices plus norms, decoding on
 attention. That is where the 7.8x actually materializes, and this gate plus the
 bit-exact recent window are what protect it.
+
+`KvPageStore` in `src/nlu/turbo_quant.rs` is that storage, built and tested
+ahead of the integration. It appends rows, decodes them back in order, and
+evicts from the front as a paging policy would. Indices are **bit-packed** at
+exactly the code width rather than one byte each, which is what separates a real
+7.5x from the 4x an unpacked 4-bit index would give; a test asserts the ratio on
+a 128-dimensional row rather than trusting the arithmetic.
+
+What remains is wiring it into `AttentionState`: holding the recent window as
+tensors and the remainder as pages, and decoding pages on the attention path.
+The decode is a codebook gather, a norm scale and an inverse rotation, all of
+which are device primitives, so it need not return to the host.
