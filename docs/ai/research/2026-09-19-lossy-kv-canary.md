@@ -161,19 +161,43 @@ So with the current backend op set, a device-resident index array must be u32 or
 f32, both four bytes per value, and **saves no memory at all**. Device decode
 and compression cannot both be had by composing what exists.
 
+### Vulkan cannot save memory with `u8` at all
+
+Checking the allocator settles it. `VulkanDevice::alloc` computes
+`len.checked_mul(4)` — **four bytes per element for every dtype it supports**,
+F32, U32 and U8 alike. Reads and copies use `self.len * 4` to match. A `u8`
+tensor on Vulkan therefore occupies exactly what an `f32` tensor does.
+
+HIP is different: it sizes allocations by `dtype.size_in_bytes()`, so a `u8`
+tensor really is one byte per element there.
+
+So the two backends need different work, and only one of them is small:
+
+| Backend | Storage for `u8` | What compressed KV needs |
+| --- | --- | --- |
+| HIP | 1 byte per element | a `u8 -> u32` cast kernel |
+| Vulkan | **4 bytes per element** | a packed representation, several codes per `u32` word, plus an unpacking gather |
+
+On Vulkan no cast kernel helps, because the saving is lost in the allocator
+before any cast happens. Getting compression there means changing how the
+backend represents small integer tensors — packing four `u8` codes into each
+`u32` word and teaching the gather to unpack — which is a change to the storage
+model, not an added kernel.
+
 ### What this actually costs
 
 The work is not the three-op decode; that part is straightforward. It is a
 backend kernel:
 
-- **Minimum**: a `u8 -> u32` cast on HIP, and the same on Vulkan to avoid the
-  two-hop detour. That buys the 4x resident saving.
-- **Better**: an unpack kernel reading `bits`-wide codes directly into u32, which
-  keeps the full 7.5x and removes the unpacked intermediate entirely.
+- **HIP, small**: a `u8 -> u32` cast kernel alongside the existing
+  `cast_f32_u32`, buying the 4x resident saving. This is the tractable half.
+- **Vulkan, large**: packed small-integer storage and an unpacking gather,
+  because its allocator gives `u8` no saving to begin with.
 
-Both mean writing and gating a kernel per backend, in the same vendored code
-where `conv2d` is still missing. That is a materially larger piece of work than
-"move three ops onto the device", and the estimate should say so.
+So compressed resident KV is **achievable on HIP and not on Vulkan** without
+backend storage work. That asymmetry matters for planning: the feature could
+ship device-side on one backend while the other keeps the f32 cache, which the
+gating already allows since the path is off unless configured.
 
 Until then the paged path stays correct, gated off by default, and unusable for
 long context — which is where the earlier measurement already left it.
