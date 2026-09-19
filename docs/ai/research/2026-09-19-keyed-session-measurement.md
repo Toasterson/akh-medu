@@ -132,7 +132,14 @@ by context position rather than elapsed time or accumulated allocations, and it
 is not present on Vulkan over the same positions. The mechanism is **not
 identified**. Per-step decode timings would separate a periodic expensive step,
 such as a reallocation as the key/value cache grows, from a uniformly slower
-kernel selection above a size threshold; the probe does not record them yet.
+kernel selection above a size threshold.
+
+An attempt to get them from the completion's `check` callback **failed and was
+removed**. The callback is not a per-decode-step hook: a turn with 3 decode
+steps invoked it 20 times, so the intervals mix prefill chunks with sub-
+millisecond gaps and cannot be read as step times. Proper instrumentation needs
+a hook inside the decode loop of `quantized_qwen35`, reporting one duration per
+sampled position. Nothing here should be inferred from the discarded numbers.
 This belongs to the performance step, not to a feature slice, and it is the
 reason the earlier interleaved pass looked like a collapse: those requests all
 sat above 200 positions.

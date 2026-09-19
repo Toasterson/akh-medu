@@ -949,19 +949,32 @@ impl Config {
         let head_dim = usize_value("qwen35.attention.key_length")?;
         let value_dim = usize_value("qwen35.attention.value_length")?;
         let rope_dim = usize_value("qwen35.rope.dimension_count")?;
-        let rope_sections: Vec<usize> = match metadata.get("qwen35.rope.dimension_sections") {
-            Some(value) => value
-                .to_vec()
-                .map_err(|e| candle_core::Error::msg(format!("rope.dimension_sections: {e}")))?
-                .iter()
-                .map(|v| {
-                    v.to_u32()
-                        .map(|v| v as usize)
-                        .map_err(|e| candle_core::Error::msg(format!("rope section: {e}")))
-                })
-                .collect::<Result<Vec<usize>>>()?,
-            None => Vec::new(),
-        };
+        // Sections are written as signed integers by some writers and unsigned
+        // by others, so accept either. They are metadata for the image path and
+        // are unused by text inference: a shape we cannot read must not stop the
+        // model loading, it must stop us claiming to know the split.
+        let rope_sections: Vec<usize> = metadata
+            .get("qwen35.rope.dimension_sections")
+            .and_then(|value| value.to_vec().ok())
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|v| {
+                        v.to_u32()
+                            .map(|v| v as usize)
+                            .or_else(|_| v.to_i32().map(|v| v.max(0) as usize))
+                            .ok()
+                    })
+                    .collect::<Option<Vec<usize>>>()
+            })
+            .unwrap_or_default()
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "qwen35.rope.dimension_sections is present but unreadable; \
+                     multimodal position splitting will be unavailable"
+                );
+                Vec::new()
+            });
         let full_attention_interval = usize_value("qwen35.full_attention_interval")?;
         let state_size = usize_value("qwen35.ssm.state_size")?;
         let value_head_count = usize_value("qwen35.ssm.time_step_rank")?;
@@ -992,13 +1005,19 @@ impl Config {
         // pair of the rotary width. A mismatch means the split we would apply to
         // image positions does not describe this model.
         let section_pairs: usize = rope_sections.iter().sum();
-        if !rope_sections.is_empty() && section_pairs * 2 != rope_dim {
-            candle_core::bail!(
-                "Qwen35 rope sections {rope_sections:?} cover {section_pairs} pairs, \
-                 but the rotary width {rope_dim} needs {}",
-                rope_dim / 2
-            )
-        }
+        let rope_sections = if !rope_sections.is_empty() && section_pairs * 2 != rope_dim {
+            // Text inference does not consult the split, so a description we
+            // cannot trust must not stop the model loading. Discard it instead,
+            // so nothing later mistakes it for a usable multimodal layout.
+            tracing::warn!(
+                sections = ?rope_sections,
+                rope_dim,
+                "rope sections do not cover the rotary width; ignoring them"
+            );
+            Vec::new()
+        } else {
+            rope_sections
+        };
         if rope_dim == 0 || !rope_dim.is_multiple_of(2) || rope_dim > head_dim {
             candle_core::bail!(
                 "invalid Qwen35 rotary width {rope_dim} for attention head width {head_dim}"
@@ -2153,6 +2172,17 @@ pub(crate) mod tests {
             ("qwen35.attention.key_length".into(), U32(256)),
             ("qwen35.attention.value_length".into(), U32(256)),
             ("qwen35.rope.dimension_count".into(), U32(64)),
+            // Written as signed integers, as the real artifact does; the
+            // loader must accept that rather than refusing to load the model.
+            (
+                "qwen35.rope.dimension_sections".into(),
+                gguf_file::Value::Array(vec![
+                    gguf_file::Value::I32(11),
+                    gguf_file::Value::I32(11),
+                    gguf_file::Value::I32(10),
+                    gguf_file::Value::I32(0),
+                ]),
+            ),
             ("qwen35.rope.freq_base".into(), F32(10_000_000.0)),
             ("qwen35.attention.layer_norm_rms_epsilon".into(), F32(1e-6)),
             ("qwen35.full_attention_interval".into(), U32(4)),
