@@ -139,17 +139,41 @@ available on both. So the decode is three device operations per slot:
 3. `matmul` by the rotation, which applies the inverse rotation because
    `(Pi^T y)^T = y^T Pi`.
 
-The constraint that shapes the design is the index dtype. Vulkan needs u32, and
-**u32 indices are four bytes per value, exactly what f32 costs** — storing them
-that way forfeits the entire saving. The resident form must therefore be `u8`,
-converted to u32 per decode, which keeps residency at one byte per value for a
-4x saving against f32 and makes the u32 copy a transient rather than a
-resident cost.
+The constraint that shapes the design is the index dtype, and checking it
+changed the answer. Vulkan's `index_select` needs u32, and **u32 indices are
+four bytes per value, exactly what f32 costs** — storing them that way forfeits
+the entire saving.
 
-That 4x is less than the 7.5x bit-packing achieves, and the gap is the price of
-a gather that cannot read packed bits. A device-side unpack would recover it and
-is the more ambitious version.
+The obvious fix, storing `u8` and converting per decode, **does not work on
+either backend**:
 
-Before building it, confirm `to_dtype` from u8 to u32 exists on both backends.
-Three ops were already missing today — `conv2d`, `softmax_last_dim` and unary
-`gelu` — so assuming availability is not safe here.
+| Cast | HIP | Vulkan |
+| --- | --- | --- |
+| `u8 -> u32` | absent | absent |
+| `u8 -> f32` | absent | present |
+| `f32 -> u32` | present | present |
+
+HIP implements no `u8` casts at all; its only integer casts are `f32<->u32` and
+`f32<->i64`. Vulkan could reach u32 in two hops through f32, but HIP cannot
+reach it from u8 by any route.
+
+So with the current backend op set, a device-resident index array must be u32 or
+f32, both four bytes per value, and **saves no memory at all**. Device decode
+and compression cannot both be had by composing what exists.
+
+### What this actually costs
+
+The work is not the three-op decode; that part is straightforward. It is a
+backend kernel:
+
+- **Minimum**: a `u8 -> u32` cast on HIP, and the same on Vulkan to avoid the
+  two-hop detour. That buys the 4x resident saving.
+- **Better**: an unpack kernel reading `bits`-wide codes directly into u32, which
+  keeps the full 7.5x and removes the unpacked intermediate entirely.
+
+Both mean writing and gating a kernel per backend, in the same vendored code
+where `conv2d` is still missing. That is a materially larger piece of work than
+"move three ops onto the device", and the estimate should say so.
+
+Until then the paged path stays correct, gated off by default, and unusable for
+long context — which is where the earlier measurement already left it.
