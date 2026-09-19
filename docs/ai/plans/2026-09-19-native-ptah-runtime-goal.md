@@ -104,7 +104,14 @@ hold is superseded by what follows; the ledger
 
 ### Not started
 
-8. **Reproducible release bundle.**
+8. **Reproducible release bundle — identity half done.** `scripts/session-platform/release-manifest.py` records what a build
+   consists of: each binary's digest, the kernel libraries that binary
+   actually loads (read back from the path baked into it, since the tree holds
+   six identically named candidates), and the pinned model artifacts. It
+   refuses a dirty tree. What remains is the bundle itself: copying libraries
+   beside the executables, recording ROCm and driver versions, and verifying a
+   relocated copy runs. See
+   `../research/2026-09-19-release-manifest.md`.
 9. **Homelab canary and cutover.** Still needs shared services; ask first.
 
 Also open: **Vulkan cannot benefit from KV compression** without packed
