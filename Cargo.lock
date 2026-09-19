@@ -395,6 +395,7 @@ dependencies = [
  "tracing",
  "uuid",
  "walkdir",
+ "zstd 0.13.3",
 ]
 
 [[package]]
