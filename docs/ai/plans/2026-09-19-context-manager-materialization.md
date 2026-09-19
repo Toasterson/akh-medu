@@ -200,3 +200,54 @@ become the owner of record.
 5. Acceptance: the five-daemon canary's `final_dropped_messages` and
    `max_materialized_spans` must still hold on both devices, and a dropped
    safety-pinned span must fail the turn rather than pass silently.
+
+## Second blocker: the seam's episode model cannot represent a native turn
+
+Step 2 needs `EpisodeState.conversation`, which is
+`Option<&ConversationState>`. That type models discourse as a ring of
+`ConversationTurn { speaker, text, resolved_entities, timestamp }`, and
+`CompactingManager` assembles by re-rendering those turns newest-first.
+
+A native session turn is not that shape. `akhsessd` carries an OpenAI-style
+message array containing, besides user and assistant text:
+
+- assistant messages holding `tool_calls`, and `tool` messages carrying
+  `tool_call_id` and results — every effective tool call traverses the session
+  broker, so this traffic is the substance of an agentic turn;
+- `system` messages that are pinned instructions, distinguished from
+- `system` messages marked `neural_recall`, which belong to the following user
+  turn and are materialized recall rather than instruction.
+
+Converting that array into speaker/text turns silently discards tool traffic and
+flattens the recall/instruction distinction that `native_window` currently
+respects. A prompt assembled that way would drop tool calls from native turns —
+a correctness regression disguised as a refactor. `resolved_entities` also has no
+source on the session side, so entity-aware selection would quietly degrade to
+recency-only for native turns while still reporting itself as the same strategy.
+
+So making the core authoritative requires the episode model to represent a
+native turn first. Two ways:
+
+- **Extend `EpisodeState`** with an optional message-array view, and give the
+  managers a path that selects over messages rather than re-rendering turns.
+  Keeps one strategy; needs each shipped manager to handle both inputs.
+- **Add a message-native strategy** implementing `ContextManager` over the
+  message array, reusing `SafetyEnforced` and the `ContextWindowStats`
+  accounting. One trait, two episode shapes, no lossy conversion — but
+  `CompactingManager`'s summarization would not apply to native turns until it
+  learns the message shape.
+
+The second is closer to what `native_window` already does correctly and keeps
+the existing managers untouched; the first is better if native and agentic turns
+should share compaction behaviour. Deciding needs an answer to whether native
+turns must be compacted, or only selected over, which is the same question the
+digest shape raised and is still unanswered.
+
+## State of this slice
+
+Step 1 shipped and is proven by the canary. Steps 2-4 are blocked on the episode
+model above, not on wire plumbing. Three facts now constrain the design and are
+worth not rediscovering: assembly needs the `Engine` for safety-pin
+classification, `EpisodeState` has no message-array representation, and the
+default strategy rewrites content. No further code should land here until the
+compaction question is answered.
