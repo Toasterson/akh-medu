@@ -66,6 +66,8 @@ spec:
     storageClass: zfs-postgres
     size: 5Gi
 
+  # LAN endpoint: harvest-pg-lb.yaml pins 192.168.1.60 from homelab-pool-2.
+
   resources:
     requests:
       memory: "512Mi"

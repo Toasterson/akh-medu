@@ -62,14 +62,31 @@ store rather than the registry; the `akh-builder` (docker-container) builder
 pushes correctly. Do not run a second `docker push` for the same tag while a
 buildx push is in flight — the registry returns HTTP 500.
 
-### Not yet addressed: no LAN endpoint
+### LAN endpoint: `homelab-pool-2`
 
-The Cilium pool `homelab-pool` (192.168.1.11-19) is **fully allocated**, so
-`harvest-pg` has no LoadBalancer. In-cluster consumers (derivation worker, read
-MCP server) are fine; **harvesters on external hosts are not**. Either widen the
-pool in `infrastructure/cilium-manifests.yaml` or free an address, then add a
-`harvest-pg-lan` Service modelled on `akh-pg-lb.yaml`. Widening a LAN range risks
-conflicts with addresses outside the cluster's knowledge, so it was left alone.
+`homelab-pool` (192.168.1.11-19) is fully allocated, so a second pool
+`homelab-pool-2` (192.168.1.60-70) was added to
+`infrastructure/cilium-manifests.yaml`, and `harvest-pg-lb.yaml` pins
+**192.168.1.60**.
+
+Range verified free on 2026-09-19 by ping sweep plus ARP — nothing answered on
+`.60`-`.70` on this L2 segment (all entries `INCOMPLETE`). That cannot prove the
+router will not later lease them, so **keep this range outside the DHCP scope**.
+
+### Blocked: the cluster's GitOps stack is unhealthy
+
+The manifests are committed/staged and validate (`kubectl kustomize`,
+`kubectl apply --dry-run=server`), but **Flux cannot apply them**.
+`source-controller` is crash-looping — 31 restarts, readiness probe refused on
+:9090, exit code 2 (not OOM; it has a 1Gi limit). While it is down, every
+Kustomization fails artifact download with
+`dial tcp 10.99.141.29:80: connect: no route to host`, so `infrastructure`
+flaps between ready and not-ready and everything depending on it — including
+`cloudnativepg` — never applies.
+
+This predates and is unrelated to the transcript-harvest change: the same error
+hits `akh-medu`, `anima`, `cloud`, `external-secrets`, `forgejo` and others.
+`harvest-pg` will reconcile on its own once source-controller is stable.
 
 ## Open question this reopens
 
