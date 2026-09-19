@@ -65,8 +65,12 @@ the chronological evidence further down is retained as written.
   tensors), so that step drops out. Dynamic-resolution preprocessing is
   resolved against llama.cpp mtmd and implemented with six CPU tests. The tower
   forward is implemented and runs the real projector end to end on CPU,
-  producing finite embeddings at the language model's 5120 width; it is not yet
-  numerically validated against a reference, nor run on device. See
+  producing finite embeddings at the language model's 5120 width, and **runs on
+  CPU, HIP and Vulkan** agreeing within 8.1e-06 absolute. Getting it onto the
+  devices required replacing `conv2d`, which neither backend implements, with an
+  equivalent unfold plus matmul, and dispatching softmax and GELU per device.
+  Still not numerically validated against a reference. See
+  [device runs](../research/2026-09-19-vision-projector-devices.md) and
   [vision scope](2026-09-19-native-vision-scope.md).
 - **Long-context memory quantified** (2026-09-19): only 16 of 64 target blocks
   hold a growing KV cache (`full_attention_interval = 4`); the other 48 are

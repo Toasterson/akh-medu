@@ -453,35 +453,41 @@ impl VisionTower {
         }
         let (grid_h, grid_w) = (height / patch, width / patch);
 
-        // Patch embedding. Every temporal weight sees the same still frame, so
-        // their contributions sum; a video path would feed distinct frames.
-        let input = pixels
-            .unsqueeze(0)
-            .map_err(|e| map(e, "batch"))?
+        // Patch embedding as unfold plus matmul rather than a convolution.
+        // Kernel and stride are both the patch size, so the two are identical,
+        // and neither the HIP nor the Vulkan backend implements conv2d. This
+        // keeps the tower on matmul, which both devices already support.
+        let patch_values = 3 * patch * patch;
+        let unfolded = pixels
+            .reshape((3, grid_h, patch, grid_w, patch))
+            .map_err(|e| map(e, "unfold reshape"))?
+            // (grid_h, grid_w, channel, patch_row, patch_col) so each patch's
+            // values are contiguous in the same order as the kernel's.
+            .permute((1, 3, 0, 2, 4))
+            .map_err(|e| map(e, "unfold permute"))?
             .contiguous()
-            .map_err(|e| map(e, "contiguous"))?;
+            .map_err(|e| map(e, "unfold contiguous"))?
+            .reshape((grid_h * grid_w, patch_values))
+            .map_err(|e| map(e, "unfold flatten"))?;
+
+        // Every temporal weight sees the same still frame, so their
+        // contributions sum; a video path would feed distinct frames.
         let mut embedded: Option<Tensor> = None;
         for weight in &self.patch_weights {
-            let conv = input
-                .conv2d(weight, 0, patch, 1, 1)
-                .map_err(|e| map(e, "patch conv"))?;
+            let kernel = weight
+                .reshape((self.config.embedding_length, patch_values))
+                .map_err(|e| map(e, "kernel reshape"))?;
+            let part = unfolded
+                .matmul(&kernel.t().map_err(|e| map(e, "kernel transpose"))?
+                    .contiguous()
+                    .map_err(|e| map(e, "kernel contiguous"))?)
+                .map_err(|e| map(e, "patch projection"))?;
             embedded = Some(match embedded {
-                None => conv,
-                Some(sum) => (sum + conv).map_err(|e| map(e, "temporal sum"))?,
+                None => part,
+                Some(sum) => (sum + part).map_err(|e| map(e, "temporal sum"))?,
             });
         }
-        let embedded = embedded.ok_or_else(|| fail("projector has no patch weights".into()))?;
-
-        // (1, width, gh, gw) -> (patches, width)
-        let hidden = embedded
-            .squeeze(0)
-            .map_err(|e| map(e, "squeeze"))?
-            .flatten_from(1)
-            .map_err(|e| map(e, "flatten grid"))?
-            .t()
-            .map_err(|e| map(e, "transpose"))?
-            .contiguous()
-            .map_err(|e| map(e, "contiguous patches"))?;
+        let hidden = embedded.ok_or_else(|| fail("projector has no patch weights".into()))?;
         let hidden = hidden
             .broadcast_add(&self.patch_bias)
             .map_err(|e| map(e, "patch bias"))?;
@@ -504,7 +510,7 @@ impl VisionTower {
         let merged = self.spatial_merge(&hidden, grid_h, grid_w)?;
         let projected = linear(&merged, &self.mm0_weight, &self.mm0_bias)
             .map_err(|e| map(e, "merger first layer"))?;
-        let projected = projected.gelu().map_err(|e| map(e, "merger gelu"))?;
+        let projected = gelu(&projected).map_err(|e| map(e, "merger gelu"))?;
         linear(&projected, &self.mm2_weight, &self.mm2_bias)
             .map_err(|e| map(e, "merger second layer"))
     }
@@ -540,7 +546,7 @@ impl VisionTower {
             .matmul(&key.t().map_err(|e| map(e, "key transpose"))?)
             .map_err(|e| map(e, "scores"))?;
         let scores = (scores / (head_dim as f64).sqrt()).map_err(|e| map(e, "scale"))?;
-        let weights = candle_nn::ops::softmax_last_dim(&scores).map_err(|e| map(e, "softmax"))?;
+        let weights = softmax_last_dim(&scores).map_err(|e| map(e, "softmax"))?;
         let attended = weights
             .matmul(&value)
             .map_err(|e| map(e, "attend"))?
@@ -556,7 +562,7 @@ impl VisionTower {
             .map_err(|e| map(e, "ln2"))?;
         let up = linear(&normed, &block.up_weight, &block.up_bias)
             .map_err(|e| map(e, "ffn up"))?;
-        let activated = up.gelu().map_err(|e| map(e, "ffn gelu"))?;
+        let activated = gelu(&up).map_err(|e| map(e, "ffn gelu"))?;
         let down = linear(&activated, &block.down_weight, &block.down_bias)
             .map_err(|e| map(e, "ffn down"))?;
         (hidden + down).map_err(|e| map(e, "ffn residual"))
@@ -630,6 +636,41 @@ impl VisionTower {
             .map_err(|e| map(e, "merge contiguous"))?
             .reshape(((grid_h / merge) * (grid_w / merge), merge * merge * width))
             .map_err(|e| map(e, "merge flatten"))
+    }
+}
+
+/// GELU, tanh approximation, on whichever device holds the tensor.
+///
+/// Vulkan has no unary gelu, so it is composed from primitives the backend does
+/// implement. Using `tanh(z) = 2*sigmoid(2z) - 1`, the tanh-approximate GELU
+/// `0.5*x*(1 + tanh(u))` becomes `x * sigmoid(2u)`, which needs only exp,
+/// reciprocal and arithmetic.
+fn gelu(x: &Tensor) -> candle_core::Result<Tensor> {
+    #[cfg(feature = "vulkan")]
+    if x.device().is_vulkan() {
+        const SQRT_2_OVER_PI: f64 = 0.797_884_560_802_865_4;
+        let cubic = (x * 0.044_715)?.mul(&x.sqr()?)?;
+        let inner = ((x + cubic)? * (2.0 * SQRT_2_OVER_PI))?;
+        let sigmoid = (inner.neg()?.exp()? + 1.0)?.recip()?;
+        return x.mul(&sigmoid);
+    }
+    x.gelu()
+}
+
+/// Softmax over the last dimension, on whichever device holds the tensor.
+///
+/// The fused `softmax_last_dim` custom op is CPU-only here, so devices use the
+/// composed form built from primitives they do implement. This mirrors what
+/// `quantized_qwen35` already does for the language model's attention.
+fn softmax_last_dim(x: &Tensor) -> candle_core::Result<Tensor> {
+    #[cfg(feature = "vulkan")]
+    if x.device().is_vulkan() {
+        return candle_nn::ops::softmax(x, candle_core::D::Minus1);
+    }
+    if x.device().is_cuda() {
+        candle_nn::ops::softmax(x, candle_core::D::Minus1)
+    } else {
+        candle_nn::ops::softmax_last_dim(x)
     }
 }
 
