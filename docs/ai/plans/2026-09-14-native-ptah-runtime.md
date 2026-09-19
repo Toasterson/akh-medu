@@ -76,6 +76,15 @@ the chronological evidence further down is retained as written.
   Quality is unmeasured and a lossy KV path needs a different acceptance gate
   than the bit-exact one. See
   [memory model](../research/2026-09-19-long-context-memory-model.md).
+- **TurboQuant implemented and measured** (2026-09-19): arXiv:2504.19874
+  Algorithm 1, validated against the paper's published centroids and distortion
+  rates. On this model's real KV it reaches mean cosine 0.9954 at 4 bits and
+  0.9829 at 3, treating keys and values identically, and **at 2 bits already
+  beats PolarQuant at 3**. At 4 bits that is 7.8x compression, putting the
+  advertised 262,144-token context within reach of this card for the first time.
+  Not yet wired into `AttentionState`; activation needs an end-to-end quality
+  gate and a throughput measurement, and the dense rotation is the known cost.
+  See [TurboQuant](../research/2026-09-19-turboquant-kv.md).
 - **KV quantization quality measured, and it fails** (2026-09-19): PolarQuant
   round-trips this model's real KV at mean cosine 0.904 for keys and 0.708 for
   values, worst case -0.371, against a project gate of 0.9999. The helpers must

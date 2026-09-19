@@ -2246,6 +2246,45 @@ impl CandleBackend {
     /// not, so they are reported separately rather than pooled.
     #[cfg(feature = "candle-backend")]
     pub fn kv_quantization_report(&self, seed: u64) -> NluResult<Vec<KvLayerQuality>> {
+        self.kv_report_with(&move |values| {
+            let mean = values.iter().map(|v| *v as f64).sum::<f64>() / values.len() as f64;
+            let variance = values
+                .iter()
+                .map(|v| (*v as f64 - mean).powi(2))
+                .sum::<f64>()
+                / values.len() as f64;
+            Self::decompress_kv_vector(
+                &Self::compress_kv_vector(values, seed),
+                seed,
+                variance.sqrt() as f32,
+            )
+        })
+    }
+
+    /// The same report for TurboQuant at a chosen bit-width.
+    ///
+    /// The rotation and codebook are built once for the head dimension and
+    /// reused across every vector, which is how an online quantizer would run.
+    #[cfg(feature = "candle-backend")]
+    pub fn kv_turboquant_report(&self, seed: u64, bits: u8) -> NluResult<Vec<KvLayerQuality>> {
+        use std::cell::RefCell;
+        // Head dimension is constant across layers, but build lazily so the
+        // dimension comes from the tensors rather than an assumption.
+        let quantizer: RefCell<Option<crate::nlu::turbo_quant::TurboQuant>> = RefCell::new(None);
+        self.kv_report_with(&move |values| {
+            let mut slot = quantizer.borrow_mut();
+            let turbo = slot.get_or_insert_with(|| {
+                crate::nlu::turbo_quant::TurboQuant::new(values.len(), bits, seed)
+            });
+            turbo.dequantize(&turbo.quantize(values))
+        })
+    }
+
+    #[cfg(feature = "candle-backend")]
+    fn kv_report_with(
+        &self,
+        round_trip: &dyn Fn(&[f32]) -> Vec<f32>,
+    ) -> NluResult<Vec<KvLayerQuality>> {
         let LoadedModel::Qwen35(model) = &self.model else {
             return Err(NluError::ModelLoadFailed {
                 reason: "KV quantization report requires the Qwen35 family".into(),
@@ -2258,8 +2297,8 @@ impl CandleBackend {
                 positions: key.dim(2).map_err(|e| NluError::ModelLoadFailed {
                     reason: format!("kv state shape: {e}"),
                 })?,
-                key: measure_kv_tensor(key, seed)?,
-                value: measure_kv_tensor(value, seed)?,
+                key: measure_kv_tensor(key, round_trip)?,
+                value: measure_kv_tensor(value, round_trip)?,
             });
         }
         Ok(report)
@@ -4217,7 +4256,10 @@ pub struct KvVectorQuality {
 /// KV tensor and summarize the error. A zero vector is skipped rather than
 /// scored, since cosine is undefined there and it carries no information.
 #[cfg(feature = "candle-backend")]
-fn measure_kv_tensor(tensor: &Tensor, seed: u64) -> NluResult<KvVectorQuality> {
+fn measure_kv_tensor(
+    tensor: &Tensor,
+    round_trip: &dyn Fn(&[f32]) -> Vec<f32>,
+) -> NluResult<KvVectorQuality> {
     let shape = |e: candle_core::Error| NluError::ModelLoadFailed {
         reason: format!("kv state read: {e}"),
     };
@@ -4242,17 +4284,7 @@ fn measure_kv_tensor(tensor: &Tensor, seed: u64) -> NluResult<KvVectorQuality> {
             if norm == 0.0 {
                 continue;
             }
-            let mean = original.iter().map(|v| *v as f64).sum::<f64>() / dim as f64;
-            let variance = original
-                .iter()
-                .map(|v| (*v as f64 - mean).powi(2))
-                .sum::<f64>()
-                / dim as f64;
-            let restored = CandleBackend::decompress_kv_vector(
-                &CandleBackend::compress_kv_vector(original, seed),
-                seed,
-                variance.sqrt() as f32,
-            );
+            let restored = round_trip(original);
             let mut dot = 0.0f64;
             let mut restored_norm = 0.0f64;
             let mut diff = 0.0f64;

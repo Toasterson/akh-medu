@@ -55,6 +55,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         /// Report PolarQuant round-trip error on the resident KV cache.
         #[arg(long)]
         kv_quality: bool,
+        /// Also report TurboQuant at each of these bit-widths.
+        #[arg(long, value_delimiter = ',')]
+        kv_turboquant_bits: Vec<u8>,
         #[arg(long, default_value_t = 10)]
         idle_samples: usize,
         #[arg(long, default_value_t = 10)]
@@ -142,9 +145,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let report = backend.kv_quantization_report(0x5eed)?;
         println!(
             "{}",
-            serde_json::json!({"phase":"kv_quantization","prompt_tokens":reply.prompt_tokens,
+            serde_json::json!({"phase":"kv_quantization","quantizer":"polarquant","bits":3,
+                "prompt_tokens":reply.prompt_tokens,
                 "decode_steps":reply.decode_steps,"layers":report})
         );
+        for bits in &args.kv_turboquant_bits {
+            let report = backend.kv_turboquant_report(0x5eed, *bits)?;
+            println!(
+                "{}",
+                serde_json::json!({"phase":"kv_quantization","quantizer":"turboquant","bits":bits,
+                    "prompt_tokens":reply.prompt_tokens,
+                    "decode_steps":reply.decode_steps,"layers":report})
+            );
+        }
     }
     if args.keyed_benchmark {
         keyed_bench::run(
