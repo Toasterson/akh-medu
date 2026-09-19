@@ -74,8 +74,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             default_value = "<|im_start|>user\nSay hello in one short sentence.<|im_end|>\n<|im_start|>assistant\n"
         )]
         prompt: String,
+        /// Read the prompt from a file instead, for prompts too large to pass
+        /// as an argument. Overrides `--prompt`.
+        #[arg(long)]
+        prompt_file: Option<PathBuf>,
     }
-    let args = Args::parse();
+    let mut args = Args::parse();
+    if let Some(path) = args.prompt_file.clone() {
+        args.prompt = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading prompt file {}: {e}", path.display()))?;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
@@ -144,6 +152,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "uncompressed_bytes":residency.uncompressed_bytes,
                 "ratio":residency.uncompressed_bytes as f64 / residency.stored_bytes as f64,
                 "fidelity":residency.fidelity})
+        );
+    }
+    // Device memory after the cache has grown, against the figure the gate
+    // projected. The difference is what the reserve actually has to cover.
+    if let Some(memory) = backend.device_memory() {
+        println!(
+            "{}",
+            serde_json::json!({"phase":"memory_after_generation","free":memory.free,
+                "total":memory.total,"source":memory.source,
+                "memory_bound_context_limit":backend.memory_bound_context_limit()})
         );
     }
     if args.continuation {

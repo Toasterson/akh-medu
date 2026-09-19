@@ -2270,13 +2270,37 @@ impl CandleBackend {
     /// which is the honest answer rather than a guess.
     #[cfg(feature = "candle-backend")]
     pub fn memory_bound_context_limit(&self) -> Option<usize> {
-        let per_token = self.kv_bytes_per_token()?;
+        let per_token = self.effective_bytes_per_token()?;
         if per_token == 0 {
             return None;
         }
         let memory = self.device_memory()?;
         let budget = memory.free.saturating_sub(kv_headroom_bytes());
         Some((budget / per_token).min(self.context_length))
+    }
+
+    /// Device bytes a context token really costs, not just its KV.
+    ///
+    /// Sizing on KV alone was wrong by more than 4x. A 10,417-token request
+    /// consumed 5.44 GiB, of which KV is 1.30 GiB: the rest is prefill
+    /// intermediates and allocator blocks that are not returned between
+    /// requests. Attention scores alone scale with chunk x positions, so the
+    /// overhead grows with context and no fixed reserve can absorb it.
+    ///
+    /// The multiplier is **empirical and from a single measurement** on one
+    /// model and device - see the long-context gate research note. It admits the
+    /// largest request measured to work (10,417 tokens) and refuses the smallest
+    /// measured to fail (20,833). `AKH_CANDLE_CONTEXT_COST_MULTIPLIER` overrides
+    /// it, which is how a different model or card gets a right answer here.
+    #[cfg(feature = "candle-backend")]
+    pub fn effective_bytes_per_token(&self) -> Option<usize> {
+        let kv = self.kv_bytes_per_token()?;
+        let multiplier = std::env::var("AKH_CANDLE_CONTEXT_COST_MULTIPLIER")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| *value >= 1.0)
+            .unwrap_or(DEFAULT_CONTEXT_COST_MULTIPLIER);
+        Some((kv as f64 * multiplier) as usize)
     }
 
     /// Snapshot everything the memory gate needs, borrowing nothing afterwards.
@@ -2289,7 +2313,8 @@ impl CandleBackend {
         ContextAdmission {
             fits_tokens: self.memory_bound_context_limit(),
             declared_window: self.context_length,
-            per_token_bytes: self.kv_bytes_per_token().unwrap_or(0),
+            per_token_bytes: self.effective_bytes_per_token().unwrap_or(0),
+            kv_bytes_per_token: self.kv_bytes_per_token().unwrap_or(0),
             available_bytes: self.device_memory().map_or(0, |memory| memory.free),
             headroom_bytes: kv_headroom_bytes(),
         }
@@ -4343,7 +4368,10 @@ struct ContextAdmission {
     /// stands down rather than inventing a limit.
     fits_tokens: Option<usize>,
     declared_window: usize,
+    /// Total device cost of a token, KV plus prefill overhead.
     per_token_bytes: usize,
+    /// The KV share of it, reported so the two are never confused again.
+    kv_bytes_per_token: usize,
     available_bytes: usize,
     headroom_bytes: usize,
 }
@@ -4368,6 +4396,7 @@ impl ContextAdmission {
             declared_window: self.declared_window,
             fits_tokens,
             per_token_bytes: self.per_token_bytes,
+            kv_bytes_per_token: self.kv_bytes_per_token,
             needed_bytes: self.per_token_bytes.saturating_mul(requested),
             available_bytes: self.available_bytes,
             headroom_bytes: self.headroom_bytes,
@@ -4393,6 +4422,14 @@ pub struct DeviceMemory {
 /// Two gibibytes by default, overridable because the right reserve depends on
 /// batch and prompt shape and no single constant is right for all of them.
 #[cfg(feature = "candle-backend")]
+/// Total device cost of a context token as a multiple of its KV.
+///
+/// Measured once, on the pinned Qwen3.8 artifact on a 24 GiB card: 547.5 KiB
+/// per token against 128 KiB of KV. Not derived from the architecture, so a
+/// different model or device needs its own figure via the environment override.
+#[cfg(feature = "candle-backend")]
+const DEFAULT_CONTEXT_COST_MULTIPLIER: f64 = 4.5;
+
 fn kv_headroom_bytes() -> usize {
     const DEFAULT: usize = 2 * 1024 * 1024 * 1024;
     std::env::var("AKH_CANDLE_KV_HEADROOM_BYTES")

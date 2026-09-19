@@ -76,16 +76,74 @@ recommending compression without that would quietly undo
 on the rendered help text rather than the struct's fields, because the rendered
 text is the thing that has to be right.
 
-## Limits
+## The soak falsified the gate above
 
-- The 2 GiB reserve is a judgement call, overridable with
-  `AKH_CANDLE_KV_HEADROOM_BYTES`. Prefill intermediates scale with prompt shape
-  and no single constant is right for all of them. **It has not been calibrated**:
-  no measurement here establishes that 2 GiB is enough at 40,000 tokens, only
-  that the arithmetic and the refusal work.
-- The limits above were read at one moment with one desktop state. Free memory
-  moves; the gate reads it per request, which is correct, but means the limit a
+That last caveat was the important one. The soak ran, and the gate as first
+committed **admitted requests that then failed on allocation** - exactly what it
+was built to prevent. Evidence:
+[`ctxsoak-20260919-hip-v1`](../../../experiments/native-recall/ctxsoak-20260919-hip-v1).
+
+| prompt | tokens | outcome under the first gate |
+| --- | --- | --- |
+| 8k | 10,417 | round 0 succeeded; identical round 1 refused, limit 48,672 -> 4,112 |
+| 16k | 20,833 | **admitted, then `hipMalloc(235929600) failed`** |
+| 32k | ~41,000 | **admitted, then `hipMalloc(240648192) failed`** |
+| 48k | 62,433 | correctly refused |
+| 64k | 83,233 | correctly refused |
+
+### KV is 23% of what a token costs
+
+A 10,417-token request consumed **5.44 GiB** of device memory. Its KV is 1.30
+GiB. The remaining 4.14 GiB is prefill working space and allocator blocks not
+returned between requests - 547.5 KiB per token in total against 128 KiB of KV,
+a factor of **4.28**.
+
+Attention scores alone scale with chunk x positions, so this overhead grows with
+context. No fixed reserve can absorb a term that grows with the quantity being
+gated, which is why the 2 GiB headroom failed rather than merely being too small.
+
+The gate now sizes on total cost. The multiplier is **empirical, from a single
+measurement**: 4.5, chosen to admit the largest request measured to work and
+refuse the smallest measured to fail. It is not derived from the architecture.
+`AKH_CANDLE_CONTEXT_COST_MULTIPLIER` overrides it, which is how a different model
+or card gets a correct answer rather than this one's.
+
+### After the fix
+
+| case | tokens | result |
+| --- | --- | --- |
+| 16k prompt | 20,833 | refused cleanly, `fits_tokens: 10816`, nothing allocated |
+| 8k prompt | 10,417 | admitted, completed in 285.9 s |
+
+The serviceable context has now moved twice, both times downward, as the
+measurement got more honest:
+
+| basis | limit |
+| --- | --- |
+| declared window | 262,144 |
+| KV-only gate | 48,672 |
+| measured total cost | **10,816** |
+
+Four percent of what the artifact advertises.
+
+## Unresolved
+
+- **The gate refuses a repeat of a request that just succeeded.** After the
+  10,417-token run, driver-free memory reads 2.69 GiB and the limit collapses to
+  913 tokens, because `hipMemGetInfo` excludes the HIP allocator's retained
+  cache - memory that is reusable. `release_cached_memory` exists but its own
+  contract restricts it to a serialized model-unload boundary, never between
+  turns, so calling it from the gate would trade a wrong refusal for a possible
+  correctness fault. This needs a real answer: either a pool-aware free figure or
+  a supported reclaim point.
+- **The multiplier rests on one measurement, one model, one card.** It brackets
+  the two data points available and nothing more. A second model would need its
+  own, and there is no mechanism that would notice if it were wrong other than
+  another soak.
+- **Prefill at length is the real limit before memory is.** 10,417 tokens took
+  282-298 s to first token, about 35 tokens/s, against 0.86 s for a 15-token
+  prompt. Whatever the memory gate permits, a context of this size is not
+  currently usable interactively. That is an item-7 finding that arrived
+  unbidden and is not addressed here.
+- The limits are read per request against live free memory, so the figure a
   caller sees is not a constant.
-- Nothing here was tested at a context anywhere near the limit. The largest
-  prompt exercised is 15 tokens. That the gate admits correctly at 40,000 tokens
-  is **unverified**, and a long-context soak is the obvious next measurement.

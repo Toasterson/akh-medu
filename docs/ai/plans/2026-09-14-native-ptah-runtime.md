@@ -240,9 +240,39 @@ the chronological evidence further down is retained as written.
   pass because my grep excluded the generation lines, while generation had in
   fact completed with exit 0. The gate was on `generate_inner` and `prefill`,
   neither of which serves completions. Absence of expected output is not evidence
-  of rejection. All four admission points are now covered. **Uncalibrated and
-  untested near the limit**: the 2 GiB reserve is a judgement call and the largest
-  prompt exercised is 15 tokens. See
+  of rejection. All four admission points are now covered.
+
+- **The soak falsified that gate: KV is 23% of what a token costs**
+  (2026-09-19). The gate above **admitted requests that then failed on
+  allocation** - the exact failure it was built to prevent. A 20,833-token prompt
+  was admitted and died on `hipMalloc(235929600)`; so was a ~41,000-token one.
+  48k and 64k were refused correctly, and every earlier test used 15-token
+  prompts, which pass under both the wrong and the right limit.
+
+  A 10,417-token request consumes **5.44 GiB**, of which KV is 1.30 GiB:
+  **547.5 KiB per token against 128 KiB of KV, a factor of 4.28**. Attention
+  scores scale with chunk x positions, so the overhead grows with context and no
+  fixed reserve can absorb it. The gate now sizes on total cost, with an
+  **empirical single-measurement** multiplier of 4.5 that admits the largest
+  request measured to work and refuses the smallest measured to fail;
+  `AKH_CANDLE_CONTEXT_COST_MULTIPLIER` overrides it for another model or card.
+  Verified both ways: 20,833 now refused with nothing allocated, 10,417 still
+  admitted and completes.
+
+  Serviceable context, as the measurement got honest: declared **262,144** ->
+  KV-only gate **48,672** -> measured **10,816**. Four percent of the advertised
+  window.
+
+  **Unresolved.** The gate refuses a repeat of a request that just succeeded:
+  after the 10,417-token run free memory reads 2.69 GiB and the limit collapses
+  to 913, because `hipMemGetInfo` excludes the allocator's reusable cache.
+  `release_cached_memory` is restricted to a serialized unload boundary, so
+  calling it here would trade a wrong refusal for a correctness risk. Needs a
+  pool-aware free figure or a supported reclaim point.
+
+  **Performance, unbidden:** prefill of 10,417 tokens takes 282-298 s, about 35
+  tokens/s against 0.86 s for 15 tokens. Long context is unusable on time well
+  before memory becomes the binding constraint. Item 7, not addressed. See
   [long-context gate](../research/2026-09-19-long-context-gate.md).
 
   Three corrections this produced. **The byte layout never ran on Vulkan at

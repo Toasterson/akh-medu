@@ -76,13 +76,15 @@ pub enum NluError {
         help(
             "This model declares a {declared_window}-token window, but on this device only \
              about {fits_tokens} tokens fit once the weights are resident: each token costs \
-             {} of KV across the attention blocks. Either send at most {fits_tokens} tokens, \
+             about {} of device memory, of which {} is KV and the rest is prefill working \
+             space. Either send at most {fits_tokens} tokens, \
              or free device memory, or turn on compressed KV paging with \
              AKH_QWEN35_KV_QUANT_BITS (note that compressed KV does not meet the 0.9999 \
              cosine gate at any width and has no agreed quality criterion yet). \
              AKH_CANDLE_KV_HEADROOM_BYTES adjusts the reserve held back for activations, \
              currently {}.",
             human_bytes(*per_token_bytes),
+            human_bytes(*kv_bytes_per_token),
             human_bytes(*headroom_bytes)
         )
     )]
@@ -90,7 +92,10 @@ pub enum NluError {
         requested: usize,
         declared_window: usize,
         fits_tokens: usize,
+        /// Total device cost per token, not the KV share alone: sizing on KV
+        /// was wrong by more than 4x and admitted requests that then failed.
         per_token_bytes: usize,
+        kv_bytes_per_token: usize,
         needed_bytes: usize,
         available_bytes: usize,
         headroom_bytes: usize,
@@ -156,15 +161,16 @@ mod byte_rendering_tests {
             requested: 60_000,
             declared_window: 262_144,
             fits_tokens: 48_672,
-            per_token_bytes: 131_072,
-            needed_bytes: 60_000 * 131_072,
+            per_token_bytes: 589_824,
+            kv_bytes_per_token: 131_072,
+            needed_bytes: 60_000 * 589_824,
             available_bytes: 8_527_020_032,
             headroom_bytes: 2 * 1024 * 1024 * 1024,
         };
 
         let message = error.to_string();
         assert!(message.contains("60000 tokens"), "{message}");
-        assert!(message.contains("7.32 GiB"), "needed KV: {message}");
+        assert!(message.contains("32.96 GiB"), "needed memory: {message}");
         assert!(message.contains("7.94 GiB"), "free memory: {message}");
 
         let help = error
@@ -174,7 +180,9 @@ mod byte_rendering_tests {
         // The limit that actually applies, not just the one that failed.
         assert!(help.contains("48672 tokens"), "{help}");
         assert!(help.contains("262144-token window"), "{help}");
-        assert!(help.contains("128.00 KiB"), "per-token cost: {help}");
+        // Both figures, so the KV share is never mistaken for the whole cost.
+        assert!(help.contains("576.00 KiB"), "total per-token cost: {help}");
+        assert!(help.contains("128.00 KiB"), "KV share: {help}");
         assert!(help.contains("2.00 GiB"), "headroom: {help}");
         // Every remedy, including the caveat on the tempting one.
         assert!(help.contains("AKH_QWEN35_KV_QUANT_BITS"), "{help}");
