@@ -115,3 +115,43 @@ message content for native turns, or only select among existing messages.
 digest-only shape.
 
 This is the next decision, before any code for step 2.
+
+## Resolution
+
+`AKH_CONTEXT_STRATEGY` defaults to `compacting`, and `CompactingManager`
+rewrites message content rather than only selecting among messages. By the test
+stated above, that rules out the bounded-digest shape for the default strategy.
+
+Between the two survivors, take the third: **akhsessd executes the
+`ContextManager` seam directly, with no protocol change.**
+
+- There is exactly one implementation of context policy. akhrtd's independent
+  heuristic is the thing being removed, and step 1 already built the verifying
+  path that replaces it.
+- The exchange stays bounded: no history crosses `/v1/context` every turn.
+- Durable history never leaves the loop that owns it, satisfying the ledger
+  directly rather than by argument.
+- "One cognitive core" is about there not being a second decision-maker, not
+  about which process links the crate. A single strategy implementation invoked
+  by the history's owner is one decision point; the failure mode to guard
+  against is a second *implementation*, which is exactly what akhrtd has today.
+
+The risk to watch is drift: if the seam grows akhomed-only dependencies, the
+session service will be tempted to fork it. Guard by keeping
+`src/agent/context/` free of `Engine` borrows on the assemble path — the trait
+already takes `EpisodeState<'_>` and `TokenBudget` rather than an engine, and
+only `stats()` mentions an engine borrow, for `provenance_pinned_count`.
+
+This is reversible: if native turns later need core-only evidence at assembly
+time, the first shape becomes necessary and the call moves behind `/v1/context`.
+
+## Revised remaining steps
+
+1. Done: `native_window::verify` behind the `context_budgeted` marker.
+2. Have akhsessd build an `EpisodeState` and `TokenBudget` from the session's
+   own history, call `assemble` through `SafetyEnforced`, and send the result
+   with `context_budgeted` set, using `CandleTokenCounter` for the budget.
+3. Call `commit` with a real `TurnOutcome` after each native turn, and report
+   `ContextWindowStats` in place of the bare `dropped_messages` integer.
+4. Acceptance: the five-daemon canary's `final_dropped_messages` and
+   `max_materialized_spans` must still hold, on both devices.
