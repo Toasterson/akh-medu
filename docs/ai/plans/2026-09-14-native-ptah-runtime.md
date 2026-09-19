@@ -45,14 +45,13 @@ the chronological evidence further down is retained as written.
   results stand: prefill unaffected, unkeyed decode 15-25% faster with the
   quantized GEMV. See
   [decode anomaly](../research/2026-09-19-hip-decode-anomaly.md).
-- **Superseded note.** Keyed HIP decode is non-monotonic in context
-  position: about 17 steps/s below 200 positions, 8.2 at 256, 13.0 at 322-381,
-  then 7.8 and 6.9 at 440 and 510. Vulkan declines smoothly over the identical
-  sequence, 12.35 to 9.01. Reproducible, HIP-specific, and independent of
-  elapsed time: a six-repeat single-key soak held each turn's rate flat. An
-  earlier reading of this as memory pressure was retracted; the soak reached
-  higher VRAM with no decode loss. Mechanism unidentified; needs per-step decode
-  timings. Belongs to the performance step.
+- **Superseded.** An earlier entry here described keyed HIP decode as
+  reproducibly non-monotonic in context position, with specific rates at 256,
+  322, 440 and 510 positions. Those figures came from single runs. Four
+  interleaved runs later showed the profile does **not** reproduce between
+  processes, so neither the shape nor its attribution should be relied on. The
+  retraction and the controlled data are the entry above; this note remains
+  only so the earlier numbers are not rediscovered and believed.
 - **Long residency soak passed** (2026-09-19): 160 keyed requests over 14m42s
   with the model owned. Decode flat, RSS flat at 0.600 GB, device VRAM flat at
   24.35-24.49 GB, resident idle 0% busy at 10.72 W afterwards. The prefill
@@ -62,6 +61,23 @@ the chronological evidence further down is retained as written.
   daemons rebuilt from `028804f1`: recall after session/core restart, span
   publication, history eviction, provider continuity and session isolation. No
   processes left behind. See [canary rerun](../research/2026-09-19-canary-rerun.md).
+- **Context assembly moved to the core** (2026-09-19), inert so far. The
+  `/v1/context` contract now carries `messages`, `budget` and `assembled`, all
+  skipped when unset so an unused request serializes byte-identically and
+  neither side receives a field it would reject under `deny_unknown_fields`.
+  `core_service::assemble_context` selects through
+  `SafetyEnforced(SelectingManager)` when messages are supplied, returning the
+  chosen messages with a dropped count and per-section tokens. Nothing sets
+  them yet, so behaviour and the canary are unchanged.
+- **The last join is blocked on a topology decision** (2026-09-19). The durable
+  history is the `Conversation` in **akhrtd's own Store**, accumulated across
+  turns as the provider-session continuation; the session service never holds
+  it, `RuntimeJobRequest` has no message array, and akhrtd has no core client.
+  So no party currently holds both the history and the policy. Either give
+  akhrtd a core client, or move the conversation into the session record; the
+  first widens a trust boundary, the second relocates the state the keyed
+  cache's exact-prefix reuse depends on. Needs the user. See
+  [materialization](2026-09-19-context-manager-materialization.md).
 - **Context selection path built** (2026-09-19): `SelectingManager` selects over
   a message array, preserving tool traffic and recall markers, failing closed
   with a miette diagnostic when the pinned remainder plus the current turn
