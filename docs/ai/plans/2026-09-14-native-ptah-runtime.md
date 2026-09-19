@@ -435,6 +435,22 @@ the chronological evidence further down is retained as written.
   called "upper right" three times - "upper" right, "right" wrong, no axis
   mirrored. Unexplained, recorded. 3,460 tests pass.
 
+- **Item 5: the runtime can take an image; the daemons refuse one, by design**
+  (2026-09-19). With the model side complete, the remaining question was
+  routing. `TurnInput` already carries `artifacts: Vec<ArtifactRef>` with a
+  `media_type`, so the wire needs no new field - but the session daemon refuses
+  any artifact at submission (a test pins the refusal so nothing is silently
+  dropped) and the native runtime refuses again at job validation. akhrtd has
+  **no filesystem access to workspaces**: the fixture's workspace root is
+  `/remote-only`, and file reads are brokered tools returning text.
+  `verify_artifact` pins the model files, not attachments.
+
+  So an image reaches the model one of three ways - inline bytes in the turn
+  input (simple; collides with the 1 MiB text limit), a bytes-returning brokered
+  read (fits the tool architecture), or workspace filesystem access for akhrtd
+  (a topology change). **A decision of the same family as item 4, not made
+  here.** Nothing was changed in either daemon.
+
 - **Item 4: the seam had a silent fallback; the topology fork is confirmed real**
   (2026-09-19). `context_budgeted` existed in exactly one place in the tree -
   `native_window.rs` and its own tests. **The core never emitted it.** So once

@@ -41,83 +41,76 @@ different fixture and is not a like-for-like comparison.
 
 ## State after 2026-09-19
 
-Rewritten at the end of that day's work. The nine-item list this section used to
-hold is superseded by what follows; the ledger
-`2026-09-14-native-ptah-runtime.md` carries the per-slice evidence.
+Updated at the end of the day. Commits `9489ed7f` through `2c4f5725` on `main`,
+nothing pushed. The master ledger carries the per-slice evidence; this is the
+categorised summary.
 
 ### Done, with committed evidence
 
-1. **Keyed measurement.** First keyed throughput figures for both devices, plus
-   shader-cache counters. Two findings: prefix reuse is lost whenever a turn ends
-   at its output cap, and keyed HIP decode looked non-monotonic in context — see
-   item 7 for how that second one resolved.
-2. **Long residency.** 160 keyed requests over 14m42s, decode flat, RSS flat at
-   0.600 GB, device VRAM flat, resident-idle gate still passing. The apparent
-   prefill drift was a one-time warm-up.
-3. **Daemon acceptance.** Five daemons rebuilt and the private canary passing on
-   HIP and Vulkan.
-6. **Live KV compression — complete on HIP.** TurboQuant (arXiv:2504.19874)
-   implemented and validated against the paper's own centroids and distortion
-   rates; 0.9954 mean cosine at 4 bits on real KV, beating the previous
-   PolarQuant path at 3 bits while using 2. Bit-packed host storage, a
-   `u8 <-> u32` HIP cast kernel, and on-device decode proven equivalent to the
-   host within 1e-4. A benchmark that never finished with host decode now
-   completes at about a third of decode throughput, and the canary passes with
-   `recent=4` so paging is genuinely exercised.
+1. **Keyed measurement.** Both devices measured; variance explained (one
+   recorder run with a different preamble). Rule: compare identical preambles.
+2. **Long residency.** 160 keyed requests over 14m42s, decode and RSS flat.
+3. **Daemon acceptance.** Five daemons rebuilt, private canary passing, both
+   devices, including recall after restart.
+6. **Live KV compression and long-context gates - complete.** Compressed KV
+   works on HIP and on Vulkan (packed three codes per `u32`, 2.94x, ~5% decode;
+   the byte layout there had been failing closed on a missing cast). Fidelity is
+   measured on the live path: worst cosine **0.99788 at 8 bits, 0.98540 at 4** -
+   it clears the 0.9999 gate at **no** width, and greedy-token agreement was shown
+   to be actively misleading (same codes, different tokens on two devices). Off
+   by default; needs an acceptance criterion of its own, which is a decision.
+   The context gate now sizes on **measured total cost** - KV is 23% of what a
+   token costs - after the first version admitted requests that then failed on
+   allocation: serviceable context is **10,816** tokens against 262,144 declared.
+8. **Reproducible release bundle - done.** Manifest records binary digests,
+   per-binary kernel-library pairings and toolchain from files; the relocatable
+   bundle passes the canary run from its own `--bin-dir`.
 
 ### Blocked on a decision from the user
 
-4. **ContextManager materialization.** Every piece is built and inert: the
-   runtime verifies a core-budgeted prompt instead of evicting, `SelectingManager`
-   selects over messages preserving tool traffic, `AKH_CONTEXT_STRATEGY=selecting`
-   builds it, the `/v1/context` contract carries assembly compatibly, and the core
-   assembles when messages are supplied.
+4. **ContextManager materialization.** Built and inert: the seam is de-risked
+   and the fork evidenced in code, but **no party holds both history and
+   policy**. Either give akhrtd a core client, or move the conversation into the
+   session record.
+5. **Vision - the runtime can take an image; the daemons refuse one.**
+   Everything in the model is landed and gated: projector agreeing across
+   CPU/HIP/Vulkan at cosine 1.0000000000; per-token rope positions; spliced
+   embeddings; grid-derived positions; decode continuing from the rope cursor;
+   a front end (`generate_with_image`) that decodes, resizes, expands the
+   placeholder, splices and generates; and **2D rotary in every vision block**,
+   which the tower had lacked - the first image came back "pixelated,
+   fragmented" and now comes back "a solid red square ... a blue horizontal bar
+   along the bottom edge". Text path bit-identical throughout.
 
-   The join cannot be finished without choosing a topology, because **no party
-   currently holds both the history and the policy**: the durable conversation
-   lives in akhrtd's own `Store`, and akhrtd has no core client. Either give
-   akhrtd a core client, or move the conversation into the session record. See
-   `2026-09-19-context-manager-materialization.md`.
+   What remains is not model work:
+   - **Transport.** Both daemons refuse turn artifacts by design, with a test
+     pinning the refusal so nothing is dropped silently. akhrtd has no
+     filesystem access to workspaces (its reads are brokered tools returning
+     text). Three ways an image can arrive: inline bytes in the turn input,
+     a bytes-returning brokered read, or workspace filesystem access for
+     akhrtd. This is a topology choice of the same family as item 4.
+   - **Semantic validation.** "No external consumer is installed" was wrong:
+     ollama is installed with this exact model as `ptah-qwen3.8`. Its server is
+     down; starting it changes machine state and contends for the GPU. Needs a
+     go-ahead.
+   - Residual: a horizontally-centred square is called "upper right" three
+     times; bar sides read correctly so no axis is mirrored. Unexplained.
+   - Multiple images per prompt: refused explicitly, not built.
 
-### Blocked on something this machine does not have
+### Open
 
-5. **Vision.** The tower runs on CPU, HIP and Vulkan agreeing within 8.1e-06,
-   preprocessing matches llama.cpp's dynamic-resolution policy, the projector is
-   located through its manifest layer, and the model's mrope sections are read and
-   validated. Deepstack turned out to be absent from this artifact, which removed
-   a whole step.
-
-   It is **not numerically validated**, and cannot be here: that needs an external
-   consumer of this GGUF for a known image, and none is installed. A second
-   in-house implementation was rejected because it would share the same
-   comprehension errors and read as validation while proving much less.
-
-### Open, and smaller than it looked
-
-7. **Performance.** The non-monotonic keyed decode was **not** a kernel effect:
-   pooling seven runs showed the three severe outliers all came from the single
-   run invoked through `resident-probe.py`, whose continuation-check preamble
-   leaves a different resident state. The rule that came out of it — *compare runs
-   with identical preambles* — matters more than the anomaly. One narrow effect
-   survives, at 510 context positions only, reproducing 3/3 per configuration and
-   unexplained.
+7. **Performance - measured, ceiling known, default deliberately unchanged.**
+   Prefill chunk 256 is **1.71x** faster than 128 (three interleaved pairs, clean
+   separation), but peaks at 98.4% of the card at a context the gate admits, so
+   the default stays 128 until the cap or the headroom moves - a trade to take
+   deliberately. Removing the `repeat_kv` expansion was tried: numerically
+   exact and **10% slower**, kept behind a flag with the number on it. Earlier
+   single-run figures (49%, 1.95x) were retracted. The 510-position keyed effect
+   remains unexplained.
 
 ### Not started
 
-8. **Reproducible release bundle — identity half done.** `scripts/session-platform/release-manifest.py` records what a build
-   consists of: each binary's digest, the kernel libraries that binary
-   actually loads (read back from the path baked into it, since the tree holds
-   six identically named candidates), and the pinned model artifacts. It
-   refuses a dirty tree. What remains is the bundle itself: copying libraries
-   beside the executables, recording ROCm and driver versions, and verifying a
-   relocated copy runs. See
-   `../research/2026-09-19-release-manifest.md`.
-9. **Homelab canary and cutover.** Still needs shared services; ask first.
-
-Also open: **Vulkan cannot benefit from KV compression** without packed
-small-integer storage, because its allocator gives every dtype four bytes per
-element. That is a storage-model change, not another kernel.
-
+9. **Homelab canary and cutover.** Needs shared services; ask first.
 
 ## Standing constraints (unchanged)
 
