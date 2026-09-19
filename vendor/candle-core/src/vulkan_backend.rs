@@ -699,6 +699,10 @@ impl crate::backend::BackendStorage for VulkanStorage {
             (a, b) if a == b => "a[ai(i)]",
             (DType::F32, DType::U32) | (DType::F32, DType::U8) => "u32(x)",
             (DType::U32, DType::F32) | (DType::U8, DType::F32) => "bitcast<u32>(f32(a[ai(i)]))",
+            // Both integer dtypes occupy a whole word here, so widening is a
+            // copy; narrowing has to truncate to keep `as u8` semantics.
+            (DType::U8, DType::U32) => "a[ai(i)]",
+            (DType::U32, DType::U8) => "a[ai(i)] & 255u",
             _ => crate::bail!("Vulkan cast {:?} to {dtype:?} unsupported", self.dtype),
         };
         self.elementwise(l, None, expr, dtype)
@@ -1069,6 +1073,32 @@ impl crate::backend::BackendDevice for VulkanDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "exclusive Vulkan device"]
+    fn cast_u8_u32_roundtrip() -> Result<()> {
+        let device = crate::Device::new_vulkan(0)?;
+        // Spans the byte range including both endpoints. Both integer dtypes
+        // occupy a full word in Vulkan storage, so widening must be a copy and
+        // narrowing must truncate the way `as u8` does.
+        let bytes: Vec<u8> = vec![0, 1, 7, 15, 128, 254, 255, 3];
+        let as_u8 = crate::Tensor::from_vec(bytes.clone(), (8,), &device)?;
+        assert_eq!(as_u8.dtype(), DType::U8);
+
+        let widened = as_u8.to_dtype(DType::U32)?;
+        assert_eq!(widened.dtype(), DType::U32);
+        assert_eq!(
+            widened.to_dtype(DType::F32)?.to_vec1::<f32>()?,
+            bytes.iter().map(|b| f32::from(*b)).collect::<Vec<f32>>()
+        );
+
+        assert_eq!(widened.to_dtype(DType::U8)?.to_vec1::<u8>()?, bytes);
+
+        // Truncation, not saturation or a silent widening, above the byte range.
+        let wide = crate::Tensor::from_vec(vec![256u32, 511, 4097], (3,), &device)?;
+        assert_eq!(wide.to_dtype(DType::U8)?.to_vec1::<u8>()?, vec![0u8, 255, 1]);
+        Ok(())
+    }
 
     #[test]
     #[ignore = "exclusive Vulkan device"]

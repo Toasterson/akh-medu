@@ -177,6 +177,29 @@ the chronological evidence further down is retained as written.
   saving with no new kernel. Unimplemented and unmeasured: the extra elementwise
   passes could cost more than they save.
 
+- **KV compression now works on Vulkan too, and the packing is nearly free**
+  (2026-09-19). The packed layout above is implemented, selected automatically on
+  Vulkan, and measured on a live cache: **2.94x** smaller KV (1,648,128 bytes
+  against 4,849,664, 16 layers, 592 paged positions) for about 5% of decode.
+  Warm decode is 13.38 steps/s uncompressed, 8.33 with the byte layout, 7.98
+  packed - so nearly all of the ~40% cost is the page decode both layouts share,
+  not the unpack. Greedy output was byte-identical across all three arms.
+
+  Three corrections this produced. **The byte layout never ran on Vulkan at
+  all**: `to_dtype` had no `U8 -> U32` arm, so the decode aborted the first time
+  a position aged out. Compressed KV there was failing closed, not saving
+  nominally, and the same never-pages blind spot hid it. Both casts are now in
+  the vendored Vulkan backend with a device test. **And the accounting was wrong
+  twice, both times flattering**: it charged one byte per code unconditionally,
+  so the byte layout claimed 3.94x on the one backend where it is a net loss;
+  the first fix branched on layout but kept the same assumption one level in.
+  Element width is a property of the device, not the dtype's name. Corrected,
+  the byte layout reports **0.996x** - it stores more than the f32 it replaces.
+  The ratio is now read from the live path via `kv_page_residency()`, which
+  previously existed only in a unit test. Measured at one short prompt and 592
+  positions; the decode cost grows with context and is unmeasured there. See
+  [Vulkan packed KV](../research/2026-09-19-vulkan-packed-kv.md).
+
   `AttentionState`** — bit-packed pages per (batch, head) slot, a shared
   quantizer, the recent window exact — and passes the canary at 4 and 2 bits
   with 21 model tests still green. **Host-side decode is now measured as not

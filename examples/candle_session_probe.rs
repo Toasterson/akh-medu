@@ -131,6 +131,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "decode_steps_per_second":if reply.decode_steps > 0 {Some(reply.decode_steps as f64 / reply.decode_time.as_secs_f64())} else {None}})
         );
     }
+    // Live compressed-KV occupancy, absent unless compression is configured and
+    // something has aged out of the exact window.
+    if let Some(residency) = backend.kv_page_residency() {
+        println!(
+            "{}",
+            serde_json::json!({"phase":"kv_pages","layout":residency.layout,
+                "layers":residency.layers,"paged_positions":residency.positions,
+                "stored_bytes":residency.stored_bytes,
+                "uncompressed_bytes":residency.uncompressed_bytes,
+                "ratio":residency.uncompressed_bytes as f64 / residency.stored_bytes as f64})
+        );
+    }
     if args.continuation {
         continuation::check(&mut backend)?;
     }

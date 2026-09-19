@@ -2288,6 +2288,26 @@ impl CandleBackend {
         })
     }
 
+    /// What the live compressed KV pages occupy, or `None` when compression is
+    /// off or nothing has aged out of the exact window yet.
+    ///
+    /// Unlike the quality reports above this reads the live path rather than
+    /// simulating one, so it is the figure that backs any claim about how much
+    /// the compression actually saves on this device.
+    #[cfg(feature = "candle-backend")]
+    pub fn kv_page_residency(&self) -> Option<KvPageResidency> {
+        let LoadedModel::Qwen35(model) = &self.model else {
+            return None;
+        };
+        model.kv_page_residency().map(|live| KvPageResidency {
+            layout: live.layout,
+            stored_bytes: live.stored_bytes,
+            uncompressed_bytes: live.uncompressed_bytes,
+            positions: live.positions,
+            layers: live.layers,
+        })
+    }
+
     #[cfg(feature = "candle-backend")]
     fn kv_report_with(
         &self,
@@ -4241,6 +4261,23 @@ Some trailing text."#;
     }
 }
 
+
+/// What the live compressed KV pages occupy, summed over attention layers.
+///
+/// `stored_bytes` is what the device allocator actually charges for the code
+/// layout in use, not a nominal one-byte-per-code count, so the ratio against
+/// `uncompressed_bytes` is the saving this device really gets.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct KvPageResidency {
+    /// Which [`code layout`](crate::nlu) the pages use: `byte` or `packed-triple`.
+    pub layout: &'static str,
+    pub stored_bytes: usize,
+    pub uncompressed_bytes: usize,
+    /// Paged positions summed over layers, so layers x positions per layer.
+    pub positions: usize,
+    pub layers: usize,
+}
 
 /// Per-layer PolarQuant round-trip quality for one resident KV cache.
 #[cfg(feature = "candle-backend")]

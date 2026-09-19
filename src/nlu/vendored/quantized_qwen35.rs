@@ -327,6 +327,96 @@ struct AttentionState {
     pages: Option<KvPages>,
 }
 
+/// How codes are laid out in device memory.
+///
+/// The Vulkan allocator hands out four bytes per element for every dtype it
+/// supports, so a `u8` code tensor there costs exactly what the f32 cache it
+/// replaces costs and the compression is nominal only. Packing three codes into
+/// each `u32` word restores a real 3x. Three and not four because the unpack
+/// runs through f32, which represents integers exactly only up to `2^24`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodeLayout {
+    /// One code per element, `u8`. What HIP and the CPU backend already give.
+    Byte,
+    /// Three codes per `u32` word, packed along the head dimension.
+    PackedTriple { words_per_row: usize },
+}
+
+impl CodeLayout {
+    fn packed(dim: usize) -> Self {
+        Self::PackedTriple {
+            words_per_row: dim.div_ceil(3),
+        }
+    }
+
+    /// The layout a device wants, unless `AKH_QWEN35_KV_PACK` overrides it.
+    ///
+    /// The override exists so the packing can be measured against the layout it
+    /// replaces on the same backend; without it the two differ by device and the
+    /// comparison confounds the packing with everything else that differs.
+    fn for_device(device: &Device, dim: usize) -> Self {
+        match std::env::var("AKH_QWEN35_KV_PACK").ok().as_deref() {
+            Some("packed") => return Self::packed(dim),
+            Some("byte") => return Self::Byte,
+            _ => {}
+        }
+        #[cfg(feature = "vulkan")]
+        if device.is_vulkan() {
+            return Self::packed(dim);
+        }
+        let _ = (device, dim);
+        Self::Byte
+    }
+
+    /// Bytes one code element occupies on this device.
+    ///
+    /// Vulkan gives every dtype it supports a full 32-bit word, so a `u8` code
+    /// there costs four bytes and not one. Charging one unconditionally is what
+    /// made the byte layout look like a 3.9x saving on a backend where it is
+    /// actually a net loss.
+    fn code_element_bytes(device: &Device) -> usize {
+        #[cfg(feature = "vulkan")]
+        if device.is_vulkan() {
+            return 4;
+        }
+        let _ = device;
+        std::mem::size_of::<u8>()
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Byte => "byte",
+            Self::PackedTriple { .. } => "packed-triple",
+        }
+    }
+}
+
+/// What compressed KV pages occupy right now, summed over attention layers.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct KvPageResidency {
+    pub layout: &'static str,
+    pub stored_bytes: usize,
+    pub uncompressed_bytes: usize,
+    /// Paged positions summed over layers, so layers x positions per layer.
+    pub positions: usize,
+    pub layers: usize,
+}
+
+/// Pack rows of codes three to a `u32` word, lowest lane in the low byte.
+///
+/// Rows are padded with zero codes up to `words_per_row * 3`; the padding is
+/// dropped again on the way out, so it costs at most the tail of one word.
+fn pack_triples(codes: &[u8], dim: usize, words_per_row: usize) -> Vec<u32> {
+    let mut packed = Vec::with_capacity((codes.len() / dim) * words_per_row);
+    for row in codes.chunks_exact(dim) {
+        for word in 0..words_per_row {
+            let lane = |offset: usize| u32::from(row.get(word * 3 + offset).copied().unwrap_or(0));
+            packed.push(lane(0) | (lane(1) << 8) | (lane(2) << 16));
+        }
+    }
+    packed
+}
+
 /// Compressed older positions for one attention layer, resident on the device.
 ///
 /// Codes are `u8`, one byte each, and the decode widens them for the gather
@@ -346,6 +436,9 @@ struct KvPages {
     codebook: Tensor,
     rotation: Tensor,
     quantizer: std::sync::Arc<crate::nlu::turbo_quant::TurboQuant>,
+    layout: CodeLayout,
+    /// What one code element costs on the device holding it.
+    code_element_bytes: usize,
     positions: usize,
 }
 
@@ -370,6 +463,8 @@ impl KvPages {
             codebook,
             rotation,
             quantizer,
+            layout: CodeLayout::for_device(device, dim),
+            code_element_bytes: CodeLayout::code_element_bytes(device),
             positions: 0,
         })
     }
@@ -381,8 +476,15 @@ impl KvPages {
     /// Resident code bytes against the f32 they replace.
     fn stored_and_uncompressed_bytes(&self, heads: usize, dim: usize, batch: usize) -> (usize, usize) {
         let vectors = batch * heads * self.positions;
-        // One byte per code, plus an f32 norm per vector, for key and value.
-        let stored = 2 * (vectors * dim + vectors * std::mem::size_of::<f32>());
+        let code_bytes = match self.layout {
+            CodeLayout::Byte => vectors * dim * self.code_element_bytes,
+            // A word is four bytes on every backend, three codes to a word.
+            CodeLayout::PackedTriple { words_per_row } => {
+                vectors * words_per_row * std::mem::size_of::<u32>()
+            }
+        };
+        // Codes plus an f32 norm per vector, for key and value alike.
+        let stored = 2 * (code_bytes + vectors * std::mem::size_of::<f32>());
         (stored, 2 * vectors * dim * std::mem::size_of::<f32>())
     }
 
@@ -407,8 +509,16 @@ impl KvPages {
             }
         }
         let device = tensor.device();
+        let code_tensor = match self.layout {
+            CodeLayout::Byte => Tensor::from_vec(codes, (batch, heads, count, dim), device)?,
+            CodeLayout::PackedTriple { words_per_row } => Tensor::from_vec(
+                pack_triples(&codes, dim, words_per_row),
+                (batch, heads, count, words_per_row),
+                device,
+            )?,
+        };
         Ok((
-            Tensor::from_vec(codes, (batch, heads, count, dim), device)?,
+            code_tensor,
             Tensor::from_vec(norms, (batch, heads, count, 1), device)?,
         ))
     }
@@ -425,6 +535,34 @@ impl KvPages {
         Ok(())
     }
 
+    /// Recover one code per element from words that hold three each.
+    ///
+    /// Only `affine`, `floor` and the binary ops appear here, all of which every
+    /// backend already implements, so the packed layout needs no new kernel. The
+    /// arithmetic runs in f32 and is exact: the largest packed word is `2^24 - 1`
+    /// and both divisions are by powers of two.
+    fn unpack_triples(words: &Tensor, dim: usize) -> Result<Tensor> {
+        let (batch, heads, positions, words_per_row) = words.dims4()?;
+        let word = words.to_dtype(DType::F32)?;
+        let above_low = word.affine(1.0 / 256.0, 0.0)?.floor()?;
+        let high = word.affine(1.0 / 65_536.0, 0.0)?.floor()?;
+        let low = (&word - above_low.affine(256.0, 0.0)?)?;
+        let middle = (&above_low - high.affine(256.0, 0.0)?)?;
+        // Interleaving is a stack on a new trailing axis: element `(word, lane)`
+        // lands at `word * 3 + lane`, which is where it was packed from.
+        let interleaved = Tensor::stack(&[&low, &middle, &high], 4)?.reshape((
+            batch,
+            heads,
+            positions,
+            words_per_row * 3,
+        ))?;
+        if words_per_row * 3 == dim {
+            Ok(interleaved)
+        } else {
+            interleaved.narrow(3, 0, dim)?.contiguous()
+        }
+    }
+
     /// Decode compressed pages without leaving the device.
     ///
     /// Three primitives: gather the centroids the codes point at, scale each
@@ -432,21 +570,27 @@ impl KvPages {
     /// `rows * Pi` because reconstruction is `Pi^T y` and these rows are
     /// transposed relative to that.
     ///
-    /// Codes are held as `u8`, one byte each, and widened to the `u32` that
-    /// `index_select` requires. Holding them as `u32` instead would cost four
-    /// bytes per code, exactly what the f32 cache this replaces costs, so the
-    /// widening is what makes the compression real rather than nominal.
+    /// Codes are held one per element under [`CodeLayout::Byte`] and three per
+    /// `u32` word under [`CodeLayout::PackedTriple`]; either way they are
+    /// widened to the `u32` that `index_select` requires rather than stored
+    /// wide, which is what makes the compression real rather than nominal.
     fn decode_on_device(
         codes: &Tensor,
         norms: &Tensor,
         codebook: &Tensor,
         rotation: &Tensor,
+        layout: CodeLayout,
         batch: usize,
         heads: usize,
         positions: usize,
         dim: usize,
     ) -> Result<Tensor> {
-        let ids = codes.flatten_all()?.to_dtype(DType::U32)?;
+        let ids = match layout {
+            CodeLayout::Byte => codes.flatten_all()?.to_dtype(DType::U32)?,
+            CodeLayout::PackedTriple { .. } => Self::unpack_triples(codes, dim)?
+                .flatten_all()?
+                .to_dtype(DType::U32)?,
+        };
         codebook
             .index_select(&ids, 0)?
             .reshape((batch * heads * positions, dim))?
@@ -466,8 +610,28 @@ impl KvPages {
             return Ok(None);
         };
         Ok(Some((
-            Self::decode_on_device(kc, kn, &self.codebook, &self.rotation, batch, heads, self.positions, dim)?,
-            Self::decode_on_device(vc, vn, &self.codebook, &self.rotation, batch, heads, self.positions, dim)?,
+            Self::decode_on_device(
+                kc,
+                kn,
+                &self.codebook,
+                &self.rotation,
+                self.layout,
+                batch,
+                heads,
+                self.positions,
+                dim,
+            )?,
+            Self::decode_on_device(
+                vc,
+                vn,
+                &self.codebook,
+                &self.rotation,
+                self.layout,
+                batch,
+                heads,
+                self.positions,
+                dim,
+            )?,
         )))
     }
 }
@@ -1417,6 +1581,36 @@ impl InferenceSession {
             .collect()
     }
 
+    /// What the compressed pages of every attention layer currently occupy,
+    /// against the f32 they stand in for.
+    ///
+    /// Returns `None` when KV compression is off, so an absent figure reads as
+    /// "not compressing" rather than "compressing nothing". The stored side is
+    /// what the device allocator actually charges for the chosen
+    /// [`CodeLayout`], not a nominal one-byte-per-code count.
+    pub(crate) fn kv_page_residency(&self) -> Option<KvPageResidency> {
+        let mut residency = KvPageResidency::default();
+        for state in &self.states {
+            let MixerState::Attention(Some(state)) = state else {
+                continue;
+            };
+            let Some(pages) = state.pages.as_ref() else {
+                continue;
+            };
+            let (batch, heads, _, dim) = match state.key.dims4() {
+                Ok(dims) => dims,
+                Err(_) => continue,
+            };
+            let (stored, uncompressed) = pages.stored_and_uncompressed_bytes(heads, dim, batch);
+            residency.layout = pages.layout.label();
+            residency.stored_bytes += stored;
+            residency.uncompressed_bytes += uncompressed;
+            residency.positions += pages.positions();
+            residency.layers += 1;
+        }
+        (residency.layers > 0).then_some(residency)
+    }
+
     /// Capture a span during this operation only, without replaying cached
     /// tokens. Returned values are not archival commits or persistent snapshots.
     pub(crate) fn resume_prompt_with_taps(
@@ -2130,6 +2324,7 @@ pub(crate) mod tests {
             &norm_tensor,
             &codebook,
             &rotation,
+            CodeLayout::Byte,
             1,
             heads,
             positions,
@@ -2200,6 +2395,95 @@ pub(crate) mod tests {
             plain as f64 / stored as f64 > 3.5,
             "ratio {}",
             plain as f64 / stored as f64
+        );
+    }
+
+    #[test]
+    fn packed_triples_survive_the_device_unpack_for_every_code_and_row_width() {
+        // 128 is the head width the model actually uses and leaves one lane of
+        // the last word padded; 129 divides evenly and takes the other branch.
+        for dim in [128usize, 129] {
+            let words_per_row = dim.div_ceil(3);
+            let rows = 5usize;
+            let codes: Vec<u8> = (0..rows * dim).map(|i| ((i * 37) % 256) as u8).collect();
+            let packed = pack_triples(&codes, dim, words_per_row);
+            assert_eq!(packed.len(), rows * words_per_row);
+            assert!(
+                packed.iter().all(|word| *word < 1 << 24),
+                "a packed word has to stay inside the exactly representable f32 integers"
+            );
+
+            let words =
+                Tensor::from_vec(packed, (1, 1, rows, words_per_row), &Device::Cpu).unwrap();
+            let unpacked = KvPages::unpack_triples(&words, dim).unwrap();
+            assert_eq!(unpacked.dims(), &[1, 1, rows, dim]);
+            let got: Vec<f32> = unpacked.flatten_all().unwrap().to_vec1().unwrap();
+            let want: Vec<f32> = codes.iter().map(|code| f32::from(*code)).collect();
+            assert_eq!(got, want, "dim {dim}");
+        }
+    }
+
+    #[test]
+    fn the_packed_layout_decodes_to_exactly_what_the_byte_layout_decodes() {
+        let device = Device::Cpu;
+        let (heads, positions, dim) = (2usize, 6usize, 128usize);
+        let values: Vec<f32> = (0..heads * positions * dim)
+            .map(|i| ((i % 97) as f32 / 48.0) - 1.0)
+            .collect();
+        let tensor = Tensor::from_vec(values, (1, heads, positions, dim), &device).unwrap();
+        // Eight bits so every code in the byte range gets exercised.
+        let policy = KvQuantization { bits: 8, recent: 2 };
+        let overflow = positions - policy.recent;
+
+        let decode = |layout: CodeLayout, code_element_bytes: usize| {
+            let mut pages = KvPages::new(policy, dim, &device).unwrap();
+            pages.layout = layout;
+            pages.code_element_bytes = code_element_bytes;
+            let (kc, kn) = pages.absorb(&tensor, overflow).unwrap();
+            KvPages::extend(&mut pages.key_codes, kc).unwrap();
+            KvPages::extend(&mut pages.key_norms, kn).unwrap();
+            let (vc, vn) = pages.absorb(&tensor, overflow).unwrap();
+            KvPages::extend(&mut pages.value_codes, vc).unwrap();
+            KvPages::extend(&mut pages.value_norms, vn).unwrap();
+            pages.positions += overflow;
+            let (key, _) = pages.decode_pair(1, heads, dim).unwrap().unwrap();
+            (
+                key.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                pages.stored_and_uncompressed_bytes(heads, dim, 1),
+            )
+        };
+
+        let packed_layout = CodeLayout::PackedTriple {
+            words_per_row: dim.div_ceil(3),
+        };
+        let (plain, (plain_stored, uncompressed)) = decode(CodeLayout::Byte, 1);
+        let (packed, (packed_stored, packed_uncompressed)) = decode(packed_layout, 1);
+        // Packing changes where the codes live, never which codes they are.
+        assert_eq!(plain, packed);
+        assert_eq!(uncompressed, packed_uncompressed);
+
+        // Where an element can be one byte, the plain layout is the cheaper of
+        // the two; the packed layout exists for backends where it cannot.
+        assert!(packed_stored > plain_stored);
+        assert!(
+            uncompressed as f64 / plain_stored as f64 > 3.5,
+            "ratio {}",
+            uncompressed as f64 / plain_stored as f64
+        );
+
+        // On a backend whose narrowest element is a whole word, the byte layout
+        // is not a saving at all: it stores more than the f32 it replaces. That
+        // is the case the packed layout exists for.
+        let (_, (wide_stored, wide_uncompressed)) = decode(CodeLayout::Byte, 4);
+        assert!(
+            wide_stored > wide_uncompressed,
+            "byte layout on a four-byte element stores {wide_stored} against {wide_uncompressed}"
+        );
+        let (_, (wide_packed, _)) = decode(packed_layout, 4);
+        assert!(
+            wide_uncompressed as f64 / wide_packed as f64 > 2.9,
+            "ratio {}",
+            wide_uncompressed as f64 / wide_packed as f64
         );
     }
 

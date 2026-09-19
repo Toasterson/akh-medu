@@ -1,0 +1,13 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== B-byte-layout ===
+{"decode_seconds":4.621339925,"decode_steps_including_eos":30,"decode_steps_per_second":6.491623746980698,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":0,"seconds_including_prefill":7.1018912929999995,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!","time_to_first_token_seconds":2.480420233,"tokens":30}
+{"decode_seconds":3.601129109,"decode_steps_including_eos":30,"decode_steps_per_second":8.330720474593237,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":1,"seconds_including_prefill":5.601389523,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!","time_to_first_token_seconds":1.99983569,"tokens":30}
+{"layers":16,"layout":"byte","paged_positions":592,"phase":"kv_pages","ratio":0.9961089494163424,"stored_bytes":4868608,"uncompressed_bytes":4849664}
+=== end B-byte-layout rc=0 ===
+=== C-packed-triple ===
+{"decode_seconds":4.943670302,"decode_steps_including_eos":30,"decode_steps_per_second":6.068365843058601,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":0,"seconds_including_prefill":7.471199099,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!","time_to_first_token_seconds":2.527410236,"tokens":30}
+{"decode_seconds":3.760862966,"decode_steps_including_eos":30,"decode_steps_per_second":7.976892609811724,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":1,"seconds_including_prefill":5.768839358,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!","time_to_first_token_seconds":2.007522159,"tokens":30}
+{"layers":16,"layout":"packed-triple","paged_positions":592,"phase":"kv_pages","ratio":2.942528735632184,"stored_bytes":1648128,"uncompressed_bytes":4849664}
+=== end C-packed-triple rc=0 ===
+
+[exited with code 0]
