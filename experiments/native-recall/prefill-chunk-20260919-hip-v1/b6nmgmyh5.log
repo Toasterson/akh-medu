@@ -1,0 +1,5 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+chunk=128 peak_vram_used_bytes=24874536960
+chunk=256 peak_vram_used_bytes=25350254592
+
+[exited with code 0]

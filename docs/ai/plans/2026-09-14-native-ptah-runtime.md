@@ -275,27 +275,34 @@ the chronological evidence further down is retained as written.
   before memory becomes the binding constraint. Item 7, not addressed. See
   [long-context gate](../research/2026-09-19-long-context-gate.md).
 
-- **Item 7: half of prefill is the repeated KV expansion, and the ceiling is 2x**
-  (2026-09-19). Prefill chunks were hard-coded to 128, so a 10,417-token prompt
-  runs as 82 forwards, each re-expanding the whole accumulated K and V through
-  `repeat_kv` in all 16 attention layers. Doubling the chunk predicted 2x if that
-  dominated; it gave **1.32x** (271.4 s -> 205.3 s, 38.4 -> 50.7 tok/s), which by
-  Amdahl puts the chunk-count-proportional share at **49%**. The rest is
-  per-token weight-bound matmul that no chunking change touches.
+- **Item 7: chunk 256 is 1.71x faster; the explanation I gave was wrong**
+  (2026-09-19). **Retracted:** the earlier entry's 1.32x, its 49% share and its
+  1.95x ceiling came from single runs against a baseline that spans 17%
+  (271-317 s). Withdrawn - the same rule broken as in the Q8 GEMV retraction.
 
-  So eliminating the expansion entirely - broadcasting kv-heads inside the
-  attention matmul instead of materialising a copy - is worth about **1.95x**,
-  roughly 75 tok/s, taking a 10k prompt from ~271 s to ~140 s. Worth doing, and
-  **not enough to make long context interactive**. It is a numerical-path change
-  and would need the 0.9999 cosine gate against the current implementation, not
-  greedy agreement. Not attempted.
+  Repeated interleaved, three alternating pairs at ~5,200 tokens: chunk 128
+  **171.7 s** (sd 9.2), chunk 256 **100.6 s** (sd 3.5) - **1.708x, clean 3/3**.
+  The single run under-reported it.
 
-  Chunks of 512 and 1024 both fail on allocation: peak prefill memory scales with
-  `chunk x positions`, the same term that makes a token cost 547.5 KiB against
-  128 KiB of KV. **The default stays 128** - the 1.32x was measured at one
-  context length, and raising it on one data point would repeat a mistake already
-  made twice today. `AKH_QWEN35_PREFILL_CHUNK` makes it selectable for
-  measurement. See [prefill cost](../research/2026-09-19-prefill-cost.md).
+  **The mechanism was falsified by experiment.** I attributed the win to avoiding
+  the repeated `repeat_kv` expansion, then removed the expansion directly
+  (`AKH_QWEN35_GROUPED_ATTENTION=1`, folding the GQA repeat into the row
+  dimension). It is numerically exact - equal to `repeat_kv` element for element
+  on CPU, cosine **1.0000000000** on the full model - and **10.1% slower**
+  (184.8 s against 167.8 s, clean 3/3). Dropping the batch dimension from query
+  heads to kv-groups costs more GEMM parallelism than the copy saves. Re-running
+  Amdahl on the better data would say 83% and 5.84x; **neither is published**,
+  being the same inference whose premise is now disproved.
+
+  **The default stays 128.** Peak VRAM polled from the driver during a
+  10,417-token prefill: chunk 128 **23.17 GiB (96.6%)**, chunk 256 **23.61 GiB
+  (98.4%)** - 388 MiB spare on a 23.98 GiB card, at a context the gate admits,
+  with the cap ~400 tokens further out. The 1.71x is real and not safely
+  available at the limit; taking it needs a lower cap or more headroom, a trade
+  to decide rather than default into. That peak also **corroborates the memory
+  gate**: 96.6% full at 10,417 tokens against a 10,816 cap puts the 4.5
+  multiplier about right. See
+  [prefill cost](../research/2026-09-19-prefill-cost.md).
 
 - **Item 5: the vision projector agrees across CPU, HIP and Vulkan**
   (2026-09-19). Vision was recorded as blocked on an external consumer of this
@@ -314,7 +321,7 @@ the chronological evidence further down is retained as written.
 
   Two fixes this needed: the probe **did not build under HIP** (`new_vulkan` was
   not cfg-gated), and it had no way to emit more than a summary.
-  `scripts/session-platform/compare-vision-dumps.py` makes the gate repeatable.
+  `scripts/session-platform/compare-f32-dumps.py` makes the gate repeatable.
 
   **Still open:** semantic validation - nothing here shows this projector computes
   what Qwen3-VL's does, only that the backends agree with each other; a misread

@@ -1,0 +1,9 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+pass=1 chunk=128 ttft=184.807598635
+pass=1 chunk=256 ttft=99.333669673
+pass=2 chunk=128 ttft=164.874036216
+pass=2 chunk=256 ttft=105.308300164
+pass=3 chunk=128 ttft=165.523318893
+pass=3 chunk=256 ttft=97.074872623
+
+[exited with code 0]

@@ -1,0 +1,11 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== grouped=off, 10,417-token prefill ===
+"prompt_tokens":10417
+"time_to_first_token_seconds":316.862772765
+Error: ContextExceedsDeviceMemory { requested: 10425, declared_window: 262144, fits_tokens: 913, per_token_bytes: 589824, kv_bytes_per_token: 131072, needed_bytes: 6148915200, available_bytes: 2686451712, headroom_bytes: 2147483648 }
+=== grouped=on, 10,417-token prefill ===
+"prompt_tokens":10417
+"time_to_first_token_seconds":359.990214537
+Error: ContextExceedsDeviceMemory { requested: 10425, declared_window: 262144, fits_tokens: 910, per_token_bytes: 589824, kv_bytes_per_token: 131072, needed_bytes: 6148915200, available_bytes: 2684354560, headroom_bytes: 2147483648 }
+
+[exited with code 0]

@@ -1,0 +1,10 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+33584 chars
+pass=1 grouped=off ttft=170.966499322
+pass=1 grouped=on ttft=184.138177357
+pass=2 grouped=off ttft=171.830590406
+pass=2 grouped=on ttft=187.548623337
+pass=3 grouped=off ttft=160.7236158
+pass=3 grouped=on ttft=182.591348608
+
+[exited with code 0]

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Apply the 0.9999 cosine gate to vision projections from several devices.
+"""Apply the 0.9999 cosine gate to f32 dumps from two or more runs.
 
-Takes the raw f32 dumps written by `vision_projector_probe --dump` and compares
-every pair elementwise. Exits non-zero if any pair misses the gate.
+Compares every pair elementwise and exits non-zero if any pair misses the gate.
+Used for vision projections across devices (`vision_projector_probe --dump`) and
+for hidden states across numerical paths (`candle_session_probe --hidden-dump`);
+nothing in it is specific to either.
 
 Summary statistics are deliberately not the test: mean, standard deviation and
 L2 norm are all invariant under a permutation or a sign flip of the vector, so

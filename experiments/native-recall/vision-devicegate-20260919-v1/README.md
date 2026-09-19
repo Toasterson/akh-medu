@@ -13,7 +13,7 @@ Reproduce:
     cargo build --release --features vulkan --example vision_projector_probe
     ./target/release/examples/vision_projector_probe --model MODEL --device vulkan \
         --side 64 --dump vulkan.f32
-    scripts/session-platform/compare-vision-dumps.py \
+    scripts/session-platform/compare-f32-dumps.py \
         cpu=cpu.f32 hip=hip.f32 vulkan=vulkan.f32
 
 `gate.txt` is the result. What this does and does not establish is in

@@ -755,6 +755,38 @@ impl KvPages {
     }
 }
 
+/// Attend without materializing the GQA head expansion.
+///
+/// `repeat_kv` builds a full copy of K and V with every kv head repeated to
+/// query-head count, on every forward, in every attention layer. Folding the
+/// repeat into the row dimension instead - `(batch, kv_heads, ratio * seq, dim)`
+/// against `(batch, kv_heads, dim, positions)` - is the same arithmetic as a
+/// plain 4-D batched matmul, with nothing expanded.
+///
+/// The head ordering matches: `repeat_kv` emits head `kv * ratio + rep`, and
+/// reshaping the grouped rows back to `(batch, heads, seq, ...)` puts row
+/// `rep * seq + s` of group `kv` at exactly that head.
+///
+/// **Measured slower, and off for that reason.** It is numerically sound -
+/// exactly equal to `repeat_kv` on CPU, element for element, and cosine
+/// 1.0000000000 against the materializing path on the full model - but three
+/// interleaved pairs at ~5,200 tokens put it **10.1% slower**, 184.8 s against
+/// 167.8 s, with every materializing run beating every grouped run. Dropping the
+/// batch dimension from query heads to kv-groups appears to cost more GEMM
+/// parallelism than the avoided copy saves.
+///
+/// Kept because the result is counter-intuitive and will be proposed again: a
+/// flag and a measurement are cheaper than reimplementing it to rediscover this.
+fn grouped_attention_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("AKH_QWEN35_GROUPED_ATTENTION")
+            .map(|value| value == "1")
+            .unwrap_or(false)
+    })
+}
+
 /// Tokens forwarded per prefill step.
 ///
 /// Each chunk re-expands the whole K and V cache through `repeat_kv` in every
@@ -905,9 +937,25 @@ impl FullAttention {
             }
         };
 
-        let key = repeat_kv(key, self.head_count / self.kv_head_count)?;
-        let value = repeat_kv(value, self.head_count / self.kv_head_count)?;
-        let scores = (query.matmul(&key.t()?)? / (self.head_dim as f64).sqrt())?;
+        let ratio = self.head_count / self.kv_head_count;
+        let grouped = grouped_attention_enabled() && ratio > 1;
+        // Grouped: fold the repeat into the row dimension so the expanded K and
+        // V are never built. Otherwise materialize them as before.
+        let (key, value, query) = if grouped {
+            (key, value, query.contiguous()?)
+        } else {
+            (repeat_kv(key, ratio)?, repeat_kv(value, ratio)?, query)
+        };
+        let key_positions = key.dim(2)?;
+        let scores = if grouped {
+            query
+                .reshape((batch, self.kv_head_count, ratio * seq_len, self.head_dim))?
+                .matmul(&key.t()?)?
+                .reshape((batch, self.head_count, seq_len, key_positions))?
+        } else {
+            query.matmul(&key.t()?)?
+        };
+        let scores = (scores / (self.head_dim as f64).sqrt())?;
         let scores = match mask {
             Some(mask) => {
                 let mask = mask.broadcast_as(scores.shape())?;
@@ -915,7 +963,15 @@ impl FullAttention {
             }
             None => scores,
         };
-        let attended = softmax_last_dim(&scores)?.matmul(&value.contiguous()?)?;
+        let probabilities = softmax_last_dim(&scores)?;
+        let attended = if grouped {
+            probabilities
+                .reshape((batch, self.kv_head_count, ratio * seq_len, key_positions))?
+                .matmul(&value.contiguous()?)?
+                .reshape((batch, self.head_count, seq_len, self.head_dim))?
+        } else {
+            probabilities.matmul(&value.contiguous()?)?
+        };
         let attended = attended.transpose(1, 2)?;
         let attended = attended.broadcast_mul(&sigmoid(&gate)?)?;
         self.output
@@ -2582,6 +2638,80 @@ pub(crate) mod tests {
         for stats in [coarse, fine] {
             assert!(stats.min_cosine > -1.000_001 && stats.min_cosine < 1.000_001);
         }
+    }
+
+    #[test]
+    fn grouped_attention_is_the_same_arithmetic_as_materializing_the_repeat() {
+        use candle_transformers::utils::repeat_kv;
+        let device = Device::Cpu;
+        let (batch, kv_heads, ratio, seq, positions, dim) = (1usize, 3usize, 4usize, 5usize, 7usize, 8usize);
+        let heads = kv_heads * ratio;
+
+        // Distinct values everywhere, so a head-ordering error cannot cancel.
+        let make = |n: usize, salt: usize| {
+            let values: Vec<f32> = (0..n)
+                .map(|i| ((i * 7 + salt * 13) % 61) as f32 / 30.0 - 1.0)
+                .collect();
+            values
+        };
+        let query = Tensor::from_vec(
+            make(batch * heads * seq * dim, 1),
+            (batch, heads, seq, dim),
+            &device,
+        )
+        .unwrap();
+        let key = Tensor::from_vec(
+            make(batch * kv_heads * positions * dim, 2),
+            (batch, kv_heads, positions, dim),
+            &device,
+        )
+        .unwrap();
+        let value = Tensor::from_vec(
+            make(batch * kv_heads * positions * dim, 3),
+            (batch, kv_heads, positions, dim),
+            &device,
+        )
+        .unwrap();
+
+        // Reference: build the expanded K and V, then attend.
+        let wide_key = repeat_kv(key.clone(), ratio).unwrap();
+        let wide_value = repeat_kv(value.clone(), ratio).unwrap();
+        let reference_scores = query.matmul(&wide_key.t().unwrap()).unwrap();
+
+        // Grouped: fold the repeat into the row dimension, expand nothing.
+        let grouped_scores = query
+            .reshape((batch, kv_heads, ratio * seq, dim))
+            .unwrap()
+            .matmul(&key.t().unwrap())
+            .unwrap()
+            .reshape((batch, heads, seq, positions))
+            .unwrap();
+
+        assert_eq!(reference_scores.dims(), grouped_scores.dims());
+        let a: Vec<f32> = reference_scores.flatten_all().unwrap().to_vec1().unwrap();
+        let b: Vec<f32> = grouped_scores.flatten_all().unwrap().to_vec1().unwrap();
+        // Identical operand order per output element, so this is exact, not close.
+        assert_eq!(a, b, "grouped scores must match head for head");
+
+        // And the value matmul, which reuses the same grouping.
+        let probabilities = softmax_last_dim(&reference_scores).unwrap();
+        let reference_attended = probabilities.matmul(&wide_value.contiguous().unwrap()).unwrap();
+        let grouped_attended = probabilities
+            .reshape((batch, kv_heads, ratio * seq, positions))
+            .unwrap()
+            .matmul(&value.contiguous().unwrap())
+            .unwrap()
+            .reshape((batch, heads, seq, dim))
+            .unwrap();
+        assert_eq!(
+            reference_attended.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            grouped_attended.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            "grouped attention output must match head for head"
+        );
+
+        // The test would pass trivially if the expansion were a no-op; it is not.
+        assert_eq!(wide_key.dims(), &[batch, heads, positions, dim]);
+        assert_ne!(key.dims(), wide_key.dims());
     }
 
     #[test]

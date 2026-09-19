@@ -78,6 +78,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         /// as an argument. Overrides `--prompt`.
         #[arg(long)]
         prompt_file: Option<PathBuf>,
+        /// Write the post-prefill hidden state as little-endian f32, for
+        /// comparing two numerical paths with the cosine gate.
+        #[arg(long)]
+        hidden_dump: Option<PathBuf>,
     }
     let mut args = Args::parse();
     if let Some(path) = args.prompt_file.clone() {
@@ -120,6 +124,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "device_memory":backend.device_memory(),
             "memory_bound_context_limit":backend.memory_bound_context_limit()})
     );
+    if let Some(path) = args.hidden_dump.clone() {
+        // Taken before generation, so it reflects prefill alone.
+        let hidden = backend.extract_hidden_state(&args.prompt)?;
+        let mut bytes = Vec::with_capacity(hidden.len() * 4);
+        for value in &hidden {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(&path, bytes)?;
+        println!(
+            "{}",
+            serde_json::json!({"phase":"hidden_dump","values":hidden.len(),
+                "path":path.display().to_string()})
+        );
+    }
     let mut first = None;
     for round in 0..2 {
         let started = Instant::now();
