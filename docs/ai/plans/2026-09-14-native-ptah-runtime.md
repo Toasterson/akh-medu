@@ -89,8 +89,12 @@ the chronological evidence further down is retained as written.
   0.9829 at 3, treating keys and values identically, and **at 2 bits already
   beats PolarQuant at 3**. At 4 bits that is 7.8x compression, putting the
   advertised 262,144-token context within reach of this card for the first time.
-  Not yet wired into `AttentionState`; activation needs an end-to-end quality
-  gate and a throughput measurement, and the dense rotation is the known cost.
+  A gated lossy KV path is now wired into the model and **passes the five-daemon
+  canary at 4, 3 and 2 bits**, recalling the correct number after eviction and
+  restart. The fixture does not discriminate between those widths, so 4 bits is
+  the conservative default. Storage is still unchanged, so no memory is saved
+  yet, and the dense rotation remains the known cost. See
+  [lossy KV gate](../research/2026-09-19-lossy-kv-canary.md).
   See [TurboQuant](../research/2026-09-19-turboquant-kv.md).
 - **KV quantization quality measured, and it fails** (2026-09-19): PolarQuant
   round-trips this model's real KV at mean cosine 0.904 for keys and 0.708 for

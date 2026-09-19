@@ -101,6 +101,67 @@ fn sigmoid(x: &Tensor) -> Result<Tensor> {
     (x.neg()?.exp()? + 1.0)?.recip()
 }
 
+/// Lossy KV settings, read once from the environment.
+///
+/// `AKH_QWEN35_KV_QUANT_BITS` enables it at that bit-width;
+/// `AKH_QWEN35_KV_QUANT_RECENT` keeps that many newest positions exact, since a
+/// deployed compressor would page out only older context. Absent, nothing
+/// changes and the bit-exact path is untouched.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KvQuantization {
+    bits: u8,
+    recent: usize,
+}
+
+impl KvQuantization {
+    /// Quantize every position older than the recent window, in place.
+    ///
+    /// `tensor` is `(batch, kv_heads, positions, head_dim)`. Only positions that
+    /// existed before this call are touched, so the newest token is always
+    /// exact and a decode step never re-quantizes what it just wrote.
+    fn apply(&self, tensor: &Tensor, index_pos: usize) -> Result<Tensor> {
+        let (batch, heads, positions, dim) = tensor.dims4()?;
+        let keep_from = positions.saturating_sub(self.recent);
+        // Nothing has aged out of the exact window yet.
+        if keep_from == 0 || index_pos == 0 && positions <= self.recent {
+            return Ok(tensor.clone());
+        }
+        let device = tensor.device().clone();
+        let mut values: Vec<f32> = tensor.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+        let quantizer = crate::nlu::turbo_quant::TurboQuant::new(dim, self.bits, 0x7EED_5EED);
+        for b in 0..batch {
+            for head in 0..heads {
+                for position in 0..keep_from {
+                    let start = ((b * heads + head) * positions + position) * dim;
+                    let slice = &values[start..start + dim];
+                    let restored = quantizer.dequantize(&quantizer.quantize(slice));
+                    values[start..start + dim].copy_from_slice(&restored);
+                }
+            }
+        }
+        Tensor::from_vec(values, (batch, heads, positions, dim), &device)?
+            .to_dtype(tensor.dtype())
+    }
+}
+
+fn kv_quantization() -> Option<KvQuantization> {
+    use std::sync::OnceLock;
+    static SETTINGS: OnceLock<Option<KvQuantization>> = OnceLock::new();
+    *SETTINGS.get_or_init(|| {
+        let bits: u8 = std::env::var("AKH_QWEN35_KV_QUANT_BITS")
+            .ok()?
+            .parse()
+            .ok()
+            .filter(|bits| (1..=8).contains(bits))?;
+        let recent = std::env::var("AKH_QWEN35_KV_QUANT_RECENT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32);
+        tracing::warn!(bits, recent, "lossy KV quantization is enabled");
+        Some(KvQuantization { bits, recent })
+    })
+}
+
 fn softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "vulkan")]
     if x.device().is_vulkan() {
@@ -333,6 +394,17 @@ impl FullAttention {
                 "Qwen35 attention has no state to append at position {index_pos}"
             ),
             _ => (key, value),
+        };
+        // Optional lossy KV path, off unless configured. This round-trips the
+        // cache through TurboQuant in place: it measures the quality a
+        // compressed cache would deliver without yet changing the storage
+        // layout, so an end-to-end gate can run before memory work begins.
+        let (key, value) = match kv_quantization() {
+            Some(policy) => (
+                policy.apply(&key, index_pos)?,
+                policy.apply(&value, index_pos)?,
+            ),
+            None => (key, value),
         };
         *state = Some(AttentionState {
             key: key.clone(),
@@ -1768,6 +1840,60 @@ pub(crate) mod tests {
     use std::io::{BufReader, Cursor, Read};
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn lossy_kv_keeps_the_recent_window_exact_and_degrades_only_older_positions() {
+        let device = Device::Cpu;
+        let (heads, positions, dim) = (2usize, 8usize, 64usize);
+        let values: Vec<f32> = (0..heads * positions * dim)
+            .map(|i| ((i % 97) as f32 / 48.0) - 1.0)
+            .collect();
+        let tensor = Tensor::from_vec(values.clone(), (1, heads, positions, dim), &device).unwrap();
+
+        let policy = KvQuantization { bits: 4, recent: 3 };
+        let got: Vec<f32> = policy
+            .apply(&tensor, 1)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(got.len(), values.len());
+
+        let keep_from = positions - 3;
+        for head in 0..heads {
+            for position in 0..positions {
+                let start = (head * positions + position) * dim;
+                let original = &values[start..start + dim];
+                let actual = &got[start..start + dim];
+                if position >= keep_from {
+                    assert_eq!(original, actual, "recent position {position} must stay exact");
+                } else {
+                    assert!(
+                        original != actual,
+                        "older position {position} should have been quantized"
+                    );
+                    let dot: f32 = original.iter().zip(actual).map(|(a, b)| a * b).sum();
+                    let na: f32 = original.iter().map(|v| v * v).sum::<f32>().sqrt();
+                    let nb: f32 = actual.iter().map(|v| v * v).sum::<f32>().sqrt();
+                    assert!(dot / (na * nb) > 0.97, "cosine {}", dot / (na * nb));
+                }
+            }
+        }
+
+        // A cache still inside the exact window is returned untouched.
+        let short =
+            Tensor::from_vec(values[..heads * 2 * dim].to_vec(), (1, heads, 2, dim), &device)
+                .unwrap();
+        let untouched: Vec<f32> = KvQuantization { bits: 4, recent: 8 }
+            .apply(&short, 0)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(untouched, values[..heads * 2 * dim].to_vec());
+    }
 
     static Q8_ROUTE_ENV: Mutex<()> = Mutex::new(());
     static VERIFIED_PTAH_MODEL: OnceLock<PathBuf> = OnceLock::new();
