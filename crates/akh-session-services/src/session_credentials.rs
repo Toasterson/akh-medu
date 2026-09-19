@@ -314,6 +314,15 @@ impl Sessions {
     }
 
     pub fn remove_archived_mcp_credentials(&self, session_id: &str) -> Result<()> {
+        // Closure is irreversible. A durable cleanup receipt avoids reopening a
+        // write transaction and rereading a large transcript on every sweep.
+        if self
+            .store
+            .get::<bool>(&key("mcp_credentials_removed", &[session_id]))?
+            == Some(true)
+        {
+            return Ok(());
+        }
         self.store.transaction(|tx| {
             let session: SessionRecord = tx
                 .get(&key("session", &[session_id]))?

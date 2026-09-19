@@ -450,6 +450,7 @@ mod tests {
                     token_file,
                     ca_file: None,
                     allow_insecure_http: false,
+                    request_timeout_secs: None,
                 },
                 "operation",
                 "tool",

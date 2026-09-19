@@ -22,7 +22,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     if [ "$SERVICE" = akhrtd ]; then cargo build --locked --release -p akh-session-services --no-default-features --features runtime --bin akh-runtime-profile && cp target/release/akh-runtime-profile /out/; fi && \
     ln -s "$SERVICE" /out/akh-entrypoint
 FROM debian:bookworm-slim AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini python3 && \
     rm -rf /var/lib/apt/lists/* && groupadd --gid 10001 akh && \
     useradd --uid 10001 --gid 10001 --home-dir /data --no-create-home akh && \
     mkdir -p /data /config /workspaces && chown akh:akh /data /workspaces
