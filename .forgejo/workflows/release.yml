@@ -3,7 +3,7 @@ name: Release
 # (matches release.toml's tag-name = "v{{version}}").
 #
 # Produces, for tag vX.Y.Z:
-#   * docker images akh / akhomed / seshd / sokard  :vX.Y.Z + :latest  (Forgejo registry)
+#   * docker images akh / akhomed / seshd / sokard / akh-transcripts  :vX.Y.Z + :latest  (Forgejo registry)
 #   * a Linux x86_64 tarball (binaries + systemd units + install.sh)
 #   * an illumos IPS .p5p package (binaries + SMF manifests), built natively
 # The tarball and .p5p are attached to the Forgejo Release for the tag.
@@ -37,12 +37,13 @@ jobs:
           TAG=$(sh .forgejo/scripts/resolve-tag.sh)
           [ -n "$TAG" ] || { echo "could not resolve release tag" >&2; exit 1; }
           echo "releasing $TAG"
-          for img in akh akhomed seshd sokard; do
+          for img in akh akhomed seshd sokard akh-transcripts; do
             case "$img" in
-              akh)     DF=docker/akh.Dockerfile ;;
-              akhomed) DF=docker/akhomed.Dockerfile ;;
-              seshd)   DF=docker/seshd.Dockerfile ;;
-              sokard)  DF=docker/sokard.Dockerfile ;;
+              akh)             DF=docker/akh.Dockerfile ;;
+              akhomed)         DF=docker/akhomed.Dockerfile ;;
+              seshd)           DF=docker/seshd.Dockerfile ;;
+              sokard)          DF=docker/sokard.Dockerfile ;;
+              akh-transcripts) DF=docker/akh-transcripts.Dockerfile ;;
             esac
             echo "==> building $img from $DF"
             docker build -f "$DF" \
