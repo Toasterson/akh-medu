@@ -74,10 +74,6 @@ impl BudgetFiller {
         self.used
     }
 
-    /// Bytes still available before the limit.
-    pub fn remaining(&self) -> u64 {
-        self.limit.saturating_sub(self.used)
-    }
 
     /// Admit a text item, guaranteeing forward progress: if nothing has been
     /// admitted yet and this item alone exceeds the remaining budget, it is

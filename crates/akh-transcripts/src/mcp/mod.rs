@@ -40,16 +40,6 @@ use crate::normalize::NormalizedEvent;
 use crate::redact;
 
 /// Shared state for MCP tool handlers.
-
-/// Text admitted by the budget filler, whole or head-and-tail truncated;
-/// `None` means refused (stop and set the cursor at this item).
-fn admitted_text(a: budget::Admitted) -> Option<String> {
-    match a {
-        budget::Admitted::Whole(t) | budget::Admitted::Truncated { text: t, .. } => Some(t),
-        budget::Admitted::Refused => None,
-    }
-}
-
 pub struct TranscriptsMcpState {
     pub db: Arc<DatabaseConnection>,
     /// `None` when `AKH_TRANSCRIPTS_MODEL_DIR` was absent or failed to load
@@ -908,6 +898,15 @@ impl rmcp::handler::server::ServerHandler for TranscriptsMcpServer {
                     .to_string(),
             ),
         }
+    }
+}
+
+/// Text admitted by the budget filler, whole or head-and-tail truncated;
+/// `None` means refused (stop and set the cursor at this item).
+fn admitted_text(a: budget::Admitted) -> Option<String> {
+    match a {
+        budget::Admitted::Whole(t) | budget::Admitted::Truncated { text: t, .. } => Some(t),
+        budget::Admitted::Refused => None,
     }
 }
 
