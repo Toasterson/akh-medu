@@ -381,6 +381,7 @@ version = "0.1.0"
 dependencies = [
  "akh-embed",
  "chrono",
+ "clap",
  "miette 7.6.0",
  "regex",
  "rusqlite",
@@ -393,6 +394,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "walkdir",
  "zstd 0.13.3",
