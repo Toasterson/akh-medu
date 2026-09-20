@@ -102,10 +102,28 @@ impl SessionApp {
         let mut workers: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
         let mut running: HashMap<tokio::task::Id, (String, bool)> = HashMap::new();
         let mut last = HashMap::new();
+        // Scan on change, not on a timer. Every store commit signals
+        // `changes`, so a submitted turn, a tool result or a closure is still
+        // picked up within one interval; the interval is now a minimum
+        // spacing between scans rather than a cadence. The previous
+        // unconditional 1s scan deserialised every session record — 592
+        // closed ones, ~19 MB — every second for no work, which was most of
+        // this daemon's CPU and all of its memory churn.
+        //
+        // The fallback bounds how late any signal-free state change can be
+        // noticed. Its one real cost: a session in dispatch-failure backoff
+        // is retried up to this long after the backoff expires, instead of at
+        // the next second, because expiry alone writes nothing.
+        let changes = self.sessions.store.changes();
+        let mut dirty = true;
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut fallback = tokio::time::interval(Duration::from_secs(5));
+        fallback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                _ = changes.notified() => { dirty = true; }
+                _ = fallback.tick() => { dirty = true; }
                 result = workers.join_next_with_id(), if !workers.is_empty() => {
                     match result {
                         Some(Ok((id, result))) => {
@@ -119,7 +137,8 @@ impl SessionApp {
                         None => {}
                     }
                 }
-                _ = interval.tick() => {
+                _ = interval.tick(), if dirty => {
+                    dirty = false;
                     let mut sessions = match self.sessions.store.scan::<SessionRecord>("session/") {
                         Ok(sessions) => sessions,
                         Err(error) => { tracing::error!(code=%error.code,"session scan failed"); continue; }
