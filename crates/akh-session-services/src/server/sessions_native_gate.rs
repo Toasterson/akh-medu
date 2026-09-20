@@ -270,14 +270,14 @@ pub(super) async fn run(
             file.flush().unwrap();
         }
         let expected = if exact {
-                if index == turns.len() - 1 {
-                    "4317"
-                } else {
-                    "OK"
-                }
+            if index == turns.len() - 1 {
+                "4317"
             } else {
-                "ok"
-            };
+                "OK"
+            }
+        } else {
+            "ok"
+        };
         if output.trim() != expected {
             answer_failures += 1;
             eprintln!("answer mismatch at turn {index}: expected {expected:?}, got {output:?}");
@@ -349,5 +349,8 @@ pub(super) async fn run(
         .unwrap();
         file.flush().unwrap();
     }
-    assert_eq!(answer_failures, 0, "all five answers must meet the unchanged exact criterion");
+    assert_eq!(
+        answer_failures, 0,
+        "all five answers must meet the unchanged exact criterion"
+    );
 }

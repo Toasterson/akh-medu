@@ -14,12 +14,16 @@
 //! the model is trained to *generate* the call, not to reproduce the prompt
 //! it was given.
 
+use std::fmt;
+use std::str::FromStr;
+
 use burn::module::{AutodiffModule, Module, ModuleVisitor, Param};
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::ElementConversion;
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Int, Tensor, TensorData};
+use serde::{Deserialize, Serialize};
 
 use grug_data::TargetFormat;
 use grug_data::schema::Example;
@@ -27,6 +31,46 @@ use grug_data::schema::Example;
 use crate::pointer::{PointerTransformer, PointerTransformerConfig};
 use crate::tokenizer::Vocab;
 use crate::transformer::{AttentionBackend, TinyTransformer, TinyTransformerConfig};
+
+/// Whether `train_knowledge` reads per-record reward weights from
+/// [`grug_data::KnowledgeSftRecord::weight`] and scales each record's
+/// contribution to the batch loss by it (Phase 51 P6.5 experiment E3,
+/// `train_knowledge --record-weights use`).
+///
+/// The default, `Ignore`, reproduces pre-E3 behaviour byte-for-byte: the
+/// `weight` field is present on every record on disk, but this mode never
+/// reads it -- [`train_step_guarded_weighted`] with `record_weights: None`
+/// takes the exact same code path as [`train_step_guarded`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordWeightsMode {
+    #[default]
+    Ignore,
+    Use,
+}
+
+impl fmt::Display for RecordWeightsMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Ignore => "ignore",
+            Self::Use => "use",
+        })
+    }
+}
+
+impl FromStr for RecordWeightsMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ignore" => Ok(Self::Ignore),
+            "use" => Ok(Self::Use),
+            other => Err(format!(
+                "unknown --record-weights mode {other:?}; expected ignore or use"
+            )),
+        }
+    }
+}
 
 /// Render the tools offered in `example` plus the user request as the
 /// prompt half of a training sequence.
@@ -320,6 +364,96 @@ where
     (model, loss_value, grad_norm)
 }
 
+/// [`train_step_guarded`] with optional per-record loss weights (Phase 51
+/// P6.5 experiment E3, `train_knowledge --record-weights use`).
+///
+/// `record_weights`, when `Some`, must have exactly `batch.batch_size`
+/// entries, aligned index-for-index with the examples used to build `batch`
+/// (see `build_knowledge_batch`): `record_weights[i]` scales every position
+/// example `i` contributed to `batch.loss_mask` before the batch-mean
+/// reduction, so weight 0 makes that record contribute nothing to the step
+/// and weight 1 reproduces its unweighted contribution. See
+/// [`masked_cross_entropy_weighted`]'s doc comment for the denominator rule
+/// (unweighted mask count, so the step's effective size does not depend on
+/// how many records in the batch happen to carry a low or zero weight).
+///
+/// `record_weights: None` calls [`train_step_guarded`] directly -- the exact
+/// same code path, not a re-derivation of it -- so `--record-weights
+/// ignore` is byte-identical to pre-E3 behaviour.
+///
+/// The loss-cap / grad-norm-cap guards and gradient-norm reporting behave
+/// identically to [`train_step_guarded`] in both branches.
+pub fn train_step_guarded_weighted<B: AutodiffBackend + AttentionBackend>(
+    model: TinyTransformer<B>,
+    optim: &mut OptimizerAdaptor<Adam, TinyTransformer<B>, B>,
+    batch: &Batch<B>,
+    lr: f64,
+    loss_cap: f32,
+    grad_norm_cap: f32,
+    record_weights: Option<&[f32]>,
+) -> (TinyTransformer<B>, f32, f32)
+where
+    B::InnerBackend: AttentionBackend,
+{
+    let Some(weights) = record_weights else {
+        return train_step_guarded(model, optim, batch, lr, loss_cap, grad_norm_cap);
+    };
+    assert_eq!(
+        weights.len(),
+        batch.batch_size,
+        "record_weights length ({}) must match batch_size ({})",
+        weights.len(),
+        batch.batch_size
+    );
+
+    let device = batch.input_ids.device();
+    let mask_flags: Vec<i64> = batch
+        .loss_mask
+        .iter()
+        .map(|&m| if m { 1 } else { 0 })
+        .collect();
+    let mask_tensor = Tensor::<B, 1, Int>::from_data(
+        TensorData::new(mask_flags, [batch.batch_size * batch.seq_len]),
+        &device,
+    );
+
+    // Broadcast each record's scalar weight across its own seq_len
+    // positions, matching the record-major/position-minor flat layout every
+    // batch builder (`build_batch`, `build_knowledge_batch`) uses for
+    // `loss_mask`/`copy_mask`.
+    let mut weight_flat: Vec<f32> = Vec::with_capacity(batch.batch_size * batch.seq_len);
+    for &weight in weights {
+        for _ in 0..batch.seq_len {
+            weight_flat.push(weight);
+        }
+    }
+    let weight_tensor = Tensor::<B, 1>::from_data(
+        TensorData::new(weight_flat, [batch.batch_size * batch.seq_len]),
+        &device,
+    );
+
+    let logits = model.forward(batch.input_ids.clone()); // [batch, seq, vocab]
+    let masked_loss =
+        masked_cross_entropy_weighted(logits, batch.targets.clone(), &mask_tensor, &weight_tensor);
+
+    let loss_value: f32 = masked_loss.clone().into_scalar().elem();
+    if !loss_value.is_finite() || loss_value > loss_cap {
+        return (model, loss_value, f32::NAN);
+    }
+
+    let grads = masked_loss.backward();
+    let grads = GradientsParams::from_grads(grads, &model);
+
+    let grad_norm = global_grad_norm(&grads, &model);
+    if !grad_norm.is_finite() || grad_norm > grad_norm_cap {
+        return (model, loss_value, grad_norm);
+    }
+
+    let model = optim.step(lr, model, grads);
+
+    (model, loss_value, grad_norm)
+}
+
 /// Global (whole-model) pre-clip L2 grad norm: `sqrt(sum of squares)` over
 /// every registered gradient tensor in `grads`, restricted to `model`'s
 /// parameters. Walks the model via [`ModuleVisitor`] (the same mechanism
@@ -384,6 +518,53 @@ pub(crate) fn masked_cross_entropy<B: Backend>(
     // Guard against an all-masked-out batch (denom == 0) producing NaN;
     // this should not happen in practice (every example has a non-empty
     // target), but keep the loop from silently going NaN if it ever does.
+    let denom_scalar: f32 = denom.clone().into_scalar().elem();
+    if denom_scalar == 0.0 {
+        return masked_sum.neg();
+    }
+
+    (masked_sum.neg()) / denom
+}
+
+/// [`masked_cross_entropy`] with an additional per-position `weights`
+/// multiplier (Phase 51 P6.5 experiment E3, `train_knowledge
+/// --record-weights use`). `weights` is `[batch*seq]`, matching `mask` --
+/// each masked position's picked log-prob is scaled by its weight *before*
+/// the sum, so a record whose every position carries weight 0 contributes
+/// nothing to `masked_sum`.
+///
+/// The denominator is deliberately the *unweighted* mask count
+/// (`mask.sum()`), not `sum(mask * weights)`. Concretely: with batch size 1
+/// this reduces to `loss * weight` exactly (one record occupies the whole
+/// denominator either way). With batch size > 1, counting every masked
+/// position in the denominator regardless of its weight means a batch that
+/// happens to contain several near-zero-weight (e.g. rejected-episode)
+/// records does not make the *effective* learning rate on the
+/// remaining/full-weight records spike -- dividing by the *weighted* count
+/// instead would shrink the denominator on such batches and inflate the
+/// step size for whatever weight survived, exactly when the run should be
+/// treating that batch as supervision-light, not amplifying it.
+pub(crate) fn masked_cross_entropy_weighted<B: Backend>(
+    logits: Tensor<B, 3>,
+    targets: Tensor<B, 2, Int>,
+    mask: &Tensor<B, 1, Int>,
+    weights: &Tensor<B, 1>,
+) -> Tensor<B, 1> {
+    use burn::tensor::activation::log_softmax;
+
+    let [b, s, v] = logits.dims();
+    let logits_flat = logits.reshape([b * s, v]);
+    let targets_flat = targets.reshape([b * s, 1]);
+
+    let log_probs = log_softmax(logits_flat, 1); // [b*s, v]
+    let picked = log_probs.gather(1, targets_flat).reshape([b * s]); // [b*s]
+
+    let mask_f = mask.clone().float();
+    let denom = mask_f.clone().sum();
+    let weighted_mask = mask_f * weights.clone();
+    let masked_sum = (picked * weighted_mask).sum();
+
+    // Same all-masked-out guard as `masked_cross_entropy`.
     let denom_scalar: f32 = denom.clone().into_scalar().elem();
     if denom_scalar == 0.0 {
         return masked_sum.neg();
@@ -596,6 +777,7 @@ where
 mod tests {
     use super::*;
     use crate::CpuAutodiffBackend;
+    use crate::CpuBackend;
     use crate::tokenizer::ByteTokenizer;
     use grug_data::Dataset;
 
@@ -741,6 +923,107 @@ mod tests {
             last < first,
             "expected loss to decrease over {} steps with BPE tokenizer: first={first}, last={last}, all={losses:?}",
             losses.len()
+        );
+    }
+
+    /// Two independent single-position (seq_len=1) records, so per-position
+    /// weight == per-record weight. Weights `[1, 1]` must reproduce
+    /// [`masked_cross_entropy`] exactly -- the weighted reduction is a
+    /// strict generalisation, not a different computation.
+    #[test]
+    fn masked_cross_entropy_weighted_all_ones_matches_unweighted() {
+        let device = Default::default();
+        let logits = Tensor::<CpuBackend, 3>::from_data(
+            TensorData::new(vec![1.0f32, 0.5, 0.1, 0.2, 2.0, 0.3], [2, 1, 3]),
+            &device,
+        );
+        let targets = Tensor::<CpuBackend, 2, Int>::from_data(
+            TensorData::new(vec![0i64, 1i64], [2, 1]),
+            &device,
+        );
+        let mask = Tensor::<CpuBackend, 1, Int>::from_data(
+            TensorData::new(vec![1i64, 1i64], [2]),
+            &device,
+        );
+        let ones =
+            Tensor::<CpuBackend, 1>::from_data(TensorData::new(vec![1.0f32, 1.0f32], [2]), &device);
+
+        let weighted: f32 =
+            masked_cross_entropy_weighted(logits.clone(), targets.clone(), &mask, &ones)
+                .into_scalar()
+                .elem();
+        let unweighted: f32 = masked_cross_entropy(logits, targets, &mask)
+            .into_scalar()
+            .elem();
+        assert!(
+            (weighted - unweighted).abs() < 1e-6,
+            "weight=1 for every record must reproduce the unweighted loss: weighted={weighted}, unweighted={unweighted}"
+        );
+    }
+
+    /// Batch of 2 (seq_len=1 each), weights `[1, 0]`: the chosen denominator
+    /// rule (unweighted mask count) means the weighted loss must equal
+    /// exactly half of sample 0's own standalone (batch-of-1) loss -- sample
+    /// 1 contributes zero to the numerator but its position still counts in
+    /// the denominator.
+    #[test]
+    fn masked_cross_entropy_weighted_zero_weight_contributes_nothing_to_numerator() {
+        let device = Default::default();
+        let logits = Tensor::<CpuBackend, 3>::from_data(
+            TensorData::new(vec![1.0f32, 0.5, 0.1, 0.2, 2.0, 0.3], [2, 1, 3]),
+            &device,
+        );
+        let targets = Tensor::<CpuBackend, 2, Int>::from_data(
+            TensorData::new(vec![0i64, 1i64], [2, 1]),
+            &device,
+        );
+        let mask = Tensor::<CpuBackend, 1, Int>::from_data(
+            TensorData::new(vec![1i64, 1i64], [2]),
+            &device,
+        );
+        let weights =
+            Tensor::<CpuBackend, 1>::from_data(TensorData::new(vec![1.0f32, 0.0f32], [2]), &device);
+
+        let weighted: f32 = masked_cross_entropy_weighted(logits, targets, &mask, &weights)
+            .into_scalar()
+            .elem();
+
+        // Sample 0 alone, unweighted (batch=1, seq=1): the same logits row,
+        // same target, denom=1.
+        let logits0 = Tensor::<CpuBackend, 3>::from_data(
+            TensorData::new(vec![1.0f32, 0.5, 0.1], [1, 1, 3]),
+            &device,
+        );
+        let targets0 =
+            Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(vec![0i64], [1, 1]), &device);
+        let mask0 =
+            Tensor::<CpuBackend, 1, Int>::from_data(TensorData::new(vec![1i64], [1]), &device);
+        let sample0_alone: f32 = masked_cross_entropy(logits0, targets0, &mask0)
+            .into_scalar()
+            .elem();
+
+        assert!(
+            (weighted - 0.5 * sample0_alone).abs() < 1e-5,
+            "weighted loss {weighted} should equal half of sample 0's standalone loss {sample0_alone}"
+        );
+    }
+
+    #[test]
+    fn record_weights_mode_round_trips_through_str_and_json() {
+        assert_eq!(
+            "ignore".parse::<RecordWeightsMode>().unwrap(),
+            RecordWeightsMode::Ignore
+        );
+        assert_eq!(
+            "USE".parse::<RecordWeightsMode>().unwrap(),
+            RecordWeightsMode::Use
+        );
+        assert!("bogus".parse::<RecordWeightsMode>().is_err());
+        assert_eq!(RecordWeightsMode::default(), RecordWeightsMode::Ignore);
+        assert_eq!(RecordWeightsMode::Use.to_string(), "use");
+        assert_eq!(
+            serde_json::to_string(&RecordWeightsMode::Use).unwrap(),
+            "\"use\""
         );
     }
 }

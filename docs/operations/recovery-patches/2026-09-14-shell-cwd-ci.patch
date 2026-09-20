@@ -1,0 +1,225 @@
+From 5992e2483a945f2d358964bef684d936c96ebfc7 Mon Sep 17 00:00:00 2001
+From: "Tecton (Architect agent)" <tecton@wegmueller.it>
+Date: Mon, 14 Sep 2026 13:20:53 +0200
+Subject: [PATCH] Isolate real-shell cwd tests from memory-heavy library suite
+
+---
+ .solstice/job.sh              |  9 +++-
+ src/agent/tools/shell_exec.rs | 77 --------------------------------
+ src/observability.rs          |  1 -
+ tests/shell_exec_cwd.rs       | 84 +++++++++++++++++++++++++++++++++++
+ 4 files changed, 92 insertions(+), 79 deletions(-)
+ create mode 100644 tests/shell_exec_cwd.rs
+
+diff --git a/.solstice/job.sh b/.solstice/job.sh
+index a8e3f78d..89d32a55 100755
+--- a/.solstice/job.sh
++++ b/.solstice/job.sh
+@@ -79,6 +79,13 @@ cargo check --features server
+ echo "=== cargo test --features postgres --lib ==="
+ # Use postgres (not server) to avoid ENOSPC from linking the enormous akhomed
+ # binary. --lib skips binary targets, testing only the library crate.
+-cargo test --features postgres --lib
++# Quiet libtest keeps failures and summaries while avoiding thousands of
++# per-test success lines on the synchronous native log transport.
++cargo test --quiet --features postgres --lib
++
++# These assertions spawn real shells. A separate test executable avoids fork
++# failing with ENOMEM after the library suite grows its process address space.
++echo "=== real shell cwd integration tests ==="
++cargo test --quiet --features postgres --test shell_exec_cwd -- --test-threads=1
+ 
+ echo "=== done: native lane green at Actions-lane scope ==="
+diff --git a/src/agent/tools/shell_exec.rs b/src/agent/tools/shell_exec.rs
+index f256a89a..f8f2d002 100644
+--- a/src/agent/tools/shell_exec.rs
++++ b/src/agent/tools/shell_exec.rs
+@@ -242,83 +242,6 @@ impl Tool for ShellExecTool {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use crate::engine::EngineConfig;
+-    use crate::vsa::Dimension;
+-
+-    fn test_engine() -> Engine {
+-        Engine::new(EngineConfig {
+-            dimension: Dimension::TEST,
+-            ..Default::default()
+-        })
+-        .unwrap()
+-    }
+-
+-    /// A session cwd active on this thread (ACP session-cwd threading) must
+-    /// be what `pwd` reports — the live-verification case from the ACP
+-    /// session-cwd work item, exercised here without a whole ACP harness.
+-    #[test]
+-    fn runs_in_the_thread_local_session_cwd_when_one_is_set() {
+-        let dir = tempfile::tempdir().unwrap();
+-        let canonical = dir.path().canonicalize().unwrap();
+-        let tool = ShellExecTool;
+-        let engine = test_engine();
+-
+-        let _guard = crate::fs::set_session_cwd(Some(canonical.clone()));
+-        let input = ToolInput::new().with_param("command", "pwd");
+-        let result = tool.execute(&engine, input).unwrap();
+-        assert!(result.success, "{}", result.result);
+-        assert!(
+-            result.result.contains(canonical.to_str().unwrap()),
+-            "pwd must report the active session cwd: {}",
+-            result.result
+-        );
+-    }
+-
+-    /// Once the guard drops (turn over), a later call on the same thread must
+-    /// not still see the old session cwd — the "no session cwd" compatibility
+-    /// bar applies immediately after the turn that had one ends.
+-    #[test]
+-    fn ignores_a_session_cwd_once_its_guard_has_dropped() {
+-        let dir = tempfile::tempdir().unwrap();
+-        let canonical = dir.path().canonicalize().unwrap();
+-        let tool = ShellExecTool;
+-        let engine = test_engine();
+-
+-        {
+-            let _guard = crate::fs::set_session_cwd(Some(canonical.clone()));
+-        }
+-        let input = ToolInput::new().with_param("command", "pwd");
+-        let result = tool.execute(&engine, input).unwrap();
+-        assert!(result.success, "{}", result.result);
+-        assert!(
+-            !result.result.contains(canonical.to_str().unwrap()),
+-            "pwd must NOT report a dropped session cwd: {}",
+-            result.result
+-        );
+-    }
+-
+-    /// With no session cwd ever set, behavior is exactly what it was before
+-    /// session-cwd threading existed: `request.cwd` is `None`, so the
+-    /// backend's own default applies (for the exec-only default backend
+-    /// here, that's the process's own cwd).
+-    #[test]
+-    fn no_session_cwd_leaves_request_cwd_unset() {
+-        let tool = ShellExecTool;
+-        let engine = test_engine();
+-        assert_eq!(crate::fs::session_cwd(), None, "sanity: nothing active");
+-
+-        let input = ToolInput::new().with_param("command", "pwd");
+-        let result = tool.execute(&engine, input).unwrap();
+-        assert!(result.success, "{}", result.result);
+-        let expected = std::env::current_dir().unwrap();
+-        assert!(
+-            result.result.contains(expected.to_str().unwrap()),
+-            "pwd must report the process cwd unchanged: {} (expected under {})",
+-            result.result,
+-            expected.display()
+-        );
+-    }
+-
+     #[test]
+     fn backend_roots_reflects_the_injected_backends_read_roots() {
+         let dir = tempfile::tempdir().unwrap();
+diff --git a/src/observability.rs b/src/observability.rs
+index d2d47434..c8c8328d 100644
+--- a/src/observability.rs
++++ b/src/observability.rs
+@@ -130,7 +130,6 @@ fn init_otel(
+ ) -> Result<ObservabilityShutdown, Box<dyn std::error::Error + Send + Sync>> {
+     use opentelemetry::{KeyValue, trace::TracerProvider as _};
+     use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
+-    use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
+     use opentelemetry_sdk::{
+         Resource, propagation::TraceContextPropagator, runtime::Tokio, trace::TracerProvider,
+     };
+diff --git a/tests/shell_exec_cwd.rs b/tests/shell_exec_cwd.rs
+new file mode 100644
+index 00000000..c6ab5f70
+--- /dev/null
++++ b/tests/shell_exec_cwd.rs
+@@ -0,0 +1,84 @@
++//! Real subprocess cwd regressions run outside the large library-test process.
++//! Native CI previously failed fork/spawn with ENOMEM before these assertions.
++use akh_medu::{
++    agent::{
++        tool::{Tool, ToolInput},
++        tools::ShellExecTool,
++    },
++    engine::{Engine, EngineConfig},
++    vsa::Dimension,
++};
++
++fn test_engine() -> Engine {
++    Engine::new(EngineConfig {
++        dimension: Dimension::TEST,
++        ..Default::default()
++    })
++    .unwrap()
++}
++
++/// A session cwd active on this thread (ACP session-cwd threading) must
++/// be what `pwd` reports — the live-verification case from the ACP
++/// session-cwd work item, exercised here without a whole ACP harness.
++#[test]
++fn runs_in_the_thread_local_session_cwd_when_one_is_set() {
++    let dir = tempfile::tempdir().unwrap();
++    let canonical = dir.path().canonicalize().unwrap();
++    let tool = ShellExecTool;
++    let engine = test_engine();
++
++    let _guard = akh_medu::fs::set_session_cwd(Some(canonical.clone()));
++    let input = ToolInput::new().with_param("command", "pwd");
++    let result = tool.execute(&engine, input).unwrap();
++    assert!(result.success, "{}", result.result);
++    assert!(
++        result.result.contains(canonical.to_str().unwrap()),
++        "pwd must report the active session cwd: {}",
++        result.result
++    );
++}
++
++/// Once the guard drops (turn over), a later call on the same thread must
++/// not still see the old session cwd — the "no session cwd" compatibility
++/// bar applies immediately after the turn that had one ends.
++#[test]
++fn ignores_a_session_cwd_once_its_guard_has_dropped() {
++    let dir = tempfile::tempdir().unwrap();
++    let canonical = dir.path().canonicalize().unwrap();
++    let tool = ShellExecTool;
++    let engine = test_engine();
++
++    {
++        let _guard = akh_medu::fs::set_session_cwd(Some(canonical.clone()));
++    }
++    let input = ToolInput::new().with_param("command", "pwd");
++    let result = tool.execute(&engine, input).unwrap();
++    assert!(result.success, "{}", result.result);
++    assert!(
++        !result.result.contains(canonical.to_str().unwrap()),
++        "pwd must NOT report a dropped session cwd: {}",
++        result.result
++    );
++}
++
++/// With no session cwd ever set, behavior is exactly what it was before
++/// session-cwd threading existed: `request.cwd` is `None`, so the
++/// backend's own default applies (for the exec-only default backend
++/// here, that's the process's own cwd).
++#[test]
++fn no_session_cwd_leaves_request_cwd_unset() {
++    let tool = ShellExecTool;
++    let engine = test_engine();
++    assert_eq!(akh_medu::fs::session_cwd(), None, "sanity: nothing active");
++
++    let input = ToolInput::new().with_param("command", "pwd");
++    let result = tool.execute(&engine, input).unwrap();
++    assert!(result.success, "{}", result.result);
++    let expected = std::env::current_dir().unwrap();
++    assert!(
++        result.result.contains(expected.to_str().unwrap()),
++        "pwd must report the process cwd unchanged: {} (expected under {})",
++        result.result,
++        expected.display()
++    );
++}
+-- 
+2.50.1 (Apple Git-155)
+

@@ -89,3 +89,15 @@ pub enum SeshatError {
     #[diagnostic(code(seshat::cache_miss))]
     CacheMiss { hash: String },
 }
+
+/// Flattens the shared embedder's richer diagnostic into the plain-string
+/// `SeshatError::Embedding` variant. Call sites that need `SeshatResult` from
+/// an `akh_embed` call keep compiling with a `?` or `.map_err(Into::into)`;
+/// `akh_embed::EmbedError`'s own `Diagnostic` impl carries the detailed
+/// `code`/`help` when handled directly instead of through this conversion.
+#[cfg(feature = "embedding")]
+impl From<akh_embed::EmbedError> for SeshatError {
+    fn from(error: akh_embed::EmbedError) -> Self {
+        SeshatError::Embedding(error.to_string())
+    }
+}

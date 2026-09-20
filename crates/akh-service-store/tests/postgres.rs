@@ -41,6 +41,7 @@ fn open(kind: &str, url: &str, legacy_redb_path: Option<std::path::PathBuf>) -> 
         schema: "akh_sessions".to_string(),
         kind: kind.to_string(),
         legacy_redb_path,
+        cache_capacity_bytes: None,
     })
     .expect("open postgres store")
 }

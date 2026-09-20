@@ -45,13 +45,40 @@ fn encode(value: &impl Serialize) -> Result<Value> {
     serde_json::to_value(value).map_err(|e| Fault::invalid(e.to_string()))
 }
 
-fn record_key(id: &str) -> String {
+pub(crate) fn record_key(id: &str) -> String {
     key("session", &[id])
 }
 
+pub(crate) fn archived_key(id: &str) -> String {
+    key("archived_session", &[id])
+}
+
+/// Reads a session record by id, checking the live `session/` prefix first
+/// and falling back to `archived_session/` for sessions whose cleanup has
+/// already completed and which the dispatcher no longer scans.
+pub(crate) fn load_record(tx: &Transaction<'_>, id: &str) -> Result<Option<SessionRecord>> {
+    if let Some(record) = tx.get(&record_key(id))? {
+        return Ok(Some(record));
+    }
+    tx.get(&archived_key(id))
+}
+
+/// Writes a session record, keeping it in whichever prefix it already lives
+/// in: once a session has been archived, later writes (e.g. late-arriving
+/// events) must not resurrect it in the scanned `session/` prefix.
+pub(crate) fn save_record(tx: &mut Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    if tx
+        .get::<SessionRecord>(&archived_key(&session.id))?
+        .is_some()
+    {
+        tx.put(&archived_key(&session.id), session)
+    } else {
+        tx.put(&record_key(&session.id), session)
+    }
+}
+
 fn load(tx: &Transaction<'_>, id: &str) -> Result<SessionRecord> {
-    tx.get(&record_key(id))?
-        .ok_or_else(|| Fault::missing("session not found"))
+    load_record(tx, id)?.ok_or_else(|| Fault::missing("session not found"))
 }
 
 /// Checked inside the same transaction as each client mutation. A transport's
@@ -91,7 +118,6 @@ pub fn is_stalled(last_progress_at_ms: u64, now_ms: u64, threshold_ms: u64) -> b
 pub fn should_force_cancel(retirement_at_ms: u64, now_ms: u64, grace_ms: u64) -> bool {
     now_ms.saturating_sub(retirement_at_ms) >= grace_ms
 }
-
 
 /// Validate without writing. Only semantic failures from this phase may become
 /// negative receipts; a storage failure must roll the whole transaction back.
@@ -196,7 +222,7 @@ pub fn append_event(
     // Every durable mutation is witnessed here, so this is the single place
     // that can prove a session is still moving. See `last_progress_at`.
     session.last_progress_at = event.at;
-    tx.put(&record_key(&session.id), session)?;
+    save_record(tx, session)?;
     Ok(event)
 }
 
@@ -585,19 +611,28 @@ impl Sessions {
             .transaction(|tx| self.create_in(tx, principal, request))
     }
 
+    /// Reads a session record by id outside a transaction, checking the live
+    /// `session/` prefix first and falling back to `archived_session/` for
+    /// sessions whose cleanup has already completed.
+    pub fn get_record(&self, id: &str) -> Result<Option<SessionRecord>> {
+        if let Some(record) = self.store.get(&record_key(id))? {
+            return Ok(Some(record));
+        }
+        self.store.get(&archived_key(id))
+    }
+
     pub fn get(&self, principal: &Principal, id: &str) -> Result<SessionRecord> {
-        let session: SessionRecord = self
-            .store
-            .get(&record_key(id))?
+        let session = self
+            .get_record(id)?
             .ok_or_else(|| Fault::missing("session not found"))?;
         authorize(&session, principal)?;
         Ok(session)
     }
 
     pub fn list(&self, principal: &Principal) -> Result<Vec<SessionRecord>> {
-        Ok(self
-            .store
-            .scan::<SessionRecord>("session/")?
+        let mut sessions = self.store.scan::<SessionRecord>("session/")?;
+        sessions.extend(self.store.scan::<SessionRecord>("archived_session/")?);
+        Ok(sessions
             .into_iter()
             .filter(|s| authorize(s, principal).is_ok())
             .collect())
@@ -922,7 +957,7 @@ impl Sessions {
                     json!({"status":status,"output":job.output,"error":job.error}),
                 )?;
             } else {
-                tx.put(&record_key(&session.id), &session)?;
+                save_record(tx, &session)?;
             }
             Ok(())
         })
@@ -990,7 +1025,7 @@ impl Sessions {
                     attachment_id: attachment_id.into(),
                     expires_at: now_ms() + 60_000,
                 });
-                tx.put(&record_key(id), &session)?;
+                save_record(tx, &session)?;
             }
             Ok(session)
         })
@@ -1006,7 +1041,7 @@ impl Sessions {
                 .is_some_and(|l| l.attachment_id == attachment_id)
             {
                 session.controller = None;
-                tx.put(&record_key(id), &session)?;
+                save_record(tx, &session)?;
             }
             Ok(())
         })
@@ -1017,9 +1052,8 @@ impl Sessions {
         principal: &Principal,
         call: &ToolCall,
     ) -> Result<SessionRecord> {
-        let session: SessionRecord = self
-            .store
-            .get(&record_key(&call.session_id))?
+        let session = self
+            .get_record(&call.session_id)?
             .ok_or_else(|| Fault::missing("session not found"))?;
         if principal.id != session.runtime.runtime || !principal.has_role("runtime") {
             return Err(Fault::new("forbidden", "runtime does not own this session"));

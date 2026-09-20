@@ -44,6 +44,7 @@ pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result
                 .clone()
                 .unwrap_or_else(|| "/unused".into()),
             allow_insecure_http: endpoint.allow_insecure_http,
+            request_timeout_secs: None,
         }
         .validate()?;
     }
@@ -480,12 +481,16 @@ async fn completion(
             .await
             .map_err(|_| Fault::new("transport", "model stream interrupted"))?
         {
+            check(cancel, deadline)?;
             bytes += chunk.len();
             if bytes > MAX_BYTES {
                 return Err(Fault::new("capacity", "model output exceeded byte limit"));
             }
             buffer.extend_from_slice(&chunk);
             while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
+                // Buffered SSE can remain ready while callbacks block. Check
+                // here too: select's interruption future may not get polled.
+                check(cancel, deadline)?;
                 stream.line(&buffer[..end], host)?;
                 buffer.drain(..=end);
             }
@@ -494,6 +499,7 @@ async fn completion(
             }
         }
         if !buffer.is_empty() {
+            check(cancel, deadline)?;
             stream.line(&buffer, host)?;
         }
         let finish = stream.finish.ok_or_else(|| {
@@ -536,9 +542,15 @@ mod tests {
         recall_hits: Vec<Vec<neural_spans::SpanHit>>,
         recalls: Vec<(String, neural_spans::SpanSpace, Vec<u8>, usize)>,
         deliveries: Vec<(String, Vec<neural_spans::SpanCapture>)>,
+        cancel_on_text: Option<std::sync::Arc<AtomicBool>>,
     }
     impl Host for Witness {
         fn event(&mut self, event: RuntimeEvent) -> std::result::Result<(), String> {
+            if matches!(event, RuntimeEvent::Text { .. })
+                && let Some(cancel) = &self.cancel_on_text
+            {
+                cancel.store(true, Ordering::SeqCst);
+            }
             self.events.push(event);
             Ok(())
         }
@@ -867,7 +879,10 @@ mod tests {
                 .collect();
             assert_eq!(roles, ["user", "assistant", "system", "user", "assistant"]);
             let block = conversation.messages[2]["content"].as_str().unwrap();
-            assert!(block.contains("- [user] The sky was green that day"), "{block}");
+            assert!(
+                block.contains("- [user] The sky was green that day"),
+                "{block}"
+            );
             assert!(!block.contains("Remember the word cedar"), "{block}");
             assert_eq!(
                 conversation.messages[2]["neural_recall"]["policy_sha256"],
@@ -896,25 +911,47 @@ mod tests {
                 request.id = format!("job-{turn}");
                 request.turn_id = format!("turn-{turn}");
                 request.input.text = "Again?".into();
-                assert_eq!(run(&store, &profile, &request, &mut host, &cancel).unwrap(), "ok");
+                assert_eq!(
+                    run(&store, &profile, &request, &mut host, &cancel).unwrap(),
+                    "ok"
+                );
             }
             host.support_recall = true;
-            host.recall_hits.push(vec![hit("turn", "Remember the word cedar")]);
+            host.recall_hits
+                .push(vec![hit("turn", "Remember the word cedar")]);
             request.id = "job-recall-evicted".into();
             request.turn_id = "turn-recall-evicted".into();
             run(&store, &profile, &request, &mut host, &cancel).unwrap();
-            let conversation: Conversation = store.get(&key("internal", &[&provider])).unwrap().unwrap();
-            assert_eq!(conversation.messages[0]["content"], "  Remember the word cedar  ");
+            let conversation: Conversation =
+                store.get(&key("internal", &[&provider])).unwrap().unwrap();
+            assert_eq!(
+                conversation.messages[0]["content"],
+                "  Remember the word cedar  "
+            );
             let recalled = &conversation.messages[conversation.messages.len() - 3];
             assert_eq!(recalled["role"], "system");
-            assert!(recalled["content"].as_str().unwrap().contains("Remember the word cedar"));
+            assert!(
+                recalled["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Remember the word cedar")
+            );
             let before = conversation.messages.len();
-            host.recall_hits.push(vec![hit("oversized", &"cedar ".repeat(300))]);
+            host.recall_hits
+                .push(vec![hit("oversized", &"cedar ".repeat(300))]);
             request.id = "job-recall-too-large".into();
             request.turn_id = "turn-recall-too-large".into();
-            assert_eq!(run(&store, &profile, &request, &mut host, &cancel).unwrap(), "ok");
-            let conversation: Conversation = store.get(&key("internal", &[&provider])).unwrap().unwrap();
-            assert_eq!(conversation.messages.len(), before + 2, "oversized optional recall is not persisted");
+            assert_eq!(
+                run(&store, &profile, &request, &mut host, &cancel).unwrap(),
+                "ok"
+            );
+            let conversation: Conversation =
+                store.get(&key("internal", &[&provider])).unwrap().unwrap();
+            assert_eq!(
+                conversation.messages.len(),
+                before + 2,
+                "oversized optional recall is not persisted"
+            );
         })
         .await
         .unwrap();
@@ -1207,6 +1244,45 @@ mod tests {
         );
         server.abort();
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn buffered_stream_checks_cancellation_between_events() {
+        use axum::{Router, routing::post};
+        let body = [
+            json!({"choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{"content":"must not be emitted"},"finish_reason":"stop"}]}),
+        ].iter().map(|v| format!("data: {v}\n\n")).collect::<String>() + "data: [DONE]\n\n";
+        let app = Router::new().route(
+            "/",
+            post(move || {
+                let body = body.clone();
+                async move { ([("content-type", "text/event-stream")], body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let mut host = Witness {
+            cancel_on_text: Some(cancel.clone()),
+            ..Default::default()
+        };
+        let error = completion(
+            reqwest::Client::new().post(url),
+            &mut host,
+            &cancel,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(
+            host.events.len(),
+            1,
+            "buffered output continued after cancellation"
+        );
+        server.abort();
+    }
+
     #[test]
     fn incomplete_streams_and_wrong_tool_finish_are_not_success() {
         let mut host = Witness::default();

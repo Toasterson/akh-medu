@@ -1,0 +1,39 @@
+# Local filesystem demo. See docs/ai/phases/phase-52-sokar/52a-report.md.
+# Store options: plain literals for non-secret settings; credentials via env:/file:.
+default_store = "local"
+
+[server]
+api_bind = "127.0.0.1:9400"
+admin_bind = "127.0.0.1:9401"
+# Optional public base URL (including a reverse-proxy prefix if needed).
+# Omit to return relative content URLs.
+public_api_url = "http://127.0.0.1:9400"
+
+[mcp]
+enabled = true
+path = "/mcp"
+max_inline_bytes = 8388608
+session_idle_secs = 900
+
+# Omit database for an ephemeral index rebuilt from manifests on every start.
+# Ephemeral mode is single-daemon only: never share its prefix between daemons.
+# For durable idempotency and coordination across replicas, enable PostgreSQL:
+# [database]
+# url = "env:SOKAR_DATABASE_URL"
+
+[[store]]
+name = "local"
+service = "fs"
+prefix = "sokar"
+[store.options]
+root = "env:SOKAR_FS_ROOT"
+
+[[principal]]
+id = "local-service"
+token_file = "/tmp/sokar-local/token"
+
+[limits]
+max_body_bytes = 268435456
+
+[delivery]
+inline_media_types = ["text/plain", "image/png", "image/jpeg"]

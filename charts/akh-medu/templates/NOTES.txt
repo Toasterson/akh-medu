@@ -1,0 +1,20 @@
+akh-medu ({{ .Chart.Name }}-{{ .Chart.Version }}, app {{ .Chart.AppVersion }}) has been installed/upgraded in {{ .Release.Namespace }}.
+{{- if .Values.transcripts.enabled }}
+
+── transcripts (agent-session transcript harvest, ADR 108) ──────────────────
+
+The migrate initContainer on {{ include "akh-medu.fullname" . }}-transcripts-derive
+runs migrations authenticated as the database OWNER (harvest), using the
+harvest-pg-client-harvest cert mounted at
+{{ .Values.transcripts.database.ownerCertMountPath }} — not the harvest_derive
+cert the main container uses. This is deliberate: the store's default
+privileges are declared FOR ROLE harvest, so tables must be *created by*
+harvest for harvest_derive/harvest_read to receive their grants automatically.
+No manual GRANT is required as long as that Secret exists in this namespace
+(verified live during packaging — see values.yaml's transcripts.database.owner
+comment).
+
+See docs/wayfinder/transcript-harvest/tickets/derivation-worker.md for the
+rest of the operational shape (anti-join discovery, re-derivation by version
+bump, advisory-locked singleton).
+{{- end }}

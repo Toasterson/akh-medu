@@ -263,6 +263,43 @@ async fn kubernetes_retries_one_allocation_and_never_deletes_a_replacement_uid()
             .await
             .is_err()
     );
+    // A ready allocation can outlive its executor. Neither a stopped process
+    // nor an operator's absence assertion permits dropping a present resource.
+    resolution.resolution.request_id = "lost-executor-inspection".into();
+    resolution.resolution.expected_request_sha256 =
+        akh_session_services::recovery::fingerprint(&first.request).unwrap();
+    resolution.observed_absent = true;
+    state.lock().unwrap().object = Some(json!({"metadata":{"uid":"replacement-uid"}}));
+    assert!(
+        service
+            .reconcile(&admin, "session", &resolution)
+            .await
+            .is_err()
+    );
+    assert_eq!(service.get("session").unwrap().state, "ready");
+    state.lock().unwrap().object = None;
+    resolution.resolution.quiescent = false;
+    assert!(
+        service
+            .reconcile(&admin, "session", &resolution)
+            .await
+            .is_err()
+    );
+    resolution.resolution.quiescent = true;
+    let recovered = service
+        .reconcile(&admin, "session", &resolution)
+        .await
+        .unwrap();
+    assert_eq!(recovered.state, "released");
+    assert_eq!(recovered.binding, first.binding);
+    assert_eq!(
+        service
+            .reconcile(&admin, "session", &resolution)
+            .await
+            .unwrap()
+            .state,
+        "released"
+    );
     task.abort();
 }
 

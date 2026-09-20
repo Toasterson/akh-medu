@@ -1,0 +1,43 @@
+{
+  "imports": [
+    {
+      "path": "HANDOFF.md",
+      "document_id": "01a0abe7-aa20-7f71-b168-c13b85b52ab2",
+      "sha256": "bcae78deacc2077f6d162bf34d45e05f93b70d8c64e04d4c91fa48227f2f9f6a",
+      "receipt_hash_matches": true
+    },
+    {
+      "path": "transcripts/conversation.md",
+      "document_id": "01a0abe7-df4e-7f63-ad17-3afa0c5c750c",
+      "sha256": "3cdd1b9667f13903784936501d4f06cb1295be8f6cc0f40ad504d0df4dec2aa0",
+      "receipt_hash_matches": true
+    },
+    {
+      "path": "sources/post.md",
+      "document_id": "01a0abe7-dfc1-7210-ae14-a4913f24b49d",
+      "sha256": "d9148742d5df97a69d6a42dc35f9289525ef586420ef5712228ababc3730bfc8",
+      "receipt_hash_matches": true
+    },
+    {
+      "path": "seshat/source-docs.txt",
+      "document_id": "01a0abe7-e045-78b3-a2de-967174863e15",
+      "sha256": "de320b3cd869912dd4f2b86b30419db5370e46db295c4cc30405a1cadd8eab3e",
+      "receipt_hash_matches": true
+    },
+    {
+      "path": "seshat/source-core.txt",
+      "document_id": "01a0abe7-e0e5-7f92-b029-f96d371c07ab",
+      "sha256": "aa1efa80a396a8676b5f426031d93ef36170cd7062879ed6eac5096f107647c4",
+      "receipt_hash_matches": true
+    },
+    {
+      "path": "seshat/source-examples.txt",
+      "document_id": "01a0abe7-e1e9-7961-9618-d4c2d262582e",
+      "sha256": "471d6500fa28e36e350729ab75cb0ab329a0f15fcb27f7c298e7ad09d73e9562",
+      "receipt_hash_matches": true
+    }
+  ],
+  "upstream_files_verified": 52,
+  "method": "Local body SHA256 equals Seshat receipt content_hash; extracted upstream files byte-equal to pinned archive",
+  "bootstrap_attempt": "Local CLI PAT lacked document.write; connected Anima MCP import succeeded"
+}

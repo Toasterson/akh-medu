@@ -1,0 +1,76 @@
+{{- if .Values.sokard.enabled }}
+{{- $stores := .Values.sokard.stores -}}
+{{- if not $stores -}}
+{{- fail "sokard.stores must have at least one entry when sokard.enabled=true (see crates/sokar/src/config.rs::Config::validate)" -}}
+{{- end -}}
+{{- $defaultStore := .Values.sokard.config.defaultStore -}}
+{{- if not $defaultStore -}}
+{{- $defaultStore = (index $stores 0).name -}}
+{{- end -}}
+{{- $secretKey := .Values.sokard.database.secretKey | default "SOKAR_DATABASE_URL" -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-sokard-config
+  labels:
+    {{- include "akh-medu.sokard.labels" . | nindent 4 }}
+data:
+  sokar.toml: |
+    # Rendered from charts/akh-medu values (sokard.*). Field names must match
+    # crates/sokar/src/config.rs exactly — it derives deny_unknown_fields.
+    default_store = {{ $defaultStore | quote }}
+
+    [server]
+    api_bind = "0.0.0.0:{{ .Values.sokard.service.apiPort }}"
+    admin_bind = "0.0.0.0:{{ .Values.sokard.service.adminPort }}"
+    {{- if .Values.sokard.config.publicApiUrl }}
+    public_api_url = {{ .Values.sokard.config.publicApiUrl | quote }}
+    {{- end }}
+
+    [mcp]
+    enabled = {{ .Values.sokard.mcp.enabled }}
+    path = {{ .Values.sokard.mcp.path | quote }}
+
+    {{- if .Values.sokard.database.enabled }}
+
+    [database]
+    url = "env:{{ $secretKey }}"
+    {{- end }}
+
+    {{- range $stores }}
+
+    [[store]]
+    name = {{ .name | quote }}
+    service = {{ .service | quote }}
+    {{- if .prefix }}
+    prefix = {{ .prefix | quote }}
+    {{- end }}
+    {{- if .options }}
+    [store.options]
+    {{- range $key, $val := .options }}
+    {{ $key }} = {{ $val | quote }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+
+    {{- range .Values.sokard.principals }}
+
+    [[principal]]
+    id = {{ .id | quote }}
+    {{- if .tokenFile }}
+    token_file = {{ .tokenFile | quote }}
+    {{- end }}
+    {{- if .tokenSha256File }}
+    token_sha256_file = {{ .tokenSha256File | quote }}
+    {{- end }}
+    {{- end }}
+
+    [limits]
+    max_body_bytes = {{ .Values.sokard.config.limits.maxBodyBytes | int64 }}
+
+    {{- if .Values.sokard.config.delivery.inlineMediaTypes }}
+
+    [delivery]
+    inline_media_types = [{{ range $i, $mt := .Values.sokard.config.delivery.inlineMediaTypes }}{{ if $i }}, {{ end }}{{ $mt | quote }}{{ end }}]
+    {{- end }}
+{{- end }}

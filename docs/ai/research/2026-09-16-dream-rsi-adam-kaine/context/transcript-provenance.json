@@ -1,0 +1,7 @@
+{
+  "session": "/Users/toasty/.codex/sessions/2026/09/16/rollout-2026-09-16T21-37-53-01a0abb9-c2cb-71f0-afc5-2c458c585078.jsonl",
+  "session_id": "01a0abb9-c2cb-71f0-afc5-2c458c585078",
+  "message_count": 7,
+  "cutoff": "2026-09-16T20:21:57.781Z",
+  "verification": "JSON round-trip equality and exact message inclusion in Markdown verified; Only response_item message output_text retained; reasoning items excluded. Legacy source omits channel metadata."
+}

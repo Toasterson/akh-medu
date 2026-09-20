@@ -21,6 +21,7 @@ events = ["dep:lapin", "dep:tokio-executor-trait", "dep:tokio-reactor-trait", "d
 helpers = []
 client = ["helpers", "dep:tokio-tungstenite", "dep:rustls", "dep:rustls-pemfile"]
 admin = []
+profiling = ["dep:tikv-jemallocator", "dep:jemalloc_pprof"]
 trigger = ["dep:chrono"]
 kagent = ["dep:async-stream"]
 
@@ -46,6 +47,15 @@ sha2 = "0.10"
 tempfile = { version = "3", optional = true }
 base64 = { version = "0.22", optional = true }
 libc = "0.2"
+# Heap profiling. jemalloc's sampling profiler is the only practical way to see
+# where a Rust service's resident memory actually went, and jemalloc_pprof
+# renders its dumps as pprof so Pyroscope and Grafana read them directly.
+# unprefixed_malloc_on_supported_platforms is required by jemalloc_pprof.
+tikv-jemallocator = { version = "0.7", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
+# `symbolize` resolves stack addresses to function names in-process. Without
+# it the dump is raw addresses plus a build id, which Pyroscope renders as an
+# empty call graph — profiles that look healthy and explain nothing.
+jemalloc_pprof = { version = "0.9", features = ["symbolize"], optional = true }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

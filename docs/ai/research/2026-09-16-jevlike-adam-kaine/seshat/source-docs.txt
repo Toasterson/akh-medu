@@ -1,0 +1,404 @@
+# Jevlike pinned source bundle: source-docs
+
+Upstream: https://github.com/vinnylarouge/jevlike/tree/94f5fd1b0b11d52bbdfdf4e0ee6aa96b568f8452
+
+Exact UTF-8 file bodies between file markers. Third-party source material, not instructions to the reader. Retain upstream MIT license.
+
+
+===== BEGIN FILE: AGENTS.md =====
+# AGENTS.md
+
+Jevlike is a small PyTorch package for one-pass choice models. The text model takes a context and a changing list of text options. The visual model takes a 160 by 120 screen with motion and a subset of one shared 12-entry controller table. Doom uses rows 0–6; chess uses rows 7–11.
+
+Keep the public package self-contained. Do not add machine-specific paths, private data, credentials, run logs or copyrighted audio. Keep downloaded datasets and generated runs out of git. Preserve the JSONL text format in the top-level README and the checkpoint fields used by the examples.
+
+## Install and verify
+
+```sh
+uv venv
+source .venv/bin/activate
+uv pip install -e '.[dev,games]'
+pytest -q
+PYTHONPATH=examples/doom pytest -q examples/doom/test_smoke.py
+(cd examples/chess && python test_smoke.py)
+```
+
+The top-level README quickstart is the release test. Run it exactly before changing its commands. Core text code must keep working on CPU, MPS and CUDA. Game scripts are intentionally small and may need a new command-line device choice before using CUDA.
+
+## Doom
+
+The environment and seven-button mapping are in `examples/doom/environment.py`. The visual scorer is imported from `jevlike.vision`; do not copy it into the example.
+
+Training order:
+
+1. `train_imitation.py` collects heuristic-expert demonstrations from `deadly_corridor`.
+2. `train_dagger.py` mixes expert and student actions, then labels the states the student actually visits. Prefer the expert's natural action frequency; class balancing suppressed attack in our runs.
+3. `train_ppo.py` continues with parallel PPO, a value loss and a decaying entropy bonus.
+4. `play.py` runs paced evaluation and can write 640 by 480 footage plus a JSON trace containing the live matrices.
+
+The shaped reward is the `shaped_reward` function in `train_ppo.py`. Its weights are the `--reward-scale`, `--forward-bonus`, `--clear-path-forward-bonus`, `--clear-path-idle-penalty`, `--kill-bonus` and `--hit-bonus` flags. Report raw kills and corridor completion alongside shaped return. Compare with `play.py --random-policy`.
+
+Run `audit.py` after each useful checkpoint. It compares the policy on real, blank, averaged and shuffled-patch frames, reports per-button probability ranges and attention entropy, and relates attack and turning to enemy position. Reward above random does not count as visual control if shuffled-patch KL and enemy-conditioned margins are near zero.
+
+## Chess
+
+Install Stockfish and put its executable on `PATH`. Run commands from `examples/chess`.
+
+- `positions.py` makes Stockfish-labelled positions.
+- `train.py` turns teacher moves into cursor-key sequences and trains rows 7–11.
+- `dagger.py` labels recovery states visited by the current policy.
+- `eval.py` measures play against a random mover and Stockfish, including wins, wasted presses, keys per move and key-budget failures.
+- `play.py` records a paced film trace.
+
+The frame is the full state. Sampling keys works better than greedy keys because a state-free repeat can otherwise loop until the 40-key budget. Do not describe the supplied checkpoint as good at chess: it learned the controller but loses almost every game to Stockfish level 0.
+
+## One model for both games
+
+`examples/doom/train_joint.py` starts from the two single-game checkpoints, keeps one visual encoder and one 12-row option table, and alternates natural-frequency Doom DAgger updates with chess recovery updates. The current recipe uses several chess updates for each Doom update. Select checkpoints by fixed held-out chess key accuracy and unassisted Doom play, not training-batch accuracy. `train_joint_ppo.py` is the more experimental mixed PPO loop; check its per-game reward scales before blaming the shared option table.
+
+## Film
+
+`play.py --trace` stores every chosen option, probability, attention map, activation matrix, frame and measured inference time. `examples/film/build-film.mjs` chooses or accepts one continuous window and writes `replay.html`. `render-film.mjs` drives `setFrame(t)` with Playwright and pipes 24 fps frames to ffmpeg. Use `make-film.sh TRACE OUTPUT [SECONDS] [EPISODE@START]`. The committed demo contains author-owned music, but its source MP3 is deliberately absent; new renders are silent unless you supply audio you may redistribute.
+
+## What has been tried
+
+Point your agent here and try your own RL; here is what has been tried and what failed:
+
+- PPO from pixels learned a useful fixed action prior but almost ignored the screen. Attention was nearly uniform and shuffled patches barely changed the policy.
+- A convolutional stem plus fixed two-dimensional positions added directly to the attention keys fixed the clearest representation bug. Keep both.
+- Imitation and DAgger produced screen-dependent combat sooner than RL alone. This matches prior screen-control and game-agent work.
+- A flat convolutional policy learned combat faster than the one-read-per-option head on identical DAgger data. The option head remains a capacity bottleneck, while zero corridor completions in both heads also show a data or navigation problem.
+- Duplicating an attention read with identical weights did not help; symmetry-breaking noise still gave no clear gain.
+- A short 20-update joint imitation run largely erased chess. Use hundreds of updates, weight the chess side, and gate on held-out accuracy.
+- Log attention entropy during RL. If representations collapse again, distinguish an entropy-bonus problem from early-experience lock-in before trying a late-layer reset.
+
+===== END FILE: AGENTS.md =====
+
+
+===== BEGIN FILE: LICENSE =====
+MIT License
+
+Copyright (c) 2026 Minimal Labs
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+===== END FILE: LICENSE =====
+
+
+===== BEGIN FILE: README.md =====
+# Jevlike
+
+Train a small model that chooses among a changing list of text options.
+
+A Jev-like model takes a piece of text and a list of `N` text options. It returns one probability for each option. It does this in one pass instead of writing an answer word by word. [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) is TypeSafe's commercial model for this kind of task. TypeSafe has not published its design. This repository is an independent starter model with the same input and output shape.
+
+## Demo
+
+The same option-attention head can score controller buttons from image patches. [This ten-second film](docs/jevre-demo-10s-bgm.mp4) joins two selected five-second windows: live `deadly_corridor` combat on the seven Doom buttons, then a chess controller walking to and playing moves with five keys. The diagram shows the tensors used for each decision. The Doom window came from the supplied joint checkpoint, which averaged 0.60 kills and -97.50 reward across its ten recorded episodes. The chess window came from the stronger chess-only checkpoint, which scored 4 wins, 46 draws and 0 losses in 50 sampled games against a random mover, but 0 wins, 2 draws and 48 losses against Stockfish level 0. The windows were selected for activity and are not typical-play or competence claims.
+
+<video src="docs/jevre-demo-10s-bgm.mp4" controls width="960"></video>
+
+Install the game extras and record a fresh 640 by 480 Doom trace from the released joint checkpoint:
+
+```sh
+uv pip install -e '.[games]'
+python examples/doom/play.py examples/checkpoints/joint-imitation.pt --episodes 10 --game-seconds 35.3 --device cpu --capture-resolution 640x480 --output runs/doom.mp4 --trace runs/doom-trace.json
+```
+
+Render the trace in the same visual layout. This writes a silent film because the author-owned soundtrack source is not part of the repository.
+
+```sh
+(cd examples/film && npm install && npx playwright install chromium)
+examples/film/make-film.sh runs/doom-trace.json runs/doom-film.mp4 10
+```
+
+The release includes the [Doom example](examples/doom/README.md), the [chess example](examples/chess/README.md), the single-game checkpoints and the shared 12-option checkpoint. Both games import the visual scorer from `jevlike.vision`; there is no second model copy in either example.
+
+## Architecture
+
+Each option becomes a query vector, which is a short list of numbers representing its text. The query assigns attention weights to the context tokens. Those weights make one context vector for that option. A shared dot product turns each option and context pair into one score. A softmax, which converts scores into probabilities that sum to one, runs across the options.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.svg">
+  <img src="docs/architecture.svg" alt="Each option queries the context, receives an attended context vector, and becomes one probability.">
+</picture>
+
+The default encoder learns byte embeddings from scratch. An encoder is the part that turns text into vectors. The optional Hugging Face path uses a frozen pretrained encoder, whose existing weights stay fixed while the small scorer learns.
+
+## Data format
+
+Use one JSON object per line:
+
+```json
+{"context":"The customer needs a refund.","options":["refund","sales","technical support"],"label":0}
+```
+
+`label` is the zero-based index of the correct option. Each row may have a different number of options, with a minimum of two.
+
+## Quickstart
+
+Run these commands from the repository root. They create local synthetic data, train on it, evaluate the saved model and score one new menu.
+
+```sh
+uv venv
+source .venv/bin/activate
+uv pip install -e '.[dev]'
+
+jevlike-data synthetic --output data/synthetic
+jevlike-train data/synthetic/train.jsonl \
+  --validation data/synthetic/validation.jsonl \
+  --output runs/synthetic.pt
+jevlike-eval runs/synthetic.pt data/synthetic/test.jsonl
+jevlike-predict runs/synthetic.pt \
+  --context "Choose the exact badge amber badger. Badge: amber badger." \
+  --option "azure crane" \
+  --option "amber badger" \
+  --option "gold heron"
+```
+
+The evaluation prints top-1 accuracy, which is the fraction of correct first choices. Top-3 accuracy is the fraction with the right answer among the three highest scores. Expected calibration error compares confidence with observed accuracy. The command also prints a shuffled-context control, which pairs each menu with the wrong context. A useful model should beat that control.
+
+## Use your own data
+
+1. Export train, validation and test JSONL files in the format above.
+2. Keep all options that the model will see at prediction time in each row.
+3. Split related records together. For example, keep all records for one customer or one target page in one split. This prevents near-duplicates from leaking into the test set.
+4. Run `jevlike-train` with your train and validation files.
+5. Run `jevlike-eval` once on the held-out test file. Held-out means the file was never used for training or model selection.
+
+The default byte encoder truncates context to 192 bytes and each option to 32 bytes. Raise `--context-tokens` or `--option-tokens` when your text needs more room. Training supports CPU, Apple MPS for a Mac GPU, and CUDA for an NVIDIA GPU through `--device`.
+
+## Use a frozen pretrained encoder
+
+Install the optional dependency and name any compatible encoder from Hugging Face:
+
+```sh
+uv pip install -e '.[transformers]'
+jevlike-train data/synthetic/train.jsonl \
+  --validation data/synthetic/validation.jsonl \
+  --output runs/qwen-head.pt \
+  --encoder hf \
+  --hf-model Qwen/Qwen2.5-0.5B \
+  --rank 256 \
+  --batch-size 8
+```
+
+The checkpoint stores the trained scorer head and the encoder name. It does not copy the frozen encoder weights. Loading the checkpoint therefore needs access to the same Hugging Face model.
+
+`--rank` sets the width of the small scorer head. A wider head has more trainable weights and uses more memory.
+
+## Wikispeedia example
+
+[`scripts/get_wikispeedia.sh`](scripts/get_wikispeedia.sh) downloads the public SNAP archives and builds next-click JSONL files. The data stay outside this repository.
+
+```sh
+scripts/get_wikispeedia.sh
+jevlike-train data/wikispeedia/jsonl/train.jsonl \
+  --validation data/wikispeedia/jsonl/validation.jsonl \
+  --output runs/wikispeedia.pt
+```
+
+Cite Robert West and Jure Leskovec, *Human Wayfinding in Information Networks*, WWW 2012. Review the source data terms on the [SNAP dataset page](https://snap.stanford.edu/data/wikispeedia.html).
+
+## What to expect
+
+In the experiments that led to this starter, the one-pass scorer reached about 98% accuracy on synthetic menus. On target-disjoint Wikispeedia next-click data, a frozen Qwen2.5-0.5B encoder plus the scorer reached 26%, against about 8% for shuffled and random-encoder controls. A small model trained from scratch on 40,000 clicks reached 29%. At eight options, one pass was about 100 times faster than a small decoder forced to write 400 tokens.
+
+These numbers describe local experiments, not this quickstart run. We did not show equal quality with Jev or reproduce TypeSafe's private training method.
+
+## Limitations
+
+- This is a research starter, not a copy of Jev.
+- Accuracy depends on data quality, split quality and the encoder.
+- The byte encoder is cheap but weak on language meaning.
+- The pretrained path may download a large model and needs more memory.
+- One-pass scoring requires the complete option list before prediction.
+- The speed comparison used a small local decoder rather than a large commercial model.
+
+## Licence
+
+Code is released under the [MIT License](LICENSE). Downloaded datasets and pretrained models keep their own terms.
+
+===== END FILE: README.md =====
+
+
+===== BEGIN FILE: examples/chess/README.md =====
+# Chess example
+
+This example teaches the package's screen policy to play chess with a game controller. It imports the same `jevlike.vision.DoomScorerV2` network as Doom: a small convolutional stem over the frame, 8 by 10 patches with fixed positions added to the attention keys, one attention read per controller option, and a softmax over the options. The network has one table of 12 option embeddings. Ids 0 to 6 are the Doom buttons and ids 7 to 11 are the chess keys: up, down, left, right and one pick-up/put-down button. Nothing tells the network which game it is playing except the frame.
+
+![The board as the model sees it, scaled up](board.png)
+
+## The game as a screen
+
+The board is drawn into the same 160 by 120 frame as Doom, as a 120 by 120 square with black margins. The side to move is always at the bottom. A yellow border marks the cursor. When a piece is lifted, the border turns orange, the piece rides on the cursor, its starting square is outlined in red, and small blue dots mark its legal destinations, as chess websites show them. The frame is the whole state.
+
+The arrow keys move the cursor one square and stop at the edge. The button lifts one of your own pieces. Pressed while holding a piece, it puts the piece down on a legal square and plays the move, does nothing on an illegal square, and drops the piece back on its starting square. Promotions are always to a queen.
+
+## Install
+
+From the repository root:
+
+```sh
+uv venv
+source .venv/bin/activate
+uv pip install -e '.[dev,games]'
+# Install Stockfish with your platform's package manager and put it on PATH.
+```
+
+Run the scripts from this directory. They import the shared network from the installed `jevlike` package.
+
+```sh
+cd examples/chess
+python test_smoke.py
+```
+
+## Play and evaluate the supplied checkpoint
+
+```sh
+python eval.py checkpoints/chess-dagger1.pt --games 50 --sample --device mps
+python play.py checkpoints/chess-dagger1.pt --games 10 --opponent random --sample --out runs/trace.json --frames-dir runs/frames
+```
+
+`eval.py` plays games against a uniform random mover, Stockfish at skill level 0 and Stockfish at skill level 3. The model plays both colours. `--sample` draws each key from the model's probabilities; without it the model takes the most likely key. `play.py` writes a paced trace in the Doom example's format, with the 480 by 480 board picture for every key press.
+
+## Train
+
+1. Generate positions labelled with a Stockfish teacher move (depth 10). The first command uses noisy low-strength Stockfish self-play after a few random opening moves. The second plays Stockfish against a random mover and keeps only the strong side's positions, so the data holds won endgames.
+
+   ```sh
+   python positions.py --out runs/positions --workers 12 --train 80000 --heldout 4000
+   python positions.py --vs-random --out runs/positions-vr --workers 8 --train 40000 --heldout 0 --seed 2
+   ```
+
+2. Train on key sequences. From a random cursor square, the teacher walks the cursor to the piece, rows first and then columns, lifts it, walks to the destination and puts it down. Every screen on the way is one training frame, labelled with the next key.
+
+   ```sh
+   python train.py --steps 16000 --lr 3e-3 --dagger 0 --name pretrain
+   ```
+
+3. Correct the model's own mistakes. Play games with the trained model and save every state it reaches, including wrong turns, and label each with the teacher's next key from that state. Then train on a 50/50 mix of teacher walks and these states. This is DAgger (dataset aggregation).
+
+   ```sh
+   python dagger.py runs/pretrain.pt --games 200 --device mps --out runs/dagger/a.jsonl
+   python train.py --init runs/pretrain.pt --steps 6000 --lr 1e-3 --dagger 0.5 --name dagger1
+   ```
+
+The supplied checkpoint came from 7,500 steps of step 2 and 6,000 steps of step 3.
+
+## Results
+
+The checkpoint was evaluated over 50 games against each opponent, 25 as white and 25 as black, with sampled keys. A turn has a budget of 40 key presses; if the model has not played a move by then, a random legal move is played and counted as a failure. Games stop as draws after 200 plies. Centipawn loss is Stockfish's judgement at depth 10 of how much worse each of the model's own moves was than the best move.
+
+| Opponent | Wins | Draws | Losses | Wasted presses | Keys per move | Budget failures | Centipawn loss |
+|---|---|---|---|---|---|---|---|
+| Random mover | 4 | 46 | 0 | 4% | 11.8 | 14% | 288 |
+| Stockfish level 0 | 0 | 2 | 48 | 4% | 13.0 | 17% | 155 |
+| Stockfish level 3 | 0 | 0 | 50 | 4% | 13.3 | 15% | 144 |
+
+A wasted press is an arrow against the edge, the button on an empty square, or an illegal put-down. The network takes about 0.7 ms per key press on Apple MPS.
+
+In plain terms, the model has learned the controller but not chess. It rarely wastes a press, and it wins material against a random mover: in 35 of the 42 games stopped at 200 plies it was at least three points of material ahead. It seldom delivers checkmate, though, and it loses almost every game to Stockfish at its lowest skill level.
+
+Choosing the most likely key every time is much worse than sampling: for a checkpoint halfway through step 3, 68% of moves hit the key budget. With nothing but the screen as memory, a press that changes nothing, or two presses that undo each other, repeats forever.
+
+## What limits it
+
+- **Reading the board works.** Trained to name the cursor's square from the frame, the network was right 99.95% of the time on held-out positions.
+- **Walking to a marked square works.** When the teacher's target square was marked on the screen, next-key accuracy reached 94% after 1,250 steps.
+- **Choosing the move is the limit.** Without the mark, held-out next-key accuracy levels off near 65%, and training accuracy stops at the same level. A network twice as wide was no better at the same training step.
+- **The dots help.** The legal-move dots added about seven points of key accuracy.
+- **Recovery training helps.** Training on the model's own states (step 3) cut wasted presses in sampled play from 24% to 4% across our runs.
+
+===== END FILE: examples/chess/README.md =====
+
+
+===== BEGIN FILE: examples/doom/README.md =====
+# Doom example
+
+This example uses `jevlike.vision.DoomScorerV2` to choose a controller button from a game screen. It is the same visual model used by the chess example. One table holds 12 option vectors: seven Doom buttons and five chess keys.
+
+The input is a 160 by 120 RGB frame plus one motion channel made from the previous frame. A small convolutional stem makes 80 image patches. Fixed two-dimensional positions are added to the attention keys. Each active controller option reads the patches once and receives one score. A softmax turns the seven Doom scores into probabilities.
+
+## Install
+
+From the repository root:
+
+```sh
+uv venv
+source .venv/bin/activate
+uv pip install -e '.[dev,games]'
+```
+
+## Evaluate the supplied checkpoints
+
+The controller is turn left, turn right, forward, backward, strafe left, strafe right and attack. Evaluation is paced at 8.75 decisions per second. The policy still sees 160 by 120 input when footage is captured at 640 by 480.
+
+```sh
+python examples/doom/play.py examples/doom/checkpoints/deadly-dagger.pt \
+  --episodes 10 --game-seconds 60 --device cpu --greedy
+python examples/doom/play.py examples/checkpoints/joint-imitation.pt \
+  --episodes 10 --game-seconds 60 --device cpu --capture-resolution 640x480 \
+  --output runs/doom.mp4 --trace runs/doom-trace.json
+```
+
+The single-game checkpoint was trained by imitation and DAgger. DAgger means repeatedly collecting the states visited by the current policy and asking an expert for the right action there. The joint checkpoint has the same weights and one 12-row option table for both games. It is an early checkpoint, not a strong player.
+
+## Train
+
+Pure pixel PPO is included for experimentation, but it was a poor starting point. The more reliable order was imitation, DAgger, then PPO. The heuristic expert uses the object labels supplied by ViZDoom only to make training labels; the policy itself receives pixels and motion.
+
+```sh
+python examples/doom/train_imitation.py \
+  --episodes 500 --envs 16 --device cpu --output runs/doom-imitation.pt
+python examples/doom/train_dagger.py \
+  --initialise-from runs/doom-imitation.pt \
+  --episodes 500 --envs 16 --device cpu --no-class-balance \
+  --output runs/doom-dagger.pt
+python examples/doom/train_ppo.py \
+  --initialise-from runs/doom-dagger.pt \
+  --episodes 2000 --envs 16 --scenario deadly_corridor --device cpu \
+  --output runs/doom-ppo.pt
+```
+
+Use `--device mps` on Apple silicon. CUDA works through PyTorch, but these small scripts currently expose only CPU and MPS in their command-line choices; adding a CUDA choice requires no model change.
+
+## Audit screen dependence
+
+High reward can come from a fixed action habit. The audit compares predictions on real, blank, averaged and shuffled-patch frames. It also checks whether attack probability rises when an enemy is centred and whether attention remains non-uniform.
+
+```sh
+python examples/doom/audit.py examples/doom/checkpoints/deadly-dagger.pt \
+  --frames 500 --device cpu --output runs/doom-audit.json
+```
+
+## Joint training
+
+First generate chess positions as described in the [chess example](../chess/README.md). Then alternate Doom DAgger batches with more heavily weighted chess batches:
+
+```sh
+python examples/doom/train_joint.py \
+  --doom-checkpoint examples/doom/checkpoints/deadly-dagger.pt \
+  --chess-checkpoint examples/chess/checkpoints/chess-dagger1.pt \
+  --updates 500 --chess-steps 5 --device cpu --output runs/joint.pt
+```
+
+`train_joint_ppo.py` is the experimental mixed PPO and chess-supervision loop. The short released joint checkpoint lost much of the chess controller, so use the fixed held-out chess accuracy printed by `train_joint.py` as a gate before replacing it.
+
+===== END FILE: examples/doom/README.md =====

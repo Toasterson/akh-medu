@@ -1,0 +1,23 @@
+{
+  "upstream_commit": "94f5fd1b0b11d52bbdfdf4e0ee6aa96b568f8452",
+  "repository": "https://github.com/vinnylarouge/jevlike",
+  "retrieved_at": "2026-09-16T20:25:05.065247+00:00",
+  "sources": [
+    {
+      "path": "sources/upstream.tar.gz",
+      "url": "https://codeload.github.com/vinnylarouge/jevlike/tar.gz/94f5fd1b0b11d52bbdfdf4e0ee6aa96b568f8452",
+      "sha256": "857669b9bc2b28d26f5f7e973e94eabcab0a20568567a211126bf71a010edcda",
+      "bytes": 2991295
+    },
+    {
+      "path": "sources/tweet-fxtwitter.json",
+      "url": "https://api.fxtwitter.com/vinnylarouge/status/2100170846346097083",
+      "sha256": "15166982ea9090041e73189c84e974db46cd4934d019628fc7efa899ead29454",
+      "bytes": 8863
+    }
+  ],
+  "transcript_session": "/Users/toasty/.codex/sessions/2026/09/16/rollout-2026-09-16T22-20-48-01a0abe1-0cec-7f92-b70b-48475a17ebbf.jsonl",
+  "message_count": 4,
+  "transcript_verification": "Exact message string inclusion and JSON round trip",
+  "scope": "Source archive and static research only; no training or upstream code executed"
+}

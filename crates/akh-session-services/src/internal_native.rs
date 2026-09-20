@@ -3,15 +3,13 @@
 use super::*;
 use akh_medu::nlu::{
     candle_backend::{
-        CandleBackend, CandleConfig, CandleDevice, CandleFinishReason, CaptureRequest,
-        ModelFamily, RecallDecision,
+        CandleBackend, CandleConfig, CandleDevice, CandleFinishReason, CaptureRequest, ModelFamily,
+        RecallDecision,
     },
     error::NluError,
     span_projection::{CapturePolicy, Projector},
 };
-use akh_session_types::neural_spans::{
-    MAX_TEXT_BYTES, SpanCapture, SpanSource, SpanSpace,
-};
+use akh_session_types::neural_spans::{MAX_TEXT_BYTES, SpanCapture, SpanSource, SpanSpace};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 /// At most this many recalled spans are materialized before the user turn.
@@ -203,7 +201,9 @@ pub(super) fn completion(
         .map_err(|e| Fault::new("model_context", e.to_string()))?;
     let family = backend.family();
     let count_prompt = backend.completion_prompt_counter();
-    let prompt_budget = config.max_context_tokens.checked_sub(config.max_output_tokens as usize)
+    let prompt_budget = config
+        .max_context_tokens
+        .checked_sub(config.max_output_tokens as usize)
         .ok_or_else(|| Fault::invalid("output reservation exceeds native context"))?;
     let count_window = |candidate: &[Value]| {
         let rendered = render_prompt(candidate, tools, family)?;
@@ -218,9 +218,12 @@ pub(super) fn completion(
     } else {
         crate::native_window::select(messages, prompt_budget, count_window)?
     };
-    tracing::debug!(budgeted_by_core, dropped_messages = window.dropped_messages,
+    tracing::debug!(
+        budgeted_by_core,
+        dropped_messages = window.dropped_messages,
         prompt_tokens = window.prompt_tokens,
-        "selected native prompt window; durable history retained");
+        "selected native prompt window; durable history retained"
+    );
     let messages = window.messages.as_slice();
     let (prompt, user_span) = render_prompt_with_user_span(messages, tools, family)?;
     if prompt.len() > MAX_BYTES {
@@ -289,16 +292,31 @@ pub(super) fn completion(
                     }
                 };
                 let recalled = crate::native_recall::assemble(
-                    messages, &hits, &plan.space, &prompt_text[..plan.prompt_bytes.start],
-                    prompt_budget, MAX_BYTES, |candidate| {
+                    messages,
+                    &hits,
+                    &plan.space,
+                    &prompt_text[..plan.prompt_bytes.start],
+                    prompt_budget,
+                    MAX_BYTES,
+                    |candidate| {
                         let rendered = render_prompt(candidate, tools, family)?;
-                        let tokens = count_prompt(&rendered).map_err(|e| Fault::new("model_context", e.to_string()))?;
+                        let tokens = count_prompt(&rendered)
+                            .map_err(|e| Fault::new("model_context", e.to_string()))?;
                         Ok((rendered, tokens))
                     },
-                ).map_err(|e| NluError::LlmGenerationFailed { reason: e.to_string() })?;
-                let Some(recalled) = recalled else { return Ok(RecallDecision::Continue); };
-                tracing::debug!(recalled_spans = recalled.message["neural_recall"]["turn_ids"]
-                    .as_array().map_or(0, Vec::len), "native recall materialized");
+                )
+                .map_err(|e| NluError::LlmGenerationFailed {
+                    reason: e.to_string(),
+                })?;
+                let Some(recalled) = recalled else {
+                    return Ok(RecallDecision::Continue);
+                };
+                tracing::debug!(
+                    recalled_spans = recalled.message["neural_recall"]["turn_ids"]
+                        .as_array()
+                        .map_or(0, Vec::len),
+                    "native recall materialized"
+                );
                 recalled_message = Some(recalled.message);
                 Ok(RecallDecision::Reprompt(recalled.prompt))
             },

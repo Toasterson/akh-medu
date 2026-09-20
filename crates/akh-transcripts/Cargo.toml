@@ -1,0 +1,64 @@
+[package]
+name = "akh-transcripts"
+version = "0.1.0"
+edition = "2024"
+description = "Agent-session transcript harvest: verbatim store, derivation, and read surface (ADR 108)"
+license = "GPL-3.0-only"
+repository = "https://github.com/Toasterson/akh-medu"
+
+[dependencies]
+# Database (SeaORM + Postgres) — same versions as akhomed-store / seshat.
+sea-orm = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono", "with-json"] }
+sea-orm-migration = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+sea-query = "0.32"
+
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# `akh-harvest` binary CLI.
+clap = { version = "4.5", features = ["derive"] }
+# `AKH_TRANSCRIPTS_MACHINE`'s default value.
+hostname = "0.4"
+
+# Error handling (miette + thiserror per project convention)
+miette = { version = "7", features = ["fancy"] }
+thiserror = "2"
+
+# Source adapters
+walkdir = "2"
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+# `.jsonl` -> `.jsonl.zst` rotation fallback (source-file-lifecycle.md); not
+# observed locally but must be handled defensively.
+zstd = "0.13"
+
+# Embedding (shared with seshat)
+akh-embed = { path = "../akh-embed" }
+# MCP read surface (increment 6) — versions copied exactly from
+# crates/seshat/Cargo.toml so the two servers stay on one rmcp/axum/schemars
+# lineage.
+rmcp = { version = "0.17", features = [
+    "server",
+    "macros",
+    "transport-streamable-http-server",
+] }
+axum = "0.8"
+schemars = { version = "0.8", features = ["uuid1", "chrono"] }
+tower = { version = "0.5", features = ["util"] }
+
+[dev-dependencies]
+tempfile = "3"
+# MCP client transport for the increment-6 integration test — mirrors
+# crates/sokar/Cargo.toml's dev-dependency split (server features live in
+# [dependencies] above; client-only features stay test-only).
+rmcp = { version = "0.17", features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+[[bin]]
+name = "akh-transcripts-mcp"
+path = "src/bin/akh-transcripts-mcp.rs"

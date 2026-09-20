@@ -38,7 +38,9 @@ use grug_train::knowledge_train::{
     KnowledgeModelShape, KnowledgeModelSize, KnowledgeSteeringLineage, fingerprint_artifact_file,
     fingerprint_knowledge_records, generate_knowledge_outputs, score_knowledge_outputs,
 };
-use grug_train::train::{init_training, to_eval_model, train_step_guarded};
+use grug_train::train::{
+    RecordWeightsMode, init_training, to_eval_model, train_step_guarded_weighted,
+};
 use grug_train::{
     AttentionBackend, BpeTokenizer, FoundationLineage, GenerateConfig, PositionalEncoding,
     RemediationLineage, RemediationSupplement, VerifiedFoundationBundle, VerifiedKnowledgeBundle,
@@ -213,6 +215,19 @@ struct Args {
     /// sequence budgets without allocating or updating model weights.
     #[arg(long)]
     validate_only: bool,
+
+    /// Whether to read per-record reward weights from
+    /// `KnowledgeSftRecord::weight` and scale each record's contribution to
+    /// the batch loss by it (Phase 51 P6.5 experiment E3: reward-weighted
+    /// SFT). `ignore` (default) reproduces pre-E3 behaviour byte-for-byte --
+    /// the field is present on every record on disk but is never read.
+    /// `use` validates every record's weight is finite and in `[0, 1]`
+    /// before training starts, then multiplies each record's per-token loss
+    /// by its weight (missing weight defaults to 1.0) before the
+    /// batch-mean reduction; see `grug_train::train::masked_cross_entropy_weighted`
+    /// for the exact denominator rule.
+    #[arg(long, default_value = "ignore")]
+    record_weights: RecordWeightsMode,
 }
 
 #[derive(Debug)]
@@ -273,6 +288,17 @@ struct RunDescriptor {
     /// this field existed, so old bundles still load strictly.
     #[serde(default)]
     schedule_changes: Vec<ScheduleChange>,
+    /// `--record-weights` mode this segment trained under (Phase 51 P6.5
+    /// experiment E3). `#[serde(default)]` resolves a run.json written
+    /// before this field existed to `Ignore`, matching its actual (pre-E3)
+    /// behaviour. A resume must keep this setting -- see
+    /// `compare_resume_run`.
+    #[serde(default)]
+    record_weights: RecordWeightsMode,
+    /// How many records in this segment's full training mixture carried a
+    /// `weight` value. Always `0` when `record_weights` is `Ignore`.
+    #[serde(default)]
+    weighted_record_count: usize,
 }
 
 /// One sanctioned `--allow-schedule-change` resume: the learning-rate and/or
@@ -445,6 +471,32 @@ where
         "train_knowledge: families={:?} languages={:?} stages={:?}",
         train_inventory.families, train_inventory.languages, train_inventory.stages
     );
+
+    // Phase 51 P6.5 experiment E3: `--record-weights use` validates every
+    // record's weight up front (a bad weight fails the run before any GPU
+    // time is spent) and reports how the mixture is weighted. Under the
+    // default `ignore`, `KnowledgeSftRecord::weight` is never read here or
+    // anywhere else in this run -- `train_record_weights` stays `None` and
+    // every downstream call behaves exactly as it did before this field
+    // existed.
+    let weighted_record_count = if args.record_weights == RecordWeightsMode::Use {
+        validate_record_weights(&train_records)?;
+        let summary = summarize_record_weights(&train_records);
+        println!(
+            "train_knowledge: record-weights=use weighted_records={} histogram(zero={}, fractional={}, one={})",
+            summary.carrying, summary.zero, summary.fractional, summary.one
+        );
+        summary.carrying
+    } else {
+        0
+    };
+    let train_record_weights: Option<Vec<f32>> = (args.record_weights == RecordWeightsMode::Use)
+        .then(|| {
+            train_records
+                .iter()
+                .map(|record| record.weight.unwrap_or(1.0))
+                .collect()
+        });
 
     let foundation = args
         .foundation_bundle
@@ -705,6 +757,7 @@ where
                 supplemental_total_records,
                 remediation_share_ppm.expect("remediation records have a validated share"),
                 learning_rate,
+                weighted_record_count,
             )
         })
         .transpose()?;
@@ -733,6 +786,14 @@ where
         })
         .or_else(|| {
             steering_parent
+                .as_ref()
+                .and_then(|parent| parent.artifact().foundation.clone())
+        })
+        // A remediated candidate keeps its parent's foundation lineage exactly
+        // like a steered one: the parent's `context_extended_from` (carried
+        // above) is only valid together with the foundation it extended from.
+        .or_else(|| {
+            remediation_parent
                 .as_ref()
                 .and_then(|parent| parent.artifact().foundation.clone())
         })
@@ -901,6 +962,8 @@ where
         remediated_from: remediation_lineage.clone(),
         start_step: segment_start_step,
         schedule_changes: resume_schedule_changes,
+        record_weights: args.record_weights,
+        weighted_record_count,
     };
     if let Some(artifact) = &resume_artifact {
         preserve_resume_run_descriptor(&args.artifacts_dir, artifact.checkpoint_step)?;
@@ -955,15 +1018,23 @@ where
                 model_config.max_seq_len,
                 &device,
             )?;
+            // `train_record_weights` is `None` under the default
+            // `--record-weights ignore`, in which case `batch_weights` is
+            // also `None` and `train_step_guarded_weighted` takes the exact
+            // same code path as the unweighted `train_step_guarded`.
+            let batch_weights: Option<Vec<f32>> = train_record_weights
+                .as_ref()
+                .map(|weights| indices.iter().map(|&index| weights[index]).collect());
             let effective_lr = warmup_learning_rate(learning_rate, args.warmup_steps, step);
             let step_started = Instant::now();
-            let (next_model, loss, grad_norm) = train_step_guarded(
+            let (next_model, loss, grad_norm) = train_step_guarded_weighted(
                 model,
                 &mut optimizer,
                 &batch,
                 effective_lr,
                 args.loss_cap,
                 args.grad_norm_cap,
+                batch_weights.as_deref(),
             );
             model = next_model;
             final_loss = loss;
@@ -1182,6 +1253,58 @@ fn load_records(path: &Path) -> Result<Vec<KnowledgeSftRecord>, Box<dyn Error>> 
         )));
     }
     Ok(records)
+}
+
+/// `--record-weights use` precondition: every record's `weight`, when
+/// present, must be finite and in `[0, 1]` -- anything else fails the run
+/// before a single training step runs, naming the exact record so the bad
+/// weight can be traced back to its generator. A record with no `weight` at
+/// all is untouched (it defaults to 1.0 downstream), which is why this
+/// only inspects `Some` values.
+fn validate_record_weights(records: &[KnowledgeSftRecord]) -> Result<(), Box<dyn Error>> {
+    for record in records {
+        if let Some(weight) = record.weight
+            && (!weight.is_finite() || !(0.0..=1.0).contains(&weight))
+        {
+            return Err(invalid_data(format!(
+                "record {} has an invalid --record-weights weight {weight}: must be finite \
+                 and in [0, 1]",
+                record.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Bucketed counts over a training mixture's *effective* per-record weight
+/// (`record.weight.unwrap_or(1.0)`), logged once at the start of a
+/// `--record-weights use` run. `carrying` is how many records had an
+/// explicit `weight` on disk at all (regardless of its bucket); the three
+/// buckets always sum to `records.len()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct RecordWeightSummary {
+    carrying: usize,
+    zero: usize,
+    fractional: usize,
+    one: usize,
+}
+
+fn summarize_record_weights(records: &[KnowledgeSftRecord]) -> RecordWeightSummary {
+    let mut summary = RecordWeightSummary::default();
+    for record in records {
+        if record.weight.is_some() {
+            summary.carrying += 1;
+        }
+        let effective = record.weight.unwrap_or(1.0);
+        if effective == 0.0 {
+            summary.zero += 1;
+        } else if effective == 1.0 {
+            summary.one += 1;
+        } else {
+            summary.fractional += 1;
+        }
+    }
+    summary
 }
 
 fn validate_records(
@@ -1604,6 +1727,7 @@ fn build_remediation_lineage(
     supplemental_training_records: usize,
     supplemental_share_ppm: u64,
     learning_rate: f64,
+    weighted_record_count: usize,
 ) -> Result<RemediationLineage, Box<dyn Error>> {
     let parent_bundle_path = args
         .remediate_from_bundle
@@ -1641,6 +1765,8 @@ fn build_remediation_lineage(
         learning_rate,
         warmup_steps: args.warmup_steps,
         epochs: args.epochs,
+        record_weights: args.record_weights,
+        weighted_record_count,
     };
     lineage.verify().map_err(invalid_data)?;
     Ok(lineage)
@@ -1732,7 +1858,8 @@ fn compare_resume_run(
         || stored.ckpt_every != args.ckpt_every
         || stored.loss_cap != args.loss_cap
         || stored.grad_norm_cap != args.grad_norm_cap
-        || stored.tokenizer_vocab_size != tokenizer_vocab_size;
+        || stored.tokenizer_vocab_size != tokenizer_vocab_size
+        || stored.record_weights != args.record_weights;
     ResumeComparison {
         schedule_changed,
         other_mismatch,
@@ -2124,6 +2251,8 @@ mod schedule_change_tests {
             remediated_from: None,
             start_step: 0,
             schedule_changes: Vec::new(),
+            record_weights: RecordWeightsMode::Ignore,
+            weighted_record_count: 0,
         }
     }
 
@@ -2276,6 +2405,39 @@ mod schedule_change_tests {
             serde_json::from_value(legacy).expect("legacy run.json without schedule_changes");
         assert!(parsed.schedule_changes.is_empty());
     }
+
+    /// `RunDescriptor::record_weights`/`weighted_record_count` default when
+    /// absent, so a run.json written before Phase 51 P6.5 (E3) still
+    /// deserializes -- and defaults to `Ignore`/`0`, exactly matching what
+    /// such a run actually did.
+    #[test]
+    fn record_weights_defaults_when_absent_from_legacy_run_json() {
+        let mut legacy = serde_json::to_value(sample_run()).expect("serialize sample run");
+        let object = legacy
+            .as_object_mut()
+            .expect("run descriptor is a JSON object");
+        object.remove("record_weights");
+        object.remove("weighted_record_count");
+        let parsed: RunDescriptor =
+            serde_json::from_value(legacy).expect("legacy run.json without record_weights");
+        assert_eq!(parsed.record_weights, RecordWeightsMode::Ignore);
+        assert_eq!(parsed.weighted_record_count, 0);
+    }
+
+    /// Switching `--record-weights` across a `--resume` is rejected as an
+    /// `other_mismatch`, exactly like every other non-schedule invariant
+    /// (batch size, corpus hash, ...) -- the mode a segment started under
+    /// must be the mode it continues under.
+    #[test]
+    fn changed_record_weights_mode_is_an_other_mismatch() {
+        let stored = sample_run();
+        assert_eq!(stored.record_weights, RecordWeightsMode::Ignore);
+        let args = sample_args(&["--record-weights", "use"]);
+        let comparison = compare(&stored, &args, stored.learning_rate);
+        assert!(!comparison.schedule_changed);
+        assert!(comparison.other_mismatch);
+        assert!(comparison.rejects(args.allow_schedule_change));
+    }
 }
 
 #[cfg(test)]
@@ -2367,6 +2529,7 @@ mod remediation_integration_tests {
             system_context: None,
             prompt,
             target,
+            weight: None,
         }
     }
 
@@ -2591,5 +2754,182 @@ mod remediation_integration_tests {
             .remediated_from
             .expect("resumed candidate must still carry the remediation block");
         assert_eq!(resumed_lineage, lineage);
+    }
+
+    /// `validate_record_weights` must name the offending record and reject
+    /// both an out-of-range weight and a non-finite one -- the two `--record-
+    /// weights use` failure modes deliverable 2 requires a "precise
+    /// diagnostic naming the record id" for.
+    #[test]
+    fn record_weights_validation_rejects_out_of_range_and_nan() {
+        let mut over_one = sample_record("bad-1", "ep-1", "blake3:c", "q?", "a");
+        over_one.weight = Some(1.5);
+        let error = validate_record_weights(std::slice::from_ref(&over_one)).unwrap_err();
+        assert!(
+            error.to_string().contains("bad-1"),
+            "diagnostic must name the record id: {error}"
+        );
+
+        let mut nan_weight = sample_record("bad-2", "ep-2", "blake3:c", "q?", "a");
+        nan_weight.weight = Some(f32::NAN);
+        let error = validate_record_weights(std::slice::from_ref(&nan_weight)).unwrap_err();
+        assert!(
+            error.to_string().contains("bad-2"),
+            "diagnostic must name the record id: {error}"
+        );
+
+        let mut fine = sample_record("ok-1", "ep-3", "blake3:c", "q?", "a");
+        fine.weight = Some(0.5);
+        assert!(validate_record_weights(std::slice::from_ref(&fine)).is_ok());
+        // No weight at all is always fine -- it defaults to 1.0 downstream.
+        let untouched = sample_record("ok-2", "ep-4", "blake3:c", "q?", "a");
+        assert!(validate_record_weights(std::slice::from_ref(&untouched)).is_ok());
+    }
+
+    /// End-to-end CPU coverage for `--record-weights use` (Phase 51 P6.5
+    /// experiment E3): remediates a trained parent on base records plus a
+    /// supplemental sibling whose records carry explicit weights, runs
+    /// exactly two training steps (6 records / batch size 3), and asserts
+    /// the resulting `candidate-model.json`'s `remediated_from` block
+    /// records `record_weights: "use"` and the correct weighted-record
+    /// count -- the mechanism an E3 treatment candidate is told apart from
+    /// its `--record-weights ignore` control by.
+    #[test]
+    fn remediate_from_bundle_with_record_weights_use_records_lineage() {
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let contracts = sample_contracts();
+        let contracts_path = workdir.path().join("contracts.json");
+        std::fs::write(
+            &contracts_path,
+            serde_json::to_vec_pretty(&contracts).expect("serialize contracts"),
+        )
+        .expect("write contracts.json");
+
+        let base_records: Vec<KnowledgeSftRecord> = (0..4)
+            .map(|i| {
+                sample_record(
+                    &format!("base-{i}"),
+                    &format!("base-episode-{i}"),
+                    &contracts.manifest_hash,
+                    &format!("What is {i} plus {i}?"),
+                    &format!("the sum is {}", i + i),
+                )
+            })
+            .collect();
+        let base_path = workdir.path().join("base.sft.jsonl");
+        write_jsonl(&base_path, &base_records);
+
+        // --- Phase 1: train an ordinary, uncertified parent candidate. ---
+        let parent_dir = workdir.path().join("parent");
+        let parent_args = Args::try_parse_from([
+            "train_knowledge",
+            "--contracts",
+            contracts_path.to_str().unwrap(),
+            "--train-jsonl",
+            base_path.to_str().unwrap(),
+            "--artifacts-dir",
+            parent_dir.to_str().unwrap(),
+            "--model",
+            "small",
+            "--epochs",
+            "1",
+            "--batch-size",
+            "2",
+            "--ckpt-every",
+            "1",
+            "--eval-every",
+            "999999",
+            "--bpe-vocab-size",
+            "260",
+            "--learning-rate",
+            "1e-3",
+        ])
+        .expect("parent argv parses");
+        validate_args(&parent_args).expect("parent args are valid");
+        run::<grug_train::CpuAutodiffBackend>(parent_args, Default::default())
+            .expect("parent run succeeds");
+        let parent_candidate = load_candidate(&parent_dir);
+
+        // --- Phase 2: remediate with `--record-weights use` on a
+        // supplemental sibling whose two records carry explicit weights
+        // (one full-weight, one reward-zeroed). ---
+        let mut supplemental_records: Vec<KnowledgeSftRecord> = (0..2)
+            .map(|i| {
+                sample_record(
+                    &format!("sibling-{i}"),
+                    &format!("sibling-episode-{i}"),
+                    &contracts.manifest_hash,
+                    &format!("What is the sibling fact {i}?"),
+                    &format!("sibling-answer-{i}"),
+                )
+            })
+            .collect();
+        supplemental_records[0].weight = Some(1.0);
+        supplemental_records[1].weight = Some(0.0);
+        let supplemental_dir = workdir.path().join("sibling");
+        std::fs::create_dir_all(&supplemental_dir).expect("mkdir sibling");
+        let supplemental_path = supplemental_dir.join("train.sft.jsonl");
+        write_jsonl(&supplemental_path, &supplemental_records);
+
+        let remediation_dir = workdir.path().join("remediated");
+        let remediation_args = Args::try_parse_from([
+            "train_knowledge",
+            "--contracts",
+            contracts_path.to_str().unwrap(),
+            "--train-jsonl",
+            base_path.to_str().unwrap(),
+            "--supplemental-jsonl",
+            supplemental_path.to_str().unwrap(),
+            "--artifacts-dir",
+            remediation_dir.to_str().unwrap(),
+            "--model",
+            "small",
+            "--epochs",
+            "1",
+            // 6 records (4 base + 2 supplemental) / batch size 3 = exactly
+            // 2 steps for this segment.
+            "--batch-size",
+            "3",
+            "--ckpt-every",
+            "1",
+            "--eval-every",
+            "999999",
+            "--bpe-vocab-size",
+            "260",
+            "--learning-rate",
+            "5e-4",
+            "--remediate-from-bundle",
+            parent_dir.to_str().unwrap(),
+            "--remediation-max-share-ppm",
+            "500000",
+            "--record-weights",
+            "use",
+        ])
+        .expect("record-weights remediation argv parses");
+        validate_args(&remediation_args).expect("record-weights remediation args are valid");
+        run::<grug_train::CpuAutodiffBackend>(remediation_args, Default::default())
+            .expect("record-weights remediation run succeeds");
+
+        let remediated_candidate = load_candidate(&remediation_dir);
+        assert_eq!(
+            remediated_candidate.checkpoint_step,
+            parent_candidate.checkpoint_step + 2,
+            "this segment must run exactly two steps"
+        );
+        let lineage = remediated_candidate
+            .remediated_from
+            .expect("candidate-model.json must carry a remediation block");
+        assert_eq!(lineage.record_weights, RecordWeightsMode::Use);
+        // Only the two supplemental records carry an explicit weight; the
+        // four base records were written by `sample_record`, which leaves
+        // `weight: None`.
+        assert_eq!(lineage.weighted_record_count, 2);
+
+        let run_descriptor: RunDescriptor = serde_json::from_reader(BufReader::new(
+            File::open(remediation_dir.join("run.json")).expect("run.json exists"),
+        ))
+        .expect("run.json parses");
+        assert_eq!(run_descriptor.record_weights, RecordWeightsMode::Use);
+        assert_eq!(run_descriptor.weighted_record_count, 2);
     }
 }

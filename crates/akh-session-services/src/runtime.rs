@@ -171,7 +171,7 @@ impl Runtime {
                 // `unknown_since` clock, or a runtime that keeps crash-looping
                 // could make its own quarantined jobs look perpetually fresh
                 // and never eligible for `resolve_stale_unknown_jobs`.
-                if !job.status.terminal() && job.status != TurnStatus::Unknown {
+                if job.request.binding.runtime == config.service_id && !job.status.terminal() && job.status != TurnStatus::Unknown {
                     job.status = TurnStatus::Unknown;
                     job.error = Some(Fault::new("unknown_outcome", "runtime restarted before a durable terminal result; inspect provider continuation and execution receipts"));
                     tx.put(&job_key(&job.request.id), &job)?;
@@ -202,7 +202,7 @@ impl Runtime {
         self.store.transaction(|tx| {
             let mut resolved = vec![];
             for mut job in tx.scan::<RuntimeJob>("job/")? {
-                if job.status != TurnStatus::Unknown || active.contains_key(&job.request.id) {
+                if job.request.binding.runtime != self.config.service_id || job.status != TurnStatus::Unknown || active.contains_key(&job.request.id) {
                     continue;
                 }
                 let Some(since) = tx.get::<u64>(&unknown_since_key(&job.request.id))? else {
@@ -226,9 +226,17 @@ impl Runtime {
         })
     }
     pub fn get(&self, id: &str) -> Result<RuntimeJob> {
-        self.store
+        let job: RuntimeJob = self
+            .store
             .get(&job_key(id))?
-            .ok_or_else(|| Fault::missing("runtime job not found"))
+            .ok_or_else(|| Fault::missing("runtime job not found"))?;
+        if job.request.binding.runtime != self.config.service_id {
+            return Err(Fault::new(
+                "forbidden",
+                "runtime job belongs to another service",
+            ));
+        }
+        Ok(job)
     }
     pub fn submit(&self, principal: &Principal, request: RuntimeJobRequest) -> Result<RuntimeJob> {
         crate::http::role(principal, "session")?;
@@ -260,12 +268,9 @@ impl Runtime {
                 "installed runtime profile differs from session binding",
             ));
         }
-        if self
-            .store
-            .scan::<RuntimeJob>("job/")?
-            .iter()
-            .any(|j| j.status == TurnStatus::Unknown)
-        {
+        if self.store.scan::<RuntimeJob>("job/")?.iter().any(|j| {
+            j.request.binding.runtime == self.config.service_id && j.status == TurnStatus::Unknown
+        }) {
             return Err(Fault::new(
                 "unknown_outcome",
                 "runtime is quarantined until unknown jobs and possible orphan processes are reconciled",
@@ -402,6 +407,9 @@ impl Runtime {
         self.store.transaction(|tx| {
             let target=job_key(id);
             let mut job:RuntimeJob=tx.get(&target)?.ok_or_else(||Fault::missing("runtime job not found"))?;
+            if job.request.binding.runtime != self.config.service_id {
+                return Err(Fault::new("forbidden", "runtime job belongs to another service"));
+            }
             crate::recovery::validate(principal,&job.request,resolution)?;
             if crate::recovery::already(tx,principal,&target,resolution)? { return Ok(job); }
             if job.status!=TurnStatus::Unknown { return Err(Fault::conflict("only an unknown job can be reconciled")); }
@@ -456,7 +464,9 @@ impl RemoteHost {
             .block_on(self.service.client.post::<T>("sessions", path, &body))
         {
             Ok(reply) => Ok(Some(reply)),
-            Err(error) if error.code == "not_found" && error.message.contains("returned HTTP 404") => {
+            Err(error)
+                if error.code == "not_found" && error.message.contains("returned HTTP 404") =>
+            {
                 Ok(None)
             }
             Err(error) => Err(error.to_string()),
@@ -653,6 +663,45 @@ mod tests {
             error: None,
             events: vec![],
         }
+    }
+
+    #[test]
+    fn shared_store_recovery_never_touches_another_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("shared.redb")).unwrap();
+        let mut other = unknown_job("foreign");
+        other.request.binding.runtime = "runtime-2".into();
+        other.status = TurnStatus::Running;
+        store
+            .transaction(|tx| tx.put(&job_key("foreign"), &other))
+            .unwrap();
+        let runtime = Runtime::new(config(dir.path()), store.clone()).unwrap();
+        assert_eq!(
+            store
+                .get::<RuntimeJob>(&job_key("foreign"))
+                .unwrap()
+                .unwrap()
+                .status,
+            TurnStatus::Running
+        );
+        assert_eq!(runtime.get("foreign").unwrap_err().code, "forbidden");
+        assert_eq!(runtime.cancel("foreign").unwrap_err().code, "forbidden");
+        other.status = TurnStatus::Unknown;
+        store
+            .transaction(|tx| {
+                tx.put(&job_key("foreign"), &other)?;
+                tx.put(&unknown_since_key("foreign"), &0u64)
+            })
+            .unwrap();
+        assert!(runtime.resolve_stale_unknown_jobs().unwrap().is_empty());
+        assert_eq!(
+            store
+                .get::<RuntimeJob>(&job_key("foreign"))
+                .unwrap()
+                .unwrap()
+                .status,
+            TurnStatus::Unknown
+        );
     }
 
     /// The exact incident this sweep exists for: a job left `Running` when the

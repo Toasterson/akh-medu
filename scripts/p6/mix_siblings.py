@@ -43,7 +43,13 @@ def blake3_file(path: Path) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--corpus", type=Path, required=True, help="generator out-dir holding <family>/train.sft.jsonl")
-    ap.add_argument("--take", action="append", default=[], metavar="FAMILY=N", help="records to draw per family")
+    ap.add_argument(
+        "--take",
+        action="append",
+        default=[],
+        metavar="FAMILY=N[@CORPUS]",
+        help="records to draw per family; an optional @CORPUS dir overrides --corpus for that family (control arms that hold one family constant)",
+    )
     ap.add_argument("--base-records", type=int, required=True, help="record count of the base --train-jsonl")
     ap.add_argument("--max-share-ppm", type=int, default=50_000, help="supplemental / total ceiling in ppm (default 50000 = 5 percent)")
     ap.add_argument("--seed", type=int, required=True)
@@ -51,11 +57,14 @@ def main() -> int:
     args = ap.parse_args()
 
     draws: dict[str, int] = {}
+    corpus_for: dict[str, Path] = {}
     for spec in args.take:
-        family, _, count = spec.partition("=")
+        family, _, rest = spec.partition("=")
+        count, _, corpus = rest.partition("@")
         if not family or not count.isdigit():
-            ap.error(f"--take expects FAMILY=N, got {spec!r}")
+            ap.error(f"--take expects FAMILY=N[@CORPUS], got {spec!r}")
         draws[family] = int(count)
+        corpus_for[family] = Path(corpus) if corpus else args.corpus
     if not draws:
         ap.error("at least one --take FAMILY=N is required")
 
@@ -77,7 +86,7 @@ def main() -> int:
     written = 0
     with out_path.open("w", encoding="utf-8") as out:
         for family in sorted(draws):
-            src = args.corpus / family / "train.sft.jsonl"
+            src = corpus_for[family] / family / "train.sft.jsonl"
             if not src.is_file():
                 print(f"missing sidecar for {family}: {src}", file=sys.stderr)
                 return 1

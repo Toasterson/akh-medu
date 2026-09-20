@@ -154,7 +154,9 @@ mod tests {
     #[test]
     fn core_budgeted_marker_is_opt_in_and_absent_on_legacy_payloads() {
         assert!(!core_budgeted(&[json!({"role":"user","content":"hi"})]));
-        assert!(!core_budgeted(&[json!({"role":"system","context_budgeted":false})]));
+        assert!(!core_budgeted(&[
+            json!({"role":"system","context_budgeted":false})
+        ]));
         assert!(core_budgeted(&[
             json!({"role":"system","context_budgeted":true}),
             json!({"role":"user","content":"hi"})
@@ -182,7 +184,12 @@ mod tests {
             json!({"role":"user","content":"current"}),
         ];
         // select() would drop the old turn to fit; verify() must not.
-        assert_eq!(select(&history, 2, |m| Ok(m.len())).unwrap().dropped_messages, 2);
+        assert_eq!(
+            select(&history, 2, |m| Ok(m.len()))
+                .unwrap()
+                .dropped_messages,
+            2
+        );
         let fault = verify(&history, 2, |m| Ok(m.len())).err().unwrap();
         assert_eq!(fault.code, "capacity");
         assert!(fault.message.contains("4 tokens"), "{}", fault.message);

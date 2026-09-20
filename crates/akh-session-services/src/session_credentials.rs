@@ -166,8 +166,7 @@ impl Sessions {
             return Err(Fault::invalid("invalid session capability"));
         }
         self.store.transaction(|tx| {
-            let mut session: SessionRecord = tx
-                .get(&key("session", &[session_id]))?
+            let mut session = crate::session::load_record(tx, session_id)?
                 .ok_or_else(|| Fault::missing("session not found"))?;
             if session.principal != principal.id && !principal.has_role("admin") {
                 return Err(Fault::new(
@@ -293,9 +292,7 @@ impl Sessions {
     /// after a session requires a capability, even across config changes.
     pub(crate) fn mcp_token(&self, session: &SessionRecord, service: &str) -> Result<String> {
         self.store.transaction(|tx| {
-            let current: SessionRecord = tx
-                .get(&key("session", &[&session.id]))?
-                .ok_or_else(unavailable)?;
+            let current = crate::session::load_record(tx, &session.id)?.ok_or_else(unavailable)?;
             if current.closed_at.is_some() {
                 return Err(Fault::conflict("session is archived"));
             }
@@ -314,10 +311,17 @@ impl Sessions {
     }
 
     pub fn remove_archived_mcp_credentials(&self, session_id: &str) -> Result<()> {
+        // Closure is irreversible. A durable cleanup receipt avoids reopening a
+        // write transaction and rereading a large transcript on every sweep.
+        if self
+            .store
+            .get::<bool>(&key("mcp_credentials_removed", &[session_id]))?
+            == Some(true)
+        {
+            return Ok(());
+        }
         self.store.transaction(|tx| {
-            let session: SessionRecord = tx
-                .get(&key("session", &[session_id]))?
-                .ok_or_else(unavailable)?;
+            let session = crate::session::load_record(tx, session_id)?.ok_or_else(unavailable)?;
             if session.closed_at.is_none() {
                 return Err(Fault::conflict("session is still open"));
             }

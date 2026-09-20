@@ -81,6 +81,8 @@ shareable and what stays private. Until then, placeholder mapping:
 | 7 | *(unnamed)* | stillness / brevity / witness |
 | 8 | *(unnamed)* | teacher / transmission |
 
+**2026-09-14 update:** the "trained bias" column now has a public vocabulary — Oxide's fifteen values mapped onto the eight slots, with the three Oxide principles as captain invariants rather than voices. The mapping, the per-step observables and the engine analogs are in [ADR 110](../decisions/110-kaine-character-guided-reward-live-environment.md) §Decision 1; slot *names* are still deferred to Till.
+
 Public scaffolding that makes this citable without touching the lineage:
 Internal Family Systems (parts led by a Self), Minsky's *Society of Mind*,
 and the persona-vectors result (personas exist as directions in activation

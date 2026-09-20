@@ -1,0 +1,112 @@
+[
+  {
+    "role": "user",
+    "text": "Oh, another paper for Kaine Tweet: Current LLMs aren't truly creative because they haven't implemented the \"Formal Theory of Fun and Creativity\" (2008) yet. See \"Driven by Compression Progress: A Simple  Principle Explains Essential Aspects of Subjective Beauty, Novelty,  Surprise, Interestingness, Attention, Curiosity, Creativity, Art,  Science, Music, Jokes\" https://arxiv.org/abs/0812.4360",
+    "timestamp": "2026-09-16T18:34:13.577Z"
+  },
+  {
+    "role": "assistant",
+    "text": "I’ll read the paper and check the Kaine context to see how the connection holds up.",
+    "timestamp": "2026-09-16T18:34:17.299Z"
+  },
+  {
+    "role": "assistant",
+    "text": "Yes—this is relevant to **Kaine’s curiosity mechanism**, though the tweet’s claim is stronger than the paper establishes. It proposes a computational account of creativity; it doesn’t prove that implementing this particular theory is necessary for creativity.\n\nSchmidhuber’s central idea is to **reward improvement in understanding**. Already-understood repetition offers little progress; unpredictable noise offers little learnable structure; an initially puzzling pattern that becomes predictable offers substantial progress. The agent seeks experiences that enable that improvement. [Paper, §§1–2](https://arxiv.org/html/0812.4360v2)\n\nThe measurable signal is roughly:\n\n\\[\nr_{\\text{curiosity}} = L_{\\text{before}}(D)-L_{\\text{after}}(D)\n\\]\n\nHere \\(L\\) measures encoding cost, and both model versions must be evaluated on **the same data**. Otherwise, an easier batch could masquerade as learning. [Appendix A.5–A.6](https://arxiv.org/html/0812.4360v2)\n\nFor Kaine, my proposed adaptation would be:\n\n- **Predict consequences:** maintain a predictor of tool results and environment changes.\n- **Choose informative experiments:** favor observations expected to improve that predictor.\n- **Measure transferable learning:** test improvements on reserved examples as well as observed experience, so memorization doesn’t pass as discovery.\n- **Keep curiosity subordinate to verified outcomes and budgets:** use it to guide curriculum and exploration within the existing training rules.\n\nThat fits [ADR 110’s Explorer disposition and structured reward design](/Users/toasty/ws/akh-medu/docs/ai/decisions/110-kaine-character-guided-reward-live-environment.md:47). Its current weighted supervision approach means adopting the paper’s full reinforcement-learning controller would be a separate architectural decision.\n\nA useful first experiment: offer Kaine familiar tasks, learnable unfamiliar tasks, and irreducibly random tasks under equal budgets. Test whether a learning-progress signal directs exploration toward the learnable tasks **and improves later task performance**. That would give us evidence for the mechanism without needing to settle what “truly creative” means.\n\n<oai-mem-citation>\n<citation_entries>\nMEMORY.md:51-51|note=[Prior Kaine reward and authority context checked against current ADR]\n</citation_entries>\n<rollout_ids>\n01a0a98e-10f7-7af3-9aae-70685457a1a2\n</rollout_ids>\n</oai-mem-citation>",
+    "timestamp": "2026-09-16T18:34:56.302Z"
+  },
+  {
+    "role": "user",
+    "text": "It was posted as response to the Belief paper we included already",
+    "timestamp": "2026-09-16T18:36:07.209Z"
+  },
+  {
+    "role": "assistant",
+    "text": "I’ll check which Belief paper we included so I can connect the reply to its argument.",
+    "timestamp": "2026-09-16T18:36:11.342Z"
+  },
+  {
+    "role": "assistant",
+    "text": "Ah, understood—you’re giving the context of the reply, not endorsing its claim. I treated it too much as a standalone argument.\n\nThat makes this a companion reference to the Belief paper for Kaine: the reply proposes **compression progress as the mechanism behind curiosity and creativity**. Whether it complements or challenges the Belief paper depends on that paper’s precise argument.\n\nI couldn’t locate the Belief reference in the local Kaine docs. What was its title or link?",
+    "timestamp": "2026-09-16T18:36:25.772Z"
+  },
+  {
+    "role": "user",
+    "text": "https://x.com/perksverse/status/2099822502126219588",
+    "timestamp": "2026-09-16T18:37:01.012Z"
+  },
+  {
+    "role": "assistant",
+    "text": "I’ll open the post and follow its paper reference.",
+    "timestamp": "2026-09-16T18:37:05.213Z"
+  },
+  {
+    "role": "assistant",
+    "text": "Ah—that identifies it: **“Theory Is All You Need: AI, Human Cognition, and Causal Reasoning” by Felin and Holweg**, with its *data–belief asymmetry* argument. The authors emphasize forming causal theories and intervening to generate new evidence. [Paper](https://pubsonline.informs.org/doi/10.1287/stsc.2024.0189)\n\nThat makes the Schmidhuber reply more pointed: **computational agents can be designed to actively seek discoveries**, with improvements in prediction or compression supplying the motivation. It challenges the framing of computation as merely consuming existing data, although it doesn’t by itself resolve the authors’ argument about originating causal theories. [Schmidhuber’s framework](https://arxiv.org/html/0812.4360v2)\n\nFor Kaine, I’d read them together as two complementary design questions:\n\n- **Belief/theory:** What explanation do I propose, and what experiment would distinguish it from alternatives?\n- **Compression progress:** Which experiment is likely to teach me something, and did my understanding actually improve?\n\nThe combined research direction is **conjecture → predict → intervene → observe → revise**, with learning progress helping choose the next experiment. That’s the connection I missed in my first response.",
+    "timestamp": "2026-09-16T18:37:31.842Z"
+  },
+  {
+    "role": "user",
+    "text": "You also have a transcript of the Oxford paper.",
+    "timestamp": "2026-09-16T18:37:37.979Z"
+  },
+  {
+    "role": "assistant",
+    "text": "I’ll look for the transcript in the workspace and prior session records.",
+    "timestamp": "2026-09-16T18:37:40.645Z"
+  },
+  {
+    "role": "assistant",
+    "text": "I found the earlier Kaine discussion in the Claude session archive. It already proposed a theory datatype, a foresight score, and theory-first training episodes. I’m checking whether that archive also contains the transcript itself.",
+    "timestamp": "2026-09-16T18:38:42.028Z"
+  },
+  {
+    "role": "assistant",
+    "text": "I found the [earlier Oxford-paper discussion](/Users/toasty/.claude/projects/-Users-toasty-ws-akh-medu/bfb0ce41-a104-407c-a0cc-6f5c801cc003.jsonl:93). I should have recovered that context before asking you.\n\nIt already proposed a **theory datatype, predict-before-act foresight scoring, and theory-first training episodes** for Kaine. Schmidhuber’s paper therefore adds a specific next piece: **using measured learning progress to guide which experiments Kaine pursues**.\n\nThe archive I located contains our discussion and the paper’s abstract; it records failed full-text retrievals. I haven’t located a separate full-paper transcript yet.",
+    "timestamp": "2026-09-16T18:38:54.167Z"
+  },
+  {
+    "role": "user",
+    "text": "It was Claude's context and I ran out of usage. t3code still has the thread snoozed. THread ID 7e5cfbbd-084f-4cf8-96ab-16fcf9f39733",
+    "timestamp": "2026-09-16T18:40:06.361Z"
+  },
+  {
+    "role": "assistant",
+    "text": "I’ll look up that t3code thread and recover Claude’s context, including the transcript and any Kaine decisions already made.",
+    "timestamp": "2026-09-16T18:40:09.833Z"
+  },
+  {
+    "role": "assistant",
+    "text": "Found it: **“Theory-Based Foresight for Kaine”**, the exact t3code thread you named. I’ve recovered Claude’s discussion; the thread remains snoozed.\n\nClaude proposed five additions:\n\n- A `Theory` datatype linking causal claims to discriminating experiments.\n- A `foresight` reward for predictions made before acting.\n- Theory-first training episodes.\n- Experiment selection based on reducing uncertainty.\n- Exposing the hypothesis explorer.\n\nThese were **proposals only**—Claude explicitly recorded that nothing was written to disk.\n\nSo Schmidhuber belongs alongside that existing proposal: **foresight measures whether an anticipated effect occurred; compression progress measures whether the experience improved the learner’s understanding.** Those should remain distinct signals.\n\nAnd the transcript is the conversation transcript: Claude recorded that full-paper retrieval was blocked and its analysis used the abstract plus prior knowledge.",
+    "timestamp": "2026-09-16T18:40:41.716Z"
+  },
+  {
+    "role": "user",
+    "text": "Ok, harvest everything and your transcript and record it and put it into seshat so I can handle it with fable. add paper text verbatim to seshat aswell",
+    "timestamp": "2026-09-16T19:09:03.866Z"
+  },
+  {
+    "role": "assistant",
+    "text": "I’ll harvest both conversations, recover the full text of both papers, and record the sources and a Fable handoff in Seshat. I’ll preserve the original wording and distinguish the earlier proposals from changes actually made.",
+    "timestamp": "2026-09-16T19:09:09.132Z"
+  },
+  {
+    "role": "user",
+    "text": "make a local folder tree too",
+    "timestamp": "2026-09-16T19:09:24.021Z"
+  },
+  {
+    "role": "assistant",
+    "text": "I’ll also create a local folder tree with transcripts, paper sources, provenance, checksums, and Seshat receipts. I’m using the PDF skill to check text extraction; I’ll retain source PDFs wherever full-text archiving is permitted.",
+    "timestamp": "2026-09-16T19:09:29.393Z"
+  },
+  {
+    "role": "assistant",
+    "text": "I found licensed editions of both papers, including a Creative Commons edition of Schmidhuber’s paper. The local archive is underway. The Oxford publisher’s PDF download is blocked, so I’m checking institutional copies for the complete text.",
+    "timestamp": "2026-09-16T19:10:49.773Z"
+  },
+  {
+    "role": "assistant",
+    "text": "Both complete paper texts are recovered: 26 pages for Felin–Holweg and 35 for Schmidhuber. I’ve preserved both conversations and prepared the Fable handoff. I’m now importing them into Seshat and checking the persisted content hashes. The handoff notes that PDF extraction preserves the text without paraphrasing, but can alter mathematical layout and hyphenation.",
+    "timestamp": "2026-09-16T19:14:21.690Z"
+  }
+]

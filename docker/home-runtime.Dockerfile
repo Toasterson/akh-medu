@@ -3,14 +3,20 @@
 # brokered to akhexecd; the provider container never mounts a workspace.
 ARG RUST_VERSION=1.94.1
 FROM rust:${RUST_VERSION}-bookworm AS build
+# `profiling` makes jemalloc the global allocator and compiles its sampling
+# profiler in, so heap profiles can be attributed to allocation sites. It stays
+# dormant unless a container sets MALLOC_CONF, and the endpoint is served on a
+# separate, cluster-internal listener.
 ARG TARGETPLATFORM
 WORKDIR /src
 COPY . .
-ENV CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_INCREMENTAL=0
+# line-tables-only rather than 0: jemalloc's profiler records addresses, and
+# without symbols to resolve them the heap profile is an empty call graph.
+ENV CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_DEBUG=line-tables-only CARGO_INCREMENTAL=0
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,id=akh-home-runtime-${TARGETPLATFORM},sharing=locked \
     cargo build --locked --release -p akh-session-services --no-default-features \
-      --features runtime,events,executor,helpers,session \
+      --features runtime,events,executor,helpers,session,profiling \
       --bin akhrtd --bin akheventd --bin akhsessd --bin akhexecd --bin akh-runtime-profile --bin akh-service \
       --example native-provider-probe && \
     mkdir -p /out/examples && \

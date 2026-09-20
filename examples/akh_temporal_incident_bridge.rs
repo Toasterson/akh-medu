@@ -1,10 +1,13 @@
 //! Isolated R1 bridge exposing bounded native forward-chaining with provenance.
 //! Never connects to a daemon; the caller must supply a fresh exam data directory.
+use akh_medu::agent::causal::{
+    ActionSchema, CausalEffect, CausalManager, CausalPattern, EffectKind, PatternElement,
+    StateTransition,
+};
+use akh_medu::agent::event_calculus::{Event, EventCalculusEngine};
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::collections::HashMap;
-use akh_medu::agent::event_calculus::{Event, EventCalculusEngine};
-use akh_medu::agent::causal::{ActionSchema, CausalManager, CausalPattern, CausalEffect, EffectKind, PatternElement, StateTransition};
 
 use akh_medu::agent::tools::{
     kg_delete::KgDeleteTool, kg_query::KgQueryTool, memory_recall::MemoryRecallTool,
@@ -44,50 +47,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if name == "exam_temporal_event" {
                 let args = &request["arguments"];
                 let id = args["id"].as_str().ok_or("event id required")?;
-                if id.is_empty() || id.len() > 128 { return Err("invalid event id".into()); }
+                if id.is_empty() || id.len() > 128 {
+                    return Err("invalid event id".into());
+                }
                 let timestamp = args["timestamp"].as_u64().ok_or("timestamp required")?;
                 let granted = args["granted"].as_bool().ok_or("boolean required")?;
                 let fluent = engine.resolve_or_create_entity("r0:repair-permission")?;
-                temporal.record_event(Event { symbol_id: engine.resolve_or_create_entity(id)?, name: id.into(), timestamp,
-                    initiates: if granted { vec![fluent] } else { vec![] },
-                    terminates: if granted { vec![] } else { vec![fluent] },
-                }, &engine)?;
+                temporal.record_event(
+                    Event {
+                        symbol_id: engine.resolve_or_create_entity(id)?,
+                        name: id.into(),
+                        timestamp,
+                        initiates: if granted { vec![fluent] } else { vec![] },
+                        terminates: if granted { vec![] } else { vec![fluent] },
+                    },
+                    &engine,
+                )?;
                 temporal.persist(&engine)?;
                 return Ok(json!({"success":true}));
             }
             if name == "exam_temporal_state" {
                 let fluent = engine.resolve_or_create_entity("r0:repair-permission")?;
-                return Ok(json!({"success":true,"holding":temporal.holds_at(fluent,u64::MAX),
-                    "cached":temporal.get_fluent(fluent),"history":temporal.fluent_history(fluent).unwrap_or_default()}));
+                return Ok(
+                    json!({"success":true,"holding":temporal.holds_at(fluent,u64::MAX),
+                    "cached":temporal.get_fluent(fluent),"history":temporal.fluent_history(fluent).unwrap_or_default()}),
+                );
             }
             if name == "exam_causal_predict" {
                 let args = &request["arguments"];
                 let parse = |key: &str| -> Result<Vec<CausalPattern>, Box<dyn std::error::Error>> {
-                    let rows = args[key].as_array().ok_or("literal triple array required")?;
-                    if rows.is_empty() || rows.len() > 8 { return Err("one to eight literal triples required".into()); }
+                    let rows = args[key]
+                        .as_array()
+                        .ok_or("literal triple array required")?;
+                    if rows.is_empty() || rows.len() > 8 {
+                        return Err("one to eight literal triples required".into());
+                    }
                     let mut patterns = Vec::new();
                     for row in rows {
                         let values = row.as_array().ok_or("triple must be an array")?;
-                        if values.len() != 3 { return Err("three labels required".into()); }
+                        if values.len() != 3 {
+                            return Err("three labels required".into());
+                        }
                         let mut ids = Vec::new();
                         for (i, v) in values.iter().enumerate() {
                             let label = v.as_str().ok_or("label must be string")?;
-                            if label.is_empty() || label.len() > 128 { return Err("label length invalid".into()); }
-                            ids.push(if i == 1 { engine.resolve_or_create_relation(label)? } else { engine.resolve_or_create_entity(label)? });
+                            if label.is_empty() || label.len() > 128 {
+                                return Err("label length invalid".into());
+                            }
+                            ids.push(if i == 1 {
+                                engine.resolve_or_create_relation(label)?
+                            } else {
+                                engine.resolve_or_create_entity(label)?
+                            });
                         }
-                        patterns.push(CausalPattern { subject: PatternElement::Concrete(ids[0]), predicate: PatternElement::Concrete(ids[1]), object: PatternElement::Concrete(ids[2]), negated: false });
+                        patterns.push(CausalPattern {
+                            subject: PatternElement::Concrete(ids[0]),
+                            predicate: PatternElement::Concrete(ids[1]),
+                            object: PatternElement::Concrete(ids[2]),
+                            negated: false,
+                        });
                     }
                     Ok(patterns)
                 };
                 let preconditions = parse("preconditions")?;
-                let effects = parse("effects")?.into_iter().map(|p| CausalEffect { kind: EffectKind::Assert, subject: p.subject, predicate: p.predicate, object: p.object, confidence: 1.0 }).collect();
-                let schema = ActionSchema { action_id: engine.resolve_or_create_entity("r0-causal-repair")?, name: "r0-causal-repair".into(), description: "Sourced experimental schema".into(), parameters: vec![], preconditions, effects, success_rate: 0.0, execution_count: 0 };
+                let effects = parse("effects")?
+                    .into_iter()
+                    .map(|p| CausalEffect {
+                        kind: EffectKind::Assert,
+                        subject: p.subject,
+                        predicate: p.predicate,
+                        object: p.object,
+                        confidence: 1.0,
+                    })
+                    .collect();
+                let schema = ActionSchema {
+                    action_id: engine.resolve_or_create_entity("r0-causal-repair")?,
+                    name: "r0-causal-repair".into(),
+                    description: "Sourced experimental schema".into(),
+                    parameters: vec![],
+                    preconditions,
+                    effects,
+                    success_rate: 0.0,
+                    execution_count: 0,
+                };
                 let applicable = schema.is_applicable(&engine.all_triples());
                 causal.register_action_schema(schema);
                 causal.persist(&engine)?;
-                if !applicable { return Ok(json!({"success": true, "applicable": false})); }
+                if !applicable {
+                    return Ok(json!({"success": true, "applicable": false}));
+                }
                 let transition = causal.predict_effects("r0-causal-repair", &engine)?;
-                if transition.assertions.is_empty() { return Err("empty prediction refused".into()); }
+                if transition.assertions.is_empty() {
+                    return Err("empty prediction refused".into());
+                }
                 next_prediction += 1;
                 let id = format!("prediction-{}-{}", std::process::id(), next_prediction);
                 let result = json!({"success": true, "applicable": true, "prediction": id, "assertions": transition.assertions});
@@ -95,9 +147,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(result);
             }
             if name == "exam_causal_verify" {
-                let id = request["arguments"]["prediction"].as_str().ok_or("prediction id required")?;
-                let transition = predictions.get(id).ok_or("unknown prediction in this session")?;
-                return Ok(json!({"success": true, "verified": causal.verify_prediction(transition, &engine)}));
+                let id = request["arguments"]["prediction"]
+                    .as_str()
+                    .ok_or("prediction id required")?;
+                let transition = predictions
+                    .get(id)
+                    .ok_or("unknown prediction in this session")?;
+                return Ok(
+                    json!({"success": true, "verified": causal.verify_prediction(transition, &engine)}),
+                );
             }
             if name == "exam_export" {
                 engine.persist()?;

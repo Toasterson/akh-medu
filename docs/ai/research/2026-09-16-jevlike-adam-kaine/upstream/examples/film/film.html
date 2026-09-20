@@ -1,0 +1,74 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Jev-like plays Doom</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color:#eee;font-family:'Iowan Old Style','Palatino Linotype',Palatino,Georgia,serif;-webkit-font-smoothing:antialiased}
+#frame{width:1920px;height:1080px;position:relative;transform-origin:top left;background:#000}
+#architecture{position:absolute;left:30px;top:6px;width:1120px}
+#architecture svg{display:block;width:100%;height:auto}
+#game{position:absolute;top:488px}
+#outputs{position:absolute;left:1190px;top:24px;width:710px;height:462px}
+#outputs svg{display:block;width:100%;height:100%}
+.number{font-family:'Avenir Next',Avenir,'Helvetica Neue',sans-serif;font-weight:300;font-variant-numeric:tabular-nums;font-feature-settings:'tnum'}
+</style>
+<div id="frame"><div id="architecture"><!-- DIAGRAM --></div><div id="outputs"></div><canvas id="game"></canvas></div>
+<script>
+const DATA=/* DATA */;const DUR=DATA.film_seconds||10;window.filmDuration=DUR;
+const N=DATA.decisions.length,DT=4/35;
+const frames=DATA.decisions.map(d=>{const image=new Image();image.src=`data:${DATA.frame_mime||'image/jpeg'};base64,`+d.frame;return image});
+// the footage slot is 789x592 under the band; the frame keeps its own aspect, centred in it
+const canvas=document.querySelector('#game'),game=canvas.getContext('2d');let W=789,H=592;
+window.ready=Promise.all(frames.map(image=>image.decode())).then(()=>{const scale=Math.min(789/frames[0].naturalWidth,592/frames[0].naturalHeight);W=Math.round(frames[0].naturalWidth*scale);H=Math.round(frames[0].naturalHeight*scale);canvas.width=W;canvas.height=H;canvas.style.left=`${565+(789-W)/2}px`;canvas.style.top=`${488+(592-H)/2}px`});
+
+// one perceptual ramp on black: cyan, green, orange, magenta, yellow
+const ramp=[[0,0,0],[79,195,247],[96,239,196],[255,194,71],[255,95,158],[255,246,160]];
+function rampColour(t){t=Math.max(0,Math.min(.999,t))*(ramp.length-1);const i=Math.floor(t),f=t-i;return ramp[i].map((v,k)=>Math.round(v+(ramp[i+1][k]-v)*f))}
+function columns(values,count){return values.map(row=>Array.from({length:count},(_,column)=>{const start=Math.floor(column*row.length/count),end=Math.floor((column+1)*row.length/count);return row.slice(start,Math.max(start+1,end)).reduce((sum,value)=>sum+value,0)/Math.max(1,end-start)}))}
+function prepare(key,values){if(key==='query'||key==='key'||key==='value')return columns(values,16);if(key==='attention')return columns(values.map(grid=>grid.flat()),40);if(key==='scores'||key==='probabilities')return values[0].map(value=>[value]);return values}
+const cellCache={};
+function drawMatrix(id,key,values){values=prepare(key,values);const cells=cellCache[id]||(cellCache[id]=document.querySelectorAll(`${id} [data-cell]`)),flat=values.flat(),low=Math.min(...flat),high=Math.max(...flat),span=Math.max(1e-9,high-low);cells.forEach((cell,index)=>{const colour=rampColour((flat[index]-low)/span);cell.setAttribute('fill',`rgb(${colour.join(',')})`)})}
+function mix(a,b,f){return Array.isArray(a)?a.map((value,i)=>mix(value,b[i],f)):a+(b-a)*f}
+function drawArchitecture(left,right,f){const a={};for(const key of Object.keys(left.activations))a[key]=mix(left.activations[key],right.activations[key],f);drawMatrix('#cut-q','query',a.query);drawMatrix('#cut-k','key',a.key);drawMatrix('#cut-v','value',a.value);drawMatrix('#cut-a','attention',a.attention);drawMatrix('#cut-w','scores',a.scores);drawMatrix('#cut-p','probabilities',a.probabilities)}
+
+// the chosen option's patch attention as a faint glow over the frame
+function glow(values,context,width,height){values=values.flat();const rows=DATA.grid_rows,cols=DATA.grid_columns,maximum=Math.max(...values,1e-9);for(let row=0;row<rows;row++)for(let column=0;column<cols;column++){const strength=Math.pow(values[row*cols+column]/maximum,.7),colour=column<cols/2?[79,195,247]:row<rows/2?[255,95,158]:[255,194,71];context.fillStyle=`rgba(${colour[0]},${colour[1]},${colour[2]},${.003+.05*strength})`;context.fillRect(column*width/cols,row*height/rows,width/cols,height/rows)}}
+function drawGame(leftIndex,rightIndex,f,left,right){game.clearRect(0,0,W,H);game.globalAlpha=1;game.drawImage(frames[leftIndex],0,0,W,H);game.globalAlpha=f;game.drawImage(frames[rightIndex],0,0,W,H);game.globalAlpha=1;game.save();game.globalCompositeOperation='screen';glow(mix(left.attention,right.attention,f),game,W,H);game.restore()}
+
+// controller panel: seven hairlines, one dot each, a fading trail of the last values,
+// the sampled row in white; icons as strokes; one number for the sampled row.
+const ICONS={
+ 'turn left':'M18 9 A7 7 0 1 0 22 20 M18 9 L13 6 M18 9 L15 14',
+ 'turn right':'M10 9 A7 7 0 1 1 6 20 M10 9 L15 6 M10 9 L13 14',
+ 'move forward':'M14 23 L14 5 M8 11 L14 5 L20 11',
+ 'move backward':'M14 5 L14 23 M8 17 L14 23 L20 17',
+ 'strafe left':'M23 14 L5 14 M11 8 L5 14 L11 20',
+ 'strafe right':'M5 14 L23 14 M17 8 L23 14 L17 20',
+ 'attack':'M14 14 m-6 0 a6 6 0 1 0 12 0 a6 6 0 1 0 -12 0 M14 2 L14 7 M14 21 L14 26 M2 14 L7 14 M21 14 L26 14',
+ 'move up':'M14 23 L14 5 M8 11 L14 5 L20 11',
+ 'move down':'M14 5 L14 23 M8 17 L14 23 L20 17',
+ 'move left':'M23 14 L5 14 M11 8 L5 14 L11 20',
+ 'move right':'M5 14 L23 14 M17 8 L23 14 L17 20',
+ 'pick up / put down':'M14 3 L14 19 M9 8 L14 3 L19 8 M9 14 L14 19 L19 14 M5 25 L23 25',
+};
+// icon by exact name, else by keyword, so a trace's own action names still draw
+function iconFor(name){if(ICONS[name])return ICONS[name];const n=name.toLowerCase();if(/turn/.test(n))return ICONS[/left/.test(n)?'turn left':'turn right'];if(/up|forward/.test(n))return ICONS['move up'];if(/down|back/.test(n))return ICONS['move down'];if(/left/.test(n))return ICONS['move left'];if(/right/.test(n))return ICONS['move right'];if(/attack|fire|shoot/.test(n))return ICONS.attack;return ICONS['pick up / put down']}
+const ROW=48,TOP=34,ICON_X=4,LINE_X0=78,LINE_X1=560,NUM_X=584,TRAIL=4,ROWS=DATA.actions.length;
+const panel=document.querySelector('#outputs');
+panel.innerHTML=`<svg viewBox="0 0 710 462">${DATA.actions.map((name,i)=>{const y=TOP+i*ROW;return `<g class="row" data-option="${i}">
+ <path d="${iconFor(name)}" transform="translate(${ICON_X},${y-21}) scale(1.5)" fill="none" stroke="#999" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+ <line x1="${LINE_X0}" y1="${y}" x2="${LINE_X1}" y2="${y}" stroke="#999" stroke-width="0.8" opacity=".55"/>
+ ${Array.from({length:TRAIL},(_,k)=>`<circle class="trail" data-k="${k}" cx="${LINE_X0}" cy="${y}" r="3.6" fill="#999" opacity="0"/>`).join('')}
+ <circle class="dot" cx="${LINE_X0}" cy="${y}" r="8" fill="#999"/>
+ <text class="number" x="${NUM_X}" y="${y+12}" font-size="34" fill="#f2f2f2"></text>
+</g>`}).join('')}
+<text class="number" id="latency" x="${(LINE_X0+LINE_X1)/2}" y="${TOP+ROWS*ROW+44}" text-anchor="middle" font-size="36" fill="#e6e6e6"></text>
+<text class="number" id="decision-rate" x="${(LINE_X0+LINE_X1)/2}" y="${TOP+ROWS*ROW+4}" text-anchor="middle" font-size="36" fill="#e6e6e6"></text></svg>`;
+const rows=[...panel.querySelectorAll('.row')];
+function pos(p){return LINE_X0+(LINE_X1-LINE_X0)*Math.min(1,p/DATA.probability_scale)}
+function highlight(option,phase){let strength=0;for(let k=Math.max(0,Math.floor(phase)-2);k<=Math.min(N-1,Math.ceil(phase)+1);k++){if(DATA.decisions[k].action_index!==option)continue;const distance=phase-k;const candidate=distance<0?1+distance/(.08/DT):1-distance/(.20/DT);strength=Math.max(strength,candidate)}return Math.max(0,Math.min(1,strength))}
+function drawProbabilities(left,right,f,phase){const probabilities=mix(left.probabilities,right.probabilities,f),sampled=DATA.decisions[Math.min(N-1,Math.round(phase))].action_index,leftIndex=Math.floor(phase);rows.forEach((row,i)=>{const strength=highlight(i,phase),shade=Math.round(150+105*strength),colour=`rgb(${shade},${shade},${shade})`;row.querySelector('.dot').setAttribute('cx',pos(probabilities[i]));row.querySelector('.dot').setAttribute('fill',colour);row.querySelector('path').setAttribute('stroke',colour);row.querySelectorAll('.trail').forEach(trail=>{const k=+trail.dataset.k,index=leftIndex-k;if(index<0){trail.setAttribute('opacity',0);return}trail.setAttribute('cx',pos(DATA.decisions[index].probabilities[i]));trail.setAttribute('opacity',(.28-.06*k)*(1-f*.5))});row.querySelector('text').textContent=i===sampled?`${(probabilities[i]*100).toFixed(0)}%`:''})}
+function drawTiming(t,phase){const bucket=Math.floor(t*4)/4,centre=Math.min(N-1,Math.floor(bucket*(N-1)/DUR)),first=Math.max(0,centre-4),recent=DATA.decisions.slice(first,centre+1);const milliseconds=recent.reduce((sum,d)=>sum+d.latency_ms,0)/recent.length;document.querySelector('#latency').innerHTML=`${milliseconds.toFixed(1)}<tspan fill="#8a8a8a" font-size="24"> ms per decision</tspan>`;document.querySelector('#decision-rate').innerHTML=`${Math.min(1/DT,1000/milliseconds).toFixed(1)}<tspan fill="#8a8a8a" font-size="24"> decisions per second, as played</tspan>`}
+window.setFrame=async t=>{const phase=Math.min(N-1,t/DUR*(N-1)),leftIndex=Math.floor(phase),rightIndex=Math.min(N-1,leftIndex+1),raw=phase-leftIndex,f=raw*raw*(3-2*raw),left=DATA.decisions[leftIndex],right=DATA.decisions[rightIndex];drawArchitecture(left,right,f);drawGame(leftIndex,rightIndex,f,left,right);drawProbabilities(left,right,f,phase);drawTiming(t,phase)};
+addEventListener('resize',()=>document.querySelector('#frame').style.transform=`scale(${Math.min(innerWidth/1920,innerHeight/1080)})`);dispatchEvent(new Event('resize'));
+if(!location.search.includes('capture')){let start=performance.now();(function loop(){setFrame(((performance.now()-start)/1000)%DUR);requestAnimationFrame(loop)})()}
+</script>

@@ -115,7 +115,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// Why an agentic turn's tool loop ended without the model volunteering a final
 /// answer. Each maps to a short clause the forced-synthesis nudge explains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TurnStop {
+pub(crate) enum TurnStop {
     /// Hit the absolute iteration backstop.
     IterationCap,
     /// Exceeded the per-turn wall-clock budget.
@@ -152,9 +152,22 @@ enum TurnStop {
 pub(crate) enum AgenticTurnOutcome {
     Completed,
     Refused,
+    Interrupted(TurnStop),
 }
 
 impl TurnStop {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::IterationCap => "iteration_budget",
+            Self::Timeout => "time_budget",
+            Self::RepeatLoop => "repeat_loop",
+            Self::Cancelled => "cancelled",
+            Self::DeclaredButIdle => "no_work",
+            Self::ContractUnsatisfied => "contract_unsatisfied",
+            Self::WedgeTimeout => "no_progress",
+        }
+    }
+
     fn clause(self) -> &'static str {
         match self {
             TurnStop::IterationCap => "You have reached your tool-call limit",
@@ -163,7 +176,7 @@ impl TurnStop {
             TurnStop::Cancelled => "This turn was cancelled",
             TurnStop::DeclaredButIdle => {
                 "You declared completion but verification shows no work was performed. \
-                 The worktree has no uncommitted changes and no mutating tool calls were made. \
+                 No successful file write or changed repository state was verified. \
                  Review the task requirements and use the appropriate tools to make the necessary changes"
             }
             TurnStop::ContractUnsatisfied => {
@@ -174,6 +187,42 @@ impl TurnStop {
             }
         }
     }
+}
+
+/// Read-only repository evidence for shell-based edits. Disable external diff
+/// drivers so verification cannot execute repository-configured commands.
+fn repository_witness(cwd: &std::path::Path) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .output()
+            .ok()?;
+        out.status.success().then_some(out.stdout)
+    };
+    let mut hash = DefaultHasher::new();
+    git(&["rev-parse", "HEAD"])?.hash(&mut hash);
+    git(&["diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD"])?.hash(&mut hash);
+    let untracked = git(&["ls-files", "--others", "--exclude-standard", "-z"])?;
+    for name in untracked.split(|b| *b == 0).filter(|name| !name.is_empty()) {
+        let name = std::str::from_utf8(name).ok()?;
+        name.hash(&mut hash);
+        // Do not follow symlinks or read arbitrary untracked datasets/devices.
+        // Metadata is sufficient to distinguish an untouched checkout from a
+        // new or modified candidate; Anima still validates the actual diff.
+        let metadata = std::fs::symlink_metadata(cwd.join(name)).ok()?;
+        metadata.len().hash(&mut hash);
+        metadata.modified().ok()?.hash(&mut hash);
+    }
+    Some(hash.finish())
+}
+
+fn verified_write(tool: &str, args: &Value, success: bool) -> bool {
+    success
+        && (tool == "edit"
+            || (tool == "file_io" && args.get("action").and_then(Value::as_str) == Some("write")))
 }
 
 /// Frontier-harness-style budget governing the agentic tool loop — *defense in
@@ -241,6 +290,18 @@ impl RoundBudget {
             last_request: now,
             no_work_retries: 0,
         }
+    }
+
+    /// Autonomous work has no implicit elapsed-time or round cutoff. Explicit
+    /// operator limits remain supported; repetition and cancellation still stop it.
+    fn for_dispatch(mut self) -> Self {
+        if env_usize("AKH_AGENT_MAX_ROUNDS").is_none() {
+            self.hard_max = usize::MAX;
+        }
+        if env_usize("AKH_AGENT_TURN_TIMEOUT_SECS").is_none() {
+            self.timeout = Duration::MAX;
+        }
+        self
     }
 
     /// Whether the turn must end before issuing another model call.
@@ -752,6 +813,12 @@ impl Agent {
         // final one) — never raw arguments/results, so a chatty tool loop
         // doesn't bloat the WAL payload.
         let mut tool_trace: Vec<Value> = Vec::new();
+        let work_cwd = if is_autonomous_dispatch {
+            crate::fs::session_cwd()
+        } else {
+            None
+        };
+        let initial_worktree = work_cwd.as_deref().and_then(repository_witness);
         // Full results are retained only for this turn's provenance gate. A
         // study-note write may cite a successful evidence result from a prior
         // model round, never another parallel call emitted in the same round.
@@ -774,6 +841,9 @@ impl Agent {
         // a flat round count. The loop yields *why* it stopped so the turn can end
         // with a forced synthesis rather than a bare cutoff.
         let mut budget = RoundBudget::new(backend.capabilities().context_window);
+        if is_autonomous_dispatch {
+            budget = budget.for_dispatch();
+        }
         // Turn-level metrics: track total prompt size and request count for diagnosing
         // pathological latency (work item "turns die quietly", ask 2).
         let mut turn_metrics = super::llm_metrics::TurnMetrics::new();
@@ -941,7 +1011,11 @@ impl Agent {
                         rounds = budget.rounds_so_far(),
                         "completion check: empty answer → forcing final synthesis"
                     );
-                    break TurnStop::IterationCap;
+                    break if is_autonomous_dispatch {
+                        TurnStop::DeclaredButIdle
+                    } else {
+                        TurnStop::IterationCap
+                    };
                 }
 
                 // Post-condition guard: in autonomous dispatch mode, verify that
@@ -958,16 +1032,18 @@ impl Agent {
                     // Deterministic oracle: did the turn perform any mutating
                     // operations? Check tool_trace for file_io/edit/shell_exec (ok
                     // = true).
-                    let has_mutating_calls = tool_trace.iter().any(|entry| {
-                        if let (Some(tool), Some(ok)) = (
-                            entry.get("tool").and_then(|v| v.as_str()),
-                            entry.get("ok").and_then(|v| v.as_bool()),
-                        ) {
-                            ok && matches!(tool, "file_io" | "edit" | "shell_exec")
-                        } else {
-                            false
-                        }
+                    let explicit_write = tool_trace
+                        .iter()
+                        .any(|entry| entry.get("wrote").and_then(Value::as_bool) == Some(true));
+                    let shell_ran = tool_trace.iter().any(|entry| {
+                        entry.get("tool").and_then(Value::as_str) == Some("shell_exec")
+                            && entry.get("ok").and_then(Value::as_bool) == Some(true)
                     });
+                    let shell_changed_tree = shell_ran
+                        && initial_worktree
+                            .zip(work_cwd.as_deref().and_then(repository_witness))
+                            .is_some_and(|(before, after)| before != after);
+                    let has_mutating_calls = explicit_write || shell_changed_tree;
 
                     tracing::debug!(
                         agent_id,
@@ -1055,6 +1131,8 @@ impl Agent {
                 return Some(AgenticTurnOutcome::Completed);
             }
 
+            budget.note_request();
+
             // Tool round. Any prose the model emitted alongside its tool calls is
             // reasoning; on the fallback path it was not streamed, so surface it
             // as a thinking step here (the streaming path already did).
@@ -1088,6 +1166,10 @@ impl Agent {
                     user_prompt,
                     &tool_evidence[..evidence_before_round],
                 );
+                // A completed tool is progress even when it ran longer than
+                // the gap between model requests. Do not kill the next round
+                // using the tool's execution time as evidence of a wedge.
+                budget.note_request();
                 sink.emit(&AkhMessage::tool_result(
                     outcome.exec_name.clone(),
                     outcome.success,
@@ -1124,7 +1206,7 @@ impl Agent {
                 agent_id,
                 "agentic turn cancelled (idle watchdog); ending without forced synthesis"
             );
-            return Some(AgenticTurnOutcome::Completed);
+            return Some(AgenticTurnOutcome::Interrupted(stop));
         }
 
         // An explicit contract is a hard post-condition, not a suggestion for
@@ -1147,6 +1229,20 @@ impl Agent {
             return Some(AgenticTurnOutcome::Refused);
         }
 
+        // A dispatch interruption must not become a fabricated completion or a
+        // completed-turn training example. The runner retains the partial work.
+        if is_autonomous_dispatch {
+            sink.emit(&AkhMessage::error(
+                "turn_interrupted",
+                format!(
+                    "Task incomplete: {}. Preserve existing work for continuation.",
+                    stop.clause()
+                ),
+            ));
+            turn_metrics.log();
+            return Some(AgenticTurnOutcome::Interrupted(stop));
+        }
+
         // Budget exhausted — force one tool-free synthesis ("reflect and answer")
         // so the turn returns the best answer it can from what it gathered, rather
         // than the old bare "(stopped after N rounds)" cutoff.
@@ -1165,7 +1261,7 @@ impl Agent {
         );
         // Log turn-level metrics summary (total prompt size, request count).
         turn_metrics.log();
-        Some(AgenticTurnOutcome::Completed)
+        Some(AgenticTurnOutcome::Interrupted(stop))
     }
 
     /// Execute one model-requested tool call, running it through every ADR 089
@@ -1330,7 +1426,7 @@ impl Agent {
             note_prefix.push_str(&format!("[repaired args: {note}] "));
         }
 
-        let mut trace = json!({"tool": exec_name.clone(), "ok": success});
+        let mut trace = json!({"tool": exec_name.clone(), "ok": success, "wrote": verified_write(&exec_name, &exec_args, success)});
         if let Some(verified) = study_note_evidence_verified {
             trace["evidence_verified"] = json!(verified);
         }
@@ -1463,8 +1559,8 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .record_agent_turn(answer);
-        // ADR 091: same capture hook as the normal-completion turn-end site.
-        self.emit_turn_wal(engine, agent_id, user_prompt, answer, tool_trace);
+        // This is an interrupted answer, not a completed-turn training example.
+        let _ = (engine, user_prompt, tool_trace);
         if used_fallback {
             sink.emit(&AkhMessage::narrative(answer, "acp"));
         }
@@ -2956,12 +3052,84 @@ mod tests {
     }
 
     #[test]
+    fn read_and_shell_success_are_not_write_evidence() {
+        assert!(!verified_write("file_io", &json!({"action":"read"}), true));
+        assert!(!verified_write(
+            "shell_exec",
+            &json!({"command":"cat code.rs"}),
+            true
+        ));
+        assert!(verified_write("file_io", &json!({"action":"write"}), true));
+        assert!(!verified_write("edit", &json!({}), false));
+    }
+
+    #[test]
+    fn repository_evidence_tracks_partial_shell_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir.path())
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            )
+        };
+        git(&["init", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@local",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ]);
+        let before = repository_witness(dir.path()).unwrap();
+        assert_eq!(Some(before), repository_witness(dir.path()));
+        std::fs::write(dir.path().join("code.rs"), "partial work").unwrap();
+        let after = repository_witness(dir.path()).unwrap();
+        assert_ne!(before, after);
+        std::fs::write(dir.path().join("code.rs"), "more partial work").unwrap();
+        assert_ne!(Some(after), repository_witness(dir.path()));
+    }
+
+    #[test]
     fn round_budget_scales_cap_to_context_window() {
         assert_eq!(RoundBudget::new(Some(1_000_000)).hard_max, 30); // GLM-class
         assert_eq!(RoundBudget::new(Some(262_144)).hard_max, 30); // gemma4-12b
         assert_eq!(RoundBudget::new(Some(128_000)).hard_max, 20);
         assert_eq!(RoundBudget::new(Some(8_192)).hard_max, DEFAULT_MAX_ROUNDS);
         assert_eq!(RoundBudget::new(None).hard_max, DEFAULT_MAX_ROUNDS);
+    }
+
+    #[test]
+    fn autonomous_productive_work_outlives_interactive_limits() {
+        let mut b = RoundBudget::new(None).for_dispatch();
+        b.started = Instant::now() - Duration::from_secs(3600);
+        for i in 0..100 {
+            b.note_request();
+            let c = call("kg_query", &i.to_string());
+            b.note_round([(c.0.as_str(), &c.1)]);
+            assert_eq!(b.exhausted(), None);
+        }
+        let c = call("kg_query", "stuck");
+        for _ in 0..DEFAULT_REPEAT_LIMIT {
+            b.note_round([(c.0.as_str(), &c.1)]);
+        }
+        assert_eq!(b.exhausted(), Some(TurnStop::RepeatLoop));
+    }
+
+    #[test]
+    fn a_completed_long_tool_clears_the_wedge_clock() {
+        let mut b = RoundBudget::new(None).for_dispatch();
+        b.last_request = Instant::now() - Duration::from_secs(120);
+        assert_eq!(b.exhausted(), Some(TurnStop::WedgeTimeout));
+        b.note_request();
+        assert_eq!(b.exhausted(), None);
     }
 
     #[test]
@@ -3779,7 +3947,7 @@ mod tests {
     /// post-condition guard only fires when has_mutating_calls is checked,
     /// which doesn't happen when tool_calls is empty in the first place.
     #[test]
-    fn dispatch_mode_empty_answer_also_forces_synthesis() {
+    fn dispatch_mode_empty_answer_reports_incomplete_without_synthesis() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
         agent
@@ -3799,8 +3967,8 @@ mod tests {
         assert_eq!(result, Some(()));
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "dispatch mode with empty answer must also force final synthesis"
+            1,
+            "dispatch mode must not synthesize a completion for empty work"
         );
     }
 
@@ -3890,25 +4058,21 @@ mod tests {
         let sink = crate::message::VecSink::new();
         let cancel = std::sync::atomic::AtomicBool::new(false);
         // is_autonomous_dispatch = true: enable the post-condition guard
-        let result =
-            agent.run_agentic_turn(&engine, "tecton", "make changes", &sink, &cancel, true);
-        assert_eq!(result, Some(()));
-        let calls_made = calls.load(std::sync::atomic::Ordering::SeqCst);
-        // Should make: 1 initial call + 3 retries + 1 forced synthesis = 5 calls total.
-        // The no_work_retry counter starts at 0. After the first idle answer:
-        // - note_no_work_retry() → counter = 1, returns false → retry
-        // After the second idle answer:
-        // - note_no_work_retry() → counter = 2, returns false → retry
-        // After the third idle answer:
-        // - note_no_work_retry() → counter = 3, returns false → retry
-        // After the fourth idle answer:
-        // - note_no_work_retry() → counter = 4, returns true → break with DeclaredButIdle
-        // Then forced synthesis makes one more call.
-        // So: 4 idle calls + 1 synthesis call = 5 total.
-        assert_eq!(
-            calls_made, 5,
-            "should make exactly 5 calls: 4 idle rounds (1 initial + 3 retries) + 1 forced synthesis"
+        let result = agent.run_agentic_turn_with_conversation_state(
+            &engine,
+            "tecton",
+            "make changes",
+            &sink,
+            &cancel,
+            true,
+            &std::sync::Mutex::new(ConversationState::default()),
         );
+        assert_eq!(
+            result,
+            Some(AgenticTurnOutcome::Interrupted(TurnStop::DeclaredButIdle))
+        );
+        let calls_made = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(calls_made, 4, "four idle attempts, no fabricated synthesis");
     }
 
     /// Backend that does work (calls a tool) on the first round, then declares

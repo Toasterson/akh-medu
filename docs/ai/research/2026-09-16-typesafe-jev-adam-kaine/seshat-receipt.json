@@ -1,0 +1,26 @@
+{
+  "ingested_on": "2026-09-16",
+  "transport": "Anima MCP anima_import",
+  "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+  "verification": "Seshat document listing confirmed both entries; returned content hashes match local file SHA-256 hashes.",
+  "documents": [
+    {
+      "file": "README.md",
+      "slug": "2026-09-16-typesafe-jev-adam-kaine-research",
+      "anima_document_id": "01a0abb7-cbee-7b10-993c-ebea76e6350b",
+      "seshat_document_id": "a4b357e1-f46f-49e4-a01b-b89ebad0a66b",
+      "chunk_count": 22,
+      "version": 1,
+      "sha256": "2791f34e65ea8e70152161be1c2597909e384557ab821d0d51a18984527048fc"
+    },
+    {
+      "file": "follow-up-transcript.md",
+      "slug": "2026-09-16-typesafe-jev-qwen-lecun-follow-up-transcript",
+      "anima_document_id": "01a0abb8-0144-7381-8564-68d9b53ac74f",
+      "seshat_document_id": "90dec8c3-aa87-4f20-bfc9-be228eb5edf8",
+      "chunk_count": 7,
+      "version": 1,
+      "sha256": "d5d26cd1d478a47d2eb138b75e6295cd8161b951f213e1ad2b2899fe6b248042"
+    }
+  ]
+}

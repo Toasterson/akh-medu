@@ -26,3 +26,45 @@ family = "oracle_repair"
 kind = "repair"
 language = "en"
 text = "Authorization for the repair on \"{target}\" was revoked. Do not proceed until re-authorized, then complete the repair once authorization is restored."
+
+# Phase 51 P6.5/E3 — multi-step (K>=2) variants of the same three worlds,
+# split into per-step turns so a real conversation carries forward between
+# an engine-executed tool-call step and the step that depends on its result
+# (see `generate_e3_multistep` in the generator source). Same three worlds,
+# same placeholders, phrased as two decision points instead of one sentence.
+
+[[template]]
+family = "oracle_acquire"
+kind = "e3_acquire_learn"
+language = "en"
+text = "A new versioned command \"{command}\" was documented with syntax \"{syntax}\". Learn it and persist it now."
+
+[[template]]
+family = "oracle_acquire"
+kind = "e3_acquire_recall"
+language = "en"
+text = "You have just restarted. Recall the syntax you persisted for \"{command}\"."
+
+[[template]]
+family = "oracle_revise"
+kind = "e3_revise_apply"
+language = "en"
+text = "The current route for \"{job}\" changed from \"{old_worker}\" to \"{new_worker}\". Apply the correction now, preserving the prior assignment as history."
+
+[[template]]
+family = "oracle_revise"
+kind = "e3_revise_verify"
+language = "en"
+text = "Who is the current worker for \"{job}\" now?"
+
+[[template]]
+family = "oracle_repair"
+kind = "e3_repair_attempt"
+language = "en"
+text = "Attempt to complete the repair on \"{target}\" now."
+
+[[template]]
+family = "oracle_repair"
+kind = "e3_repair_complete"
+language = "en"
+text = "Authorization for \"{target}\" has been restored. Complete the repair now."

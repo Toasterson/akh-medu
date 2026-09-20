@@ -205,36 +205,67 @@ impl SessionApp {
     pub async fn run_dispatcher(self) {
         use std::collections::{HashMap, HashSet};
         let mut workers: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
-        let mut running: HashMap<tokio::task::Id, String> = HashMap::new();
+        let mut running: HashMap<tokio::task::Id, (String, bool)> = HashMap::new();
         let mut last = HashMap::new();
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        // Scan on change, not on a timer. Every store commit signals
+        // `changes`, so a submitted turn, a tool result or a closure is still
+        // picked up within one interval; the interval is now a minimum
+        // spacing between scans rather than a cadence. The previous
+        // unconditional 1s scan deserialised every session record — 592
+        // closed ones, ~19 MB — every second for no work, which was most of
+        // this daemon's CPU and all of its memory churn.
+        //
+        // A closed session only stays in this scanned "session/" prefix while
+        // the dispatcher still has cleanup to do for it (see
+        // `archive_if_clean`); once credentials are removed, the workspace is
+        // released, every completed turn is accepted, and every repository
+        // publication is settled, it moves to "archived_session/" and this
+        // scan never deserialises it again.
+        //
+        // The fallback bounds how late any signal-free state change can be
+        // noticed. Its one real cost: a session in dispatch-failure backoff
+        // is retried up to this long after the backoff expires, instead of at
+        // the next second, because expiry alone writes nothing.
+        let changes = self.sessions.store.changes();
+        let mut dirty = true;
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut fallback = tokio::time::interval(Duration::from_secs(5));
+        fallback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                _ = changes.notified() => { dirty = true; }
+                _ = fallback.tick() => { dirty = true; }
                 result = workers.join_next_with_id(), if !workers.is_empty() => {
                     match result {
                         Some(Ok((id, result))) => {
-                            let session = running.remove(&id).unwrap_or_default();
+                            let (session, _) = running.remove(&id).unwrap_or_default();
                             if let Err(error) = result { tracing::error!(%session,code=%error.code,"session reconciliation failed"); }
                         }
                         Some(Err(error)) => {
-                            let session = running.remove(&error.id()).unwrap_or_default();
+                            let (session, _) = running.remove(&error.id()).unwrap_or_default();
                             tracing::error!(%session,"session reconciliation task interrupted");
                         }
                         None => {}
                     }
                 }
-                _ = interval.tick() => {
+                _ = interval.tick(), if dirty => {
+                    dirty = false;
                     let mut sessions = match self.sessions.store.scan::<SessionRecord>("session/") {
                         Ok(sessions) => sessions,
                         Err(error) => { tracing::error!(code=%error.code,"session scan failed"); continue; }
                     };
-                    // Oldest scheduled first prevents inactive sessions at the start
-                    // of the ledger from starving later sessions when capacity is full.
-                    sessions.sort_by_key(|session| last.get(&session.id).copied());
-                    let active: HashSet<_> = running.values().cloned().collect();
+                    // Lease-bearing work must not queue behind historical cleanup.
+                    // Keep cleanup bounded even when its remote executor is gone;
+                    // oldest-first within each class still makes cleanup progress.
+                    sessions.sort_by_key(|session| (session.closed_at.is_some(), last.get(&session.id).copied()));
+                    let active: HashSet<_> = running.values().map(|(id, _)| id.clone()).collect();
+                    let mut cleanup_workers = running.values().filter(|(_, closed)| *closed).count();
                     for session in sessions {
                         if workers.len() >= 64 { break; }
                         if active.contains(&session.id) { continue; }
+                        let closed = session.closed_at.is_some();
+                        if closed && cleanup_workers >= 4 { continue; }
                         let retry_after = if session.closed_at.is_some() {
                             Duration::from_secs(5)
                         } else {
@@ -245,7 +276,8 @@ impl SessionApp {
                         let worker = self.clone();
                         last.insert(id.clone(), tokio::time::Instant::now());
                         let task = workers.spawn(async move { worker.tick_session(session).await });
-                        running.insert(task.id(), id);
+                        running.insert(task.id(), (id, closed));
+                        if closed { cleanup_workers += 1; }
                     }
                 }
             }
@@ -316,6 +348,11 @@ impl SessionApp {
         if let Err(error) = self.reconcile_progress(&session) {
             tracing::warn!(session=%session.id,code=%error.code,"session progress reconciliation deferred");
         }
+        if session.closed_at.is_some()
+            && let Err(error) = self.archive_if_clean(&session)
+        {
+            tracing::warn!(session=%session.id,code=%error.code,"session archival deferred");
+        }
         if !session.turns.iter().any(|t| !t.status.terminal()) {
             return Ok(());
         }
@@ -323,8 +360,7 @@ impl SessionApp {
             tracing::warn!(session=%session.id,code=%error.code,"session reconciliation deferred");
             self.sessions.store.transaction(|tx| {
                 let k = key("dispatch_error", &[&session.id]);
-                let mut current: SessionRecord = tx
-                    .get(&key("session", &[&session.id]))?
+                let mut current = crate::session::load_record(tx, &session.id)?
                     .ok_or_else(|| Fault::missing("session disappeared"))?;
                 // Tracked on every failure, not only the first with a new
                 // message, so the dispatcher's retry backoff (jittered_backoff)
@@ -341,17 +377,16 @@ impl SessionApp {
                         json!({"error":error}),
                     )?;
                 } else {
-                    tx.put(&key("session", &[&session.id]), &current)?;
+                    crate::session::save_record(tx, &current)?;
                 }
                 Ok(())
             })?;
         } else if session.dispatch_failures != 0 {
             self.sessions.store.transaction(|tx| {
-                let mut current: SessionRecord = tx
-                    .get(&key("session", &[&session.id]))?
+                let mut current = crate::session::load_record(tx, &session.id)?
                     .ok_or_else(|| Fault::missing("session disappeared"))?;
                 current.dispatch_failures = 0;
-                tx.put(&key("session", &[&session.id]), &current)
+                crate::session::save_record(tx, &current)
             })?;
         }
         Ok(())
@@ -407,10 +442,9 @@ impl SessionApp {
         // Re-read: `force_retire` just above may be what set retirement, and
         // a session with no turns at all can go straight from admitted to
         // closed in this same pass instead of waiting for another sweep.
-        let current: SessionRecord = self
+        let current = self
             .sessions
-            .store
-            .get(&key("session", &[&session.id]))?
+            .get_record(&session.id)?
             .ok_or_else(|| Fault::missing("session disappeared"))?;
         if let Some(retirement) = &current.retirement
             && crate::session::should_force_cancel(
@@ -448,6 +482,71 @@ impl SessionApp {
             return Err(Fault::conflict(
                 "sandbox manager did not confirm this session's release",
             ));
+        }
+        Ok(())
+    }
+    /// A closed session stays in the scanned `session/` prefix only while the
+    /// dispatcher still has cleanup to do for it. Once every piece of that
+    /// cleanup is done — MCP credentials removed, workspace released, every
+    /// completed turn accepted by core (mirroring `publish_completions`'s own
+    /// notion of "nothing left to do"), and every repository publication
+    /// intent settled — the record moves to `archived_session/`, which this
+    /// dispatcher never scans. Reads by id (`Sessions::get`/`get_record`) and
+    /// `Sessions::list` still check both prefixes.
+    fn archive_if_clean(&self, session: &SessionRecord) -> Result<()> {
+        if self
+            .sessions
+            .store
+            .get::<bool>(&key("mcp_credentials_removed", &[&session.id]))?
+            != Some(true)
+        {
+            return Ok(());
+        }
+        if self
+            .sessions
+            .store
+            .get::<bool>(&key("workspace_released", &[&session.id]))?
+            != Some(true)
+        {
+            return Ok(());
+        }
+        for turn in session
+            .turns
+            .iter()
+            .filter(|turn| turn.status == TurnStatus::Completed)
+        {
+            if self
+                .sessions
+                .store
+                .get::<ToolResult>(&key("core_accepted", &[&turn.id]))?
+                .is_none()
+            {
+                return Ok(());
+            }
+        }
+        if !crate::session_publication::publications_settled(&self.sessions.store, &session.id)? {
+            return Ok(());
+        }
+        let archived = self.sessions.store.transaction(|tx| {
+            let Some(record) = crate::session::load_record(tx, &session.id)? else {
+                return Ok(false);
+            };
+            if record.closed_at.is_none() {
+                return Ok(false);
+            }
+            if tx
+                .get::<SessionRecord>(&crate::session::record_key(&session.id))?
+                .is_none()
+            {
+                // Already archived by an earlier tick or a concurrent worker.
+                return Ok(false);
+            }
+            tx.put(&crate::session::archived_key(&session.id), &record)?;
+            tx.delete(&crate::session::record_key(&session.id))?;
+            Ok(true)
+        })?;
+        if archived {
+            tracing::info!(session=%session.id, "session archived");
         }
         Ok(())
     }
@@ -541,8 +640,7 @@ impl SessionApp {
                 }
                 tx.put(&k, &result)?;
                 tx.delete(&request_key)?;
-                let mut current: SessionRecord = tx
-                    .get(&key("session", &[&session.id]))?
+                let mut current = crate::session::load_record(tx, &session.id)?
                     .ok_or_else(|| Fault::missing("session disappeared"))?;
                 crate::session::append_event(
                     tx,
@@ -592,10 +690,9 @@ impl SessionApp {
                 allocation.bootstrap_result,
             )?;
         }
-        let current: SessionRecord = self
+        let current = self
             .sessions
-            .store
-            .get(&key("session", &[&session.id]))?
+            .get_record(&session.id)?
             .ok_or_else(|| Fault::missing("session disappeared"))?;
         let Some(turn) = current.turns.iter().find(|t| !t.status.terminal()) else {
             return Ok(());
@@ -638,9 +735,8 @@ impl SessionApp {
                     }
                     self.sessions.store.transaction(|tx| {
                         tx.put(&k, &context)?;
-                        let mut session: SessionRecord =
-                            tx.get(&key("session", &[&current.id]))?
-                                .ok_or_else(|| Fault::missing("session disappeared"))?;
+                        let mut session = crate::session::load_record(tx, &current.id)?
+                            .ok_or_else(|| Fault::missing("session disappeared"))?;
                         crate::session::append_event(
                             tx,
                             &mut session,
@@ -1931,7 +2027,15 @@ mod lifecycle_tests {
             (StatusCode::OK, json!({"supported":true,"hits":[]}))
         );
         #[cfg(feature = "candle-runtime")]
-        native_gate::run(app, router, runtime_secret, dir.path(), _exact, _instructions).await;
+        native_gate::run(
+            app,
+            router,
+            runtime_secret,
+            dir.path(),
+            _exact,
+            _instructions,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -2281,6 +2385,158 @@ mod lifecycle_tests {
         assert!(
             after.closed_at.is_some(),
             "retirement must finalize even though no runtime ever confirmed this turn"
+        );
+    }
+
+    /// The 19 MB / 5 s scan floor came from closed sessions with nothing
+    /// left to do sitting forever in the scanned "session/" prefix. Once
+    /// every piece of cleanup is done (MCP credentials removed, workspace
+    /// released, every completed turn accepted, every repository publication
+    /// settled) the record must move to "archived_session/" — invisible to
+    /// the dispatcher scan — while still being reachable by id and by list().
+    #[tokio::test]
+    async fn closed_session_with_completed_cleanup_moves_to_the_archived_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-lifecycle-test-credential").unwrap();
+        let config: Config =
+            serde_json::from_value(lifecycle_test_config(dir.path(), &token)).unwrap();
+        let principal = config.principals[0].clone();
+        let app = SessionApp::new(
+            Arc::new(config),
+            Store::open(&dir.path().join("state.redb")).unwrap(),
+        )
+        .unwrap();
+        let session = app
+            .sessions
+            .create(
+                &principal,
+                &NewSession {
+                    request_id: "create".into(),
+                    akh: "test".into(),
+                    workspace_profile: "local".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        let closed = app.sessions.archive(&principal, &session.id).unwrap();
+        assert!(closed.closed_at.is_some());
+        // A session with no MCP requirements, no completed turns, and no
+        // repository publication intents satisfies those three conditions
+        // for free; only these two markers are ever driven by an external
+        // dependency (credential removal, sandbox release), so the test sets
+        // them directly instead of faking those subsystems.
+        app.sessions
+            .store
+            .transaction(|tx| {
+                tx.put(&key("mcp_credentials_removed", &[&closed.id]), &true)?;
+                tx.put(&key("workspace_released", &[&closed.id]), &true)
+            })
+            .unwrap();
+        let live_key = key("session", &[&closed.id]);
+        let archived_key = key("archived_session", &[&closed.id]);
+        app.tick_session(closed.clone()).await.unwrap();
+        assert_eq!(
+            app.sessions.store.get::<SessionRecord>(&live_key).unwrap(),
+            None,
+            "cleanup is done; the record must leave the scanned prefix"
+        );
+        assert!(
+            app.sessions
+                .store
+                .get::<SessionRecord>(&archived_key)
+                .unwrap()
+                .is_some(),
+            "the record must land in archived_session/"
+        );
+        let fetched = app.sessions.get(&principal, &closed.id).unwrap();
+        assert_eq!(fetched.id, closed.id);
+        let listed = app.sessions.list(&principal).unwrap();
+        assert!(
+            listed.iter().any(|s| s.id == closed.id),
+            "list() must still surface archived sessions"
+        );
+        // A second tick, now driven by the archived record (as the
+        // dispatcher would never scan it again, only a caller reading it by
+        // id could hand it back), must be a no-op: no failure, and no
+        // resurrection in the scanned prefix.
+        app.tick_session(fetched).await.unwrap();
+        assert_eq!(
+            app.sessions.store.get::<SessionRecord>(&live_key).unwrap(),
+            None,
+            "a repeat tick on an already-archived session must not recreate session/"
+        );
+        assert!(
+            app.sessions
+                .store
+                .get::<SessionRecord>(&archived_key)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// Missing any one of the cleanup markers must block archival — here,
+    /// `workspace_released` never lands, so the session must stay in
+    /// "session/" for the dispatcher to keep retrying its release.
+    #[tokio::test]
+    async fn closed_session_without_workspace_release_is_not_archived() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-lifecycle-test-credential").unwrap();
+        // `lifecycle_test_config` configures no "sandboxes" endpoint, so
+        // `release_archived`'s call to it can never succeed; that is exactly
+        // what keeps `workspace_released` from ever landing here.
+        let config: Config =
+            serde_json::from_value(lifecycle_test_config(dir.path(), &token)).unwrap();
+        let principal = config.principals[0].clone();
+        let app = SessionApp::new(
+            Arc::new(config),
+            Store::open(&dir.path().join("state.redb")).unwrap(),
+        )
+        .unwrap();
+        let session = app
+            .sessions
+            .create(
+                &principal,
+                &NewSession {
+                    request_id: "create".into(),
+                    akh: "test".into(),
+                    workspace_profile: "local".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        let closed = app.sessions.archive(&principal, &session.id).unwrap();
+        // mcp_credentials_removed is satisfied on the very first tick (this
+        // session never required any), but workspace_released never lands
+        // because there is no sandboxes endpoint configured to release
+        // against, so `release_archived` keeps failing and the marker never
+        // gets set.
+        app.tick_session(closed.clone()).await.unwrap();
+        let live_key = key("session", &[&closed.id]);
+        let archived_key = key("archived_session", &[&closed.id]);
+        assert_ne!(
+            app.sessions
+                .store
+                .get::<bool>(&key("workspace_released", &[&closed.id]))
+                .unwrap(),
+            Some(true),
+            "with no sandboxes endpoint configured, release cannot succeed"
+        );
+        assert!(
+            app.sessions
+                .store
+                .get::<SessionRecord>(&live_key)
+                .unwrap()
+                .is_some(),
+            "archival must not run while cleanup is still outstanding"
+        );
+        assert_eq!(
+            app.sessions
+                .store
+                .get::<SessionRecord>(&archived_key)
+                .unwrap(),
+            None
         );
     }
 }
