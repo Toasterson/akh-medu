@@ -12,6 +12,7 @@ mod m20260919_000002_create_events;
 mod m20260919_000003_create_sessions;
 mod m20260919_000004_create_chunks;
 mod m20260919_000005_create_drift_counters;
+mod m20260920_000001_events_subseq_disposition;
 
 pub struct Migrator;
 
@@ -24,6 +25,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260919_000003_create_sessions::Migration),
             Box::new(m20260919_000004_create_chunks::Migration),
             Box::new(m20260919_000005_create_drift_counters::Migration),
+            Box::new(m20260920_000001_events_subseq_disposition::Migration),
         ]
     }
 }
@@ -33,11 +35,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn drift_counters_is_the_latest_migration() {
+    fn events_subseq_disposition_is_the_latest_migration() {
         let migrations = Migrator::migrations();
         assert_eq!(
             migrations.last().expect("at least one migration").name(),
-            "m20260919_000005_create_drift_counters"
+            "m20260920_000001_events_subseq_disposition"
         );
     }
 }

@@ -6,9 +6,9 @@
 //!
 //! Deliberately a **plain table**, not a hypertable: TimescaleDB would force
 //! `observed_at` into the unique index, but the index this table actually
-//! needs is `(derivation_version, source, session_id, stream_id, seq)` — the
-//! natural key plus the version the derivation worker's anti-join discovery
-//! depends on
+//! needs is `(derivation_version, source, session_id, stream_id, seq,
+//! subseq)` — the natural key, `subseq` (below), and the version the
+//! derivation worker's anti-join discovery depends on
 //! ([derivation-worker ticket](../../../docs/wayfinder/transcript-harvest/tickets/derivation-worker.md)).
 //! `observed_at` is carried as an ordinary column for read-surface ordering.
 //!
@@ -19,6 +19,19 @@
 //! `degraded` (with `degraded_reason`) marks a partially-recognised shape —
 //! this is what stops a poison record from re-pending forever, since a
 //! degraded row still satisfies the anti-join.
+//!
+//! `subseq` and `disposition` were added by
+//! `m20260920_000001_events_subseq_disposition` once the derivation worker
+//! ran into the two gaps increment 1 left open: one raw record can yield
+//! several events (a Claude `user` record with three `tool_result` blocks —
+//! `subseq` is the block index, `0` for a record that yields at most one
+//! event), and a record that yields **no** event
+//! ([`crate::normalize::Outcome::Noise`], `::Undetermined`, or a hard
+//! normalizer failure) must still write a row or the anti-join re-pends it
+//! forever — `disposition` (`event | noise | undetermined | failed`, a
+//! Postgres `CHECK` constraint) records which case this row is, and `kind`
+//! is `NULL` for every disposition except `event` — never an invented
+//! pseudo-kind, per the normal-form ticket's closed-ten-kinds stance.
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -36,12 +49,27 @@ pub struct Model {
     pub stream_id: String,
     #[sea_orm(primary_key, auto_increment = false)]
     pub seq: i64,
+    /// Distinguishes multiple events derived from one raw record (the block
+    /// index inside e.g. a Claude `user` record's content array). `0` for a
+    /// record that yields at most one event — every existing row before
+    /// this column was added satisfies that, which is why `0` rather than a
+    /// nullable column is the migration's default.
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub subseq: i32,
 
     /// The raw record's `observed_at` (carried, not part of this table's key).
     pub observed_at: DateTimeUtc,
 
-    /// One of the ten closed [`crate::model::EventKind`]s.
-    pub kind: String,
+    /// One of the ten closed [`crate::model::EventKind`]s. `NULL` unless
+    /// `disposition = "event"`.
+    #[sea_orm(nullable)]
+    pub kind: Option<String>,
+    /// `event | noise | undetermined | failed` (Postgres `CHECK`-enforced).
+    /// Which arm of [`crate::normalize::Outcome`] produced this row —
+    /// including the two arms that produce no event at all, which still
+    /// need a row here so the derivation worker's anti-join does not
+    /// re-pend them forever.
+    pub disposition: String,
     /// Finer classification within a kind, e.g. `context`'s compaction
     /// subtype. Not a second dispatch axis — the ten kinds stay closed.
     #[sea_orm(nullable)]
@@ -69,9 +97,15 @@ pub struct Model {
     #[sea_orm(nullable)]
     pub render: Option<String>,
 
-    /// True when this row was derived from a partially-recognised shape.
-    /// Carries `degraded_reason`; never silent.
+    /// True when this row was derived from a partially-recognised shape, or
+    /// (derivation worker) when normalization panicked outright
+    /// (`disposition = "failed"`). Carries `degraded_reason`; never silent.
     pub degraded: bool,
+    /// Human-readable explanation. Populated for `degraded = true` rows as
+    /// documented above; the derivation worker also repurposes this column
+    /// for the `noise` and `undetermined` dispositions' explanation (why a
+    /// record has no event) rather than adding a second reason column for
+    /// what is, in every case, "why this row does not look like the others".
     #[sea_orm(nullable)]
     pub degraded_reason: Option<String>,
 
