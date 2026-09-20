@@ -1,0 +1,11 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+GENERATOR_FIXED
+/tmp/ctxsoak/prompt-08k.txt: 53684 chars, 400 blocks
+=== verification 2, corrected prompt: two rounds; round 1 was refused at limit 913 before the reclaim ===
+{"context_length":262144,"device_memory":{"free":8529117184,"source":"hipMemGetInfo","total":25753026560},"family":"Qwen35","kv_bytes_per_token":131072,"memory_bound_context_limit":10819,"phase":"loaded","projected_kv_bytes_at_full_context":34359738368,"seconds":20.425422576}
+{"decode_seconds":1.61110973,"decode_steps_including_eos":7,"decode_steps_per_second":4.344831310776082,"finish":"Length","phase":"generation","prompt_tokens":10417,"round":0,"seconds_including_prefill":274.019340862,"text":"<elided>","time_to_first_token_seconds":272.407922003,"tokens":8}
+[2m2026-09-20T13:06:41.925237Z[0m [32m INFO[0m [2makh_medu::nlu::candle_backend[0m[2m:[0m admitted after reclaiming the allocator cache [3mreleased_bytes[0m[2m=[0m5329982513 [3mfits_before[0m[2m=[0mSome(910) [3mfits_after[0m[2m=[0mSome(10844)
+{"decode_seconds":1.662723073,"decode_steps_including_eos":7,"decode_steps_per_second":4.209961426330673,"finish":"Length","phase":"generation","prompt_tokens":10417,"round":1,"seconds_including_prefill":284.549537525,"text":"<elided>","time_to_first_token_seconds":282.886588495,"tokens":8}
+{"free":2686451712,"memory_bound_context_limit":913,"phase":"memory_after_generation","source":"hipMemGetInfo","total":25753026560}
+
+[exited with code 0]

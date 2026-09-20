@@ -477,8 +477,18 @@ the chronological evidence further down is retained as written.
   The gate now reclaims and re-checks once when it would otherwise refuse, so
   cached blocks become driver-free memory any size can use - correct, where
   adding the cached total to the free figure would over-admit on fragmentation.
-  Vulkan has no pool and is unchanged. The reproduction (10,417 tokens, two
-  rounds) was stopped at load when the day was capped. **Not yet verified.**
+  Vulkan has no pool and is unchanged.
+
+  **Verified on the GPU 2026-09-20.** Same 10,417-token prompt, two rounds.
+  Round 0 admitted and completed; round 1 - refused at a 913-token limit
+  before the fix - logged `admitted after reclaiming the allocator cache`,
+  **5.33 GB released, limit 910 -> 10,844**, and completed. After it the cache
+  had refilled and the raw limit read 913 again, which is the intended shape:
+  the reclaim runs only on the refuse path, so the cache keeps its value until
+  a request actually needs the memory. A first rerun overshot the prompt
+  (13,017 tokens) and was correctly refused before anything ran; that log is
+  kept too, since it shows the refuse-path reclaim firing on a request that
+  still does not fit. Evidence in `ctxsoak-20260919-hip-v1/reclaim-verification-passed.log`.
 
 - **Item 4: the seam had a silent fallback; the topology fork is confirmed real**
   (2026-09-19). `context_budgeted` existed in exactly one place in the tree -
