@@ -814,6 +814,12 @@ impl PgTxState<'_> {
         Ok(())
     }
 
+    /// Whether any `put` or `delete` ran in this transaction; see
+    /// [`crate::Store::changes`].
+    pub(crate) fn wrote(&self) -> bool {
+        !self.pending.borrow().is_empty()
+    }
+
     pub(crate) fn delete(&mut self, key: &str) -> Result<()> {
         let tx = self.tx.clone();
         let table = self.inner.table.clone();
