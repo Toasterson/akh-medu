@@ -90,9 +90,29 @@ Removing one: `DROP ROLE harvest_<machine>` and delete its cert.
 - The source files are the spool: a failed push retries next tick. Watermarks
   are `(inode, byte offset)` per stream under the state dir; deleting them is
   harmless — a full re-scan collides into `ON CONFLICT DO NOTHING`.
+- **Quote the URL in the env file.** systemd's `EnvironmentFile=` reads it
+  fine unquoted, but anyone who `source`s the file in a shell gets every `&` in
+  the query string interpreted as a job separator and the variable silently
+  unset. Write `AKH_TRANSCRIPTS_DATABASE_URL='postgres://…'` (single quotes).
+  Also: never edit it with `sed s/…/URL/` — an unescaped `&` in a sed
+  replacement re-inserts the match (this produced a quadruplicated URL once).
+- **Transcripts can contain NUL bytes.** Postgres `text`/`jsonb` reject `\0`
+  outright (`unsupported Unicode escape sequence`); the harvester strips exactly
+  that byte from `raw`/`payload`. It is the one deviation from byte-exact
+  storage, and it is logged.
 - **Health is the watermark, not the process.** A harvester that runs and
   harvests nothing looks identical to a broken one. Check watermark age against
   the source file's mtime.
+
+## Status — hephaistos (2026-09-20)
+
+`akh-harvest.timer` **enabled and active**, 15-minute cadence; binary at
+`~/.local/bin/akh-harvest` (release build of `feat/transcript-harvest`). First
+full harvest: 93 streams, ~75k records in 74 s; re-scan after deleting the
+watermarks deduped 75,120/75,160 rows. Steady state: a few hundred new records
+per tick (this machine's own live Claude Code sessions). Store at that point:
+75,530 raw rows, 13 sessions, 92 streams. 8 records quarantined per run — the
+workflow `journal.jsonl` with no timestamps anywhere, the documented trap.
 
 ## Known limits / open items
 
