@@ -34,8 +34,7 @@ impl SessionApp {
                 }
                 return Ok(prior);
             }
-            let session: SessionRecord = tx
-                .get(&key("session", &[id]))?
+            let session = crate::session::load_record(tx, id)?
                 .ok_or_else(|| Fault::missing("session not found"))?;
             if session.closed_at.is_some() || session.retirement.is_some() {
                 return Err(Fault::conflict(
