@@ -78,7 +78,16 @@ GRANT USAGE ON SCHEMA public TO harvest_<machine>;
 GRANT INSERT ON th_raw_records TO harvest_<machine>;   -- existing table
 ALTER DEFAULT PRIVILEGES FOR ROLE harvest IN SCHEMA public GRANT INSERT ON TABLES TO harvest_<machine>;
 ```
-then mint its v3 cert (CN = role), install the binary, env file and timer.
+then mint its v3 cert (CN = role), pack `ca.crt tls.crt tls.key` into a
+`.tgz`, and on the machine run
+`sh scripts/install-akh-harvest.sh --machine <name> --bundle <tgz> --build`
+(or `--binary <path>`): it installs the env file, the binary, and a systemd /
+launchd / SMF schedule, then runs one harvest. Roles and certs already exist
+for `armini`, `archibald`, `exec1` (bundles under
+`~/.config/akh-transcripts/bundles/` on hephaistos). **harvest-pg is LAN-only**
+(`harvest-pg-lan`, 192.168.1.60) — a machine reachable only over the tailnet or
+the Internet cannot push until it is on the LAN or an Internet endpoint exists
+(akh-pg has one; harvest-pg deliberately does not yet).
 Removing one: `DROP ROLE harvest_<machine>` and delete its cert.
 
 ## Harvester on a machine (hephaistos is the reference)
