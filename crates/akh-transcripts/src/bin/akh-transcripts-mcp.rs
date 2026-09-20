@@ -65,7 +65,7 @@ fn default_bind() -> String {
 /// four tools keep working, rather than the whole server refusing to start.
 fn load_embedder() -> Option<akh_embed::SharedEmbedder> {
     let Some(dir) = std::env::var_os("AKH_TRANSCRIPTS_MODEL_DIR") else {
-        tracing::warn!(
+        tracing::warn!(target: "akh_transcripts::mcp", 
             "AKH_TRANSCRIPTS_MODEL_DIR is not set — search_transcripts will return a clear \
              error; list_sessions, get_session, get_lines, and grep_transcripts are unaffected"
         );
@@ -74,11 +74,11 @@ fn load_embedder() -> Option<akh_embed::SharedEmbedder> {
     let dir = PathBuf::from(dir);
     match akh_embed::SentenceEmbedder::load(&dir) {
         Ok(embedder) => {
-            tracing::info!(dir = %dir.display(), "embedding model loaded");
+            tracing::info!(target: "akh_transcripts::mcp", dir = %dir.display(), "embedding model loaded");
             Some(Arc::new(Mutex::new(embedder)))
         }
         Err(error) => {
-            tracing::warn!(
+            tracing::warn!(target: "akh_transcripts::mcp", 
                 %error,
                 dir = %dir.display(),
                 "embedding model failed to load — search_transcripts will return a clear error"
@@ -104,7 +104,7 @@ async fn main() -> miette::Result<()> {
     let database_url = std::env::var("AKH_TRANSCRIPTS_DATABASE_URL")
         .map_err(|_| StartupError::DatabaseUrlMissing)?;
     let db = pool::connect(&database_url).await?;
-    tracing::info!("connected to harvest-pg (harvest_read role)");
+    tracing::info!(target: "akh_transcripts::mcp", "connected to harvest-pg (harvest_read role)");
     let db = Arc::new(db);
 
     let embedder = load_embedder();
@@ -150,12 +150,12 @@ async fn main() -> miette::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|source| StartupError::BindFailed { addr, source })?;
-    tracing::info!(%addr, "akh-transcripts-mcp listening");
+    tracing::info!(target: "akh_transcripts::mcp", %addr, "akh-transcripts-mcp listening");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutting down");
+            tracing::info!(target: "akh_transcripts::mcp", "shutting down");
         })
         .await
         .map_err(|source| StartupError::BindFailed { addr, source })?;

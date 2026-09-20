@@ -114,6 +114,16 @@ per tick (this machine's own live Claude Code sessions). Store at that point:
 75,530 raw rows, 13 sessions, 92 streams. 8 records quarantined per run — the
 workflow `journal.jsonl` with no timestamps anywhere, the documented trap.
 
+## Logging
+
+All three binaries log under the `akh_transcripts::*` targets, so
+`RUST_LOG=akh_transcripts=info` (the chart default) shows harvester, worker
+and MCP events alike. Before image `>d72262cacdc2` the worker logged under
+`akh_derive` and was **silent under that filter while working correctly** —
+if a worker pod shows no log lines, check the image tag before assuming it is
+dead; the authoritative health signals are the advisory-lock holder in
+`pg_locks` and `pending=0` from the anti-join.
+
 ## Known limits / open items
 
 - Only `hephaistos` is provisioned. Other machines need the "Adding a machine"

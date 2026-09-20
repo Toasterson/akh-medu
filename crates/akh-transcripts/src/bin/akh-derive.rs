@@ -84,7 +84,7 @@ async fn main() -> ExitCode {
     if cli.migrate {
         return match pool::run_migrations_locked(&database_url).await {
             Ok(()) => {
-                tracing::info!("akh-derive --migrate: migrations applied");
+                tracing::info!(target: "akh_transcripts::derive", "akh-derive --migrate: migrations applied");
                 ExitCode::SUCCESS
             }
             Err(err) => {
@@ -152,7 +152,7 @@ async fn main() -> ExitCode {
     if cli.once {
         return match derive::run_pass(&db, &config, embedder.as_ref()).await {
             Ok(summary) => {
-                tracing::info!("{}", summary);
+                tracing::info!(target: "akh_transcripts::derive", "{}", summary);
                 ExitCode::SUCCESS
             }
             Err(err) => {
@@ -163,7 +163,7 @@ async fn main() -> ExitCode {
     }
 
     let interval = Duration::from_secs(env_u64("AKH_TRANSCRIPTS_DERIVE_INTERVAL_SECS", 30));
-    tracing::info!(
+    tracing::info!(target: "akh_transcripts::derive", 
         interval_secs = interval.as_secs(),
         batch_streams = config.batch_streams,
         embed = embedder.is_some(),
@@ -171,8 +171,8 @@ async fn main() -> ExitCode {
     );
     loop {
         match derive::run_pass(&db, &config, embedder.as_ref()).await {
-            Ok(summary) => tracing::info!("{}", summary),
-            Err(err) => tracing::error!("{:?}", err),
+            Ok(summary) => tracing::info!(target: "akh_transcripts::derive", "{}", summary),
+            Err(err) => tracing::error!(target: "akh_transcripts::derive", "{:?}", err),
         }
         tokio::time::sleep(interval).await;
     }
