@@ -470,6 +470,19 @@ the chronological evidence further down is retained as written.
   is closed: it was the section layout, not model bias. Evidence in
   `vision-e2e-20260919-hip-v1/placement-after-interleaved-mrope.log`.
 
+- **Item 5: semantic validation against the reference - 11 of 11 agree**
+  (2026-09-20). "Needs a go-ahead to start ollama" was over-classified: a
+  user-scoped `ollama serve` on the read-only system model store is a local
+  process, run serially and stopped afterwards, not a shared service. Its
+  `ptah-qwen3.8:stable` pins the exact model and projector blobs akhrtd loads.
+  Same eleven images, same instruction, greedy on both: every placement, bar
+  side, stripe orientation, count and relation agrees, and **both read "PTAH
+  412" from an image that says PTAH 42** - the identical misreading, which is
+  stronger evidence of the same computation than a shared correct answer. The
+  card was confirmed released (0.03 GiB) before ours ran. Behavioural only:
+  ollama exposes no hidden states. See
+  [vision device gate](../research/2026-09-19-vision-device-gate.md).
+
 - **Item 6: allocator-cache reclaim on the admission refuse path; GPU
   verification pending** (2026-09-19, end of day). `release_cached_memory`'s
   own preconditions make it safe at admission (default stream, no capture, a

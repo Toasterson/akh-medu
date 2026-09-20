@@ -89,10 +89,10 @@ categorised summary.
      text). Three ways an image can arrive: inline bytes in the turn input,
      a bytes-returning brokered read, or workspace filesystem access for
      akhrtd. This is a topology choice of the same family as item 4.
-   - **Semantic validation.** "No external consumer is installed" was wrong:
-     ollama is installed with this exact model as `ptah-qwen3.8`. Its server is
-     down; starting it changes machine state and contends for the GPU. Needs a
-     go-ahead.
+   - ~~Semantic validation~~ - **done 2026-09-20**: 11 of 11 images agree
+     with ollama on the same blobs, including an identical misreading of
+     rendered text. Starting a user-scoped ollama serially and stopping it was
+     within scope; it was over-classified as needing a go-ahead.
    - ~~Residual: a centred square called "upper right"~~ - closed 2026-09-20:
      the LLM-side M-RoPE sections were laid out contiguously (Qwen2-VL);
      Qwen3.5 interleaves them. Placement now reads correctly.

@@ -277,6 +277,54 @@ in the "upper right quadrant". "Upper" is right - it sits slightly above
 centre - "right" is not. Bar sides read correctly, so no axis is mirrored.
 Unexplained; recorded rather than chased.
 
+## Semantic validation against the reference: 11 of 11 agree
+
+2026-09-20. Evidence:
+[`vision-semantic-20260920-v1`](../../../experiments/native-recall/vision-semantic-20260920-v1).
+
+The reference is ollama's `ptah-qwen3.8:stable`, whose manifest pins the exact
+model and projector blobs akhrtd loads. It was run as a user process on the
+read-only system model store, `think: false`, temperature 0, seed 0, and stopped
+before ours ran; the card was confirmed released. Same eleven images, same
+instruction, both greedy. This is behavioural - ollama exposes no hidden states,
+so no cosine is possible - and it answers the question the device gate could
+not: whether two implementations of the same weights reach the same reading of
+the same pixels.
+
+| image | reference (ollama, same blobs) | ours (akhrtd) | verdict |
+| --- | --- | --- | --- |
+| square_left | The image displays a solid red square positioned in the upper-left quadrant of a white background. | upper-left area | agree |
+| square_centre | This image features a solid red square centered on a plain white background. | centered | agree |
+| square_right | The image displays a solid red square positioned on the right side of a white background. | upper-right area | agree |
+| square_bar_bottom | The image features a bold red square centered on a white background, with a solid blue horizontal bar spanning the bottom edge. | red square centered in the upper portion, blue horizontal bar along the bottom edge | agree |
+| square_bar_left | The image displays a simplified, abstract representation of the French flag, featuring a vertical blue stripe on the left and a solid red square centered on a white background. | blue vertical bar on the left, red square center-right | agree |
+| stripes_vertical | The image displays the national flag of France, featuring three vertical stripes of equal width in blue, white, and red from left to right. | French flag, three vertical stripes blue/white/red left to right | agree |
+| stripes_horizontal | The image displays a flag with three horizontal stripes: blue on top, white in the middle, and red on the bottom. | three horizontal stripes, blue top, white middle, red bottom | agree |
+| text_ptah42 | The image displays the text "PTAH 412" in bold, black, uppercase letters against a plain white background. | the text "PTAH 412" in bold black capital letters centered | agree - **same misreading**: image says PTAH 42 |
+| dot_bottom_left | The image displays a single, solid green circle positioned in the lower-left corner against a plain white background. | single solid green circle, bottom-left corner | agree |
+| three_dots | The image displays three solid black circles arranged horizontally in a straight line against a plain white background. | three solid black circles arranged horizontally in a straight line | agree |
+| triangle_above_circle | The image features a small blue triangle positioned above a larger red circle, both centered on a plain white background. | solid blue triangle directly above a larger solid red circle, both centered | agree |
+
+Every placement, side, count and relation agrees. The reading test is the
+strongest row: both implementations read **"PTAH 412"** from an image that says
+`PTAH 42`. An identical *error* from the same pixels is better evidence of
+equivalence than an identical correct answer would be - a correct answer can be
+reached by different computations, a specific misreading at this resolution is
+a property of the shared model and preprocessing that both reproduce.
+
+Two of my own extraction faults on the way, both the class already documented
+yesterday: the first reading run looked cut off mid-sentence with `finish: Stop`,
+because the grep pattern `"text":"[^"]*"` ends at the first *escaped* quote
+inside the JSON string and the model's next characters were `\"PTAH`. The run
+had finished at 93 tokens. Parsed properly, both the 96- and 256-token runs
+read the text. Pattern-matching JSON is not parsing it.
+
+What this does not establish: numerical equivalence of the resize (Catmull-Rom
+against PIL bicubic) or of any intermediate tensor. It establishes that the
+front end, projector, 2D rotary, spliced embeddings, interleaved M-RoPE and
+rope-cursor decode compose into the same function ollama computes, on inputs
+built to distinguish layout, count, relation and text.
+
 ## The external reference exists after all
 
 Recorded twice as "no external consumer is installed". There is no transformers,
