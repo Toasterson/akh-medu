@@ -50,8 +50,6 @@ rmcp = { version = "0.17", features = [
 axum = "0.8"
 schemars = { version = "0.8", features = ["uuid1", "chrono"] }
 tower = { version = "0.5", features = ["util"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
