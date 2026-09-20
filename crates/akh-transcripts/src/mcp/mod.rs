@@ -40,6 +40,16 @@ use crate::normalize::NormalizedEvent;
 use crate::redact;
 
 /// Shared state for MCP tool handlers.
+
+/// Text admitted by the budget filler, whole or head-and-tail truncated;
+/// `None` means refused (stop and set the cursor at this item).
+fn admitted_text(a: budget::Admitted) -> Option<String> {
+    match a {
+        budget::Admitted::Whole(t) | budget::Admitted::Truncated { text: t, .. } => Some(t),
+        budget::Admitted::Refused => None,
+    }
+}
+
 pub struct TranscriptsMcpState {
     pub db: Arc<DatabaseConnection>,
     /// `None` when `AKH_TRANSCRIPTS_MODEL_DIR` was absent or failed to load
@@ -577,14 +587,13 @@ impl TranscriptsMcpServer {
         let mut continue_from: Option<String> = None;
         for event in visible.iter().skip(start_idx) {
             let rendered = queries::redact_and_render(event);
-            let bytes = rendered.len() as u64;
-            if filler.try_take(bytes) {
+            if let Some(render) = admitted_text(filler.admit_text(rendered)) {
                 out_events.push(SessionEventOut {
                     stream_id: event.key.stream_id.clone(),
                     seq: event.key.seq,
                     subseq: event.subseq,
                     kind: kind_label(event.kind).to_string(),
-                    render: rendered,
+                    render,
                 });
             } else if continue_from.is_none() {
                 continue_from = Some(encode_session_cursor(
@@ -656,8 +665,7 @@ impl TranscriptsMcpServer {
                 let Some(raw) = raw else { continue };
                 match queries::redact_raw(&raw) {
                     queries::VerbatimLine::Text(text) => {
-                        let bytes = text.len() as u64;
-                        if filler.try_take(bytes) {
+                        if let Some(text) = admitted_text(filler.admit_text(text)) {
                             lines.push(LineOut {
                                 stream_id: row.stream_id.clone(),
                                 seq: row.seq,
@@ -692,8 +700,7 @@ impl TranscriptsMcpServer {
                     continue;
                 };
                 let rendered = queries::redact_and_render(&event);
-                let bytes = rendered.len() as u64;
-                if filler.try_take(bytes) {
+                if let Some(rendered) = admitted_text(filler.admit_text(rendered)) {
                     lines.push(LineOut {
                         stream_id: row.stream_id.clone(),
                         seq: row.seq,
@@ -771,8 +778,7 @@ impl TranscriptsMcpServer {
         let mut budget_stop_offset: Option<u64> = None;
         for (i, row) in rows.iter().enumerate() {
             let snippet = windowed_snippet(&row.text, &re);
-            let bytes = snippet.len() as u64;
-            if filler.try_take(bytes) {
+            if let Some(snippet) = admitted_text(filler.admit_text(snippet)) {
                 hits.push(GrepHitOut {
                     source: row.source.clone(),
                     session_id: row.session_id.clone(),
@@ -851,8 +857,7 @@ impl TranscriptsMcpServer {
             // module cannot verify.
             let flags = redact::scan(&row.text);
             let text = redact::apply(&row.text, &flags);
-            let bytes = text.len() as u64;
-            if filler.try_take(bytes) {
+            if let Some(text) = admitted_text(filler.admit_text(text)) {
                 hits.push(SearchHitOut {
                     source: row.source.clone(),
                     session_id: row.session_id.clone(),
