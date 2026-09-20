@@ -15,6 +15,7 @@ pub mod model;
 
 pub mod adapter;
 pub mod entity;
+pub mod harvest;
 pub mod migration;
 pub mod pool;
 

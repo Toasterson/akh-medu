@@ -18,6 +18,12 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# `akh-harvest` binary CLI.
+clap = { version = "4.5", features = ["derive"] }
+# `AKH_TRANSCRIPTS_MACHINE`'s default value.
+hostname = "0.4"
 
 # Error handling (miette + thiserror per project convention)
 miette = { version = "7", features = ["fancy"] }
