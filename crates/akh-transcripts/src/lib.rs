@@ -24,4 +24,7 @@ pub mod render;
 pub mod redact;
 pub mod chunk;
 
+pub mod auth;
+pub mod mcp;
+
 pub use error::{TranscriptError, TranscriptResult};
