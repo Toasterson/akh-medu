@@ -8,6 +8,20 @@ model artifacts, unrelated providers, session history, and rollback evidence.
 
 ## Latest local checkpoint
 
+- **Item 6: compressed KV put behind a task-level gate** (2026-09-20). It clears
+  no numerical parity gate (worst cosine 0.99788 at 8 bits) and is off by
+  default; the user's rule for enabling it is a canary pass at that width.
+  `validate_kv_gate` enforces exactly that, fail-closed and pinned like runtime
+  conformance: if the process is configured for compression at N bits, a
+  `KvGateEvidence` document must record `passed: true` and pin bits, model
+  sha256, tokenizer sha256 and device to this load, or the model refuses to
+  load. KV off needs no evidence. Eight GPU-free unit tests cover stand-down,
+  refuse-without-evidence, admit-matching, and reject on wider width / failed
+  run / wrong model / wrong device. Emitting the evidence (canary at a width plus
+  a recorder) is the operational follow-on; until one exists, compression stays
+  off. See [KV task gate](../research/2026-09-20-kv-task-gate.md).
+
+
 - **Item 5 transport: a brokered read's image bytes reach the projector**
   (2026-09-20). The model side was complete and semantically validated; the gap
   was routing. A bytes-returning workspace read already exists (the executor

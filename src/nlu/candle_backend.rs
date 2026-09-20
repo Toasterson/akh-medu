@@ -2431,6 +2431,14 @@ impl CandleBackend {
     /// Unlike the quality reports above this reads the live path rather than
     /// simulating one, so it is the figure that backs any claim about how much
     /// the compression actually saves on this device.
+    /// The lossy-KV width this process is configured to use, if any. `None`
+    /// means compression is off. Used by the daemon's task-level gate to refuse
+    /// enabling compression without matching canary evidence.
+    #[cfg(feature = "candle-backend")]
+    pub fn configured_kv_bits(&self) -> Option<u8> {
+        crate::nlu::vendored::quantized_qwen35::configured_kv_quant().map(|(bits, _)| bits)
+    }
+
     #[cfg(feature = "candle-backend")]
     pub fn kv_page_residency(&self) -> Option<KvPageResidency> {
         let LoadedModel::Qwen35(model) = &self.model else {

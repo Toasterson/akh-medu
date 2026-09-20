@@ -256,6 +256,9 @@ pub(super) fn completion(
     backend
         .set_context_limit(config.max_context_tokens)
         .map_err(|e| Fault::new("model_context", e.to_string()))?;
+    // Lossy KV compression is admitted only behind canary evidence for this
+    // exact width, model, tokenizer and device.
+    validate_kv_gate(config, backend.configured_kv_bits())?;
     let family = backend.family();
     let count_prompt = backend.completion_prompt_counter();
     let prompt_budget = config.max_context_tokens.checked_sub(config.max_output_tokens as usize)
@@ -457,6 +460,46 @@ pub(super) fn completion(
         }
     }
     Ok((message, finish, recalled_message))
+}
+
+/// Refuse to enable lossy KV compression without canary-pass evidence.
+///
+/// Compressed KV clears no numerical parity gate, so it is admitted only when
+/// the five-daemon canary passed at exactly this width, for these weights, on
+/// this device (the user's chosen task-level gate). `configured_bits` is what
+/// the process would actually run; `None` means compression is off and the gate
+/// stands down. Otherwise a matching, passing `KvGateEvidence` is required, and
+/// its absence or any mismatch fails the load closed.
+fn validate_kv_gate(config: &NativeCandle, configured_bits: Option<u8>) -> Result<()> {
+    let Some(bits) = configured_bits else {
+        return Ok(());
+    };
+    let path = config.kv_quant_evidence.as_ref().ok_or_else(|| {
+        Fault::new(
+            "kv_gate_required",
+            format!(
+                "lossy KV compression is enabled at {bits} bits but no canary evidence is                  configured; run the five-daemon canary at {bits} bits for these artifacts and                  point kv_quant_evidence at its passing result, or disable compression"
+            ),
+        )
+    })?;
+    let evidence: KvGateEvidence = serde_json::from_slice(&std::fs::read(path).map_err(|_| {
+        Fault::new("kv_gate", "cannot read the configured KV canary evidence")
+    })?)
+    .map_err(|_| Fault::new("kv_gate", "KV canary evidence is malformed"))?;
+    if !evidence.passed {
+        return Err(Fault::new("kv_gate", "KV canary evidence records a failed run"));
+    }
+    if evidence.bits != bits
+        || evidence.model_sha256 != config.model_sha256
+        || evidence.tokenizer_sha256 != config.tokenizer_sha256
+        || evidence.device != config.device
+    {
+        return Err(Fault::new(
+            "kv_gate",
+            "KV canary evidence does not cover this exact width, model, tokenizer and device",
+        ));
+    }
+    Ok(())
 }
 
 fn verify_artifact(
@@ -925,6 +968,85 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
+    fn gate_config(evidence: Option<std::path::PathBuf>) -> NativeCandle {
+        NativeCandle {
+            model: "ptah".into(),
+            model_path: "/m.gguf".into(),
+            model_sha256: "a".repeat(64),
+            tokenizer_path: "/t.json".into(),
+            tokenizer_sha256: "b".repeat(64),
+            device: NativeCandleDevice::Hip { ordinal: 0 },
+            max_context_tokens: 1024,
+            max_iterations: 4,
+            max_output_tokens: 16,
+            kv_quant_evidence: evidence,
+        }
+    }
+
+    fn write_evidence(dir: &std::path::Path, ev: &KvGateEvidence) -> std::path::PathBuf {
+        let path = dir.join("kv-evidence.json");
+        std::fs::write(&path, serde_json::to_vec(ev).unwrap()).unwrap();
+        path
+    }
+
+    fn matching_evidence() -> KvGateEvidence {
+        KvGateEvidence {
+            passed: true,
+            model_sha256: "a".repeat(64),
+            tokenizer_sha256: "b".repeat(64),
+            device: NativeCandleDevice::Hip { ordinal: 0 },
+            bits: 4,
+            recent: 32,
+            min_cosine: 0.985,
+            checks: vec!["history eviction at the core".into()],
+        }
+    }
+
+    #[test]
+    fn kv_gate_stands_down_when_compression_is_off() {
+        // No configured bits: the gate never looks at evidence.
+        assert!(validate_kv_gate(&gate_config(None), None).is_ok());
+    }
+
+    #[test]
+    fn kv_gate_refuses_compression_without_evidence() {
+        let fault = validate_kv_gate(&gate_config(None), Some(4)).unwrap_err();
+        assert_eq!(fault.code, "kv_gate_required");
+    }
+
+    #[test]
+    fn kv_gate_admits_a_matching_passing_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_evidence(dir.path(), &matching_evidence());
+        assert!(validate_kv_gate(&gate_config(Some(path)), Some(4)).is_ok());
+    }
+
+    #[test]
+    fn kv_gate_rejects_a_wider_width_a_failed_run_and_wrong_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        // Configured at 4 bits, evidence only covers 4 -> asking for 8 must fail.
+        let path = write_evidence(dir.path(), &matching_evidence());
+        assert_eq!(
+            validate_kv_gate(&gate_config(Some(path.clone())), Some(8)).unwrap_err().code,
+            "kv_gate"
+        );
+        // A failed canary run.
+        let mut failed = matching_evidence();
+        failed.passed = false;
+        let path = write_evidence(dir.path(), &failed);
+        assert_eq!(validate_kv_gate(&gate_config(Some(path)), Some(4)).unwrap_err().code, "kv_gate");
+        // Evidence for a different model.
+        let mut other_model = matching_evidence();
+        other_model.model_sha256 = "c".repeat(64);
+        let path = write_evidence(dir.path(), &other_model);
+        assert_eq!(validate_kv_gate(&gate_config(Some(path)), Some(4)).unwrap_err().code, "kv_gate");
+        // Evidence for a different device.
+        let mut other_device = matching_evidence();
+        other_device.device = NativeCandleDevice::Vulkan { ordinal: 0 };
+        let path = write_evidence(dir.path(), &other_device);
+        assert_eq!(validate_kv_gate(&gate_config(Some(path)), Some(4)).unwrap_err().code, "kv_gate");
+    }
+
     #[test]
     fn a_base64_image_tool_result_is_detected_and_decoded() {
         let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
@@ -977,8 +1099,7 @@ mod tests {
             device: NativeCandleDevice::Cpu,
             max_context_tokens: 2048,
             max_iterations: 4,
-            max_output_tokens: 128,
-        };
+            max_output_tokens: 128, kv_quant_evidence: None };
         let identity = ResidentIdentity::from(&original);
         let mut another_call = original.clone();
         another_call.model = "same-weights-another-profile".into();

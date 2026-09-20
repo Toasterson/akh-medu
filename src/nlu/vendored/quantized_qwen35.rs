@@ -113,6 +113,14 @@ pub(crate) struct KvQuantization {
     recent: usize,
 }
 
+/// The process-configured lossy-KV width and exact window, if enabled.
+///
+/// Exposed so the daemon can refuse to run with compression enabled unless a
+/// canary-pass evidence document authorizes exactly this width.
+pub(crate) fn configured_kv_quant() -> Option<(u8, usize)> {
+    kv_quantization().map(|q| (q.bits, q.recent))
+}
+
 fn kv_quantization() -> Option<KvQuantization> {
     use std::sync::OnceLock;
     static SETTINGS: OnceLock<Option<KvQuantization>> = OnceLock::new();

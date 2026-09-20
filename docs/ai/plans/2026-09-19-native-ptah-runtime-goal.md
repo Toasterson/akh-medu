@@ -52,7 +52,7 @@ categorised summary.
 2. **Long residency.** 160 keyed requests over 14m42s, decode and RSS flat.
 3. **Daemon acceptance.** Five daemons rebuilt, private canary passing, both
    devices, including recall after restart.
-6. **Live KV compression and long-context gates - complete.** Compressed KV
+6. **Live KV compression and long-context gates - complete; task-level enable gate added 2026-09-20.** Compressed KV
    works on HIP and on Vulkan (packed three codes per `u32`, 2.94x, ~5% decode;
    the byte layout there had been failing closed on a missing cast). Fidelity is
    measured on the live path: worst cosine **0.99788 at 8 bits, 0.98540 at 4** -

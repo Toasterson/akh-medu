@@ -642,8 +642,7 @@ mod tests {
             device: NativeCandleDevice::Cpu,
             max_context_tokens: 4096,
             max_iterations: 4,
-            max_output_tokens: 512,
-        });
+            max_output_tokens: 512, kv_quant_evidence: None });
         assert!(
             validate(&profile, &request)
                 .unwrap_err()
@@ -806,6 +805,7 @@ mod tests {
             max_context_tokens: 96,
             max_iterations: 4,
             max_output_tokens: 4,
+            kv_quant_evidence: None,
         }
     }
 
@@ -970,6 +970,7 @@ mod tests {
             max_context_tokens: 4096,
             max_iterations: 4,
             max_output_tokens,
+            kv_quant_evidence: None,
         }
     }
     /// Run serially with explicit AKH_NATIVE_MODEL, AKH_NATIVE_TOKENIZER and

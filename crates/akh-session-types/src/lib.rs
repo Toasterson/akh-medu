@@ -942,6 +942,36 @@ pub struct NativeCandle {
     pub max_context_tokens: usize,
     pub max_iterations: u32,
     pub max_output_tokens: u32,
+    /// Canary-pass evidence authorizing lossy KV compression at the configured
+    /// bit-width. Required whenever compressed KV is enabled for this load;
+    /// absent means compression must be off, and an enabled load without it is
+    /// refused. See [`KvGateEvidence`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_quant_evidence: Option<std::path::PathBuf>,
+}
+
+/// Evidence that the five-daemon canary passed with lossy KV compression at a
+/// given bit-width, pinned to the exact artifacts and device it ran against.
+///
+/// Compressed KV clears no numerical parity gate (worst cosine 0.99788 at 8
+/// bits), so it is admitted only behind a task-level check: the canary's
+/// recall/eviction/isolation assertions must hold at that width, for these
+/// weights, on this device. The runtime refuses to enable compression without a
+/// matching, passing document - the same fail-closed shape as runtime
+/// conformance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KvGateEvidence {
+    pub passed: bool,
+    pub model_sha256: String,
+    pub tokenizer_sha256: String,
+    pub device: NativeCandleDevice,
+    pub bits: u8,
+    pub recent: usize,
+    /// Worst per-vector cosine measured on the live paged path at this width.
+    pub min_cosine: f64,
+    /// The canary checks that held, for the record.
+    pub checks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
