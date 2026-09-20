@@ -113,11 +113,11 @@ categorised summary.
 
 9. **Homelab canary and cutover.** Needs shared services; ask first.
 
-## Tomorrow starts here (written at the end of 2026-09-19)
+## Resumed 2026-09-20: both pending verifications passed
 
-Two fixes are committed, unit-tested (3,460 passing) and **not yet verified on
-the GPU** - the session was capped before their runs completed. Run these first,
-serially, before anything else:
+Two fixes were committed on 2026-09-19 without GPU verification, the day
+having been capped. Both were run first thing on resuming and **both passed**;
+the commands are kept so the runs are repeatable:
 
 1. **Interleaved M-RoPE for image tokens.** The LLM-side section mapping was
    Qwen2-VL's contiguous blocks; Qwen3.5 interleaves them (transformers
@@ -159,7 +159,11 @@ serially, before anything else:
    ladder script only references them. (The note here originally said the
    ladder script regenerates them; it does not, and this was found on resuming.)
 
-Then the decisions listed under "Blocked on a decision from the user".
+   **Done 2026-09-20: passed.** Round 1 admitted after reclaiming 5.33 GB,
+   limit 910 -> 10,844, and completed. See `reclaim-verification-passed.log`.
+
+With both verified, nothing unblocked remains. Next are the decisions listed
+under "Blocked on a decision from the user".
 
 ## Standing constraints (unchanged)
 
