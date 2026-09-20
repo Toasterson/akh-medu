@@ -407,6 +407,38 @@ impl ContextBudget {
     }
 }
 
+/// A runtime asking the session daemon to have the cognitive core assemble this
+/// turn's context. The runtime holds the conversation; the session daemon holds
+/// the akh identity and the core credential, so the runtime sends its candidate
+/// messages here and the daemon forwards them to `/v1/context` on the akh's core.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeContextRequest {
+    /// Identifies the active job; `name` must be [`RuntimeContextRequest::CALL_NAME`].
+    pub call: ToolCall,
+    /// The active turn's input, forwarded so the core can build its evidence.
+    pub input: TurnInput,
+    /// Candidate messages, newest last.
+    pub messages: Vec<Value>,
+    /// The budget the assembled context must fit.
+    pub budget: ContextBudget,
+}
+
+impl RuntimeContextRequest {
+    pub const CALL_NAME: &'static str = "assemble_context";
+}
+
+/// The assembled context, or `None` when the session has no cognitive core.
+///
+/// `None` keeps a runtime that always asks interoperating with a session that
+/// has no core configured: the runtime then windows locally, exactly as before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeContextReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembled: Option<AssembledContext>,
+}
+
 /// Marks a message the cognitive core already assembled to budget.
 ///
 /// The core sets it on every message it returns; the runtime reads it to decide

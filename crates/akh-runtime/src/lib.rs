@@ -6,7 +6,8 @@ pub mod profile;
 mod questions;
 
 use akh_session_types::{
-    ApprovalPolicy, ExecutionMode, RuntimeEvent, RuntimeJobRequest, RuntimeKind, ToolResult,
+    ApprovalPolicy, AssembledContext, ExecutionMode, RuntimeEvent, RuntimeJobRequest, RuntimeKind,
+    ToolResult,
     neural_spans::{SpanCapture, SpanHit, SpanSpace},
 };
 use serde_json::{Value, json};
@@ -39,6 +40,20 @@ pub trait Host {
     /// means the host does not retain them; the turn itself is unaffected.
     fn spans(&mut self, _id: &str, _captures: &[SpanCapture]) -> Result<bool, String> {
         Ok(false)
+    }
+    /// Ask the cognitive core to assemble this turn's context to budget.
+    ///
+    /// `Ok(None)` means the host has no core to defer to — no core configured
+    /// for this session, or a session daemon that predates the route — and the
+    /// runtime then windows the conversation locally, exactly as before. A host
+    /// never fabricates an assembly; the returned messages are the core's.
+    fn assemble_context(
+        &mut self,
+        _messages: &[Value],
+        _window_tokens: usize,
+        _reserved_output_tokens: usize,
+    ) -> Result<Option<AssembledContext>, String> {
+        Ok(None)
     }
 }
 

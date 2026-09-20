@@ -68,10 +68,13 @@ categorised summary.
 
 ### Blocked on a decision from the user
 
-4. **ContextManager materialization.** Built and inert: the seam is de-risked
-   and the fork evidenced in code, but **no party holds both history and
-   policy**. Either give akhrtd a core client, or move the conversation into the
-   session record.
+4. ~~ContextManager materialization~~ - **done 2026-09-20.** Chose "akhrtd has
+   a core client": the runtime initiates per-turn assembly against its own
+   conversation, the session daemon forwards to the akh's core with the akh and
+   auth it already holds (no new credential crosses a boundary). Five-daemon
+   canary green - core evicted 4 messages, runtime verified with 0 drops on top,
+   recall returned 4317. See
+   [ContextManager join](../research/2026-09-20-contextmanager-join.md).
 5. **Vision - the runtime can take an image; the daemons refuse one.**
    Everything in the model is landed and gated: projector agreeing across
    CPU/HIP/Vulkan at cosine 1.0000000000; per-token rope positions; spliced

@@ -8,6 +8,25 @@ model artifacts, unrelated providers, session history, and rollback evidence.
 
 ## Latest local checkpoint
 
+- **Item 4: ContextManager materialized; akhrtd defers per-turn assembly to the
+  core** (2026-09-20). The seam existed but nothing drove it - history in
+  akhrtd's `Conversation`, policy in the core's `SelectingManager`, and no party
+  holding both. Per the user's topology choice ("give akhrtd a core client"),
+  the runtime now initiates assembly against its own conversation and the
+  session daemon forwards to the akh's core. Reading the code showed the literal
+  reading would give akhrtd a core credential and the akh id (core's
+  `/v1/context` is per-akh, authorized); instead akhrtd calls the session
+  daemon's new `/v1/runtime/context`, which forwards with the akh and auth it
+  already holds. No trust boundary widened, no new config field: `Host::
+  assemble_context` defaults to `None` (fail-soft to local windowing), so a
+  session with no core is unchanged. Five-daemon canary passed: core assembled
+  all five turns, **evicted 4 messages at the core**, the runtime verified with
+  **0 drops on top**, recall returned `4317`. The canary's eviction assertion
+  moved to the core locus (replaced, not weakened) and gained two checks. See
+  [ContextManager join](../research/2026-09-20-contextmanager-join.md).
+
+
+
 Updated 2026-09-19. The entries below supersede the 2026-09-14 checkpoint notes;
 the chronological evidence further down is retained as written.
 
