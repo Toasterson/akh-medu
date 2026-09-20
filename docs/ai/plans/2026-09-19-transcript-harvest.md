@@ -117,3 +117,37 @@ the scripts that produced them are reproducible:
 `docs/wayfinder/transcript-harvest/assets/scripts/` (`render_prototype.py`,
 `redaction_prototype.py`) plus the survey scripts on branch
 `research/source-format-stability`.
+
+## Implementation decisions ratified during the build (2026-09-20)
+
+Surfaced by the increment agents where the tickets were silent; ratified by the
+integrator rather than left implicit in code.
+
+- **`th_events` gained `subseq` and `disposition`.** One raw record can yield
+  several events (a Claude `user` record with three `tool_result` blocks), so the
+  unique key is `(derivation_version, source, session_id, stream_id, seq, subseq)`.
+  Records that yield no event still get a row with `disposition ∈ noise |
+  undetermined | failed` and `kind NULL`, so the anti-join never re-pends them
+  (derivation-worker §2). The ten-kind set stays closed — no pseudo-kinds.
+- **Codex dispatch keys on the record's own JSON `type`, not `origin.record_type`** —
+  the adapter flattens `response_item` to its nested `payload.type` for drift
+  counting, which would have sent every model-I/O record to Undetermined.
+- **OpenCode payload is the whole `event` row**; the normalizer unwraps `data`.
+  OpenCode records carry no timestamp; the harvester derives `observed_at` from
+  `data.time.created|updated|timestamp|created_at` (ms epoch or RFC3339) before
+  forward-fill, else quarantines.
+- Claude `system` subtypes other than `model_refusal_fallback` → Undetermined.
+  Claude `fallback` blocks and Codex `session_meta`/`token_usage_record`/
+  `compacted`/`turn_context` serialise the whole block as `text` (nothing lost).
+  Codex tool outputs take `call_id`/`id` as `tool_call_id`, mirroring the call.
+  Codex `inter_agent_communication_metadata` → Undetermined (catch-all).
+- `render()` returns a `Render` newtype; `Outcome::Degraded` is chosen from the
+  built event's `degraded` flag, not by the caller.
+- Chunk turn boundary = `EventKind` change (Prompt ↔ Reply), since kind encodes
+  role for prose across all three sources.
+- **OpenCode `message.part.updated` tool-part shape is a best-effort guess**
+  (18-event local corpus): verify when real OpenCode volume exists.
+- **Client certificates must be X.509 v3** and rustls verifies the hostname even
+  under `verify-ca`; external harvesters use `harvest-pg.lab.home` + `verify-full`
+  (runbook). Codex `cli_version` is persisted in the watermark so tail reads keep
+  their schema marker.
