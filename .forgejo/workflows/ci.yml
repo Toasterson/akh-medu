@@ -51,7 +51,10 @@ jobs:
           test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
           sh .forgejo/scripts/run-logged.sh daemon-profiles python3 scripts/session-platform/check-profiles.py
-          sh .forgejo/scripts/run-logged.sh platform-tests cargo test --quiet --locked -p akh-session-services --all-features -p akh-runtime -p akh-session-types -p akh-service-store
+          # Every akh-session-services feature except the GPU backends: `metal`
+          # pulls objc2 (Apple-only) and `hip`/`vulkan` need driver SDKs, none
+          # of which exist on the Linux runner, so `--all-features` cannot build here.
+          sh .forgejo/scripts/run-logged.sh platform-tests cargo test --quiet --locked -p akh-session-services --features session,runtime,candle-runtime,core-integration-tests,executor,sandbox,events,helpers,client,admin,profiling,trigger,kagent -p akh-runtime -p akh-session-types -p akh-service-store
 
   # Sokar artifact daemon (Phase 52, ADR 108): unit + integration tests on the
   # OpenDAL memory/fs services. Postgres and MinIO contract tests skip or are
