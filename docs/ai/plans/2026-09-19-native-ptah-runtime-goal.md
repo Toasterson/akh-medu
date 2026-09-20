@@ -111,7 +111,17 @@ categorised summary.
 
 ### Not started
 
-9. **Homelab canary and cutover.** Needs shared services; ask first.
+9. **Homelab canary and cutover.** Authorized by the user 2026-09-20 (canary
+   and cutover both), which clears the goal's ask-first gate. **But blocked on
+   infrastructure:** from this session none of `sia.lab.home`,
+   `archibald.lab.home`, `forgejo.lab.home` or `lab.home` resolve, and Anima MCP
+   (the only sanctioned tracker path) is not connected. External internet works
+   (WireGuard default route, external HTTPS 200); the homelab LAN does not. The
+   authorization stands for when the homelab is reachable; nothing shared can be
+   touched until then. Standing rules still hold: no psql (Anima MCP only), no
+   Forgejo/Archibald changes, no push. Before any destructive cutover step,
+   surface the concrete plan for confirmation even though canary+cutover is
+   authorized in principle.
 
 ## Resumed 2026-09-20: both pending verifications passed
 
