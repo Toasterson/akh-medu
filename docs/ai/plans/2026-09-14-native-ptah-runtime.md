@@ -8,6 +8,25 @@ model artifacts, unrelated providers, session history, and rollback evidence.
 
 ## Latest local checkpoint
 
+- **Item 5 transport: a brokered read's image bytes reach the projector**
+  (2026-09-20). The model side was complete and semantically validated; the gap
+  was routing. A bytes-returning workspace read already exists (the executor
+  returns base64 behind `encoding=base64`), so no wire change was needed. The
+  native runtime now detects a single `tool` message whose result carries a
+  decodable PNG/JPEG (base64 in `data.content`, sniffed by signature), swaps the
+  vision placeholder in for its bytes, renders, and routes to
+  `generate_with_image` instead of folding base64 into the text prompt. Zero or
+  more than one image falls through to the text path (the single-image entry
+  point cannot place several). Image turns skip neural-span recall. Detection,
+  decode, single-vs-multi and signature recognition are unit-tested (4 tests);
+  `generate_with_image` itself is already GPU-validated (11/11 semantic). The
+  remaining end-to-end - a daemon turn where the model reads an image tool
+  result and describes it - is deferred to a clean shared-GPU window and a
+  harness that exposes an image-returning read. See
+  [ContextManager join](../research/2026-09-20-contextmanager-join.md) for the
+  transport decision context.
+
+
 - **Item 4: ContextManager materialized; akhrtd defers per-turn assembly to the
   core** (2026-09-20). The seam existed but nothing drove it - history in
   akhrtd's `Conversation`, policy in the core's `SelectingManager`, and no party

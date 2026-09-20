@@ -86,12 +86,11 @@ categorised summary.
    along the bottom edge". Text path bit-identical throughout.
 
    What remains is not model work:
-   - **Transport.** Both daemons refuse turn artifacts by design, with a test
-     pinning the refusal so nothing is dropped silently. akhrtd has no
-     filesystem access to workspaces (its reads are brokered tools returning
-     text). Three ways an image can arrive: inline bytes in the turn input,
-     a bytes-returning brokered read, or workspace filesystem access for
-     akhrtd. This is a topology choice of the same family as item 4.
+   - ~~Transport~~ - **wired 2026-09-20** (chosen: bytes-returning brokered
+     read). The executor already returns base64; the runtime now detects a
+     single image in the tool traffic, substitutes the vision placeholder, and
+     routes to `generate_with_image`. Unit-tested; the daemon-level image turn
+     is the remaining end-to-end, deferred to a clean shared-GPU window.
    - ~~Semantic validation~~ - **done 2026-09-20**: 11 of 11 images agree
      with ollama on the same blobs, including an identical misreading of
      rendered text. Starting a user-scoped ollama serially and stopping it was
