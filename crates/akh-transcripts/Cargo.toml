@@ -34,5 +34,28 @@ zstd = "0.13"
 # Embedding (shared with seshat)
 akh-embed = { path = "../akh-embed" }
 
+# MCP read surface (increment 6) — versions copied exactly from
+# crates/seshat/Cargo.toml so the two servers stay on one rmcp/axum/schemars
+# lineage.
+rmcp = { version = "0.17", features = [
+    "server",
+    "macros",
+    "transport-streamable-http-server",
+] }
+axum = "0.8"
+schemars = { version = "0.8", features = ["uuid1", "chrono"] }
+tower = { version = "0.5", features = ["util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+
 [dev-dependencies]
 tempfile = "3"
+# MCP client transport for the increment-6 integration test — mirrors
+# crates/sokar/Cargo.toml's dev-dependency split (server features live in
+# [dependencies] above; client-only features stay test-only).
+rmcp = { version = "0.17", features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+[[bin]]
+name = "akh-transcripts-mcp"
+path = "src/bin/akh-transcripts-mcp.rs"
