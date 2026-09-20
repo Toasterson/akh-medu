@@ -120,5 +120,13 @@ workflow `journal.jsonl` with no timestamps anywhere, the documented trap.
   steps; `armini`, `archibald`, `exec1` were not reachable at rollout time.
 - `harvest-pg.lab.home` is not in lab DNS (only `/etc/hosts` on hephaistos).
 - Compression has not yet triggered (needs rows older than 30 d).
-- Rollout status of `akh-derive` / `akh-transcripts-mcp`: see the plan; update
-  this section when they are live.
+- `akh-derive` / `akh-transcripts-mcp`: built and verified against the live
+  store from hephaistos (worker derived the full 75k backlog: 45,016 events,
+  29,718 noise, 796 undetermined, 0 failed; 5,160 chunks embedded; all five MCP
+  tools exercised incl. semantic search). Image
+  `code.aopc.cloud/toasterson/akh-transcripts:d72262cacdc2`; chart 0.1.18 with
+  `transcripts.enabled: true` staged in the Flux repo alongside the
+  `transcripts.lab.home` HTTPRoute — **not yet rolled out** (awaits the signed
+  Flux commit). The worker is a singleton: a second instance refuses with a
+  clear message; passes run every `AKH_TRANSCRIPTS_DERIVE_INTERVAL_SECS` (30 s
+  default) and an idle pass costs ~80 ms after the natural-key index.

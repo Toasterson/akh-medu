@@ -1,6 +1,6 @@
 # ADR 108 — Agent Session Transcript Harvest
 
-- **Status:** Accepted (design complete, user-grilled 2026-09-19). Not built.
+- **Status:** Accepted (design user-grilled 2026-09-19). **Built 2026-09-20**: harvester live on hephaistos (systemd timer), `harvest-pg` populated (75k raw rows, all derived, 5k chunks embedded), worker + MCP read surface verified against the live store; image `code.aopc.cloud/toasterson/akh-transcripts:d72262cacdc2` pushed; in-cluster rollout via chart 0.1.18 awaiting the Flux commit.
 - **Date:** 2026-09-19
 - **Deciders:** Till (grilled), Opus 5
 - **Plan:** [docs/ai/plans/2026-09-19-transcript-harvest.md](../plans/2026-09-19-transcript-harvest.md)
@@ -80,6 +80,23 @@ Each of these reversed or corrected a decision already taken:
   rows with TimescaleDB uninstalled — it is a plain table. The guarded migration
   warned and no-opped, and nothing verified afterwards. Outside this ADR's scope,
   but it is why the new image asserts its extensions at build time.
+
+## Build findings (2026-09-20)
+
+- **The anti-join needed an index the schema ticket did not foresee.** On 75k
+  rows the planner merged on three key columns and post-filtered `seq`
+  (210,751,599 rows removed, 43.6 s per pass — the worker looked hung).
+  `th_raw_records (source, session_id, stream_id, seq)` brings it to 80 ms.
+- **`th_events` needed `subseq` and `disposition`**: one raw record can yield
+  several events, and noise/undetermined/failed records must still get a row or
+  the anti-join re-pends them forever.
+- **Reading a record larger than the byte budget livelocked** the read surface
+  (zero lines, cursor unchanged); oversized first items are now emitted
+  head-and-tail truncated with a visible marker.
+- **Client certs must be X.509 v3** for rustls, and rustls verifies the hostname
+  even under `verify-ca`; **transcripts contain NUL bytes** Postgres rejects.
+- Claude `attachment` records land as `context` but degraded (~3.8k): the
+  normalizer does not find their text field. Tracked by the drift counters.
 
 ## Consequences
 
