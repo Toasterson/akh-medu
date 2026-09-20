@@ -1,6 +1,6 @@
 # ADR 108 — Agent Session Transcript Harvest
 
-- **Status:** Accepted (design user-grilled 2026-09-19). **Built 2026-09-20**: harvester live on hephaistos (systemd timer), `harvest-pg` populated (75k raw rows, all derived, 5k chunks embedded), worker + MCP read surface verified against the live store; image `code.aopc.cloud/toasterson/akh-transcripts:d72262cacdc2` pushed; in-cluster rollout via chart 0.1.18 awaiting the Flux commit.
+- **Status:** Accepted (design user-grilled 2026-09-19). **Built 2026-09-20**: harvester live on hephaistos (systemd timer), `harvest-pg` populated (75k raw rows, all derived, 5k chunks embedded), worker + MCP read surface verified against the live store; image `code.aopc.cloud/toasterson/akh-transcripts:d72262cacdc2` pushed; in-cluster worker + MCP read surface rolled out via chart 0.1.18 and reachable at `http://transcripts.lab.home/mcp`.
 - **Date:** 2026-09-19
 - **Deciders:** Till (grilled), Opus 5
 - **Plan:** [docs/ai/plans/2026-09-19-transcript-harvest.md](../plans/2026-09-19-transcript-harvest.md)

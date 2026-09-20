@@ -126,7 +126,10 @@ workflow `journal.jsonl` with no timestamps anywhere, the documented trap.
   tools exercised incl. semantic search). Image
   `code.aopc.cloud/toasterson/akh-transcripts:d72262cacdc2`; chart 0.1.18 with
   `transcripts.enabled: true` staged in the Flux repo alongside the
-  `transcripts.lab.home` HTTPRoute — **not yet rolled out** (awaits the signed
-  Flux commit). The worker is a singleton: a second instance refuses with a
+  `transcripts.lab.home` HTTPRoute — **rolled out 2026-09-20** (talos `fc92a9d`,
+  Helm release v111, chart 0.1.18): both pods Running on `stor03`, HTTPRoute
+  Accepted, and `search_transcripts` answered through the internal gateway
+  (`Host: transcripts.lab.home` → 192.168.1.12) with the fleet bearer token;
+  no token → 401. The worker is a singleton: a second instance refuses with a
   clear message; passes run every `AKH_TRANSCRIPTS_DERIVE_INTERVAL_SECS` (30 s
   default) and an idle pass costs ~80 ms after the natural-key index.
