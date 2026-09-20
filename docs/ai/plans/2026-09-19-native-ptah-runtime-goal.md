@@ -93,8 +93,9 @@ categorised summary.
      ollama is installed with this exact model as `ptah-qwen3.8`. Its server is
      down; starting it changes machine state and contends for the GPU. Needs a
      go-ahead.
-   - Residual: a horizontally-centred square is called "upper right" three
-     times; bar sides read correctly so no axis is mirrored. Unexplained.
+   - ~~Residual: a centred square called "upper right"~~ - closed 2026-09-20:
+     the LLM-side M-RoPE sections were laid out contiguously (Qwen2-VL);
+     Qwen3.5 interleaves them. Placement now reads correctly.
    - Multiple images per prompt: refused explicitly, not built.
 
 ### Open
@@ -137,6 +138,10 @@ serially, before anything else:
    Expected: left/centre/right each named correctly; the four geometry images
    at least as good as the post-rope run in `geometry-after-rope.log`.
 
+   **Done 2026-09-20: passed.** Left/centre/right each correct; bar-bottom
+   square now "centered in the upper portion". See
+   `placement-after-interleaved-mrope.log`.
+
 2. **Allocator-cache reclaim on the admission refuse path.** Before the fix a
    repeat of a 10,417-token request that had just succeeded was refused at a
    913-token limit, because `hipMemGetInfo` excludes the pool's reusable
@@ -148,9 +153,11 @@ serially, before anything else:
          --tokens 8 --idle-samples 1 --settle-seconds 0 --baseline-settle-seconds 0
 
    Expected: two generation rounds and an `admitted after reclaiming the
-   allocator cache` log line on the second. (`/tmp/ctxsoak/prompt-08k.txt` is
-   regenerable from `experiments/native-recall/ctxsoak-20260919-hip-v1/run-ladder.sh`
-   if `/tmp` was cleared.)
+   allocator cache` log line on the second. If `/tmp` was cleared, regenerate
+   the prompts first with
+   `experiments/native-recall/ctxsoak-20260919-hip-v1/make-prompts.py` - the
+   ladder script only references them. (The note here originally said the
+   ladder script regenerates them; it does not, and this was found on resuming.)
 
 Then the decisions listed under "Blocked on a decision from the user".
 

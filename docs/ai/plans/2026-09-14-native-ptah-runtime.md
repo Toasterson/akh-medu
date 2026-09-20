@@ -461,8 +461,14 @@ the chronological evidence further down is retained as written.
   temporal on the rest (transformers `qwen3_5`, llama.cpp `IMROPE` for
   `LLM_ARCH_QWEN35`). Only image tokens take that path, which is why every text
   gate stayed bit-identical. Rewritten with the expected layout written out
-  literally in the test. **Not yet run on the GPU**; the placement and geometry
-  reruns are tomorrow's first item.
+  literally in the test.
+
+  **Verified on the GPU 2026-09-20.** Placement: left -> "upper-left area",
+  centre -> "centered", right -> "upper-right area", where all three had been
+  "right". The bar-bottom image, previously "upper right quadrant", is now
+  "centered in the upper portion". Stripes unchanged and correct. The residual
+  is closed: it was the section layout, not model bias. Evidence in
+  `vision-e2e-20260919-hip-v1/placement-after-interleaved-mrope.log`.
 
 - **Item 6: allocator-cache reclaim on the admission refuse path; GPU
   verification pending** (2026-09-19, end of day). `release_cached_memory`'s
