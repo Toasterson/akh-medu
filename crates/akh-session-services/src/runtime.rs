@@ -596,6 +596,32 @@ impl akh_runtime::Host for RemoteHost {
             .post_optional::<neural_spans::SpanDeliveryReply>("/v1/runtime/spans", json!(delivery))?
             .is_some_and(|reply| reply.accepted))
     }
+    fn assemble_context(
+        &mut self,
+        messages: &[Value],
+        window_tokens: usize,
+        reserved_output_tokens: usize,
+    ) -> std::result::Result<Option<akh_session_types::AssembledContext>, String> {
+        let request = akh_session_types::RuntimeContextRequest {
+            call: self.call(
+                &self.request.turn_id,
+                akh_session_types::RuntimeContextRequest::CALL_NAME,
+                json!({}),
+            ),
+            input: self.request.input.clone(),
+            messages: messages.to_vec(),
+            budget: akh_session_types::ContextBudget {
+                window_tokens,
+                reserved_output_tokens,
+            },
+        };
+        Ok(self
+            .post_optional::<akh_session_types::RuntimeContextReply>(
+                "/v1/runtime/context",
+                json!(request),
+            )?
+            .and_then(|reply| reply.assembled))
+    }
 }
 
 #[cfg(test)]

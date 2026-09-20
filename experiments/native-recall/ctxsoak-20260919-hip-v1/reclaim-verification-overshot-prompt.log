@@ -1,0 +1,7 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== verification 2: 10k prompt, two rounds; round 1 was refused at limit 913 before the reclaim ===
+{"context_length":262144,"device_memory":{"free":8529117184,"source":"hipMemGetInfo","total":25753026560},"family":"Qwen35","kv_bytes_per_token":131072,"memory_bound_context_limit":10819,"phase":"loaded","projected_kv_bytes_at_full_context":34359738368,"seconds":23.14862068}
+Error: ContextExceedsDeviceMemory { requested: 13025, declared_window: 262144, fits_tokens: 10876, per_token_bytes: 589824, kv_bytes_per_token: 131072, needed_bytes: 7682457600, available_bytes: 8562671616, headroom_bytes: 2147483648 }
+RC=
+
+[exited with code 0]

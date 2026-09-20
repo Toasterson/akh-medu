@@ -1,0 +1,10 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+{"path":"/tmp/grouped/rope_same_prompt.f32","phase":"hidden_dump","values":5120}
+{"decode_seconds":2.336412121,"decode_steps_including_eos":47,"decode_steps_per_second":20.116314060159766,"finish":"Length","phase":"generation","prompt_tokens":26,"round":0,"seconds_including_prefill":3.140892543,"text":"<think>\nThe user asks me to explain in two sentences why a cache that..."resident model\" is a model that stays loaded in memory (e","time_to_first_token_seconds":0.803696349,"tokens":48}
+--- same prompt, before vs after the rope change ---
+pair                        cosine      rel L2   worst abs  gate
+after vs before       1.0000000000   0.000e+00   0.000e+00  PASS
+
+all pairs meet the 0.9999 cosine gate
+
+[exited with code 0]

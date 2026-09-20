@@ -243,6 +243,7 @@ dependencies = [
  "hnsw_rs",
  "hound",
  "icalendar",
+ "image",
  "imap",
  "knuffel",
  "lapin",

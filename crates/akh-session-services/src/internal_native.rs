@@ -15,6 +15,61 @@ use std::sync::{Mutex, MutexGuard, TryLockError};
 /// At most this many recalled spans are materialized before the user turn.
 const MAX_RECALL_HITS: usize = 4;
 
+/// The Qwen3-VL image placeholder: one merged-patch pad, bracketed. The vision
+/// entry point expands the single pad to one token per merged patch.
+const VISION_PLACEHOLDER: &str = "<|vision_start|><|image_pad|><|vision_end|>";
+
+/// The one tool message in `messages` that carries a decodable image, if any.
+///
+/// A brokered workspace read returns bytes as base64 in its `data.encoding`
+/// field (see the executor). This finds a `tool` message whose result carries
+/// base64 that decodes to a recognized image, and returns its index and bytes.
+/// Returns `None` for zero images or more than one, since the vision entry point
+/// takes exactly one; an ambiguous or absent image falls through to the text
+/// path rather than guessing.
+fn single_image_tool(messages: &[Value]) -> Option<(usize, Vec<u8>)> {
+    use base64::Engine as _;
+    let mut found: Option<(usize, Vec<u8>)> = None;
+    for (index, message) in messages.iter().enumerate() {
+        if message["role"] != "tool" {
+            continue;
+        }
+        // The tool content is the JSON string of a ToolResult; its data holds
+        // {content: <base64>, encoding: "base64"} for a bytes-returning read.
+        let Some(content) = message["content"].as_str() else {
+            continue;
+        };
+        let Ok(result) = serde_json::from_str::<Value>(content) else {
+            continue;
+        };
+        if result["data"]["encoding"] != "base64" {
+            continue;
+        }
+        let Some(b64) = result["data"]["content"].as_str() else {
+            continue;
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) else {
+            continue;
+        };
+        if !is_recognized_image(&bytes) {
+            continue;
+        }
+        if found.is_some() {
+            // More than one image: the single-image entry point cannot place
+            // them, so defer to the text path rather than pick one silently.
+            return None;
+        }
+        found = Some((index, bytes));
+    }
+    found
+}
+
+/// PNG or JPEG by signature, the two formats the preprocessor decodes.
+fn is_recognized_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
+        || bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+}
+
 /// First-iteration neural context for one turn: the accepted input text that
 /// captures are byte ranges of, and the callback identity for recall/delivery.
 pub(super) struct RecallContext<'a> {
@@ -199,6 +254,9 @@ pub(super) fn completion(
     backend
         .set_context_limit(config.max_context_tokens)
         .map_err(|e| Fault::new("model_context", e.to_string()))?;
+    // Lossy KV compression is admitted only behind canary evidence for this
+    // exact width, model, tokenizer and device.
+    validate_kv_gate(config, backend.configured_kv_bits())?;
     let family = backend.family();
     let count_prompt = backend.completion_prompt_counter();
     let prompt_budget = config
@@ -209,6 +267,70 @@ pub(super) fn completion(
         let rendered = render_prompt(candidate, tools, family)?;
         count_prompt(&rendered).map_err(|e| Fault::new("model_context", e.to_string()))
     };
+    // Image transport: a brokered read may hand back an image as base64 rather
+    // than as text. When exactly one tool message carries a decodable image and
+    // the model is a vision family, feed it to the projector path with the
+    // vision placeholder standing in for its bytes, instead of folding base64
+    // into the text prompt where it would be meaningless.
+    if family == ModelFamily::Qwen35 {
+        if let Some((image_index, image_bytes)) = single_image_tool(messages) {
+            let mut view: Vec<Value> = messages.to_vec();
+            view[image_index]["content"] = Value::String(VISION_PLACEHOLDER.to_owned());
+            let window = if crate::native_window::core_budgeted(&view) {
+                crate::native_window::verify(&view, prompt_budget, count_window)?
+            } else {
+                crate::native_window::select(&view, prompt_budget, count_window)?
+            };
+            let (prompt, _span) = render_prompt_with_user_span(&window.messages, tools, family)?;
+            // If windowing evicted the image's own turn, there is nothing to
+            // show; fall through to the ordinary text path below.
+            if prompt.contains(VISION_PLACEHOLDER) {
+                if prompt.len() > MAX_BYTES {
+                    return Err(Fault::new(
+                        "capacity",
+                        "native vision prompt exceeds context byte budget",
+                    ));
+                }
+                let completion = backend
+                    .generate_with_image(
+                        &prompt,
+                        &image_bytes,
+                        config.max_output_tokens,
+                        &mut || {
+                            check(cancel, deadline).map_err(|e| NluError::LlmGenerationFailed {
+                                reason: e.to_string(),
+                            })
+                        },
+                    )
+                    .map_err(|e| Fault::new("model", e.to_string()))?;
+                if let Err(error) = check(cancel, deadline) {
+                    backend.discard_completion_state();
+                    return Err(error);
+                }
+                if !matches!(completion.finish_reason, CandleFinishReason::Stop) {
+                    backend.discard_completion_state();
+                    return Err(Fault::new(
+                        "model_incomplete",
+                        "native vision model exhausted its output token budget",
+                    ));
+                }
+                let (message, finish) = parse_response_with_tools(&completion.text, tools)?;
+                drop(resident);
+                if finish == "stop" {
+                    if let Some(text) = message["content"].as_str() {
+                        if !text.is_empty() {
+                            host.event(RuntimeEvent::Text {
+                                text: text.to_owned(),
+                            })
+                            .map_err(Fault::invalid)?;
+                        }
+                    }
+                }
+                // Image turns do not participate in neural-span recall/capture.
+                return Ok((message, finish, None));
+            }
+        }
+    }
     // akhomed owns eviction once it assembles to budget; the runtime then only
     // checks the fit against the model's own tokenizer and fails closed. The
     // local selector remains for payloads from a core that has not moved yet.
@@ -363,6 +485,50 @@ pub(super) fn completion(
         }
     }
     Ok((message, finish, recalled_message))
+}
+
+/// Refuse to enable lossy KV compression without canary-pass evidence.
+///
+/// Compressed KV clears no numerical parity gate, so it is admitted only when
+/// the five-daemon canary passed at exactly this width, for these weights, on
+/// this device (the user's chosen task-level gate). `configured_bits` is what
+/// the process would actually run; `None` means compression is off and the gate
+/// stands down. Otherwise a matching, passing `KvGateEvidence` is required, and
+/// its absence or any mismatch fails the load closed.
+fn validate_kv_gate(config: &NativeCandle, configured_bits: Option<u8>) -> Result<()> {
+    let Some(bits) = configured_bits else {
+        return Ok(());
+    };
+    let path = config.kv_quant_evidence.as_ref().ok_or_else(|| {
+        Fault::new(
+            "kv_gate_required",
+            format!(
+                "lossy KV compression is enabled at {bits} bits but no canary evidence is                  configured; run the five-daemon canary at {bits} bits for these artifacts and                  point kv_quant_evidence at its passing result, or disable compression"
+            ),
+        )
+    })?;
+    let evidence: KvGateEvidence = serde_json::from_slice(
+        &std::fs::read(path)
+            .map_err(|_| Fault::new("kv_gate", "cannot read the configured KV canary evidence"))?,
+    )
+    .map_err(|_| Fault::new("kv_gate", "KV canary evidence is malformed"))?;
+    if !evidence.passed {
+        return Err(Fault::new(
+            "kv_gate",
+            "KV canary evidence records a failed run",
+        ));
+    }
+    if evidence.bits != bits
+        || evidence.model_sha256 != config.model_sha256
+        || evidence.tokenizer_sha256 != config.tokenizer_sha256
+        || evidence.device != config.device
+    {
+        return Err(Fault::new(
+            "kv_gate",
+            "KV canary evidence does not cover this exact width, model, tokenizer and device",
+        ));
+    }
+    Ok(())
 }
 
 fn verify_artifact(
@@ -818,6 +984,160 @@ fn answer_only(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+
+    fn tool_message(data: Value) -> Value {
+        // Mirrors how internal.rs frames a brokered tool result: the whole
+        // ToolResult is the JSON string content of a `tool` role message.
+        let result = serde_json::json!({"success": true, "text": "", "data": data, "receipt": "r"});
+        serde_json::json!({"role": "tool", "tool_call_id": "c", "content": result.to_string()})
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn gate_config(evidence: Option<std::path::PathBuf>) -> NativeCandle {
+        NativeCandle {
+            model: "ptah".into(),
+            model_path: "/m.gguf".into(),
+            model_sha256: "a".repeat(64),
+            tokenizer_path: "/t.json".into(),
+            tokenizer_sha256: "b".repeat(64),
+            device: NativeCandleDevice::Hip { ordinal: 0 },
+            max_context_tokens: 1024,
+            max_iterations: 4,
+            max_output_tokens: 16,
+            kv_quant_evidence: evidence,
+        }
+    }
+
+    fn write_evidence(dir: &std::path::Path, ev: &KvGateEvidence) -> std::path::PathBuf {
+        let path = dir.join("kv-evidence.json");
+        std::fs::write(&path, serde_json::to_vec(ev).unwrap()).unwrap();
+        path
+    }
+
+    fn matching_evidence() -> KvGateEvidence {
+        KvGateEvidence {
+            passed: true,
+            model_sha256: "a".repeat(64),
+            tokenizer_sha256: "b".repeat(64),
+            device: NativeCandleDevice::Hip { ordinal: 0 },
+            bits: 4,
+            recent: 32,
+            min_cosine: 0.985,
+            checks: vec!["history eviction at the core".into()],
+        }
+    }
+
+    #[test]
+    fn kv_gate_stands_down_when_compression_is_off() {
+        // No configured bits: the gate never looks at evidence.
+        assert!(validate_kv_gate(&gate_config(None), None).is_ok());
+    }
+
+    #[test]
+    fn kv_gate_refuses_compression_without_evidence() {
+        let fault = validate_kv_gate(&gate_config(None), Some(4)).unwrap_err();
+        assert_eq!(fault.code, "kv_gate_required");
+    }
+
+    #[test]
+    fn kv_gate_admits_a_matching_passing_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_evidence(dir.path(), &matching_evidence());
+        assert!(validate_kv_gate(&gate_config(Some(path)), Some(4)).is_ok());
+    }
+
+    #[test]
+    fn kv_gate_rejects_a_wider_width_a_failed_run_and_wrong_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        // Configured at 4 bits, evidence only covers 4 -> asking for 8 must fail.
+        let path = write_evidence(dir.path(), &matching_evidence());
+        assert_eq!(
+            validate_kv_gate(&gate_config(Some(path.clone())), Some(8))
+                .unwrap_err()
+                .code,
+            "kv_gate"
+        );
+        // A failed canary run.
+        let mut failed = matching_evidence();
+        failed.passed = false;
+        let path = write_evidence(dir.path(), &failed);
+        assert_eq!(
+            validate_kv_gate(&gate_config(Some(path)), Some(4))
+                .unwrap_err()
+                .code,
+            "kv_gate"
+        );
+        // Evidence for a different model.
+        let mut other_model = matching_evidence();
+        other_model.model_sha256 = "c".repeat(64);
+        let path = write_evidence(dir.path(), &other_model);
+        assert_eq!(
+            validate_kv_gate(&gate_config(Some(path)), Some(4))
+                .unwrap_err()
+                .code,
+            "kv_gate"
+        );
+        // Evidence for a different device.
+        let mut other_device = matching_evidence();
+        other_device.device = NativeCandleDevice::Vulkan { ordinal: 0 };
+        let path = write_evidence(dir.path(), &other_device);
+        assert_eq!(
+            validate_kv_gate(&gate_config(Some(path)), Some(4))
+                .unwrap_err()
+                .code,
+            "kv_gate"
+        );
+    }
+
+    #[test]
+    fn a_base64_image_tool_result_is_detected_and_decoded() {
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
+        let messages = vec![
+            serde_json::json!({"role": "user", "content": "look"}),
+            tool_message(serde_json::json!({"content": b64(&png), "encoding": "base64"})),
+        ];
+        let (index, bytes) = single_image_tool(&messages).expect("image detected");
+        assert_eq!(index, 1);
+        assert_eq!(bytes, png);
+    }
+
+    #[test]
+    fn non_image_and_text_tool_results_are_ignored() {
+        // A base64 blob that is not an image (no PNG/JPEG signature).
+        let blob = tool_message(
+            serde_json::json!({"content": b64(b"just some bytes"), "encoding": "base64"}),
+        );
+        // A plain utf8 read.
+        let text = tool_message(serde_json::json!({"content": "hello", "encoding": "utf8"}));
+        assert!(single_image_tool(&[blob, text]).is_none());
+    }
+
+    #[test]
+    fn more_than_one_image_defers_to_the_text_path() {
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 9, 9];
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 7];
+        let messages = vec![
+            tool_message(serde_json::json!({"content": b64(&jpeg), "encoding": "base64"})),
+            tool_message(serde_json::json!({"content": b64(&png), "encoding": "base64"})),
+        ];
+        // Two images cannot both be placed by the single-image entry point.
+        assert!(single_image_tool(&messages).is_none());
+    }
+
+    #[test]
+    fn image_signatures_are_recognized_but_arbitrary_bytes_are_not() {
+        assert!(is_recognized_image(&[
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A
+        ]));
+        assert!(is_recognized_image(&[0xFF, 0xD8, 0xFF, 0xE0]));
+        assert!(!is_recognized_image(b"GIF89a"));
+        assert!(!is_recognized_image(b""));
+    }
+
     #[test]
     fn residency_ignores_call_limits_but_preserves_every_artifact_identity_field() {
         let original = NativeCandle {
@@ -830,6 +1150,7 @@ mod tests {
             max_context_tokens: 2048,
             max_iterations: 4,
             max_output_tokens: 128,
+            kv_quant_evidence: None,
         };
         let identity = ResidentIdentity::from(&original);
         let mut another_call = original.clone();

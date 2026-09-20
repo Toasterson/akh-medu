@@ -71,7 +71,7 @@ pub(crate) fn select(
 pub(crate) fn core_budgeted(messages: &[Value]) -> bool {
     messages
         .iter()
-        .any(|message| message.get("context_budgeted") == Some(&Value::Bool(true)))
+        .any(|message| message.get(akh_session_types::CONTEXT_BUDGETED) == Some(&Value::Bool(true)))
 }
 
 /// Check a prompt the cognitive core already budgeted, without ever dropping.

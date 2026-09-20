@@ -1,0 +1,14 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== 1. text parity after the rope-cursor change (same prompt as the baseline dump) ===
+{"path":"/tmp/grouped/cursor.f32","phase":"hidden_dump","values":5120}
+{"decode_seconds":2.326069431,"decode_steps_including_eos":47,"decode_steps_per_second":20.205759713627394,"finish":"Length","phase":"generation","prompt_tokens":26,"round":0,"seconds_including_prefill":3.123378332,"text":"<elided>"resident model\" is a model that stays loaded in memory (e","time_to_first_token_seconds":0.796445024,"tokens":48}
+{"decode_seconds":2.3300248630000002,"decode_steps_including_eos":47,"decode_steps_per_second":20.171458573830677,"finish":"Length","phase":"generation","prompt_tokens":26,"round":1,"seconds_including_prefill":3.12812413,"text":"<elided>"resident model\" is a model that stays loaded in memory (e","time_to_first_token_seconds":0.797832122,"tokens":48}
+pair                        cosine      rel L2   worst abs  gate
+after_cursor vs before  1.0000000000   0.000e+00   0.000e+00  PASS
+
+all pairs meet the 0.9999 cosine gate
+
+=== 2. image smoke: synthetic red square on white, blue bar at the bottom ===
+{"decode_seconds":3.013398814,"finish":"Stop","phase":"vision_describe","prompt_tokens":273,"text":"<think>\n\n</think>\n\nThis image displays the national flag of France, featuring three vertical stripes of equal width in the colors blue, white, and red from left to right.","time_to_first_token_seconds":3.943736687,"tokens":34}
+
+[exited with code 0]

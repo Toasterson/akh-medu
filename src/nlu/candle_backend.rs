@@ -480,6 +480,9 @@ pub struct CandleBackend {
     /// standalone (benches/tests) — eligibility then falls back to the `AKH_SPEC_DECODE` env
     /// flag. Wired by `CandleChatBackend` construction so a runtime tool flip is seen next turn.
     runtime_options: Option<std::sync::Arc<crate::inference_options::InferenceOptions>>,
+    /// The vision tower, loaded on first use and held for the model's lifetime.
+    #[cfg(feature = "candle-backend")]
+    vision: Option<crate::nlu::vision_tower::VisionTower>,
 }
 
 impl std::fmt::Debug for CandleBackend {
@@ -665,6 +668,8 @@ impl CandleBackend {
             context_length,
             completion_context_limit: None,
             active_completion_session: None,
+            #[cfg(feature = "candle-backend")]
+            vision: None,
             config,
             model_path: model_path.to_path_buf(),
             runtime_options: None,
@@ -2239,6 +2244,138 @@ impl CandleBackend {
         }
     }
 
+    /// Live device memory, when the platform can report it.
+    ///
+    /// HIP asks the driver directly. Vulkan has no portable free-memory query in
+    /// wgpu, so on AMD the kernel's sysfs counters are read instead - the same
+    /// numbers the idle-power probe samples. A device that can report neither
+    /// yields `None`, and the caller must not invent a number for it.
+    #[cfg(feature = "candle-backend")]
+    pub fn device_memory(&self) -> Option<DeviceMemory> {
+        match &self.device {
+            #[cfg(feature = "hip")]
+            Device::Cuda(_) => candle_core::cuda::device_memory_info().map(|(free, total)| {
+                DeviceMemory { free, total, source: "hipMemGetInfo" }
+            }),
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(_) => amd_sysfs_memory(),
+            _ => None,
+        }
+    }
+
+    /// Tokens of context that actually fit on this device, weights resident.
+    ///
+    /// The declared window is what the GGUF advertises; this is what the hardware
+    /// can hold. For the pinned Qwen3.8 artifact the two differ by more than an
+    /// order of magnitude, so treating the declared window as an admission limit
+    /// means accepting requests that can only end in an allocation failure part
+    /// way through prefill.
+    ///
+    /// `None` when either the per-token cost or the device memory is unknown,
+    /// which is the honest answer rather than a guess.
+    #[cfg(feature = "candle-backend")]
+    pub fn memory_bound_context_limit(&self) -> Option<usize> {
+        let per_token = self.effective_bytes_per_token()?;
+        if per_token == 0 {
+            return None;
+        }
+        let memory = self.device_memory()?;
+        let budget = memory.free.saturating_sub(kv_headroom_bytes());
+        Some((budget / per_token).min(self.context_length))
+    }
+
+    /// Device bytes a context token really costs, not just its KV.
+    ///
+    /// Sizing on KV alone was wrong by more than 4x. A 10,417-token request
+    /// consumed 5.44 GiB, of which KV is 1.30 GiB: the rest is prefill
+    /// intermediates and allocator blocks that are not returned between
+    /// requests. Attention scores alone scale with chunk x positions, so the
+    /// overhead grows with context and no fixed reserve can absorb it.
+    ///
+    /// The multiplier is **empirical and from a single measurement** on one
+    /// model and device - see the long-context gate research note. It admits the
+    /// largest request measured to work (10,417 tokens) and refuses the smallest
+    /// measured to fail (20,833). `AKH_CANDLE_CONTEXT_COST_MULTIPLIER` overrides
+    /// it, which is how a different model or card gets a right answer here.
+    #[cfg(feature = "candle-backend")]
+    pub fn effective_bytes_per_token(&self) -> Option<usize> {
+        let kv = self.kv_bytes_per_token()?;
+        let multiplier = std::env::var("AKH_CANDLE_CONTEXT_COST_MULTIPLIER")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| *value >= 1.0)
+            .unwrap_or(DEFAULT_CONTEXT_COST_MULTIPLIER);
+        Some((kv as f64 * multiplier) as usize)
+    }
+
+    /// Snapshot everything the memory gate needs, borrowing nothing afterwards.
+    ///
+    /// Taken once per request rather than per call site: each one costs a driver
+    /// query, and a limit that shifted between two checks of the same request
+    /// would be worse than either answer.
+    #[cfg(feature = "candle-backend")]
+    fn context_admission(&self) -> ContextAdmission {
+        ContextAdmission {
+            fits_tokens: self.memory_bound_context_limit(),
+            declared_window: self.context_length,
+            per_token_bytes: self.effective_bytes_per_token().unwrap_or(0),
+            kv_bytes_per_token: self.kv_bytes_per_token().unwrap_or(0),
+            available_bytes: self.device_memory().map_or(0, |memory| memory.free),
+            headroom_bytes: kv_headroom_bytes(),
+        }
+    }
+
+    /// Admit, and if the device's own allocator cache is what stands in the way,
+    /// give it back and try once more.
+    ///
+    /// `hipMemGetInfo` does not count blocks the pool holds for reuse, so after
+    /// one request the figure can drop by gigabytes that are in fact available:
+    /// a repeat of a request that had just succeeded was refused at a 913-token
+    /// limit. Reclaiming turns those blocks back into driver-free memory, which
+    /// any allocation size can use - the honest figure, where adding the cached
+    /// total to free memory would over-admit whenever cached block sizes do not
+    /// match the new request. It runs only on the refuse path, so the cache
+    /// keeps its value everywhere else. The reclaim checks its own preconditions
+    /// (default stream, no capture) and fails closed; then the original refusal
+    /// stands. Vulkan has no pool and is unchanged.
+    #[cfg(feature = "candle-backend")]
+    fn admit_context_reclaiming(
+        &self,
+        prompt_tokens: usize,
+        max_new_tokens: usize,
+    ) -> NluResult<ContextAdmission> {
+        let first = self.context_admission();
+        let refused = match first.check(prompt_tokens, max_new_tokens) {
+            Ok(()) => return Ok(first),
+            Err(error) => error,
+        };
+        #[cfg(feature = "hip")]
+        if matches!(self.device, Device::Cuda(_)) {
+            match candle_core::cuda::release_cached_memory() {
+                Ok(released) if released > 0 => {
+                    let second = self.context_admission();
+                    return match second.check(prompt_tokens, max_new_tokens) {
+                        Ok(()) => {
+                            tracing::info!(
+                                released_bytes = released,
+                                fits_before = ?first.fits_tokens,
+                                fits_after = ?second.fits_tokens,
+                                "admitted after reclaiming the allocator cache"
+                            );
+                            Ok(second)
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "allocator cache not reclaimable at admission; refusal stands");
+                }
+            }
+        }
+        Err(refused)
+    }
+
     /// Resident KV bytes for a full `tokens`-long context, when modelled.
     #[cfg(feature = "candle-backend")]
     pub fn projected_kv_bytes(&self, tokens: usize) -> Option<usize> {
@@ -2294,6 +2431,14 @@ impl CandleBackend {
     /// Unlike the quality reports above this reads the live path rather than
     /// simulating one, so it is the figure that backs any claim about how much
     /// the compression actually saves on this device.
+    /// The lossy-KV width this process is configured to use, if any. `None`
+    /// means compression is off. Used by the daemon's task-level gate to refuse
+    /// enabling compression without matching canary evidence.
+    #[cfg(feature = "candle-backend")]
+    pub fn configured_kv_bits(&self) -> Option<u8> {
+        crate::nlu::vendored::quantized_qwen35::configured_kv_quant().map(|(bits, _)| bits)
+    }
+
     #[cfg(feature = "candle-backend")]
     pub fn kv_page_residency(&self) -> Option<KvPageResidency> {
         let LoadedModel::Qwen35(model) = &self.model else {
@@ -2361,6 +2506,209 @@ impl CandleBackend {
             check,
             &mut |_| Ok(RecallDecision::Continue),
         )
+    }
+
+    /// Generate from a prompt that contains one image.
+    ///
+    /// The prompt carries `<|vision_start|><|image_pad|><|vision_end|>` where
+    /// the image belongs; the single pad is expanded to one token per merged
+    /// patch. Image rows come from the projector and are spliced in place of
+    /// those tokens, and every token gets a `(t, h, w)` rope triple - text
+    /// tokens degenerate ones, image tokens their grid cell. Decode then
+    /// continues from the rope cursor the image left, not from the cache
+    /// length. Qwen3.5 only; the projector must sit alongside the model.
+    #[cfg(feature = "candle-backend")]
+    pub fn generate_with_image(
+        &mut self,
+        prompt: &str,
+        image_bytes: &[u8],
+        max_tokens: u32,
+        check: &mut dyn FnMut() -> NluResult<()>,
+    ) -> NluResult<CandleCompletion> {
+        use crate::nlu::vision_positions::position_triples;
+        use crate::nlu::vision_prompt::{expand_single_image, VisionTokens};
+        let started = std::time::Instant::now();
+        check()?;
+        let fail = |error: candle_core::Error| NluError::LlmGenerationFailed {
+            reason: format!("image generation: {error}"),
+        };
+        #[cfg(feature = "hip")]
+        if let Device::Cuda(device) = &self.device {
+            Device::new_cuda(device.ordinal()).map_err(fail)?;
+        }
+        if self.family != ModelFamily::Qwen35 {
+            return Err(NluError::LlmGenerationFailed {
+                reason: format!("image input needs the Qwen35 family, this model is {:?}", self.family),
+            });
+        }
+        if max_tokens == 0 {
+            return Err(NluError::LlmGenerationFailed {
+                reason: "generation needs a positive token budget".into(),
+            });
+        }
+        let specials = {
+            let id = |name: &str| {
+                self.tokenizer.token_to_id(name).ok_or_else(|| NluError::LlmGenerationFailed {
+                    reason: format!("tokenizer has no `{name}` token; this model cannot take images"),
+                })
+            };
+            VisionTokens {
+                start: id("<|vision_start|>")?,
+                pad: id("<|image_pad|>")?,
+                end: id("<|vision_end|>")?,
+            }
+        };
+
+        // Image first: its grid decides how many tokens the placeholder becomes.
+        self.ensure_vision_tower()?;
+        let tower = self.vision.as_ref().expect("loaded above");
+        let config = tower.config().clone();
+        let prepared = crate::nlu::vision_preprocess::prepare_image(
+            image_bytes,
+            &config.resize_policy(),
+            config.patch_size,
+            config.spatial_merge_size,
+            config.image_mean,
+            config.image_std,
+        )?;
+        let raw_tokens = self.encode_prompt(prompt)?;
+        let expanded = expand_single_image(&raw_tokens, specials, prepared.grid)?;
+        let total = expanded.tokens.len();
+
+        // Same gates as text: the declared window and what the device holds.
+        let limit = self.completion_context_limit.unwrap_or(self.context_length);
+        validate_completion_budget(total, max_tokens, limit)?;
+        self.admit_context_reclaiming(total, max_tokens as usize)?;
+        check()?;
+
+        let pixels = Tensor::from_vec(
+            prepared.pixels,
+            (3, prepared.height, prepared.width),
+            &self.device,
+        )
+        .map_err(fail)?;
+        let image_rows = tower.forward(&pixels)?;
+        let (rows, width) = image_rows.dims2().map_err(fail)?;
+        if rows != prepared.grid.tokens() {
+            return Err(NluError::LlmGenerationFailed {
+                reason: format!("projector produced {rows} rows for a {}-token grid", prepared.grid.tokens()),
+            });
+        }
+        check()?;
+
+        // Looked up before the model is borrowed mutably for the whole loop.
+        let eos = self.find_eos_token();
+        let LoadedModel::Qwen35(model) = &mut self.model else {
+            unreachable!("family checked above");
+        };
+        if width != model.embedding_width() {
+            return Err(NluError::LlmGenerationFailed {
+                reason: format!("projector width {width} does not match the residual width {}", model.embedding_width()),
+            });
+        }
+        let tokens = Tensor::new(expanded.tokens.as_slice(), &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(fail)?;
+        let text_rows = model.embed_tokens(&tokens).map_err(fail)?;
+        let span = expanded.image_span.clone();
+        let spliced = Tensor::cat(
+            &[
+                &text_rows.narrow(1, 0, span.start).map_err(fail)?,
+                &image_rows.to_dtype(text_rows.dtype()).map_err(fail)?.unsqueeze(0).map_err(fail)?,
+                &text_rows.narrow(1, span.end, total - span.end).map_err(fail)?,
+            ],
+            1,
+        )
+        .and_then(|t| t.contiguous())
+        .map_err(fail)?;
+        let positions = position_triples(&expanded.pieces);
+
+        let mut logits = model.prefill_embedded(&tokens, &spliced, &positions).map_err(fail)?;
+
+        // The decode loop below mirrors the text path's sampling, stop and
+        // timing. It is separate because the text path drives the tracked
+        // `forward_token`, which the embedded prefill does not prepare; the
+        // rope continuation after the image lives inside the model instead.
+        let mut generated = Vec::new();
+        let mut finish_reason = CandleFinishReason::Length;
+        let mut first_sample_at = None;
+        let mut last_sample_at = None;
+        let mut step_seconds: Vec<f64> = Vec::new();
+        let mut decode_steps = 0;
+        for index in 0..max_tokens {
+            check()?;
+            let row = match logits.rank() {
+                3 => logits.i((0, logits.dim(1).map_err(fail)? - 1, ..)),
+                _ => logits.i((0, ..)),
+            }
+            .map_err(fail)?;
+            let token = if self.config.temperature == 0.0 {
+                row.argmax(0).and_then(|t| t.to_scalar::<u32>()).map_err(fail)?
+            } else {
+                let scaled = (&row / self.config.temperature as f64).map_err(fail)?;
+                let probs = candle_nn::ops::softmax(&scaled, 0).map_err(fail)?;
+                sample_from_probs(&probs.to_vec1::<f32>().map_err(fail)?)
+            };
+            let sampled_now = std::time::Instant::now();
+            if first_sample_at.is_none() {
+                first_sample_at = Some(sampled_now);
+            } else {
+                decode_steps += 1;
+                if let Some(previous) = last_sample_at {
+                    step_seconds.push(sampled_now.duration_since(previous).as_secs_f64());
+                }
+            }
+            last_sample_at = Some(sampled_now);
+            if eos.contains(&token) {
+                finish_reason = CandleFinishReason::Stop;
+                break;
+            }
+            generated.push(token);
+            if index + 1 < max_tokens {
+                check()?;
+                let input = Tensor::new(&[[token]], &self.device).map_err(fail)?;
+                logits = model
+                    .decode_step(&input, total + index as usize)
+                    .map_err(fail)?;
+            }
+        }
+        let sampled_at = std::time::Instant::now();
+        // An image session is not a reusable text prefix; do not let a later
+        // keyed text call believe it can extend this state.
+        self.discard_completion_state();
+        let text = self.tokenizer.decode(&generated, false).map_err(|e| {
+            NluError::LlmGenerationFailed { reason: format!("detokenization: {e}") }
+        })?;
+        Ok(CandleCompletion {
+            text,
+            prompt_tokens: total,
+            reused_prompt_tokens: 0,
+            tokens_generated: generated.len() as u32,
+            finish_reason,
+            time_to_first_token: first_sample_at.unwrap().duration_since(started),
+            decode_time: sampled_at.duration_since(first_sample_at.unwrap()),
+            step_seconds,
+            decode_steps,
+            prompt_span_taps: None,
+        })
+    }
+
+    /// Load the projector next to the model, once.
+    #[cfg(feature = "candle-backend")]
+    fn ensure_vision_tower(&mut self) -> NluResult<()> {
+        if self.vision.is_some() {
+            return Ok(());
+        }
+        let path = self.mmproj_path()?;
+        let mut file = std::fs::File::open(&path).map_err(|e| NluError::ModelLoadFailed {
+            reason: format!("open projector {}: {e}", path.display()),
+        })?;
+        let content = candle_core::quantized::gguf_file::Content::read(&mut file).map_err(|e| {
+            NluError::ModelLoadFailed { reason: format!("read projector {}: {e}", path.display()) }
+        })?;
+        let tower = crate::nlu::vision_tower::VisionTower::load(&content, &mut file, &self.device)?;
+        self.vision = Some(tower);
+        Ok(())
     }
 
     /// Reuse one active conversation's exact forwarded prefix. The caller must
@@ -2549,6 +2897,9 @@ impl CandleBackend {
         let limit = self.completion_context_limit.unwrap_or(self.context_length);
         let mut prompt_tokens = self.encode_prompt(prompt)?;
         validate_completion_budget(prompt_tokens.len(), max_tokens, limit)?;
+        // The declared window says what the artifact supports; this says what
+        // the device can hold. On the pinned model the two differ fivefold.
+        let admission = self.admit_context_reclaiming(prompt_tokens.len(), max_tokens as usize)?;
         let token_span = match &capture {
             Some(request) => self.token_span_for_bytes(prompt, &request.byte_span)?,
             None => None,
@@ -2594,6 +2945,7 @@ impl CandleBackend {
                     model.rewind(checkpoint).map_err(fail)?;
                     let new_tokens = encode_prompt_tokens(&self.tokenizer, self.family, &new_prompt)?;
                     validate_completion_budget(new_tokens.len(), max_tokens, limit)?;
+                    admission.check(new_tokens.len(), max_tokens as usize)?;
                     check()?;
                     let forwarded =
                         with_interrupt(check, |guard| model.resume_prompt(&new_tokens, guard))?;
@@ -2733,6 +3085,9 @@ impl CandleBackend {
                 ),
             });
         }
+        // The declared window is not an admission limit on its own: it is what
+        // the artifact advertises, not what fits with the weights resident.
+        self.admit_context_reclaiming(prompt_tokens.len(), max_tokens as usize)?;
 
         // Prefill: process all prompt tokens at once.
         let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
@@ -3279,6 +3634,9 @@ impl CandleBackend {
                 ),
             });
         }
+        // Prefill sizes the cache to the prompt; what the caller then generates
+        // is gated where the generation limit is known.
+        self.admit_context_reclaiming(prompt_tokens.len(), 0)?;
 
         let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
             .map_err(|e| NluError::LlmGenerationFailed {
@@ -4267,6 +4625,117 @@ Some trailing text."#;
     }
 }
 
+
+/// What the device can hold, captured before any of a request is allocated.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, Copy)]
+struct ContextAdmission {
+    /// `None` when the device cannot report memory, in which case the gate
+    /// stands down rather than inventing a limit.
+    fits_tokens: Option<usize>,
+    declared_window: usize,
+    /// Total device cost of a token, KV plus prefill overhead.
+    per_token_bytes: usize,
+    /// The KV share of it, reported so the two are never confused again.
+    kv_bytes_per_token: usize,
+    available_bytes: usize,
+    headroom_bytes: usize,
+}
+
+#[cfg(feature = "candle-backend")]
+impl ContextAdmission {
+    /// Reject a request that cannot fit, before any of it is allocated.
+    ///
+    /// Checked against prompt plus the tokens the caller intends to generate,
+    /// since the cache grows through decode: a prompt that just fits can still
+    /// run the device out part way through its reply.
+    fn check(self, prompt_tokens: usize, max_new_tokens: usize) -> NluResult<()> {
+        let requested = prompt_tokens.saturating_add(max_new_tokens);
+        let Some(fits_tokens) = self.fits_tokens else {
+            return Ok(());
+        };
+        if requested <= fits_tokens {
+            return Ok(());
+        }
+        Err(NluError::ContextExceedsDeviceMemory {
+            requested,
+            declared_window: self.declared_window,
+            fits_tokens,
+            per_token_bytes: self.per_token_bytes,
+            kv_bytes_per_token: self.kv_bytes_per_token,
+            needed_bytes: self.per_token_bytes.saturating_mul(requested),
+            available_bytes: self.available_bytes,
+            headroom_bytes: self.headroom_bytes,
+        })
+    }
+}
+
+/// Live device memory in bytes, and where the figure came from.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct DeviceMemory {
+    pub free: usize,
+    pub total: usize,
+    /// Named so a report says which query produced it rather than implying all
+    /// devices answer the same way.
+    pub source: &'static str,
+}
+
+/// Reserve held back from the KV budget for activations, logits and workspace.
+///
+/// Prefill allocates intermediates proportional to the prompt, so spending every
+/// free byte on cache would fail inside the forward pass instead of at the gate.
+/// Two gibibytes by default, overridable because the right reserve depends on
+/// batch and prompt shape and no single constant is right for all of them.
+#[cfg(feature = "candle-backend")]
+/// Total device cost of a context token as a multiple of its KV.
+///
+/// Measured once, on the pinned Qwen3.8 artifact on a 24 GiB card: 547.5 KiB
+/// per token against 128 KiB of KV. Not derived from the architecture, so a
+/// different model or device needs its own figure via the environment override.
+#[cfg(feature = "candle-backend")]
+const DEFAULT_CONTEXT_COST_MULTIPLIER: f64 = 4.5;
+
+fn kv_headroom_bytes() -> usize {
+    const DEFAULT: usize = 2 * 1024 * 1024 * 1024;
+    std::env::var("AKH_CANDLE_KV_HEADROOM_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT)
+}
+
+/// Free and total VRAM from the AMD kernel driver's sysfs counters.
+///
+/// Used where the graphics API has no free-memory query. Returns `None` on any
+/// other vendor or if the counters are absent, rather than guessing.
+#[cfg(all(feature = "candle-backend", feature = "vulkan"))]
+fn amd_sysfs_memory() -> Option<DeviceMemory> {
+    let read = |card: &std::path::Path, name: &str| -> Option<usize> {
+        std::fs::read_to_string(card.join("device").join(name))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    for entry in std::fs::read_dir("/sys/class/drm").ok()?.flatten() {
+        let path = entry.path();
+        let Some(total) = read(&path, "mem_info_vram_total") else {
+            continue;
+        };
+        let Some(used) = read(&path, "mem_info_vram_used") else {
+            continue;
+        };
+        if total == 0 {
+            continue;
+        }
+        return Some(DeviceMemory {
+            free: total.saturating_sub(used),
+            total,
+            source: "amdgpu sysfs mem_info_vram",
+        });
+    }
+    None
+}
 
 /// What the live compressed KV pages occupy, summed over attention layers.
 ///

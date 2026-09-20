@@ -1,0 +1,17 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== chunk=128 ===
+{"decode_seconds":1.645013372,"decode_steps_including_eos":7,"decode_steps_per_second":4.25528455825829,"finish":"Length","phase":"generation","prompt_tokens":10417,"round":0,"seconds_including_prefill":273.059275753,"text":"<elided>","time_to_first_token_seconds":271.414007697,"tokens":8}
+Error: ContextExceedsDeviceMemory { requested: 10425, declared_window: 262144, fits_tokens: 910, per_token_bytes: 589824, kv_bytes_per_token: 131072, needed_bytes: 6148915200, available_bytes: 2684354560, headroom_bytes: 2147483648 }
+=== end chunk=128 rc=0 ===
+=== chunk=256 ===
+{"decode_seconds":1.642186183,"decode_steps_including_eos":7,"decode_steps_per_second":4.262610459437777,"finish":"Length","phase":"generation","prompt_tokens":10417,"round":0,"seconds_including_prefill":206.906399359,"text":"<elided>","time_to_first_token_seconds":205.263919361,"tokens":8}
+Error: ContextExceedsDeviceMemory { requested: 10425, declared_window: 262144, fits_tokens: 910, per_token_bytes: 589824, kv_bytes_per_token: 131072, needed_bytes: 6148915200, available_bytes: 2684354560, headroom_bytes: 2147483648 }
+=== end chunk=256 rc=0 ===
+=== chunk=512 ===
+Error: LlmGenerationFailed { reason: "session generation: hipMalloc(452984832) failed (rc=2)" }
+=== end chunk=512 rc=0 ===
+=== chunk=1024 ===
+Error: LlmGenerationFailed { reason: "session generation: hipMalloc(503316480) failed (rc=2)" }
+=== end chunk=1024 rc=0 ===
+
+[exited with code 0]

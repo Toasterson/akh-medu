@@ -1,0 +1,7 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+BUILT
+{"context_length":262144,"device_memory":{"free":7420080128,"source":"amdgpu sysfs mem_info_vram","total":25753026560},"family":"Qwen35","kv_bytes_per_token":131072,"memory_bound_context_limit":40226,"phase":"loaded","projected_kv_bytes_at_full_context":34359738368,"seconds":32.637010902}
+{"decode_seconds":2.177920083,"decode_steps_including_eos":23,"decode_steps_per_second":10.560534419756301,"finish":"Length","phase":"generation","prompt_tokens":15,"round":0,"seconds_including_prefill":3.612111913,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it","time_to_first_token_seconds":1.433581204,"tokens":24}
+{"decode_seconds":1.683437492,"decode_steps_including_eos":23,"decode_steps_per_second":13.662520948535462,"finish":"Length","phase":"generation","prompt_tokens":15,"round":1,"seconds_including_prefill":2.591840799,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it","time_to_first_token_seconds":0.907903839,"tokens":24}
+
+[exited with code 0]

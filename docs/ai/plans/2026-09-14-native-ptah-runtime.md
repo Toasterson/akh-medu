@@ -8,6 +8,58 @@ model artifacts, unrelated providers, session history, and rollback evidence.
 
 ## Latest local checkpoint
 
+- **Item 6: compressed KV put behind a task-level gate** (2026-09-20). It clears
+  no numerical parity gate (worst cosine 0.99788 at 8 bits) and is off by
+  default; the user's rule for enabling it is a canary pass at that width.
+  `validate_kv_gate` enforces exactly that, fail-closed and pinned like runtime
+  conformance: if the process is configured for compression at N bits, a
+  `KvGateEvidence` document must record `passed: true` and pin bits, model
+  sha256, tokenizer sha256 and device to this load, or the model refuses to
+  load. KV off needs no evidence. Eight GPU-free unit tests cover stand-down,
+  refuse-without-evidence, admit-matching, and reject on wider width / failed
+  run / wrong model / wrong device. Emitting the evidence (canary at a width plus
+  a recorder) is the operational follow-on; until one exists, compression stays
+  off. See [KV task gate](../research/2026-09-20-kv-task-gate.md).
+
+
+- **Item 5 transport: a brokered read's image bytes reach the projector**
+  (2026-09-20). The model side was complete and semantically validated; the gap
+  was routing. A bytes-returning workspace read already exists (the executor
+  returns base64 behind `encoding=base64`), so no wire change was needed. The
+  native runtime now detects a single `tool` message whose result carries a
+  decodable PNG/JPEG (base64 in `data.content`, sniffed by signature), swaps the
+  vision placeholder in for its bytes, renders, and routes to
+  `generate_with_image` instead of folding base64 into the text prompt. Zero or
+  more than one image falls through to the text path (the single-image entry
+  point cannot place several). Image turns skip neural-span recall. Detection,
+  decode, single-vs-multi and signature recognition are unit-tested (4 tests);
+  `generate_with_image` itself is already GPU-validated (11/11 semantic). The
+  remaining end-to-end - a daemon turn where the model reads an image tool
+  result and describes it - is deferred to a clean shared-GPU window and a
+  harness that exposes an image-returning read. See
+  [ContextManager join](../research/2026-09-20-contextmanager-join.md) for the
+  transport decision context.
+
+
+- **Item 4: ContextManager materialized; akhrtd defers per-turn assembly to the
+  core** (2026-09-20). The seam existed but nothing drove it - history in
+  akhrtd's `Conversation`, policy in the core's `SelectingManager`, and no party
+  holding both. Per the user's topology choice ("give akhrtd a core client"),
+  the runtime now initiates assembly against its own conversation and the
+  session daemon forwards to the akh's core. Reading the code showed the literal
+  reading would give akhrtd a core credential and the akh id (core's
+  `/v1/context` is per-akh, authorized); instead akhrtd calls the session
+  daemon's new `/v1/runtime/context`, which forwards with the akh and auth it
+  already holds. No trust boundary widened, no new config field: `Host::
+  assemble_context` defaults to `None` (fail-soft to local windowing), so a
+  session with no core is unchanged. Five-daemon canary passed: core assembled
+  all five turns, **evicted 4 messages at the core**, the runtime verified with
+  **0 drops on top**, recall returned `4317`. The canary's eviction assertion
+  moved to the core locus (replaced, not weakened) and gained two checks. See
+  [ContextManager join](../research/2026-09-20-contextmanager-join.md).
+
+
+
 Updated 2026-09-19. The entries below supersede the 2026-09-14 checkpoint notes;
 the chronological evidence further down is retained as written.
 
@@ -216,6 +268,316 @@ the chronological evidence further down is retained as written.
   a knife-edge near a token boundary, not a quality difference. Greedy agreement
   there reported "nothing changed" on one device and "something changed" on the
   other from the same codes: not merely a weak signal but a misleading one.
+
+- **Long-context gate: the runtime advertised 262,144 tokens and can serve
+  48,672** (2026-09-19). The only admission check was against the GGUF's declared
+  window, which is what the artifact supports, not what the card holds. At 128 KiB
+  of KV per token the declared window needs 32 GiB on a 23.98 GiB card that
+  already holds 16.8 GB of weights, so a request could pass every check and then
+  fail on an allocation part way through prefill.
+
+  `memory_bound_context_limit()` now reports what fits: **48,672** tokens on HIP
+  (`hipMemGetInfo`) and **40,226** on Vulkan (`amdgpu` sysfs, since wgpu has no
+  portable free-memory query). The two differ by ~1.1 GB because sysfs is
+  card-wide and includes the compositor; that is the more conservative figure and
+  the right bias for a gate. A device that can report neither stands the gate
+  down rather than inventing a limit. Verified in both directions - normal
+  requests admit at unchanged decode throughput, oversized ones exit 1 with zero
+  generation before anything is allocated. The miette diagnostic names the limit,
+  the per-token cost, the adjustable reserve and every remedy, including
+  compressed KV **with its 0.9999 caveat attached** so nothing recommends it on
+  the strength of a help string.
+
+  **My first verification of this was hollow**: the rejection case looked like a
+  pass because my grep excluded the generation lines, while generation had in
+  fact completed with exit 0. The gate was on `generate_inner` and `prefill`,
+  neither of which serves completions. Absence of expected output is not evidence
+  of rejection. All four admission points are now covered.
+
+- **The soak falsified that gate: KV is 23% of what a token costs**
+  (2026-09-19). The gate above **admitted requests that then failed on
+  allocation** - the exact failure it was built to prevent. A 20,833-token prompt
+  was admitted and died on `hipMalloc(235929600)`; so was a ~41,000-token one.
+  48k and 64k were refused correctly, and every earlier test used 15-token
+  prompts, which pass under both the wrong and the right limit.
+
+  A 10,417-token request consumes **5.44 GiB**, of which KV is 1.30 GiB:
+  **547.5 KiB per token against 128 KiB of KV, a factor of 4.28**. Attention
+  scores scale with chunk x positions, so the overhead grows with context and no
+  fixed reserve can absorb it. The gate now sizes on total cost, with an
+  **empirical single-measurement** multiplier of 4.5 that admits the largest
+  request measured to work and refuses the smallest measured to fail;
+  `AKH_CANDLE_CONTEXT_COST_MULTIPLIER` overrides it for another model or card.
+  Verified both ways: 20,833 now refused with nothing allocated, 10,417 still
+  admitted and completes.
+
+  Serviceable context, as the measurement got honest: declared **262,144** ->
+  KV-only gate **48,672** -> measured **10,816**. Four percent of the advertised
+  window.
+
+  **Unresolved.** The gate refuses a repeat of a request that just succeeded:
+  after the 10,417-token run free memory reads 2.69 GiB and the limit collapses
+  to 913, because `hipMemGetInfo` excludes the allocator's reusable cache.
+  `release_cached_memory` is restricted to a serialized unload boundary, so
+  calling it here would trade a wrong refusal for a correctness risk. Needs a
+  pool-aware free figure or a supported reclaim point.
+
+  **Performance, unbidden:** prefill of 10,417 tokens takes 282-298 s, about 35
+  tokens/s against 0.86 s for 15 tokens. Long context is unusable on time well
+  before memory becomes the binding constraint. Item 7, not addressed. See
+  [long-context gate](../research/2026-09-19-long-context-gate.md).
+
+- **Item 7: chunk 256 is 1.71x faster; the explanation I gave was wrong**
+  (2026-09-19). **Retracted:** the earlier entry's 1.32x, its 49% share and its
+  1.95x ceiling came from single runs against a baseline that spans 17%
+  (271-317 s). Withdrawn - the same rule broken as in the Q8 GEMV retraction.
+
+  Repeated interleaved, three alternating pairs at ~5,200 tokens: chunk 128
+  **171.7 s** (sd 9.2), chunk 256 **100.6 s** (sd 3.5) - **1.708x, clean 3/3**.
+  The single run under-reported it.
+
+  **The mechanism was falsified by experiment.** I attributed the win to avoiding
+  the repeated `repeat_kv` expansion, then removed the expansion directly
+  (`AKH_QWEN35_GROUPED_ATTENTION=1`, folding the GQA repeat into the row
+  dimension). It is numerically exact - equal to `repeat_kv` element for element
+  on CPU, cosine **1.0000000000** on the full model - and **10.1% slower**
+  (184.8 s against 167.8 s, clean 3/3). Dropping the batch dimension from query
+  heads to kv-groups costs more GEMM parallelism than the copy saves. Re-running
+  Amdahl on the better data would say 83% and 5.84x; **neither is published**,
+  being the same inference whose premise is now disproved.
+
+  **The default stays 128.** Peak VRAM polled from the driver during a
+  10,417-token prefill: chunk 128 **23.17 GiB (96.6%)**, chunk 256 **23.61 GiB
+  (98.4%)** - 388 MiB spare on a 23.98 GiB card, at a context the gate admits,
+  with the cap ~400 tokens further out. The 1.71x is real and not safely
+  available at the limit; taking it needs a lower cap or more headroom, a trade
+  to decide rather than default into. That peak also **corroborates the memory
+  gate**: 96.6% full at 10,417 tokens against a 10,816 cap puts the 4.5
+  multiplier about right. See
+  [prefill cost](../research/2026-09-19-prefill-cost.md).
+
+- **Item 5: the vision projector agrees across CPU, HIP and Vulkan**
+  (2026-09-19). Vision was recorded as blocked on an external consumer of this
+  GGUF. That is true of **semantic** validation and was too broad: cross-device
+  agreement uses the project's own 0.9999 cosine gate and needs nothing external.
+  All three backends agree at **cosine 1.0000000000** over the full 20,480-element
+  projection, worst relative L2 4.05e-06. That covers the substitutions the tower
+  makes because the device backends lack the ops: patch embedding as
+  unfold+matmul instead of `conv2d`, and dispatched `softmax_last_dim` and `gelu`.
+
+  **Summary statistics are not the test.** Mean, standard deviation and L2 norm
+  are invariant under permutation and sign flip, so the probe now dumps the full
+  projection and the gate compares elementwise. Confirmed the gate can fail: a
+  dump with two elements swapped - identical on all three summary statistics -
+  scores 0.9998978914 and is rejected.
+
+  Two fixes this needed: the probe **did not build under HIP** (`new_vulkan` was
+  not cfg-gated), and it had no way to emit more than a summary.
+  `scripts/session-platform/compare-f32-dumps.py` makes the gate repeatable.
+
+  **Still open:** semantic validation - nothing here shows this projector computes
+  what Qwen3-VL's does, only that the backends agree with each other; a misread
+  resize policy or mrope split would be wrong identically everywhere and pass.
+  See [vision device gate](../research/2026-09-19-vision-device-gate.md).
+
+- **Item 5: image rope positions are threaded, and the external reference exists
+  after all** (2026-09-19). `mrope_pair_positions` was called **only from
+  tests** - dead in the runtime. `PartialRope::apply` now takes `RopePositions`:
+  `Contiguous` for text, or a `(t, h, w)` triple per token gathered from the rope
+  table with `index_select`, which both backends already have. A degenerate
+  triple (`t == h == w`) reproduces the contiguous path **exactly**, a real image
+  triple must not, and both are asserted - the second is what catches inert
+  sections placing image tokens as text. Mismatched counts and an artifact with
+  no usable split both **refuse** rather than fall back to text positions.
+
+  The real model's text path is **bit-identical** across the change: cosine
+  1.0000000000, relative L2 and worst absolute both exactly 0.
+
+  **Correction, twice stated:** "no external consumer is installed" was wrong.
+  No transformers, torch or llama.cpp - but **ollama is installed** with this
+  exact model as `ptah-qwen3.8`, the source of the pinned blob. Its server is
+  down; starting it changes machine state and contends for the GPU, so it is
+  **flagged for a decision** rather than started. Semantic validation is
+  therefore available, not absent.
+
+  A first parity check reported cosine 0.4309 and failed - the two dumps came
+  from **different prompts**. A gate is only a gate when both sides see identical
+  input. Same fault as the morning's recorder-versus-direct comparison, opposite
+  direction: it would have rejected correct work.
+
+- **Item 5: the image path exists at the model level** (2026-09-19). Threading
+  positions was not enough - image rows come from the projector, not any token
+  id, so the forward had to accept embeddings. `embed_tokens` exposes the table,
+  `prefill_embedded` takes a spliced sequence plus a `(t, h, w)` triple per
+  token, and `rope: Option<&[[usize; 3]]>` is threaded through `Layer`, `Mixer`
+  and `FullAttention`. `None` is text, which is every pre-existing caller; image
+  layout is never inferred from the token stream.
+
+  Tested on the property that **the embedded path contains the text path**:
+  returning exactly what the table would have given, with degenerate triples,
+  reproduces the token path's logits exactly. Plus three refusals - wrong row
+  count, wrong triple count, and altered embeddings must change the output, or
+  supplied embeddings are ignored and images silently do nothing.
+
+  That test caught an **over-strict guard** of mine: refusing image positions
+  whenever sections were undeclared was too broad, since `t == h == w` needs no
+  split. It now refuses only a genuine image layout on an artifact that cannot
+  describe one. The refactor touched every layer signature, so the 27B model was
+  re-checked: text output **bit-identical**, relative L2 and worst absolute 0.
+
+- **Item 5: grid-derived positions, composed end to end** (2026-09-19).
+  `nlu::vision_positions` turns prompt shape into triples: text advances all
+  three sections together, an image shares one temporal index and spreads over
+  height and width by grid cell. The point worth stating is the advance - an
+  image costs **`max(rows, cols)` position slots, not its token count** (a 16x16
+  grid is 256 tokens and 16 slots). Advancing by token count would place
+  everything after the image too far away, and that failure is invisible: fluent
+  output, wrong answer. Asserted directly, along with a 1x1 image being
+  indistinguishable from one text token.
+
+  The end-to-end test composes grid -> triples -> spliced rows -> forward and
+  checks length agreement, finite logits and refusal on a missing triple. It
+  **does not** assert that image rows change the output, because the tiny
+  fixture's mixer weights are zero and every path yields zero logits; it asserts
+  that degeneracy instead, so the fixture gaining real weights fails the test and
+  demands the stronger assertion. The fixture also gained a rope split, without
+  which it could not reach the image path; text never consults it.
+
+  **Still not a finished feature:** nothing decodes an image file or reserves
+  placeholders during tokenization. Geometry, positions, projector and forward
+  all exist and compose; the front end that turns a user's image into that call
+  is what remains.
+
+- **Item 5: the front end exists and the first image exposed a tower fault**
+  (2026-09-19). `generate_with_image` composes decode -> resize -> normalize ->
+  projector -> placeholder expansion -> splice -> positioned prefill -> decode.
+  The one piece that was missing in the model: **decode after an image must
+  continue from the rope cursor, not the cache length** (7 tokens, cursor at 6),
+  and `forward_token` needs a tracked text prompt the embedded path never sets.
+  The model now carries `rope_cursor`, asserted in a unit test. Text path
+  **bit-identical** on the real model across all of it, decode unchanged.
+
+  First image through: **right colours, wrong shapes.** Four synthetic images,
+  same colours: vertical and horizontal stripes described correctly; a red
+  square with a blue bar described as "pixelated, fragmented, diagonal blocks".
+  Every edge sits on a patch boundary so no flatten error can scramble content;
+  what is lost is relative position between patches. **The vendored tower has no
+  2D rotary embedding** - only the absolute table - while llama.cpp's `qwen3vl`
+  graph applies `ggml_rope_multi` in vision mode to q and k in every block. The
+  GGUF declares no rope key because llama.cpp hard-codes it. The cross-device
+  gate cannot see this: all three backends compute the same wrong function. Own
+  slice next, with the four images as the before. See
+  [vision device gate](../research/2026-09-19-vision-device-gate.md).
+
+- **Item 5: 2D rotary added to every vision block; shapes now read correctly**
+  (2026-09-19). HF's `recomposition_frequencies` and ggml's vision rope mode
+  were read from source and agree - pair `i` with `i + head_dim/2`, height on
+  the first half of the pairs, width on the second, theta 10,000 - so the
+  GGUF's q/k rows are HF's and no permutation is needed. (llama.cpp's
+  `build_rope_2d` pairs differently; `qwen3vl` does not use it.) Row-major
+  patch order is kept: equivalent to the references' merge-window order under
+  permutation-equivariance. Narrow, neg, cat and broadcast multiplies only.
+
+  Pinned by five reference-free properties (identity at origin, norm
+  preservation, offset-only scores, distinct axes, table equal to an independent
+  HF re-implementation) and the real weights on CPU. Device gate with rope:
+  cpu/hip cosine 1.0000000000. Against the pre-rope output cosine **0.70** - not
+  inert. All four geometry images now correct in shape, orientation and bar
+  side; the original smoke too. Residual: a horizontally-centred square is
+  called "upper right" three times - "upper" right, "right" wrong, no axis
+  mirrored. Unexplained, recorded. 3,460 tests pass.
+
+- **Item 5: the runtime can take an image; the daemons refuse one, by design**
+  (2026-09-19). With the model side complete, the remaining question was
+  routing. `TurnInput` already carries `artifacts: Vec<ArtifactRef>` with a
+  `media_type`, so the wire needs no new field - but the session daemon refuses
+  any artifact at submission (a test pins the refusal so nothing is silently
+  dropped) and the native runtime refuses again at job validation. akhrtd has
+  **no filesystem access to workspaces**: the fixture's workspace root is
+  `/remote-only`, and file reads are brokered tools returning text.
+  `verify_artifact` pins the model files, not attachments.
+
+  So an image reaches the model one of three ways - inline bytes in the turn
+  input (simple; collides with the 1 MiB text limit), a bytes-returning brokered
+  read (fits the tool architecture), or workspace filesystem access for akhrtd
+  (a topology change). **A decision of the same family as item 4, not made
+  here.** Nothing was changed in either daemon.
+
+- **Item 5: the LLM-side M-RoPE was the Qwen2-VL layout; fixed, GPU
+  verification pending** (2026-09-19, end of day). The "upper right" residual
+  was not model bias: a red square placed left, centre or right was called
+  "right" all three times. Vertical relations had been right throughout, which
+  pointed at the column axis on the language-model side. `mrope_pair_positions`
+  laid the `[11, 11, 10]` sections out as contiguous blocks; Qwen3.5
+  **interleaves** them - height on pairs 1, 4, .., 31, width on 2, 5, .., 29,
+  temporal on the rest (transformers `qwen3_5`, llama.cpp `IMROPE` for
+  `LLM_ARCH_QWEN35`). Only image tokens take that path, which is why every text
+  gate stayed bit-identical. Rewritten with the expected layout written out
+  literally in the test.
+
+  **Verified on the GPU 2026-09-20.** Placement: left -> "upper-left area",
+  centre -> "centered", right -> "upper-right area", where all three had been
+  "right". The bar-bottom image, previously "upper right quadrant", is now
+  "centered in the upper portion". Stripes unchanged and correct. The residual
+  is closed: it was the section layout, not model bias. Evidence in
+  `vision-e2e-20260919-hip-v1/placement-after-interleaved-mrope.log`.
+
+- **Item 5: semantic validation against the reference - 11 of 11 agree**
+  (2026-09-20). "Needs a go-ahead to start ollama" was over-classified: a
+  user-scoped `ollama serve` on the read-only system model store is a local
+  process, run serially and stopped afterwards, not a shared service. Its
+  `ptah-qwen3.8:stable` pins the exact model and projector blobs akhrtd loads.
+  Same eleven images, same instruction, greedy on both: every placement, bar
+  side, stripe orientation, count and relation agrees, and **both read "PTAH
+  412" from an image that says PTAH 42** - the identical misreading, which is
+  stronger evidence of the same computation than a shared correct answer. The
+  card was confirmed released (0.03 GiB) before ours ran. Behavioural only:
+  ollama exposes no hidden states. See
+  [vision device gate](../research/2026-09-19-vision-device-gate.md).
+
+- **Item 6: allocator-cache reclaim on the admission refuse path; GPU
+  verification pending** (2026-09-19, end of day). `release_cached_memory`'s
+  own preconditions make it safe at admission (default stream, no capture, a
+  device sync with nothing in flight), and it frees only the pool's free list.
+  The gate now reclaims and re-checks once when it would otherwise refuse, so
+  cached blocks become driver-free memory any size can use - correct, where
+  adding the cached total to the free figure would over-admit on fragmentation.
+  Vulkan has no pool and is unchanged.
+
+  **Verified on the GPU 2026-09-20.** Same 10,417-token prompt, two rounds.
+  Round 0 admitted and completed; round 1 - refused at a 913-token limit
+  before the fix - logged `admitted after reclaiming the allocator cache`,
+  **5.33 GB released, limit 910 -> 10,844**, and completed. After it the cache
+  had refilled and the raw limit read 913 again, which is the intended shape:
+  the reclaim runs only on the refuse path, so the cache keeps its value until
+  a request actually needs the memory. A first rerun overshot the prompt
+  (13,017 tokens) and was correctly refused before anything ran; that log is
+  kept too, since it shows the refuse-path reclaim firing on a request that
+  still does not fit. Evidence in `ctxsoak-20260919-hip-v1/reclaim-verification-passed.log`.
+
+- **Item 4: the seam had a silent fallback; the topology fork is confirmed real**
+  (2026-09-19). `context_budgeted` existed in exactly one place in the tree -
+  `native_window.rs` and its own tests. **The core never emitted it.** So once
+  the topology lands and messages flow, the core would assemble, and the runtime
+  would read `core_budgeted == false` and run its own selector over a list the
+  core had already decided: two context policies disagreeing, silently, with the
+  turn still succeeding on different context than the core chose.
+
+  `assemble_context` now marks every message it returns, and strips any inbound
+  marker first so a flag echoed back in history cannot describe an assembly that
+  did not happen. The constant moved to `akh-session-types` as
+  `CONTEXT_BUDGETED` and both crates use it - as two string literals, a change
+  on one side would not fail to compile, it would quietly restore the double
+  eviction. Four tests cover it on the core side, six on the runtime side.
+
+  **The fork is not resolvable by reading the code.** `RuntimeJobRequest` carries
+  `input`, `instructions` and `tools` and has **no message array**: akhsessd
+  holds turns, not a rendered conversation, while the message array is built in
+  `internal.rs` in the agent loop, which has no core client. No party holds both
+  the conversation and a line to the core. Either the agent loop gains a core
+  client or the conversation moves into the session record - **a user decision**.
+  Everything above is required under both. See
+  [context seam marker](../research/2026-09-19-context-seam-marker.md).
 
   Three corrections this produced. **The byte layout never ran on Vulkan at
   all**: `to_dtype` had no `U8 -> U32` arm, so the decode aborted the first time

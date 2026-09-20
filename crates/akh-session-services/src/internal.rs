@@ -205,8 +205,37 @@ fn run_loop(
     let tools:Vec<Value> = request.tools.iter().map(|tool| json!({"type":"function","function":{"name":tool.name,"description":tool.description,"parameters":tool.input_schema}})).collect();
     for iteration in 0..max_iterations {
         check(cancel, deadline)?;
+        // Defer this turn's context assembly to the akh's cognitive core when it
+        // has one: the runtime holds the conversation, the core decides which of
+        // it survives to budget. `None` means no core is reachable and the
+        // native leg windows locally, exactly as before. Only the native leg has
+        // a declared window to budget against.
+        let assembled = match &profile.native_candle {
+            Some(candle) => host
+                .assemble_context(
+                    &conversation.messages,
+                    candle.max_context_tokens,
+                    candle.max_output_tokens as usize,
+                )
+                .map_err(Fault::invalid)?,
+            None => None,
+        };
+        if let Some(assembled) = &assembled {
+            // Eviction now lives in the core, not the runtime; surface the
+            // core's decision on the runtime's own log so acceptance can see
+            // where context was budgeted. Targeted at the native span so the
+            // canary's log filter captures it without a broader level.
+            tracing::debug!(
+                target: "akh_session_services::internal::native",
+                core_dropped_messages = assembled.dropped_messages,
+                "core assembled this turn's context"
+            );
+        }
         let mut messages = vec![json!({"role":"system","content":request.instructions})];
-        messages.extend(conversation.messages.iter().cloned());
+        match &assembled {
+            Some(assembled) => messages.extend(assembled.messages.iter().cloned()),
+            None => messages.extend(conversation.messages.iter().cloned()),
+        }
         let mut body = json!({"model":request.binding.model,"messages":messages,"stream":true,"max_tokens":max_output_tokens});
         if !tools.is_empty() {
             body["tools"] = json!(tools);
@@ -626,6 +655,7 @@ mod tests {
             max_context_tokens: 4096,
             max_iterations: 4,
             max_output_tokens: 512,
+            kv_quant_evidence: None,
         });
         assert!(
             validate(&profile, &request)
@@ -789,6 +819,7 @@ mod tests {
             max_context_tokens: 96,
             max_iterations: 4,
             max_output_tokens: 4,
+            kv_quant_evidence: None,
         }
     }
 
@@ -978,6 +1009,7 @@ mod tests {
             max_context_tokens: 4096,
             max_iterations: 4,
             max_output_tokens,
+            kv_quant_evidence: None,
         }
     }
     /// Run serially with explicit AKH_NATIVE_MODEL, AKH_NATIVE_TOKENIZER and

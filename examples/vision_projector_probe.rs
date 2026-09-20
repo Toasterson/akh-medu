@@ -20,13 +20,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         /// Square input side in pixels. Must be a multiple of patch x merge.
         #[arg(long, default_value_t = 64)]
         side: usize,
+        /// Write the full projection as little-endian f32 for cross-device
+        /// comparison. Summary statistics can agree while the vectors do not.
+        #[arg(long)]
+        dump: Option<PathBuf>,
     }
     let args = Args::parse();
+    // Each device arm needs its backend compiled in; naming one that is not
+    // says so, rather than failing to build the whole example.
     let placement = match args.device.as_str() {
         "cpu" => Device::Cpu,
+        #[cfg(feature = "hip")]
         "hip" => Device::new_cuda(0)?,
+        #[cfg(feature = "vulkan")]
         "vulkan" => Device::new_vulkan(0)?,
-        other => return Err(format!("device must be cpu, hip or vulkan, got {other}").into()),
+        other => {
+            return Err(format!(
+                "device {other} is unavailable in this build; rebuild with the matching feature"
+            )
+            .into())
+        }
     };
 
     let projector = akh_medu::nlu::projector_artifact::locate(&args.model)
@@ -77,6 +90,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "head": values.iter().take(8).collect::<Vec<_>>(),
         })
     );
+    if let Some(path) = args.dump.as_ref() {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for value in &values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(path, bytes)?;
+        eprintln!("wrote {} values to {}", values.len(), path.display());
+    }
     Ok(())
 }
 

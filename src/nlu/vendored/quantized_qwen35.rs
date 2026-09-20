@@ -113,6 +113,14 @@ pub(crate) struct KvQuantization {
     recent: usize,
 }
 
+/// The process-configured lossy-KV width and exact window, if enabled.
+///
+/// Exposed so the daemon can refuse to run with compression enabled unless a
+/// canary-pass evidence document authorizes exactly this width.
+pub(crate) fn configured_kv_quant() -> Option<(u8, usize)> {
+    kv_quantization().map(|q| (q.bits, q.recent))
+}
+
 fn kv_quantization() -> Option<KvQuantization> {
     use std::sync::OnceLock;
     static SETTINGS: OnceLock<Option<KvQuantization>> = OnceLock::new();
@@ -228,16 +236,22 @@ impl Mlp {
     }
 }
 
-/// Position index for every rotary pair under a multimodal RoPE split.
+/// Which of `(t, h, w)` each rotary pair of one token takes.
 ///
-/// Qwen-VL gives each token three indices — temporal, height and width — and
-/// assigns a contiguous run of rotary pairs to each. `sections` lists those runs
-/// in pairs. Any pair beyond the declared sections keeps the temporal index,
-/// which is what a text-only model would have used throughout.
+/// Qwen3-VL and Qwen3.5 **interleave** the sections: pair `k` takes the height
+/// index when `k % 3 == 1` and `k < 3 * sections[1]`, the width index when
+/// `k % 3 == 2` and `k < 3 * sections[2]`, and the temporal index otherwise.
+/// With this artifact's `[11, 11, 10]` over 32 pairs that is height on
+/// 1, 4, .., 31, width on 2, 5, .., 29, temporal on the rest. Both references
+/// say so - transformers' `recomposition_frequencies` for `qwen3_5`
+/// (`idx = slice(offset, section * 3, 3)`) and llama.cpp's
+/// `LLAMA_ROPE_TYPE_IMROPE` for `LLM_ARCH_QWEN35`.
 ///
-/// With `t == h == w`, every pair gets the same index and the result is
-/// indistinguishable from ordinary 1-D RoPE. That identity is why the current
-/// text-only forward pass is correct while ignoring the sections entirely.
+/// The first version of this laid the sections out as contiguous blocks, the
+/// Qwen2-VL convention. Text never noticed - every pair of a text token shares
+/// one index - but every image token handed the model row and column in the
+/// wrong pairs, and a square placed left, centre or right was called "right"
+/// each time.
 pub(crate) fn mrope_pair_positions(
     sections: &[usize],
     pairs: usize,
@@ -245,21 +259,28 @@ pub(crate) fn mrope_pair_positions(
     h: usize,
     w: usize,
 ) -> Vec<usize> {
-    let mut out = Vec::with_capacity(pairs);
-    let indices = [t, h, w];
-    for (section, width) in sections.iter().enumerate() {
-        let index = indices.get(section).copied().unwrap_or(t);
-        for _ in 0..*width {
-            if out.len() == pairs {
-                return out;
-            }
-            out.push(index);
-        }
-    }
-    while out.len() < pairs {
-        out.push(t);
-    }
-    out
+    let section = |axis: usize| sections.get(axis).copied().unwrap_or(0);
+    (0..pairs)
+        .map(|pair| match pair % 3 {
+            1 if pair < 3 * section(1) => h,
+            2 if pair < 3 * section(2) => w,
+            _ => t,
+        })
+        .collect()
+}
+
+/// Which rope positions a forward pass uses.
+///
+/// Text advances one index per token and every rotary pair shares it. Image
+/// tokens do not: the temporal, height and width sections advance independently
+/// over the patch grid, so a token's pairs take different positions depending on
+/// which section they fall in.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RopePositions<'a> {
+    /// `seq_len` consecutive indices from this one, all pairs alike.
+    Contiguous(usize),
+    /// A `(temporal, height, width)` triple per token.
+    PerToken(&'a [[usize; 3]]),
 }
 
 #[derive(Debug, Clone)]
@@ -267,6 +288,10 @@ struct PartialRope {
     cos: Tensor,
     sin: Tensor,
     width: usize,
+    /// Rotary pairs per section, empty when the artifact does not declare a
+    /// usable split. Empty means image positions cannot be threaded, which is a
+    /// refusal rather than a silent fallback to text positions.
+    sections: Vec<usize>,
 }
 
 impl PartialRope {
@@ -288,15 +313,72 @@ impl PartialRope {
             cos: angles.cos()?,
             sin: angles.sin()?,
             width: config.rope_dim,
+            sections: config.rope_sections.clone(),
         })
     }
 
-    fn apply(&self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+    /// Gather one table row per token, each pair taking its section's index.
+    ///
+    /// `index_select` over the flattened table, which both device backends
+    /// implement, so this needs no new kernel. Text never reaches it.
+    fn gathered(&self, positions: &[[usize; 3]], pairs: usize) -> Result<(Tensor, Tensor)> {
+        // A triple with t == h == w places a token wherever the split falls, so
+        // it needs no split. Refuse only a genuine image layout on an artifact
+        // that cannot describe one, which is the case that would silently place
+        // image tokens as text.
+        if self.sections.is_empty()
+            && positions
+                .iter()
+                .any(|[t, h, w]| t != h || h != w)
+        {
+            candle_core::bail!(
+                "this artifact declares no usable rope dimension sections, so image \
+                 positions cannot be threaded; text positions would silently mis-place them"
+            )
+        }
+        let rows = self.cos.dim(0)?;
+        let mut ids = Vec::with_capacity(positions.len() * pairs);
+        for [t, h, w] in positions {
+            for (pair, index) in mrope_pair_positions(&self.sections, pairs, *t, *h, *w)
+                .into_iter()
+                .enumerate()
+            {
+                if index >= rows {
+                    candle_core::bail!("rope position {index} beyond the {rows}-row table")
+                }
+                ids.push((index * pairs + pair) as u32);
+            }
+        }
+        let device = self.cos.device();
+        let ids = Tensor::from_vec(ids, (positions.len() * pairs,), device)?;
+        let take = |table: &Tensor| -> Result<Tensor> {
+            table
+                .flatten_all()?
+                .index_select(&ids, 0)?
+                .reshape((positions.len(), pairs))
+        };
+        Ok((take(&self.cos)?, take(&self.sin)?))
+    }
+
+    fn apply(&self, x: &Tensor, positions: RopePositions<'_>) -> Result<Tensor> {
         let seq_len = x.dim(2)?;
         let head_dim = x.dim(3)?;
         let rotated = x.narrow(3, 0, self.width)?.contiguous()?;
-        let cos = self.cos.narrow(0, index_pos, seq_len)?;
-        let sin = self.sin.narrow(0, index_pos, seq_len)?;
+        let (cos, sin) = match positions {
+            RopePositions::Contiguous(index_pos) => (
+                self.cos.narrow(0, index_pos, seq_len)?,
+                self.sin.narrow(0, index_pos, seq_len)?,
+            ),
+            RopePositions::PerToken(triples) => {
+                if triples.len() != seq_len {
+                    candle_core::bail!(
+                        "{} rope position triples for {seq_len} tokens",
+                        triples.len()
+                    )
+                }
+                self.gathered(triples, self.width / 2)?
+            }
+        };
         #[cfg(feature = "vulkan")]
         let primitive_rope = x.device().is_cuda() || x.device().is_vulkan();
         #[cfg(not(feature = "vulkan"))]
@@ -755,6 +837,56 @@ impl KvPages {
     }
 }
 
+/// Attend without materializing the GQA head expansion.
+///
+/// `repeat_kv` builds a full copy of K and V with every kv head repeated to
+/// query-head count, on every forward, in every attention layer. Folding the
+/// repeat into the row dimension instead - `(batch, kv_heads, ratio * seq, dim)`
+/// against `(batch, kv_heads, dim, positions)` - is the same arithmetic as a
+/// plain 4-D batched matmul, with nothing expanded.
+///
+/// The head ordering matches: `repeat_kv` emits head `kv * ratio + rep`, and
+/// reshaping the grouped rows back to `(batch, heads, seq, ...)` puts row
+/// `rep * seq + s` of group `kv` at exactly that head.
+///
+/// **Measured slower, and off for that reason.** It is numerically sound -
+/// exactly equal to `repeat_kv` on CPU, element for element, and cosine
+/// 1.0000000000 against the materializing path on the full model - but three
+/// interleaved pairs at ~5,200 tokens put it **10.1% slower**, 184.8 s against
+/// 167.8 s, with every materializing run beating every grouped run. Dropping the
+/// batch dimension from query heads to kv-groups appears to cost more GEMM
+/// parallelism than the avoided copy saves.
+///
+/// Kept because the result is counter-intuitive and will be proposed again: a
+/// flag and a measurement are cheaper than reimplementing it to rediscover this.
+fn grouped_attention_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("AKH_QWEN35_GROUPED_ATTENTION")
+            .map(|value| value == "1")
+            .unwrap_or(false)
+    })
+}
+
+/// Tokens forwarded per prefill step.
+///
+/// Each chunk re-expands the whole K and V cache through `repeat_kv` in every
+/// attention layer, so the expansion traffic scales with
+/// `(prompt / chunk) * positions`: halving the chunk count halves it. 128 was
+/// the standing value; `AKH_QWEN35_PREFILL_CHUNK` makes it measurable.
+fn prefill_chunk_size() -> usize {
+    use std::sync::OnceLock;
+    static CHUNK: OnceLock<usize> = OnceLock::new();
+    *CHUNK.get_or_init(|| {
+        std::env::var("AKH_QWEN35_PREFILL_CHUNK")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(128)
+    })
+}
+
 /// Fixed seed so a rotation is identical across every layer and restart.
 const KV_PAGE_SEED: u64 = 0x7EED_5EED;
 
@@ -780,6 +912,7 @@ impl FullAttention {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
+        rope: Option<&[[usize; 3]]>,
     ) -> Result<Tensor> {
         let (batch, seq_len, _) = x.dims3()?;
         let query_gate = self.query_gate.forward(x)?.reshape((
@@ -812,8 +945,14 @@ impl FullAttention {
             .reshape((batch, seq_len, self.kv_head_count, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let query = self.rope.apply(&query, index_pos)?.contiguous()?;
-        let key = self.rope.apply(&key, index_pos)?.contiguous()?;
+        // Image tokens carry their own (t, h, w); text advances one index per
+        // token. Absent triples mean text, never a guess at image placement.
+        let positions = match rope {
+            Some(triples) => RopePositions::PerToken(triples),
+            None => RopePositions::Contiguous(index_pos),
+        };
+        let query = self.rope.apply(&query, positions)?.contiguous()?;
+        let key = self.rope.apply(&key, positions)?.contiguous()?;
 
         let (key, value) = match state.as_ref() {
             Some(state) if index_pos > 0 => {
@@ -887,9 +1026,25 @@ impl FullAttention {
             }
         };
 
-        let key = repeat_kv(key, self.head_count / self.kv_head_count)?;
-        let value = repeat_kv(value, self.head_count / self.kv_head_count)?;
-        let scores = (query.matmul(&key.t()?)? / (self.head_dim as f64).sqrt())?;
+        let ratio = self.head_count / self.kv_head_count;
+        let grouped = grouped_attention_enabled() && ratio > 1;
+        // Grouped: fold the repeat into the row dimension so the expanded K and
+        // V are never built. Otherwise materialize them as before.
+        let (key, value, query) = if grouped {
+            (key, value, query.contiguous()?)
+        } else {
+            (repeat_kv(key, ratio)?, repeat_kv(value, ratio)?, query)
+        };
+        let key_positions = key.dim(2)?;
+        let scores = if grouped {
+            query
+                .reshape((batch, self.kv_head_count, ratio * seq_len, self.head_dim))?
+                .matmul(&key.t()?)?
+                .reshape((batch, self.head_count, seq_len, key_positions))?
+        } else {
+            query.matmul(&key.t()?)?
+        };
+        let scores = (scores / (self.head_dim as f64).sqrt())?;
         let scores = match mask {
             Some(mask) => {
                 let mask = mask.broadcast_as(scores.shape())?;
@@ -897,7 +1052,15 @@ impl FullAttention {
             }
             None => scores,
         };
-        let attended = softmax_last_dim(&scores)?.matmul(&value.contiguous()?)?;
+        let probabilities = softmax_last_dim(&scores)?;
+        let attended = if grouped {
+            probabilities
+                .reshape((batch, self.kv_head_count, ratio * seq_len, key_positions))?
+                .matmul(&value.contiguous()?)?
+                .reshape((batch, self.head_count, seq_len, self.head_dim))?
+        } else {
+            probabilities.matmul(&value.contiguous()?)?
+        };
         let attended = attended.transpose(1, 2)?;
         let attended = attended.broadcast_mul(&sigmoid(&gate)?)?;
         self.output
@@ -1086,10 +1249,11 @@ impl Mixer {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
+        rope: Option<&[[usize; 3]]>,
     ) -> Result<Tensor> {
         match (self, state) {
             (Self::Attention(attention), MixerState::Attention(state)) => {
-                attention.forward(state, x, mask, index_pos)
+                attention.forward(state, x, mask, index_pos, rope)
             }
             (Self::GatedDelta(gated_delta), MixerState::GatedDelta(state)) => {
                 gated_delta.forward(state, x, index_pos)
@@ -1121,10 +1285,11 @@ impl Layer {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
+        rope: Option<&[[usize; 3]]>,
     ) -> Result<Tensor> {
         let residual = x;
         let normalized = self.input_norm.forward(x)?;
-        let mixed = self.mixer.forward(state, &normalized, mask, index_pos)?;
+        let mixed = self.mixer.forward(state, &normalized, mask, index_pos, rope)?;
         let x = (residual + mixed)?;
         let mlp = self.mlp.forward(&self.post_attention_norm.forward(&x)?)?;
         x + mlp
@@ -1230,6 +1395,12 @@ pub(crate) struct InferenceSession {
     mask_cache: Option<((usize, usize), Tensor)>,
     checkpoint_owner: Arc<()>,
     text: Option<TextState>,
+    /// Rope index the next text token takes after an image prefill.
+    ///
+    /// An image spans fewer rope positions than it has tokens, so after one the
+    /// cache length and the rope position diverge. `None` means no image has
+    /// been forwarded and the two agree, which is every text session.
+    rope_cursor: Option<usize>,
 }
 
 /// Compatibility name used by Candle's family dispatch; not a second runner.
@@ -1846,12 +2017,51 @@ impl InferenceSession {
         let input =
             Tensor::new(&tokens[reused..], self.weights.norm.weight.device())?.unsqueeze(0)?;
         let collector = collector.filter(|collector| collector.span.start >= reused);
-        let (logits, _) = self.prefill_at_position(&input, reused, 128, check, collector)?;
+        let (logits, _) =
+            self.prefill_at_position(&input, reused, prefill_chunk_size(), check, collector)?;
         self.text = Some(TextState {
             tokens: tokens.to_vec(),
             logits: logits.clone(),
         });
         Ok((logits, reused))
+    }
+
+    /// Embed token ids through the model's own table.
+    ///
+    /// Exposed so a caller can build a mixed sequence - text rows from here,
+    /// image rows from the projector - and hand the whole thing back.
+    pub(crate) fn embed_tokens(&self, tokens: &Tensor) -> Result<Tensor> {
+        self.weights.embedding.forward(tokens)
+    }
+
+    /// Residual width, so a caller can check projector output before splicing.
+    pub(crate) fn embedding_width(&self) -> usize {
+        self.weights.hidden
+    }
+
+    /// Forward a sequence whose embeddings and rope positions are both supplied.
+    ///
+    /// This is the image path: `embedded` carries projector rows spliced among
+    /// text rows, and `positions` carries the `(t, h, w)` triple for every token,
+    /// so image tokens reach the rotary sections instead of being placed as text.
+    /// `tokens` is still required, for length and for the state bookkeeping that
+    /// the text path shares.
+    pub(crate) fn prefill_embedded(
+        &mut self,
+        tokens: &Tensor,
+        embedded: &Tensor,
+        positions: &[[usize; 3]],
+    ) -> Result<Tensor> {
+        let (_, seq_len) = tokens.dims2()?;
+        if positions.len() != seq_len {
+            candle_core::bail!(
+                "{} rope position triples for {seq_len} tokens",
+                positions.len()
+            )
+        }
+        let hidden =
+            self.run_hidden_states_positioned(tokens, 0, None, Some(positions), Some(embedded))?;
+        self.weights.output.forward(&hidden)
     }
 
     /// Start an independent empty session sharing this model's immutable weights.
@@ -1904,6 +2114,7 @@ impl InferenceSession {
             mask_cache: None,
             checkpoint_owner: Arc::new(()),
             text: None,
+            rope_cursor: None,
         }
     }
 
@@ -1978,6 +2189,7 @@ impl InferenceSession {
     fn reset(&mut self) {
         self.mask_cache = None;
         self.text = None;
+        self.rope_cursor = None;
         for state in &mut self.states {
             match state {
                 MixerState::Attention(state) => *state = None,
@@ -2030,6 +2242,22 @@ impl InferenceSession {
         index_pos: usize,
         mut collector: Option<&mut TapCollector>,
     ) -> Result<Tensor> {
+        self.run_hidden_states_positioned(tokens, index_pos, collector, None, None)
+    }
+
+    /// The same forward, with explicit rope positions for image tokens.
+    ///
+    /// `rope` is `None` for text, which is every existing caller. Supplying it
+    /// is the only way image tokens reach the rotary sections; there is no
+    /// inference of image layout from the token stream.
+    fn run_hidden_states_positioned(
+        &mut self,
+        tokens: &Tensor,
+        index_pos: usize,
+        mut collector: Option<&mut TapCollector>,
+        rope: Option<&[[usize; 3]]>,
+        embedded: Option<&Tensor>,
+    ) -> Result<Tensor> {
         let (_, seq_len) = tokens.dims2()?;
         // Tensor-based legacy/probe calls cannot claim a known host-token prefix.
         // Text entry points reinstall their log only after a successful forward.
@@ -2042,15 +2270,56 @@ impl InferenceSession {
         } else {
             None
         };
-        let mut hidden = self.weights.embedding.forward(tokens)?;
+        // After an image, text continues from the rope cursor rather than the
+        // cache length: the two diverged when the image took fewer positions
+        // than tokens. Degenerate triples from the cursor are exactly the
+        // contiguous path, just starting from the right place.
+        let continued: Option<Vec<[usize; 3]>> = match (rope, self.rope_cursor) {
+            (None, Some(cursor)) => Some((0..seq_len).map(|i| [cursor + i; 3]).collect()),
+            _ => None,
+        };
+        let rope: Option<&[[usize; 3]]> = match (&continued, rope) {
+            (Some(triples), _) => Some(triples.as_slice()),
+            (None, supplied) => supplied,
+        };
+        // Supplied embeddings replace the table lookup wholesale: an image's
+        // rows come from the projector, not from any token id.
+        let mut hidden = match embedded {
+            Some(rows) => {
+                let (_, rows_len, _) = rows.dims3()?;
+                if rows_len != seq_len {
+                    candle_core::bail!(
+                        "{rows_len} supplied embedding rows for {seq_len} tokens"
+                    )
+                }
+                rows.clone()
+            }
+            None => self.weights.embedding.forward(tokens)?,
+        };
         for (index, (layer, state)) in self.weights.layers.iter().zip(&mut self.states).enumerate()
         {
-            hidden = layer.forward(state, &hidden, mask.as_ref(), index_pos)?;
+            hidden = layer.forward(state, &hidden, mask.as_ref(), index_pos, rope)?;
             if let Some(collector) = collector.as_deref_mut() {
                 collector.observe(index, &hidden, index_pos)?;
             }
         }
+        // The next text token sits one past the largest index any section
+        // used, which is the cursor `position_triples` would have advanced to.
+        // Only tracked once any per-token positions have been forwarded.
+        if let Some(triples) = rope {
+            let last = triples
+                .iter()
+                .flat_map(|triple| triple.iter().copied())
+                .max()
+                .unwrap_or(index_pos);
+            self.rope_cursor = Some(last + 1);
+        }
         self.weights.norm.forward(&hidden)?.i((.., seq_len - 1, ..))
+    }
+
+    /// Rope index the next text token takes, when an image has been forwarded.
+    pub(crate) fn rope_cursor(&self) -> Option<usize> {
+        self.rope_cursor
     }
 
     fn run_with_hidden(&mut self, tokens: &Tensor, index_pos: usize) -> Result<(Tensor, Tensor)> {
@@ -2208,6 +2477,18 @@ pub mod test_fixture {
             ("qwen35.attention.key_length".into(), U32(4)),
             ("qwen35.attention.value_length".into(), U32(4)),
             ("qwen35.rope.dimension_count".into(), U32(4)),
+            // Two rotary pairs split one apiece between the temporal and height
+            // sections, so this fixture can exercise image positions at all.
+            // Text never consults the split, so text behaviour is unchanged.
+            (
+                "qwen35.rope.dimension_sections".into(),
+                gguf_file::Value::Array(vec![
+                    gguf_file::Value::I32(1),
+                    gguf_file::Value::I32(1),
+                    gguf_file::Value::I32(0),
+                    gguf_file::Value::I32(0),
+                ]),
+            ),
             ("qwen35.rope.freq_base".into(), F32(10_000.0)),
             ("qwen35.attention.layer_norm_rms_epsilon".into(), F32(1e-6)),
             ("qwen35.full_attention_interval".into(), U32(4)),
@@ -2566,6 +2847,147 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn per_token_rope_positions_collapse_onto_the_contiguous_path() {
+        // The real artifact's split: 11 temporal, 11 height, 10 width pairs.
+        let sections = vec![11usize, 11, 10];
+        let device = Device::Cpu;
+        let (width, context) = (64usize, 32usize);
+        let pairs = width / 2;
+        let theta: Vec<f32> = (0..width)
+            .step_by(2)
+            .map(|i| 1.0 / 10_000f32.powf(i as f32 / width as f32))
+            .collect();
+        let theta = Tensor::from_vec(theta, (1, pairs), &device).unwrap();
+        let angles = Tensor::arange(0u32, context as u32, &device)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .reshape((context, 1))
+            .unwrap()
+            .matmul(&theta)
+            .unwrap();
+        let rope = PartialRope {
+            cos: angles.cos().unwrap(),
+            sin: angles.sin().unwrap(),
+            width,
+            sections: sections.clone(),
+        };
+
+        let (batch, heads, seq) = (1usize, 2usize, 5usize);
+        let values: Vec<f32> = (0..batch * heads * seq * width)
+            .map(|i| ((i % 71) as f32 / 35.0) - 1.0)
+            .collect();
+        let x = Tensor::from_vec(values, (batch, heads, seq, width), &device).unwrap();
+
+        // A triple per token with t == h == w is the text case written the long
+        // way, so it must reproduce the contiguous path exactly.
+        let start = 3usize;
+        let degenerate: Vec<[usize; 3]> = (start..start + seq).map(|p| [p, p, p]).collect();
+        let contiguous = rope.apply(&x, RopePositions::Contiguous(start)).unwrap();
+        let per_token = rope
+            .apply(&x, RopePositions::PerToken(&degenerate))
+            .unwrap();
+        assert_eq!(
+            contiguous.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            per_token.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            "a degenerate triple must be the contiguous path exactly"
+        );
+
+        // A genuine image triple must not be the text path, or the sections are
+        // doing nothing and image tokens would be placed as if they were text.
+        let image: Vec<[usize; 3]> = (0..seq).map(|i| [1, 2 + i, 9 - i]).collect();
+        let threaded = rope.apply(&x, RopePositions::PerToken(&image)).unwrap();
+        assert_ne!(
+            contiguous.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            threaded.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            "distinct t/h/w must change the rotation"
+        );
+
+        // Wrong count is a refusal, not a silent truncation.
+        assert!(rope.apply(&x, RopePositions::PerToken(&image[..2])).is_err());
+
+        // And an artifact with no declared split refuses image positions rather
+        // than quietly placing them as text.
+        let unsplit = PartialRope { sections: Vec::new(), ..rope.clone() };
+        assert!(unsplit.apply(&x, RopePositions::PerToken(&image)).is_err());
+        assert!(unsplit.apply(&x, RopePositions::Contiguous(start)).is_ok());
+    }
+
+    #[test]
+    fn grouped_attention_is_the_same_arithmetic_as_materializing_the_repeat() {
+        use candle_transformers::utils::repeat_kv;
+        let device = Device::Cpu;
+        let (batch, kv_heads, ratio, seq, positions, dim) = (1usize, 3usize, 4usize, 5usize, 7usize, 8usize);
+        let heads = kv_heads * ratio;
+
+        // Distinct values everywhere, so a head-ordering error cannot cancel.
+        let make = |n: usize, salt: usize| {
+            let values: Vec<f32> = (0..n)
+                .map(|i| ((i * 7 + salt * 13) % 61) as f32 / 30.0 - 1.0)
+                .collect();
+            values
+        };
+        let query = Tensor::from_vec(
+            make(batch * heads * seq * dim, 1),
+            (batch, heads, seq, dim),
+            &device,
+        )
+        .unwrap();
+        let key = Tensor::from_vec(
+            make(batch * kv_heads * positions * dim, 2),
+            (batch, kv_heads, positions, dim),
+            &device,
+        )
+        .unwrap();
+        let value = Tensor::from_vec(
+            make(batch * kv_heads * positions * dim, 3),
+            (batch, kv_heads, positions, dim),
+            &device,
+        )
+        .unwrap();
+
+        // Reference: build the expanded K and V, then attend.
+        let wide_key = repeat_kv(key.clone(), ratio).unwrap();
+        let wide_value = repeat_kv(value.clone(), ratio).unwrap();
+        let reference_scores = query.matmul(&wide_key.t().unwrap()).unwrap();
+
+        // Grouped: fold the repeat into the row dimension, expand nothing.
+        let grouped_scores = query
+            .reshape((batch, kv_heads, ratio * seq, dim))
+            .unwrap()
+            .matmul(&key.t().unwrap())
+            .unwrap()
+            .reshape((batch, heads, seq, positions))
+            .unwrap();
+
+        assert_eq!(reference_scores.dims(), grouped_scores.dims());
+        let a: Vec<f32> = reference_scores.flatten_all().unwrap().to_vec1().unwrap();
+        let b: Vec<f32> = grouped_scores.flatten_all().unwrap().to_vec1().unwrap();
+        // Identical operand order per output element, so this is exact, not close.
+        assert_eq!(a, b, "grouped scores must match head for head");
+
+        // And the value matmul, which reuses the same grouping.
+        let probabilities = softmax_last_dim(&reference_scores).unwrap();
+        let reference_attended = probabilities.matmul(&wide_value.contiguous().unwrap()).unwrap();
+        let grouped_attended = probabilities
+            .reshape((batch, kv_heads, ratio * seq, positions))
+            .unwrap()
+            .matmul(&value.contiguous().unwrap())
+            .unwrap()
+            .reshape((batch, heads, seq, dim))
+            .unwrap();
+        assert_eq!(
+            reference_attended.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            grouped_attended.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            "grouped attention output must match head for head"
+        );
+
+        // The test would pass trivially if the expansion were a no-op; it is not.
+        assert_eq!(wide_key.dims(), &[batch, heads, positions, dim]);
+        assert_ne!(key.dims(), wide_key.dims());
+    }
+
+    #[test]
     fn packed_triples_survive_the_device_unpack_for_every_code_and_row_width() {
         // 128 is the head width the model actually uses and leaves one lane of
         // the last word padded; 129 divides evenly and takes the other branch.
@@ -2666,21 +3088,33 @@ pub(crate) mod tests {
         let text = mrope_pair_positions(&sections, 32, 7, 7, 7);
         assert_eq!(text, vec![7usize; 32]);
 
-        // An image token's indices differ, and the split becomes visible at
-        // exactly the declared boundaries.
+        // An image token's indices differ, and the split becomes visible -
+        // interleaved, not blocked: height on pairs 1, 4, .., 31, width on
+        // 2, 5, .., 29, temporal on the rest. Written out rather than derived
+        // from the same rule, so the test is not the implementation restated.
         let image = mrope_pair_positions(&sections, 32, 3, 5, 9);
-        assert_eq!(&image[..11], &[3usize; 11]);
-        assert_eq!(&image[11..22], &[5usize; 11]);
-        assert_eq!(&image[22..32], &[9usize; 10]);
+        let expected = [
+            3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3,
+            5, 9, 3, 5,
+        ];
+        assert_eq!(image, expected.to_vec());
+        assert_eq!(image.iter().filter(|p| **p == 3).count(), 11, "temporal pairs");
+        assert_eq!(image.iter().filter(|p| **p == 5).count(), 11, "height pairs");
+        assert_eq!(image.iter().filter(|p| **p == 9).count(), 10, "width pairs");
+        // The Qwen2-VL block layout is exactly what this must not be.
+        assert_ne!(&image[..11], &[3usize; 11]);
     }
 
     #[test]
     fn mrope_falls_back_to_the_temporal_index_beyond_the_declared_sections() {
-        // Short sections leave a tail; a model with none declared is all text.
-        assert_eq!(mrope_pair_positions(&[2, 1], 5, 1, 2, 3), vec![1, 1, 2, 1, 1]);
+        // A height section of one covers only pair 1; no width section at all.
+        assert_eq!(mrope_pair_positions(&[2, 1], 5, 1, 2, 3), vec![1, 2, 1, 1, 1]);
+        // A model with none declared is all text.
         assert_eq!(mrope_pair_positions(&[], 3, 4, 5, 6), vec![4, 4, 4]);
-        // Over-long sections are truncated to the rotary width, never past it.
+        // A temporal-only split never reaches for height or width.
         assert_eq!(mrope_pair_positions(&[9], 2, 1, 2, 3), vec![1, 1]);
+        // Interleaving never runs past the rotary width.
+        assert_eq!(mrope_pair_positions(&[11, 11, 10], 4, 1, 2, 3), vec![1, 2, 3, 1]);
     }
 
     static Q8_ROUTE_ENV: Mutex<()> = Mutex::new(());
@@ -3015,7 +3449,7 @@ pub(crate) mod tests {
             )
             .unwrap();
             hidden = layer
-                .forward(&mut layer.mixer.empty_state(), &hidden, Some(&mask), 0)
+                .forward(&mut layer.mixer.empty_state(), &hidden, Some(&mask), 0, None)
                 .unwrap();
         }
         let norm = RmsNorm::from_qtensor(
@@ -3147,6 +3581,172 @@ pub(crate) mod tests {
             tiled.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
             vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
         );
+    }
+
+    #[test]
+    fn decode_after_an_image_continues_from_the_rope_cursor_not_the_cache_length() {
+        use crate::nlu::vision_positions::{position_triples, ImageGrid, PromptPiece};
+        let bytes = tiny_gguf();
+        let device = Device::Cpu;
+        let grid = ImageGrid { rows: 2, cols: 3 };
+        let pieces = [PromptPiece::Text(2), PromptPiece::Image(grid), PromptPiece::Text(1)];
+        let positions = position_triples(&pieces);
+        let total = positions.len();
+        // text(2) -> cursor 2; the image spans max(2, 3) = 3 -> cursor 5; text(1)
+        // at 5 -> cursor 6. The cache holds 7 positions. That the two differ is
+        // the whole point of the test.
+        let expected_cursor = 2 + grid.position_span() + 1;
+        assert_ne!(expected_cursor, total);
+
+        let mut model = load_tiny_model(&bytes);
+        assert_eq!(model.rope_cursor(), None, "no image forwarded yet");
+        let tokens = Tensor::from_vec((0..total as u32).map(|i| i % 4).collect::<Vec<_>>(), (1, total), &device).unwrap();
+        let rows = model.embed_tokens(&tokens).unwrap();
+        model.prefill_embedded(&tokens, &rows, &positions).unwrap();
+        assert_eq!(model.rope_cursor(), Some(expected_cursor));
+
+        // A decode step appends at the cache length and advances the cursor by
+        // one. Before this, decode after an image would have rotated the new
+        // token at position 7 while the model believed it was at 6.
+        let next = Tensor::from_vec(vec![1u32], (1, 1), &device).unwrap();
+        model.decode_step(&next, total).unwrap();
+        assert_eq!(model.rope_cursor(), Some(expected_cursor + 1));
+
+        // A fresh text prefill forgets the image entirely.
+        model.prefill(&tokens).unwrap();
+        assert_eq!(model.rope_cursor(), None);
+    }
+
+    #[test]
+    fn a_text_and_image_prompt_runs_end_to_end_with_grid_derived_positions() {
+        use crate::nlu::vision_positions::{position_triples, ImageGrid, PromptPiece};
+        let bytes = tiny_gguf();
+        let device = Device::Cpu;
+
+        // Two text tokens, a 2x2 image, one more text token.
+        let grid = ImageGrid { rows: 2, cols: 2 };
+        let pieces = [
+            PromptPiece::Text(2),
+            PromptPiece::Image(grid),
+            PromptPiece::Text(1),
+        ];
+        let positions = position_triples(&pieces);
+        let total = 2 + grid.tokens() + 1;
+        assert_eq!(positions.len(), total);
+
+        // Placeholders stand in for the image's tokens; their ids never reach
+        // the stack because their rows are replaced by the projector's.
+        let ids: Vec<u32> = (0..total as u32).map(|i| i % 4).collect();
+        let tokens = Tensor::from_vec(ids, (1, total), &device).unwrap();
+
+        let mut model = load_tiny_model(&bytes);
+        let width = model.embedding_width();
+        let text_rows = model.embed_tokens(&tokens).unwrap();
+        assert_eq!(text_rows.dims(), &[1, total, width]);
+
+        // Stand-in projector output, distinct from any token embedding.
+        let projected = Tensor::from_vec(
+            (0..grid.tokens() * width)
+                .map(|i| ((i % 13) as f32 / 6.0) - 1.0)
+                .collect::<Vec<f32>>(),
+            (1, grid.tokens(), width),
+            &device,
+        )
+        .unwrap();
+        let spliced = Tensor::cat(
+            &[
+                &text_rows.narrow(1, 0, 2).unwrap(),
+                &projected,
+                &text_rows.narrow(1, 2 + grid.tokens(), 1).unwrap(),
+            ],
+            1,
+        )
+        .unwrap()
+        .contiguous()
+        .unwrap();
+        assert_eq!(spliced.dims(), text_rows.dims());
+
+        let logits = model
+            .prefill_embedded(&tokens, &spliced, &positions)
+            .unwrap();
+        assert_eq!(logits.dims()[0], 1);
+        let values: Vec<f32> = logits.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(values.iter().all(|v| v.is_finite()), "logits must be finite");
+
+        // This fixture's mixer weights are zero, so every path through it
+        // produces zero logits. Assert that rather than work around it: the
+        // moment the fixture stops being degenerate this fails, and whoever
+        // changed it should add the discrimination this cannot carry.
+        assert!(
+            values.iter().all(|v| *v == 0.0),
+            "fixture is no longer degenerate; assert that image rows and grid \
+             positions change the logits here, not just that they are accepted"
+        );
+
+        // What this fixture *can* establish is that the composition type-checks
+        // end to end and every stage agrees on length: grid -> triples ->
+        // spliced rows -> forward. That the triples actually change the rotation
+        // is covered where it is observable, in
+        // `per_token_rope_positions_collapse_onto_the_contiguous_path`.
+        let mut mismatched = load_tiny_model(&bytes);
+        assert!(
+            mismatched
+                .prefill_embedded(&tokens, &spliced, &positions[..total - 1])
+                .is_err(),
+            "a triple per token is required, not merely supplied"
+        );
+    }
+
+    #[test]
+    fn the_embedded_path_reproduces_the_token_path_when_nothing_is_spliced() {
+        let bytes = tiny_gguf();
+        let device = Device::Cpu;
+        let tokens = Tensor::new(&[[1u32, 2, 3]], &device).unwrap();
+
+        // Token path.
+        let mut plain = load_tiny_model(&bytes);
+        let reference: Vec<f32> = plain
+            .forward(&tokens, 0)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+
+        // Embedded path, handing back exactly what the table would have given
+        // and degenerate position triples, which is text written the long way.
+        let mut embedded_model = load_tiny_model(&bytes);
+        let rows = embedded_model.embed_tokens(&tokens).unwrap();
+        let positions: Vec<[usize; 3]> = (0..3).map(|p| [p, p, p]).collect();
+        let got: Vec<f32> = embedded_model
+            .prefill_embedded(&tokens, &rows, &positions)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(reference, got, "the image path must contain the text path");
+
+        // A row count that disagrees with the tokens is a refusal.
+        let short = rows.narrow(1, 0, 2).unwrap().contiguous().unwrap();
+        let mut third = load_tiny_model(&bytes);
+        assert!(third.prefill_embedded(&tokens, &short, &positions).is_err());
+        // As is a triple count that disagrees.
+        let mut fourth = load_tiny_model(&bytes);
+        assert!(fourth.prefill_embedded(&tokens, &rows, &positions[..2]).is_err());
+
+        // Splicing different rows must change the answer, or the supplied
+        // embeddings are being ignored and images would silently do nothing.
+        let mut fifth = load_tiny_model(&bytes);
+        let altered = rows.affine(1.0, 0.25).unwrap();
+        let spliced: Vec<f32> = fifth
+            .prefill_embedded(&tokens, &altered, &positions)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_ne!(reference, spliced, "supplied embeddings must reach the stack");
     }
 
     #[test]

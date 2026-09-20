@@ -177,6 +177,57 @@ impl SessionApp {
         }
     }
 
+    /// Forward a runtime's per-turn context assembly to the akh's cognitive core.
+    ///
+    /// The runtime holds the conversation and initiates the call; the session
+    /// daemon holds the akh identity and the core credential and forwards. No
+    /// core (`None`) or an empty candidate set returns `assembled: None`, and
+    /// the runtime then windows locally — the same fail-soft as neural recall.
+    pub async fn assemble_turn_context(
+        &self,
+        session: &SessionRecord,
+        request: RuntimeContextRequest,
+    ) -> Result<RuntimeContextReply> {
+        let Some(core) = &session.core_service else {
+            return Ok(RuntimeContextReply { assembled: None });
+        };
+        if request.messages.is_empty() {
+            return Ok(RuntimeContextReply { assembled: None });
+        }
+        let context: ContextResponse = self
+            .client
+            .post(
+                core,
+                "/v1/context",
+                &ContextRequest {
+                    request_id: request.call.turn_id.clone(),
+                    akh: session.akh.clone(),
+                    session_id: session.id.clone(),
+                    turn_id: request.call.turn_id.clone(),
+                    input: request.input,
+                    tools: session.tools.clone(),
+                    messages: request.messages,
+                    budget: Some(request.budget),
+                },
+            )
+            .await?;
+        if context.schema_version != SCHEMA_VERSION {
+            return Err(Fault::conflict("unsupported cognitive context schema"));
+        }
+        if context
+            .model
+            .as_ref()
+            .is_some_and(|model| session.runtime.model.as_ref() != Some(model))
+        {
+            return Err(Fault::conflict(
+                "session runtime model differs from the authoritative Akh model; reconcile the profile before dispatch",
+            ));
+        }
+        Ok(RuntimeContextReply {
+            assembled: context.assembled,
+        })
+    }
+
     /// Retain runtime captures of the active turn's input until the turn is
     /// published to the core. Validated now against the accepted input text so
     /// publication cannot fail later on a malformed capture.
@@ -863,6 +914,7 @@ pub fn session_router(app: SessionApp) -> Router {
             .route("/v1/runtime/tools/reconcile", post(reconcile_tool))
             .route("/v1/runtime/input", post(runtime_input))
             .route("/v1/runtime/recall", post(runtime_recall))
+            .route("/v1/runtime/context", post(runtime_context))
             .route("/v1/runtime/spans", post(runtime_spans))
             .with_state(app),
         config,
@@ -1229,6 +1281,14 @@ async fn runtime_recall(
 ) -> Api<neural_spans::RecallReply> {
     let session = app.sessions.validate_runtime_call(&p, &request.call)?;
     Ok(Json(app.neural_recall(&session, request).await?))
+}
+async fn runtime_context(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Json(request): Json<RuntimeContextRequest>,
+) -> Api<RuntimeContextReply> {
+    let session = app.sessions.validate_runtime_call(&p, &request.call)?;
+    Ok(Json(app.assemble_turn_context(&session, request).await?))
 }
 async fn runtime_spans(
     State(app): State<SessionApp>,
@@ -1775,6 +1835,62 @@ mod lifecycle_tests {
         // Publication is idempotent: the receipt prevents a second post.
         app.publish_completions(&completed).await.unwrap();
         assert_eq!(core.accepted.lock().unwrap().len(), 1);
+        core.server.abort();
+    }
+
+    #[tokio::test]
+    async fn runtime_context_assembly_fails_soft_and_never_blocks_a_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-neural-test-credential").unwrap();
+        let core = fake_core(true, vec![]).await;
+        let (app, runtime, record) = dispatched_session(
+            neural_test_config(dir.path(), &token, core.address),
+            dir.path(),
+        )
+        .await;
+        let session = app
+            .sessions
+            .validate_runtime_call(
+                &runtime,
+                &runtime_call(&record, RuntimeContextRequest::CALL_NAME),
+            )
+            .unwrap();
+        let budget = ContextBudget {
+            window_tokens: 1024,
+            reserved_output_tokens: 16,
+        };
+
+        // Empty candidate set: no assembly, and crucially no call to core -
+        // fake_core serves no /v1/context route, so a stray call would error
+        // rather than return None.
+        let empty = RuntimeContextRequest {
+            call: runtime_call(&record, RuntimeContextRequest::CALL_NAME),
+            input: record.turns[0].input.clone(),
+            messages: vec![],
+            budget,
+        };
+        assert_eq!(
+            app.assemble_turn_context(&session, empty).await.unwrap(),
+            RuntimeContextReply { assembled: None }
+        );
+
+        // A session with no cognitive core windows locally: fail-soft to None
+        // even with real candidate messages, again without touching core.
+        let mut no_core = session.clone();
+        no_core.core_service = None;
+        let populated = RuntimeContextRequest {
+            call: runtime_call(&record, RuntimeContextRequest::CALL_NAME),
+            input: record.turns[0].input.clone(),
+            messages: vec![json!({"role":"user","content":"hi"})],
+            budget,
+        };
+        assert_eq!(
+            app.assemble_turn_context(&no_core, populated)
+                .await
+                .unwrap(),
+            RuntimeContextReply { assembled: None }
+        );
         core.server.abort();
     }
 

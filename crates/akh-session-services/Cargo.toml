@@ -9,7 +9,7 @@ description = "Independent Akh session, runtime, sandbox, executor and ingress s
 default = ["session", "runtime", "executor", "sandbox", "events", "client"]
 session = ["dep:jsonschema", "dep:async-stream", "dep:rmcp", "axum/ws"]
 runtime = ["dep:akh-runtime", "helpers"]
-candle-runtime = ["runtime", "dep:akh-medu", "akh-medu/candle-backend"]
+candle-runtime = ["runtime", "dep:akh-medu", "akh-medu/candle-backend", "dep:base64"]
 # Opt-in real-core transport tests, without requiring GPU inference.
 core-integration-tests = ["session", "dep:akh-medu", "akh-medu/core-server"]
 hip = ["candle-runtime", "akh-medu/hip"]

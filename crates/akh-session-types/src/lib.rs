@@ -407,6 +407,52 @@ impl ContextBudget {
     }
 }
 
+/// A runtime asking the session daemon to have the cognitive core assemble this
+/// turn's context. The runtime holds the conversation; the session daemon holds
+/// the akh identity and the core credential, so the runtime sends its candidate
+/// messages here and the daemon forwards them to `/v1/context` on the akh's core.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeContextRequest {
+    /// Identifies the active job; `name` must be [`RuntimeContextRequest::CALL_NAME`].
+    pub call: ToolCall,
+    /// The active turn's input, forwarded so the core can build its evidence.
+    pub input: TurnInput,
+    /// Candidate messages, newest last.
+    pub messages: Vec<Value>,
+    /// The budget the assembled context must fit.
+    pub budget: ContextBudget,
+}
+
+impl RuntimeContextRequest {
+    pub const CALL_NAME: &'static str = "assemble_context";
+}
+
+/// The assembled context, or `None` when the session has no cognitive core.
+///
+/// `None` keeps a runtime that always asks interoperating with a session that
+/// has no core configured: the runtime then windows locally, exactly as before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeContextReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembled: Option<AssembledContext>,
+}
+
+/// Marks a message the cognitive core already assembled to budget.
+///
+/// The core sets it on every message it returns; the runtime reads it to decide
+/// whether to verify the fit or run its own selector. It lives here because both
+/// sides must agree on the spelling: as two independent string literals in two
+/// crates, a change on one side would silently turn assembly off rather than
+/// fail to compile, and the runtime would quietly re-evict on top of the core's
+/// decision - a second context policy, which is the thing this seam exists to
+/// prevent.
+///
+/// Absent on legacy payloads, so a core and runtime at different versions
+/// interoperate: an unmarked list is selected locally exactly as before.
+pub const CONTEXT_BUDGETED: &str = "context_budgeted";
+
 /// What the core decided to include, when it assembled.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -896,6 +942,36 @@ pub struct NativeCandle {
     pub max_context_tokens: usize,
     pub max_iterations: u32,
     pub max_output_tokens: u32,
+    /// Canary-pass evidence authorizing lossy KV compression at the configured
+    /// bit-width. Required whenever compressed KV is enabled for this load;
+    /// absent means compression must be off, and an enabled load without it is
+    /// refused. See [`KvGateEvidence`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_quant_evidence: Option<std::path::PathBuf>,
+}
+
+/// Evidence that the five-daemon canary passed with lossy KV compression at a
+/// given bit-width, pinned to the exact artifacts and device it ran against.
+///
+/// Compressed KV clears no numerical parity gate (worst cosine 0.99788 at 8
+/// bits), so it is admitted only behind a task-level check: the canary's
+/// recall/eviction/isolation assertions must hold at that width, for these
+/// weights, on this device. The runtime refuses to enable compression without a
+/// matching, passing document - the same fail-closed shape as runtime
+/// conformance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KvGateEvidence {
+    pub passed: bool,
+    pub model_sha256: String,
+    pub tokenizer_sha256: String,
+    pub device: NativeCandleDevice,
+    pub bits: u8,
+    pub recent: usize,
+    /// Worst per-vector cosine measured on the live paged path at this width.
+    pub min_cosine: f64,
+    /// The canary checks that held, for the record.
+    pub checks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

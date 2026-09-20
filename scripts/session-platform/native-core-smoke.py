@@ -236,14 +236,24 @@ def main():
             query['session_id'] = other['id']
             assert request('akhomed', '/v1/spans/query', query, caller='akhsessd') == [], 'cross-session span leak'
             runtime_log = re.sub(r'\x1b\[[0-9;]*m', '', (root / 'akhrtd.log').read_text()[final_log_start:])
-            dropped = [int(x) for x in re.findall(r'dropped_messages=(\d+)', runtime_log)]
-            assert dropped and dropped[-1] >= 2, 'final question did not evict the original fact turn'
+            # Eviction is the cognitive core's job now (ContextManager join): the
+            # runtime asks the core to assemble to budget and only verifies the
+            # result, never dropping on top of it -- a runtime that evicts on top
+            # of the core is a second context policy. The growing history must
+            # still evict the original fact turn, at the core.
+            core_dropped = [int(x) for x in re.findall(r'core_dropped_messages=(\d+)', runtime_log)]
+            runtime_dropped = [int(x) for x in re.findall(r'(?<!core_)dropped_messages=(\d+)', runtime_log)]
+            assert core_dropped and core_dropped[-1] >= 2, 'the core did not evict the original fact turn'
+            assert all(d == 0 for d in runtime_dropped), 'the runtime evicted on top of the core'
             recalled = [int(x) for x in re.findall(r'recalled_spans=(\d+)', runtime_log)]
             assert recalled and max(recalled) > 0, 'native recall was never materialized'
-            emit(phase='summary', passed=True, final_dropped_messages=dropped[-1],
+            emit(phase='summary', passed=True, final_core_dropped_messages=core_dropped[-1],
+                 runtime_dropped_messages=runtime_dropped,
                  max_materialized_spans=max(recalled),
                  checks=['real core context', 'real daemon dispatch', 'native spans published',
-                         'core/session restart', 'provider continuity', 'history eviction', 'session isolation'],
+                         'core/session restart', 'provider continuity',
+                         'history eviction at the core', 'runtime defers eviction to the core',
+                         'session isolation'],
                  scope='local daemon canary, not deployment or performance acceptance')
         except BaseException as error:
             emit(phase='summary', passed=False, error=str(error))

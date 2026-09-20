@@ -1,0 +1,12 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== 08k FULL ===
+{"context_length":262144,"device_memory":{"free":8527020032,"source":"hipMemGetInfo","total":25753026560},"family":"Qwen35","kv_bytes_per_token":131072,"memory_bound_context_limit":48672,"phase":"loaded","projected_kv_bytes_at_full_context":34359738368,"seconds":21.349554097}
+{"decode_seconds":3.542164617,"decode_steps_including_eos":15,"decode_steps_per_second":4.234698728571259,"finish":"Length","phase":"generation","prompt_tokens":10417,"round":0,"seconds_including_prefill":302.039512461,"text":"<elided>","time_to_first_token_seconds":298.497089135,"tokens":16}
+Error: ContextExceedsDeviceMemory { requested: 10433, declared_window: 262144, fits_tokens: 4112, per_token_bytes: 131072, needed_bytes: 1367474176, available_bytes: 2686451712, headroom_bytes: 2147483648 }
+=== end 08k rc=0 ===
+=== 16k FULL ===
+{"context_length":262144,"device_memory":{"free":8527020032,"source":"hipMemGetInfo","total":25753026560},"family":"Qwen35","kv_bytes_per_token":131072,"memory_bound_context_limit":48672,"phase":"loaded","projected_kv_bytes_at_full_context":34359738368,"seconds":21.702085165}
+Error: LlmGenerationFailed { reason: "session generation: hipMalloc(235929600) failed (rc=2)" }
+=== end 16k rc=0 ===
+
+[exited with code 0]
