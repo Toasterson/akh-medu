@@ -170,6 +170,14 @@ async fn main() -> ExitCode {
         "akh-derive: singleton acquired, entering the derivation loop"
     );
     loop {
+        match _guard.reassert().await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::error!(target: "akh_transcripts::derive", "akh-derive: singleton advisory lock is now held by another process; exiting so the supervisor restarts us cleanly");
+                std::process::exit(3);
+            }
+            Err(err) => tracing::error!(target: "akh_transcripts::derive", "akh-derive: could not re-assert the singleton lock: {err:?}"),
+        }
         match derive::run_pass(&db, &config, embedder.as_ref()).await {
             Ok(summary) => tracing::info!(target: "akh_transcripts::derive", "{}", summary),
             Err(err) => tracing::error!(target: "akh_transcripts::derive", "{:?}", err),

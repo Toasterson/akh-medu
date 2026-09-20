@@ -13,6 +13,6 @@ q "select coalesce(string_agg(rolname,', '),'(none)') from pg_roles r where roln
 echo "== derivation =="
 q "select 'raw='||(select count(*) from th_raw_records)||' events='||(select count(*) from th_events)||' chunks='||(select count(*) from th_chunks)||' embedded='||(select count(*) from th_chunks where embedding is not null)||' sessions='||(select count(*) from th_sessions)"
 q "select 'pending (anti-join, should be 0 within a worker interval): '||count(*) from th_raw_records r where not exists (select 1 from th_events e where e.derivation_version=1 and e.source=r.source and e.session_id=r.session_id and e.stream_id=r.stream_id and e.seq=r.seq and e.subseq=0)"
-q "select 'worker singleton held by: '||coalesce(string_agg(distinct coalesce(client_addr::text,'local'),','),'NOBODY — worker is down') from pg_locks l join pg_stat_activity a on a.pid=l.pid where l.locktype='advisory' and a.usename='harvest_derive'"
+q "select 'worker singleton lock (key 0x414B444552495645): '||case when count(*)>0 then 'HELD by pid '||string_agg(pid::text,',') else 'NOT HELD — worker down, or running unlocked (images <= 0b5fe0f963f8 lose it after ~30 min)' end from pg_locks where locktype='advisory' and classid=1095451717 and objid=1380537925 and granted"
 echo "== drift (top 5) =="
 q "select rpad(source,12)||rpad(record_type,32)||' unknown='||unknown_count||' degraded='||degraded_count from th_drift_counters order by unknown_count+degraded_count desc limit 5"

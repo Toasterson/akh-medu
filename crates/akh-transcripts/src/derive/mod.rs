@@ -183,7 +183,14 @@ pub struct SingletonGuard {
 /// that one connection for the lock to mean anything.
 pub async fn acquire_singleton(url: &str) -> TranscriptResult<SingletonGuard> {
     let mut opts = sea_orm::ConnectOptions::new(url.to_owned());
-    opts.max_connections(1).sqlx_logging(false);
+    // The lock lives on THIS session. sqlx would otherwise close it as idle
+    // after 10 minutes and rotate it after 30 — observed live: the worker kept
+    // running, unlocked, after its first half hour. Never recycle it.
+    opts.max_connections(1)
+        .min_connections(1)
+        .idle_timeout(std::time::Duration::from_secs(u32::MAX as u64))
+        .max_lifetime(std::time::Duration::from_secs(u32::MAX as u64))
+        .sqlx_logging(false);
     let db = sea_orm::Database::connect(opts)
         .await
         .map_err(|source| TranscriptError::Connect {
@@ -219,6 +226,29 @@ pub async fn acquire_singleton(url: &str) -> TranscriptResult<SingletonGuard> {
     }
 
     Ok(SingletonGuard { _db: db })
+}
+
+impl SingletonGuard {
+    /// Re-assert the singleton before each pass. On the same session
+    /// `pg_try_advisory_lock` simply nests; if the connection was ever
+    /// replaced it re-acquires; if another worker holds it, this returns
+    /// `false` and the caller must stop. Turns a silent loss into a loud one.
+    pub async fn reassert(&self) -> TranscriptResult<bool> {
+        if self._db.get_database_backend() != DatabaseBackend::Postgres {
+            return Ok(true);
+        }
+        let row = self
+            ._db
+            .query_one(Statement::from_string(
+                DatabaseBackend::Postgres,
+                format!("SELECT pg_try_advisory_lock({SINGLETON_LOCK_KEY}) AS acquired"),
+            ))
+            .await
+            .map_err(|source| TranscriptError::AdvisoryLock { action: "re-assert", source })?;
+        Ok(row
+            .map(|r| r.try_get::<bool>("", "acquired").unwrap_or(false))
+            .unwrap_or(false))
+    }
 }
 
 /// Strip credentials the same way `pool::redact_url` does. Duplicated

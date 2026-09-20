@@ -81,7 +81,12 @@ extfile in the runbook — v1 certs are rejected by rustls).
   `harvest-status.sh`: per-machine `age` must stay below ~2× the interval while
   the machine is producing. State/watermarks live in
   `~/.local/state/akh-transcripts/`; deleting them is harmless (re-scan dedupes).
-- Worker: `worker singleton held by: <pod ip>` and `pending = 0`. The worker pod
+- Worker: `worker singleton lock … HELD` and `pending = 0`. **Known bug in
+  images ≤ `0b5fe0f963f8`**: the worker keeps deriving but silently loses the
+  advisory lock after ~30 min (sqlx recycles the idle connection). Fixed in the
+  next image (guard connection never recycled, lock re-asserted every pass,
+  exit 3 if lost). Until that tag is rolled, `NOT HELD` with `pending = 0` and a
+  Running pod means "unlocked, not dead". The worker pod
   currently logs **nothing** (image `d72262cacdc2` logs under `akh_derive`, the
   chart filter is `akh_transcripts=info`) — this is fixed in image
   `0b5fe0f963f8`; the HelmRelease bump to it is **staged, uncommitted** in
