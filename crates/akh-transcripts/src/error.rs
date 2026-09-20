@@ -179,6 +179,51 @@ pub enum TranscriptError {
         )
     )]
     AdapterRootMissing { path: String },
+
+    // derive (increment 5 — `akh-derive` worker; owned by
+    // `crates/akh-transcripts/src/bin/akh-derive.rs` + `src/derive/`). Append
+    // new variants here only.
+    // -------------------------------------------------------------------
+    /// A verbatim record's normalizer produced a [`crate::normalize::DerivationError`]
+    /// that escaped as a hard failure — reached via `catch_unwind` around
+    /// [`crate::normalize::normalize`] when the panic payload downcasts to
+    /// this type — rather than folding into a degraded event the way
+    /// [`crate::normalize::DerivationError`]'s own documentation says it
+    /// always should. Surfacing it as a `TranscriptError` gives it the same
+    /// miette-formatted message the worker writes into `th_events
+    /// .degraded_reason` for the `disposition = 'failed'` row it emits
+    /// instead of dropping the record or looping on it forever.
+    #[error("derivation failed: {0}")]
+    #[diagnostic(
+        code(akh_transcripts::derive::failed),
+        help(
+            "A record's shape defeated its normalizer badly enough to panic \
+             instead of degrading gracefully. The raw row is untouched and a \
+             `th_events` row with disposition='failed' now satisfies the \
+             derivation worker's anti-join so this record does not re-pend on \
+             every tick; its `degraded_reason` carries this message. If the \
+             same (source, record_type, schema_marker) keeps producing this, \
+             the normalizer in `src/normalize/` needs a fix, not a retry."
+        )
+    )]
+    Derive(#[from] crate::normalize::DerivationError),
+
+    /// The `akh-derive` singleton advisory lock is already held by another
+    /// process.
+    #[error("another akh-derive process already holds the singleton lock")]
+    #[diagnostic(
+        code(akh_transcripts::derive::already_running),
+        help(
+            "akh-derive is designed to run as exactly one process per \
+             `harvest-pg` database (derivation-worker.md, decision 4) — \
+             concurrent instances would race the same anti-join batches for \
+             no benefit. If the previous instance crashed without releasing \
+             the lock, the session holding it ended with its connection, so \
+             the lock cannot outlive a dead process; check for a still-live \
+             `akh-derive` before assuming this is stale."
+        )
+    )]
+    DeriveAlreadyRunning,
 }
 
 // adapter — convenience constructors for `crates/akh-transcripts/src/adapter/*`.
