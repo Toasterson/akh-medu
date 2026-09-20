@@ -88,8 +88,13 @@ impl Store {
     /// Semantics are those of [`Notify::notify_one`]: a signal with no waiter
     /// is kept as a single permit, so a write that lands while the consumer is
     /// busy is not lost, and a burst of writes coalesces into one wakeup. A
-    /// rolled-back transaction never signals. Waiters see "something
-    /// committed", not what; they are expected to re-read.
+    /// rolled-back transaction never signals, and neither does a committed
+    /// transaction that only read: idempotent request replays (a client
+    /// re-POSTing a repository or credential it already has) run their
+    /// validation inside a transaction and return early without writing, and
+    /// waking the dispatcher for those had it re-scanning every session on
+    /// every replay. Waiters see "something changed", not what; they are
+    /// expected to re-read.
     pub fn changes(&self) -> Arc<Notify> {
         self.0.changes.clone()
     }
@@ -101,12 +106,13 @@ impl Store {
         match &self.0.inner {
             Inner::Redb(inner) => {
                 let write = inner.database().begin_write().map_err(failure)?;
-                let result = {
+                let (result, wrote) = {
                     let table = write.open_table(redb_backend::RECORDS).map_err(failure)?;
                     let mut tx = Transaction {
                         inner: TransactionInner::Redb(RedbTxState::new(table)),
                     };
-                    action(&mut tx)
+                    let result = action(&mut tx);
+                    (result, tx.wrote())
                 };
                 // Mirrors the original behavior exactly: only a successful
                 // action commits. Dropping `write` without committing aborts
@@ -115,7 +121,9 @@ impl Store {
                 match result {
                     Ok(value) => {
                         write.commit().map_err(failure)?;
-                        self.0.changes.notify_one();
+                        if wrote {
+                            self.0.changes.notify_one();
+                        }
                         Ok(value)
                     }
                     Err(err) => Err(err),
@@ -130,11 +138,12 @@ impl Store {
                     inner: TransactionInner::Postgres(state),
                 };
                 let result = action(&mut tx);
+                let wrote = tx.wrote();
                 let TransactionInner::Postgres(state) = tx.inner else {
                     unreachable!("postgres transaction stayed postgres")
                 };
                 let outcome = inner.finish(state, result);
-                if outcome.is_ok() {
+                if outcome.is_ok() && wrote {
                     self.0.changes.notify_one();
                 }
                 outcome
@@ -180,6 +189,12 @@ impl Transaction<'_> {
         match &self.inner {
             TransactionInner::Redb(state) => state.scan(prefix),
             TransactionInner::Postgres(state) => state.scan(prefix),
+        }
+    }
+    fn wrote(&self) -> bool {
+        match &self.inner {
+            TransactionInner::Redb(state) => state.wrote(),
+            TransactionInner::Postgres(state) => state.wrote(),
         }
     }
 }
@@ -258,6 +273,16 @@ mod tests {
             Err(Fault::new("test", "abort"))
         });
         assert!(failed.is_err());
+        assert!(
+            timeout(Duration::from_millis(100), changes.notified())
+                .await
+                .is_err()
+        );
+
+        // A committed transaction that only read must not signal either:
+        // nothing a waiter could observe has changed.
+        let read: Option<u8> = store.transaction(|tx| tx.get("a/1")).unwrap();
+        assert_eq!(read, Some(1));
         assert!(
             timeout(Duration::from_millis(100), changes.notified())
                 .await
