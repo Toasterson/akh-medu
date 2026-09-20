@@ -20,11 +20,14 @@ sqlx = { version = "0.8", default-features = false, features = [
     "postgres",
     "runtime-tokio-rustls",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+# `sync` for the Notify behind Store::changes().
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 tracing = "0.1"
 [dev-dependencies]
 tempfile = "3"
 # `macros` for `#[tokio::test(flavor = "multi_thread", ...)]`, used to
 # reproduce the "sync facade called from an async multi-thread runtime
 # worker" incident shape in tests.
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# `time` for the timeouts that prove `changes()` fires on commit and stays
+# quiet on rollback.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
