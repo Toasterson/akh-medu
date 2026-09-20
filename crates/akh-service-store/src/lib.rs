@@ -23,6 +23,7 @@ use postgres::{PgTxState, PostgresInner};
 use redb_backend::{RedbInner, RedbTxState};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{path::Path, sync::Arc};
+use tokio::sync::Notify;
 
 pub(crate) fn failure(error: impl std::fmt::Display) -> Fault {
     Fault::new("storage_error", error.to_string())
@@ -33,8 +34,14 @@ enum Inner {
     Postgres(PostgresInner),
 }
 
+struct Shared {
+    inner: Inner,
+    /// Signalled after every committed transaction; see [`Store::changes`].
+    changes: Arc<Notify>,
+}
+
 #[derive(Clone)]
-pub struct Store(Arc<Inner>);
+pub struct Store(Arc<Shared>);
 
 enum TransactionInner<'a> {
     Redb(RedbTxState<'a>),
@@ -50,7 +57,7 @@ impl Store {
     /// since before the Postgres backend existed — every existing call site
     /// and every test keeps using this.
     pub fn open(path: &Path) -> Result<Self> {
-        Ok(Self(Arc::new(Inner::Redb(RedbInner::open(path)?))))
+        Ok(Self::wrap(Inner::Redb(RedbInner::open(path)?)))
     }
 
     /// Opens a Postgres-backed store, importing a legacy redb file's
@@ -58,16 +65,40 @@ impl Store {
     /// `kind` has not already been migrated. See the `postgres` module docs
     /// for the full design (locking, cache, sync bridging).
     pub fn open_postgres(config: PostgresConfig) -> Result<Self> {
-        Ok(Self(Arc::new(Inner::Postgres(PostgresInner::open(
-            config,
-        )?))))
+        Ok(Self::wrap(Inner::Postgres(PostgresInner::open(config)?)))
+    }
+
+    fn wrap(inner: Inner) -> Self {
+        Self(Arc::new(Shared {
+            inner,
+            changes: Arc::new(Notify::new()),
+        }))
+    }
+
+    /// A handle notified after every transaction that commits on this store.
+    ///
+    /// Lets a poller react to writes instead of re-scanning on a timer. The
+    /// sessions dispatcher previously scanned every session record once a
+    /// second regardless of activity, which on a store holding only closed
+    /// sessions was ~19 MB deserialised per second for no work — most of its
+    /// CPU and all of its memory churn. Because every write already goes
+    /// through [`Store::transaction`], signalling here cannot miss a mutation
+    /// path the way per-call-site wakeups can.
+    ///
+    /// Semantics are those of [`Notify::notify_one`]: a signal with no waiter
+    /// is kept as a single permit, so a write that lands while the consumer is
+    /// busy is not lost, and a burst of writes coalesces into one wakeup. A
+    /// rolled-back transaction never signals. Waiters see "something
+    /// committed", not what; they are expected to re-read.
+    pub fn changes(&self) -> Arc<Notify> {
+        self.0.changes.clone()
     }
 
     pub fn transaction<T>(
         &self,
         action: impl FnOnce(&mut Transaction<'_>) -> Result<T>,
     ) -> Result<T> {
-        match self.0.as_ref() {
+        match &self.0.inner {
             Inner::Redb(inner) => {
                 let write = inner.database().begin_write().map_err(failure)?;
                 let result = {
@@ -84,6 +115,7 @@ impl Store {
                 match result {
                     Ok(value) => {
                         write.commit().map_err(failure)?;
+                        self.0.changes.notify_one();
                         Ok(value)
                     }
                     Err(err) => Err(err),
@@ -101,20 +133,24 @@ impl Store {
                 let TransactionInner::Postgres(state) = tx.inner else {
                     unreachable!("postgres transaction stayed postgres")
                 };
-                inner.finish(state, result)
+                let outcome = inner.finish(state, result);
+                if outcome.is_ok() {
+                    self.0.changes.notify_one();
+                }
+                outcome
             }
         }
     }
 
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
-        match self.0.as_ref() {
+        match &self.0.inner {
             Inner::Redb(inner) => inner.get(key),
             Inner::Postgres(inner) => inner.get(key),
         }
     }
 
     pub fn scan<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<T>> {
-        match self.0.as_ref() {
+        match &self.0.inner {
             Inner::Redb(inner) => inner.scan(prefix),
             Inner::Postgres(inner) => inner.scan(prefix),
         }
@@ -185,6 +221,65 @@ mod tests {
             Some("session/x")
         );
     }
+    /// `changes()` must fire on commit and stay quiet on rollback. The
+    /// sessions dispatcher now scans only when signalled, so a missed signal
+    /// delays work until its fallback and a spurious one on rollback would
+    /// make it scan for nothing. The retained-permit and coalescing
+    /// behaviours are asserted too, because the dispatcher relies on both:
+    /// a write that lands while it is mid-scan must still wake it, and a
+    /// burst of writes must not turn into a burst of scans.
+    #[tokio::test]
+    async fn changes_signals_commits_and_not_rollbacks() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("changes.redb")).unwrap();
+        let changes = store.changes();
+
+        // Nothing has committed yet: no permit is pending.
+        assert!(
+            timeout(Duration::from_millis(100), changes.notified())
+                .await
+                .is_err()
+        );
+
+        store.transaction(|tx| tx.put("a/1", &1u8)).unwrap();
+        // Signalled after the fact: the permit is retained, so a consumer
+        // that was busy during the commit still wakes.
+        assert!(
+            timeout(Duration::from_secs(1), changes.notified())
+                .await
+                .is_ok()
+        );
+
+        // A rolled-back transaction must not signal.
+        let failed: Result<()> = store.transaction(|tx| {
+            tx.put("a/2", &2u8)?;
+            Err(Fault::new("test", "abort"))
+        });
+        assert!(failed.is_err());
+        assert!(
+            timeout(Duration::from_millis(100), changes.notified())
+                .await
+                .is_err()
+        );
+
+        // A burst coalesces into a single wakeup, not one per write.
+        for i in 0..5u8 {
+            store.transaction(|tx| tx.put("b", &i)).unwrap();
+        }
+        assert!(
+            timeout(Duration::from_secs(1), changes.notified())
+                .await
+                .is_ok()
+        );
+        assert!(
+            timeout(Duration::from_millis(100), changes.notified())
+                .await
+                .is_err()
+        );
+    }
+
     #[test]
     fn tuple_ids_do_not_alias() {
         assert_ne!(key("x", &["a/b", "c"]), key("x", &["a", "b/c"]));
