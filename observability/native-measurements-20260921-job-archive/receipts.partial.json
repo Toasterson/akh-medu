@@ -1,0 +1,131 @@
+{
+  "codex": {
+    "runtime_artifact_sha256": {
+      "/usr/local/bin/akhrtd": "d22d1c206a95ca1aab379774c8ae001d2e6f9a44c80bb49d9f9db9a9c0c17431",
+      "/usr/local/bin/akhexecd": "bec1b1d125aa6d54256cbb9d7a00b27b31632639fd8e1ad5afd5ec3df241af33",
+      "/usr/local/bin/examples/native-provider-probe": "86a5222f71ac35863ca49b1a76264cbd3ef5c8344c4fe205c2ca2fdf4f7b9180"
+    },
+    "wire": {
+      "result": "passed",
+      "codex_version": "codex-cli 0.153.4",
+      "calls": [
+        "write_file",
+        "read_file",
+        "run_command",
+        "read_file",
+        "write_file"
+      ],
+      "model_requests": 13,
+      "binary_sha256": "4d76e542c222ea8c75861d8c4ade60a1a332a63255ce1c60bdaebf7c2a2869e6",
+      "platform": "Linux-aarch64",
+      "advertised_tools": [
+        "request_user_input",
+        "get_goal",
+        "create_goal",
+        "update_goal",
+        "skills.list",
+        "skills.read",
+        "akh.read_file",
+        "akh.run_command",
+        "akh.write_file"
+      ],
+      "native_refusals": {
+        "call_0": "unsupported call: exec_command",
+        "call_1": "unsupported call: exec_command",
+        "call_2": "unsupported custom tool call: apply_patch",
+        "call_9": "unsupported call: exec_command",
+        "call_10": "unsupported custom tool call: apply_patch",
+        "call_11": "unsupported call: view_image"
+      },
+      "hooks_disabled": true,
+      "not_proven": [
+        "live model behavior",
+        "kernel confinement",
+        "cross-host transport",
+        "production conformance"
+      ]
+    },
+    "cancel": {
+      "result": "passed",
+      "provider": "codex",
+      "platform": "Linux-aarch64",
+      "cancel_teardown": true,
+      "observed_descendants": 2,
+      "seconds": 0.23918849299661815
+    }
+  },
+  "claude": {
+    "runtime_artifact_sha256": {
+      "/usr/local/bin/akhrtd": "d22d1c206a95ca1aab379774c8ae001d2e6f9a44c80bb49d9f9db9a9c0c17431",
+      "/usr/local/bin/akhexecd": "bec1b1d125aa6d54256cbb9d7a00b27b31632639fd8e1ad5afd5ec3df241af33",
+      "/usr/local/bin/examples/native-provider-probe": "86a5222f71ac35863ca49b1a76264cbd3ef5c8344c4fe205c2ca2fdf4f7b9180"
+    },
+    "wire": {
+      "result": "passed",
+      "claude_version": "2.1.269 (Claude Code)",
+      "calls": [
+        "write_file",
+        "read_file",
+        "run_command",
+        "read_file",
+        "write_file"
+      ],
+      "model_requests": 12,
+      "binary_sha256": "4c84a33adc34c60d4de3acd43cfe7c64ba966591e51587c04867b8d589021be4",
+      "platform": "Linux-aarch64",
+      "advertised_tools": [
+        "AskUserQuestion",
+        "mcp__akh__read_file",
+        "mcp__akh__run_command",
+        "mcp__akh__write_file"
+      ],
+      "native_refusals": {
+        "call_0": {
+          "type": "tool_result",
+          "content": "<tool_use_error>Error: No such tool available: Bash. Bash is disabled for this session, in subagents as well as here.</tool_use_error>\n\n<system-reminder>\n<total_tokens>14999890 tokens left</total_tokens>\n</system-reminder>",
+          "is_error": true,
+          "tool_use_id": "call_0"
+        },
+        "call_1": {
+          "type": "tool_result",
+          "content": "<tool_use_error>Error: No such tool available: Write. Write is disabled for this session, in subagents as well as here.</tool_use_error>\n\n<system-reminder>\n<total_tokens>14999890 tokens left</total_tokens>\n</system-reminder>",
+          "is_error": true,
+          "tool_use_id": "call_1"
+        },
+        "call_8": {
+          "type": "tool_result",
+          "content": "<tool_use_error>Error: No such tool available: Bash. Bash is disabled for this session, in subagents as well as here.</tool_use_error>\n\n<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>",
+          "is_error": true,
+          "tool_use_id": "call_8"
+        },
+        "call_9": {
+          "type": "tool_result",
+          "content": "<tool_use_error>Error: No such tool available: Read. Read is disabled for this session, in subagents as well as here.</tool_use_error>\n\n<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>",
+          "is_error": true,
+          "tool_use_id": "call_9"
+        },
+        "call_10": {
+          "type": "tool_result",
+          "content": "<tool_use_error>Error: No such tool available: Edit. Edit is disabled for this session, in subagents as well as here.</tool_use_error>\n\n<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>",
+          "is_error": true,
+          "tool_use_id": "call_10"
+        }
+      },
+      "hooks_disabled": true,
+      "not_proven": [
+        "live model behavior",
+        "kernel confinement",
+        "cross-host transport",
+        "production conformance"
+      ]
+    },
+    "cancel": {
+      "result": "passed",
+      "provider": "claude",
+      "platform": "Linux-aarch64",
+      "cancel_teardown": true,
+      "observed_descendants": 2,
+      "seconds": 0.24493357900064439
+    }
+  }
+}
