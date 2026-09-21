@@ -237,7 +237,7 @@ pub struct LoraAdapterMeta {
 /// A loaded adapter: raw tensor bytes + metadata, ready for hot-swap.
 ///
 /// Bytes are kept as raw safetensors wire format so that downstream inference
-/// backends (candle, llama-cpp) can deserialize into their own tensor types
+/// backends such as Candle can deserialize into their own tensor types
 /// without this module depending on those crates.
 #[derive(Debug)]
 pub struct LoadedAdapter {

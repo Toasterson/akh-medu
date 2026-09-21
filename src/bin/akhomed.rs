@@ -3055,6 +3055,13 @@ impl ServerState {
                     Box::new(SafetyEnforced::new(VirtualContextManager::default()))
                 }
                 "compacting" => Box::new(SafetyEnforced::new(CompactingManager)),
+                // Reading by selection: chooses whole turns from a message
+                // array and never rewrites their content, so an exact token
+                // prefix survives for a resident keyed cache to reuse. Needs a
+                // caller that attaches EpisodeState::messages.
+                "selecting" => Box::new(SafetyEnforced::new(
+                    akh_medu::agent::context::selecting::SelectingManager,
+                )),
                 other => {
                     // Loud, because a typo here silently downgrades the akh to a
                     // different strategy than the operator selected — which would
@@ -4288,7 +4295,10 @@ async fn init_postgres(config: &AkhomedConfig) -> Option<Arc<akhomed_store::Data
     for attempt in 1..=PG_STARTUP_ATTEMPTS {
         match try_connect_pg(&opts, migrate).await {
             Ok(pool) => {
-                tracing::info!(sqlite = opts.url.starts_with("sqlite:"), "connected to SeaORM backing store");
+                tracing::info!(
+                    sqlite = opts.url.starts_with("sqlite:"),
+                    "connected to SeaORM backing store"
+                );
                 return Some(pool);
             }
             Err(e) => {

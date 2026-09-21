@@ -405,6 +405,44 @@ pub(crate) mod runtime {
             (rc == 0).then_some((free, total))
         }
 
+        /// Called only at a serialized model-unload boundary, never per token.
+        pub fn release_cached_memory(&self) -> std::result::Result<usize, String> {
+            if !current_stream().is_null() {
+                return Err("cannot release HIP cache while a non-default stream is selected".into());
+            }
+            {
+                let pool = self.pool.lock().map_err(|_| "HIP allocator is poisoned")?;
+                if pool.capture_track.is_some() {
+                    return Err("cannot release HIP cache during capture tracking".into());
+                }
+            }
+            // Cached blocks may still be referenced by previously queued work.
+            self.synchronize()?;
+            let cached = {
+                let mut pool = self.pool.lock().map_err(|_| "HIP allocator is poisoned")?;
+                if pool.capture_track.is_some() || !current_stream().is_null() {
+                    return Err("HIP capture started during cache release".into());
+                }
+                // Live and graph-pinned pointers are not in this free list.
+                let cached = std::mem::take(&mut pool.free);
+                pool.cached_bytes = 0;
+                cached
+            };
+            let mut released = 0;
+            for (bytes, pointers) in cached {
+                for pointer in pointers {
+                    let rc = unsafe { (self.free)(pointer as *mut c_void) };
+                    if rc != 0 {
+                        // Never recycle ambiguously freed pointers after a driver
+                        // failure. Remaining allocations live until process exit.
+                        return Err(format!("HIP cached allocation release failed (rc={rc}); restart required"));
+                    }
+                    released += bytes;
+                }
+            }
+            Ok(released)
+        }
+
         /// Recycle `ptr` into the pool instead of `hipFree`-ing it (which would
         /// synchronize the device). The block being freed is still allocated (counted
         /// as device-used), so recycling it leaves `free` VRAM unchanged while a real
@@ -1195,6 +1233,10 @@ pub(crate) mod runtime {
     }
 
     type AffineF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, f32, f32) -> c_int;
+    type GatedDeltaStepF32 = unsafe extern "C" fn(
+        *const f32, *const f32, *const f32, *const f32, *const f32, *const f32,
+        *mut f32, *mut f32, usize, usize, usize,
+    ) -> c_int;
     // Phase 46c: set the launch stream for a kernel library (null = default stream).
     type SetStream = unsafe extern "C" fn(*mut c_void);
     // Phase 45h: fused RMSNorm (x, weight) -> out; one kernel replaces ~7.
@@ -1349,6 +1391,7 @@ pub(crate) mod runtime {
     pub struct Kernels {
         _lib: Library,
         affine_f32: AffineF32,
+        gated_delta_step_f32: GatedDeltaStepF32,
         set_stream: SetStream,
         rms_norm_f32: RmsNormF32,
         flash_attn_decode_f32: FlashAttnDecodeF32,
@@ -1364,6 +1407,8 @@ pub(crate) mod runtime {
         cast_bf16_f16: CastFn,
         cast_f32_u32: CastFn,
         cast_u32_f32: CastFn,
+        cast_u8_u32: CastFn,
+        cast_u32_u8: CastFn,
         cast_f32_i64: CastFn,
         cast_i64_f32: CastFn,
         index_select_u32_f32: IndexSelectF32,
@@ -1385,14 +1430,20 @@ pub(crate) mod runtime {
 
     impl Kernels {
         fn load() -> std::result::Result<Self, String> {
-            let path = concat!(env!("OUT_DIR"), "/libcandle_hip_kernels.so");
-            let lib = unsafe { Library::new(path) }.map_err(|e| {
-                format!("could not dlopen {path}: {e} (was the HIP toolchain present at build time?)")
+            let path = crate::hip_kernel_path::resolve(
+                "libcandle_hip_kernels.so",
+                concat!(env!("OUT_DIR"), "/libcandle_hip_kernels.so"),
+            )?;
+            let lib = unsafe { Library::new(&path) }.map_err(|e| {
+                format!("could not dlopen {}: {e} (was the HIP toolchain present at build time?)", path.display())
             })?;
             unsafe {
                 let affine_f32: AffineF32 = *lib
                     .get(b"akh_affine_f32\0")
                     .map_err(|e| format!("missing akh_affine_f32: {e}"))?;
+                let gated_delta_step_f32: GatedDeltaStepF32 = *lib
+                    .get(b"akh_gated_delta_step_f32\0")
+                    .map_err(|e| format!("missing akh_gated_delta_step_f32: {e}"))?;
                 let set_stream: SetStream = *lib
                     .get(b"akh_set_stream\0")
                     .map_err(|e| format!("missing akh_set_stream: {e}"))?;
@@ -1428,6 +1479,8 @@ pub(crate) mod runtime {
                 let cast_bf16_f16: CastFn = cast_sym!(b"akh_cast_bf16_f16\0");
                 let cast_f32_u32: CastFn = cast_sym!(b"akh_cast_f32_u32\0");
                 let cast_u32_f32: CastFn = cast_sym!(b"akh_cast_u32_f32\0");
+                let cast_u8_u32: CastFn = cast_sym!(b"akh_cast_u8_u32\0");
+                let cast_u32_u8: CastFn = cast_sym!(b"akh_cast_u32_u8\0");
                 let cast_f32_i64: CastFn = cast_sym!(b"akh_cast_f32_i64\0");
                 let cast_i64_f32: CastFn = cast_sym!(b"akh_cast_i64_f32\0");
                 let index_select_u32_f32: IndexSelectF32 = *lib
@@ -1472,6 +1525,7 @@ pub(crate) mod runtime {
                 Ok(Kernels {
                     _lib: lib,
                     affine_f32,
+                    gated_delta_step_f32,
                     set_stream,
                     rms_norm_f32,
                     flash_attn_decode_f32,
@@ -1487,6 +1541,8 @@ pub(crate) mod runtime {
                     cast_bf16_f16,
                     cast_f32_u32,
                     cast_u32_f32,
+                    cast_u8_u32,
+                    cast_u32_u8,
                     cast_f32_i64,
                     cast_i64_f32,
                     index_select_u32_f32,
@@ -1526,6 +1582,20 @@ pub(crate) mod runtime {
         /// eagerly on the null stream.
         pub fn set_stream(&self, s: *mut c_void) {
             unsafe { (self.set_stream)(s) }
+        }
+
+        pub fn gated_delta_step_f32(
+            &self, inputs: [*const f32; 6], output: *mut f32, next: *mut f32,
+            rows: usize, value_width: usize, key_width: usize,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.gated_delta_step_f32)(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5],
+                output, next, rows, value_width, key_width,
+            ) };
+            if rc != 0 {
+                return Err(format!("akh_gated_delta_step_f32 failed (rc={rc})"));
+            }
+            Ok(())
         }
 
         /// Fused RMSNorm: one block per row over `hidden`. `x`/`out` are
@@ -1697,6 +1767,10 @@ pub(crate) mod runtime {
                 (BF16, F16) => self.cast_bf16_f16,
                 (F32, U32) => self.cast_f32_u32,
                 (U32, F32) => self.cast_u32_f32,
+                // Compressed KV pages hold one byte per code and widen them for
+                // index_select, which only takes u32 ids.
+                (U8, U32) => self.cast_u8_u32,
+                (U32, U8) => self.cast_u32_u8,
                 (F32, I64) => self.cast_f32_i64,
                 (I64, F32) => self.cast_i64_f32,
                 _ => {
@@ -2020,6 +2094,29 @@ pub(crate) mod runtime {
 /// Fetch the HIP runtime, mapping a load failure to a candle error.
 fn hip() -> Result<&'static runtime::Hip> {
     runtime::hip().map_err(Error::Msg)
+}
+
+/// Live device memory `(free, total)` in bytes, or `None` if the query fails.
+///
+/// Free counts what the driver reports as available, which already excludes
+/// this process's resident weights and the allocator's cached blocks. A caller
+/// sizing a KV cache wants exactly that, not the card's nameplate capacity.
+pub fn device_memory_info() -> Option<(usize, usize)> {
+    hip().ok()?.mem_info()
+}
+
+/// Release unused cached HIP allocations at a serialized model-unload boundary.
+/// Live tensors and graph-pinned allocations must remain valid.
+pub fn release_cached_memory() -> Result<usize> {
+    hip()?.release_cached_memory().map_err(Error::Msg)
+}
+
+/// Select f32 activation arithmetic for synchronously submitted quantized matmuls
+/// on this thread. Weight quantization is unchanged. Nested calls and unwinding
+/// restore the previous policy; no process environment or stream is modified.
+/// The callback must execute its forwards here, not return deferred/async work.
+pub fn with_full_precision_activations<T>(run: impl FnOnce() -> T) -> T {
+    crate::quantized::hip::with_full_precision_activations(run)
 }
 
 /// `(host→device, device→host)` `hipMemcpy` counts since the last [`reset_pcie_counts`]
@@ -2384,6 +2481,81 @@ impl Drop for DevicePos {
             h.free(self.ptr as *mut c_void);
         }
     }
+}
+
+/// Inference-only, out-of-place delta-rule recurrence on the default HIP stream.
+/// Inputs must be contiguous f32 on the same device. State is `[B,H,V,K]`,
+/// q/k `[B,H,K]`, v `[B,H,V]`, decay/beta `[B,H,1]`; `1 <= K <= 256`.
+/// Returns `(output [B,H,V], next_state [B,H,V,K])`, never mutating inputs.
+pub fn gated_delta_step(
+    state: &Tensor,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    decay: &Tensor,
+    beta: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    let (batch, heads, value_width, key_width) = state.dims4()?;
+    if batch == 0 || heads == 0 || value_width == 0 || !(1..=256).contains(&key_width)
+        || q.dims() != [batch, heads, key_width]
+        || k.dims() != [batch, heads, key_width]
+        || v.dims() != [batch, heads, value_width]
+        || decay.dims() != [batch, heads, 1]
+        || beta.dims() != [batch, heads, 1]
+    {
+        crate::bail!("HIP gated delta: invalid input shapes")
+    }
+    let inputs = [state, q, k, v, decay, beta];
+    for input in inputs {
+        if input.dtype() != DType::F32 || !input.is_contiguous()
+            || !input.device().same_device(state.device())
+        {
+            crate::bail!("HIP gated delta: contiguous f32 inputs on the same device required")
+        }
+    }
+    let guards = inputs.map(Tensor::storage_and_layout);
+    let mut pointers = [std::ptr::null(); 6];
+    let mut device = None;
+    for (index, (storage, layout)) in guards.iter().enumerate() {
+        let crate::Storage::Cuda(storage) = &**storage else {
+            crate::bail!("HIP gated delta: GPU inputs required")
+        };
+        pointers[index] = unsafe {
+            (storage.ptr as *const f32).add(layout.start_offset())
+        };
+        device = Some(storage.device.clone());
+    }
+    let rows = batch.checked_mul(heads).and_then(|n| n.checked_mul(value_width))
+        .filter(|&n| n <= u32::MAX as usize)
+        .ok_or_else(|| Error::Msg("HIP gated delta: row count overflow".into()))?;
+    let state_len = rows.checked_mul(key_width)
+        .ok_or_else(|| Error::Msg("HIP gated delta: state size overflow".into()))?;
+    let device = device.expect("six validated inputs");
+    let h = hip()?;
+    h.set_device(device.ordinal).map_err(Error::Msg)?;
+    let kernels = runtime::kernels().map_err(Error::Msg)?;
+    let allocate = |len: usize| -> Result<HipStorage> {
+        let bytes = len.checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| Error::Msg("HIP gated delta: allocation overflow".into()))?;
+        Ok(HipStorage {
+            device: device.clone(),
+            ptr: h.malloc(bytes).map_err(Error::Msg)?,
+            dtype: DType::F32,
+            len,
+        })
+    };
+    let output = allocate(rows)?;
+    let next = allocate(state_len)?;
+    kernels.gated_delta_step_f32(
+        pointers, output.ptr as *mut f32, next.ptr as *mut f32,
+        rows, value_width, key_width,
+    ).map_err(Error::Msg)?;
+    Ok((
+        Tensor::from_storage(crate::Storage::Cuda(output), (batch, heads, value_width),
+            crate::op::BackpropOp::none(), false),
+        Tensor::from_storage(crate::Storage::Cuda(next), state.shape(),
+            crate::op::BackpropOp::none(), false),
+    ))
 }
 
 struct FusedRmsNorm {
@@ -4152,6 +4324,42 @@ mod op_tests {
     fn gpu() -> Option<Device> {
         Device::new_cuda(0).ok()
     }
+
+    #[test]
+    #[ignore = "exclusive HIP GPU window; native model-unload memory gate"]
+    fn release_cached_memory_frees_unused_allocations_but_preserves_live_tensors() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        let runtime = super::hip()?;
+        let free_bytes = || runtime.mem_info().ok_or_else(|| crate::Error::Msg("HIP memory query failed".into())).map(|v| v.0);
+        let baseline = free_bytes()?;
+        let live = Tensor::zeros(64 * 1024 * 1024 / 4, DType::F32, &device)?.affine(1.0, 1.0)?;
+        let transient = Tensor::zeros(256 * 1024 * 1024 / 4, DType::F32, &device)?;
+        device.synchronize()?;
+        let loaded = free_bytes()?;
+        drop(transient);
+        let cached = free_bytes()?;
+        eprintln!("HIP_CACHE_RELEASE baseline_free={baseline} loaded_free={loaded} after_drop_free={cached}");
+        let released = super::release_cached_memory()?;
+        let after = free_bytes()?;
+        assert!(released >= 256 * 1024 * 1024, "must actually release the cached temporary");
+        assert!(after >= cached + 192 * 1024 * 1024, "device headroom must recover: {cached} -> {after}");
+        assert_eq!(super::release_cached_memory()?, 0, "repeated trim must be idempotent");
+        // Force fresh allocation after trimming and verify retained storage.
+        let replacement = Tensor::zeros(256 * 1024 * 1024 / 4, DType::F32, &device)?;
+        assert_eq!(live.narrow(0,0,4)?.to_vec1::<f32>()?, vec![1.0;4]);
+        assert_eq!(replacement.narrow(0,0,4)?.to_vec1::<f32>()?, vec![0.0;4]);
+        // Capture tracking also leases temporary storage; trimming must refuse it.
+        runtime.pool_capture_begin();
+        let during_capture = super::release_cached_memory();
+        let _ = runtime.pool_capture_end();
+        assert!(during_capture.is_err());
+        drop(replacement);
+        assert!(super::release_cached_memory()? >= 256 * 1024 * 1024);
+        assert_eq!(live.narrow(0,0,4)?.to_vec1::<f32>()?, vec![1.0;4]);
+        eprintln!("HIP_CACHE_RELEASE released_bytes={released} after_trim_free={after}");
+        Ok(())
+    }
+
     fn close(a: &[f32], b: &[f32], tol: f32, what: &str) {
         assert_eq!(a.len(), b.len(), "{what} len");
         for (x, y) in a.iter().zip(b) {
@@ -4957,6 +5165,196 @@ mod op_tests {
     }
 
     #[test]
+    #[ignore = "exclusive HIP GPU: vocabulary arg-reduction parity and timing"]
+    fn arg_reduce_vocabulary_probe() -> Result<()> {
+        let dev = gpu().expect("arg-reduction probe requires a HIP GPU");
+        // Independent strict-comparison oracle, including first-NaN behavior.
+        let oracle = |row: &[f32], maximum: bool| {
+            let mut best = 0usize;
+            for index in 1..row.len() {
+                if if maximum { row[index] > row[best] } else { row[index] < row[best] } {
+                    best = index;
+                }
+            }
+            best as u32
+        };
+        for width in [1, 3, 31, 33, 255, 256, 257, 1025, 248_320] {
+            let mut rows = vec![vec![0.0f32; width]; 7];
+            rows[0].fill(f32::NEG_INFINITY);
+            rows[1].fill(f32::INFINITY);
+            rows[2][0] = f32::NAN;
+            rows[3].fill(f32::NAN);
+            rows[4][width / 3] = 7.0;
+            rows[4][width - 1] = 7.0;
+            rows[5][width / 3] = -7.0;
+            rows[5][width - 1] = -7.0;
+            if width > 1 {
+                rows[2][width - 1] = f32::INFINITY;
+                rows[3][0] = 0.0; // later NaNs must not replace the first finite value
+                rows[6][width / 2] = f32::NAN;
+                rows[6][width - 1] = -0.0;
+            }
+            let input = Tensor::from_vec(rows.concat(), (rows.len(), width), &dev)?;
+            for maximum in [false, true] {
+                let actual = if maximum { input.argmax(D::Minus1)? } else { input.argmin(D::Minus1)? };
+                let expected: Vec<u32> = rows.iter().map(|row| oracle(row, maximum)).collect();
+                assert_eq!(actual.to_vec1::<u32>()?, expected, "width={width} maximum={maximum}");
+            }
+        }
+        // Non-last-axis reduction stays on the original generic kernel.
+        let values: Vec<f32> = (0..3 * 257).map(|i| ((i * 17) % 31) as f32).collect();
+        let input = Tensor::from_vec(values.clone(), (3, 257), &dev)?;
+        let cpu = Tensor::from_vec(values, (3, 257), &Device::Cpu)?;
+        assert_eq!(input.argmax(0)?.to_vec1::<u32>()?, cpu.argmax(0)?.to_vec1::<u32>()?);
+        assert_eq!(input.argmin(0)?.to_vec1::<u32>()?, cpu.argmin(0)?.to_vec1::<u32>()?);
+
+        let values: Vec<f32> = (0..248_320u64)
+            .map(|i| ((i * 48_271) % 2_147_483_647) as f32 / 2_147_483_647f32)
+            .collect();
+        let expected = oracle(&values, true);
+        let input = Tensor::from_vec(values, (248_320,), &dev)?;
+        for _ in 0..3 {
+            assert_eq!(input.argmax(0)?.to_scalar::<u32>()?, expected);
+        }
+        let mut elapsed = Vec::new();
+        for _ in 0..15 {
+            dev.synchronize()?;
+            let start = std::time::Instant::now();
+            assert_eq!(input.argmax(0)?.to_scalar::<u32>()?, expected);
+            elapsed.push(start.elapsed());
+        }
+        elapsed.sort_unstable();
+        eprintln!("HIP_ARG_REDUCE width=248320 iterations=15 median_ms={:.6} min_ms={:.6} max_ms={:.6} token={expected} scope=Tensor_argmax_plus_scalar_readback",
+            elapsed[7].as_secs_f64() * 1e3,
+            elapsed[0].as_secs_f64() * 1e3,
+            elapsed[14].as_secs_f64() * 1e3);
+        Ok(())
+    }
+
+    fn delta_reference(inputs: &[Tensor; 6]) -> Result<(Tensor, Tensor)> {
+        let [state, q, k, v, decay, beta] = inputs;
+        let state = state.broadcast_mul(&decay.unsqueeze(3)?)?;
+        let prediction = state.matmul(&k.unsqueeze(3)?)?.squeeze(3)?;
+        let update = beta.broadcast_mul(&(v - prediction)?)?;
+        let state = (state + update.unsqueeze(3)?.matmul(&k.unsqueeze(2)?)?)?;
+        let output = (state.matmul(&q.unsqueeze(3)?)?.squeeze(3)?
+            / (k.dim(2)? as f64).sqrt())?;
+        Ok((output, state))
+    }
+
+    fn delta_check(actual: &Tensor, expected: &[f32], label: &str) -> Result<()> {
+        let actual = actual.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(actual.len(), expected.len());
+        for (index, (&a, &b)) in actual.iter().zip(expected).enumerate() {
+            assert!((a - b).abs() <= 2e-5 + 1e-4 * b.abs(),
+                "{label}[{index}]: {a} != {b}");
+        }
+        Ok(())
+    }
+
+    /// Opt-in hardware gate: shape tails, head layout, immutable snapshots,
+    /// update-before-query, 128 recurrent steps, and isolated exact-shape timing.
+    #[test]
+    #[ignore = "requires an exclusively reserved HIP device"]
+    fn gated_delta_step_parity_probe() -> Result<()> {
+        let dev = crate::Device::new_cuda(0)?;
+        let data = |n: usize, salt: usize, scale: f32| -> Vec<f32> {
+            (0..n).map(|i| (((i * 37 + salt * 13) % 101) as f32 - 50.) * scale).collect()
+        };
+        for (batch, heads, vw, kw, steps) in [
+            (2, 3, 5, 1, 1), (2, 3, 5, 31, 1), (2, 3, 5, 127, 1),
+            (2, 3, 5, 128, 128), (2, 3, 5, 129, 1), (2, 3, 5, 256, 1),
+            (1, 48, 128, 128, 1),
+        ] {
+            let bh = batch * heads;
+            let mut state = data(bh * vw * kw, 1, 0.001);
+            let q = data(bh * kw, 2, 0.002 / (kw as f32).sqrt());
+            let k = data(bh * kw, 3, 0.01 / (kw as f32).sqrt());
+            let v = data(bh * vw, 4, 0.01);
+            let decay: Vec<_> = (0..bh).map(|h| [0., 1., 0.97][h % 3]).collect();
+            let beta: Vec<_> = (0..bh).map(|h| [1., 0., 0.4][h % 3]).collect();
+            let mut inputs = [
+                Tensor::from_vec(state.clone(), (batch, heads, vw, kw), &dev)?,
+                Tensor::from_vec(q.clone(), (batch, heads, kw), &dev)?,
+                Tensor::from_vec(k.clone(), (batch, heads, kw), &dev)?,
+                Tensor::from_vec(v.clone(), (batch, heads, vw), &dev)?,
+                Tensor::from_vec(decay.clone(), (batch, heads, 1), &dev)?,
+                Tensor::from_vec(beta.clone(), (batch, heads, 1), &dev)?,
+            ];
+            // Exercise contiguous views with non-zero storage offsets as well.
+            for input in &mut inputs {
+                let padded = Tensor::cat(&[
+                    &Tensor::zeros(7, DType::F32, &dev)?, &input.flatten_all()?,
+                ], 0)?;
+                *input = padded.narrow(0, 7, input.elem_count())?.reshape(input.shape())?;
+            }
+            let snapshot = inputs[0].clone();
+            let initial = state.clone();
+            for _ in 0..steps {
+                let mut expected_output = vec![0.; bh * vw];
+                for h in 0..bh {
+                    for row in 0..vw {
+                        let base = (h * vw + row) * kw;
+                        let mut prediction = 0.;
+                        for col in 0..kw {
+                            state[base + col] *= decay[h];
+                            prediction += state[base + col] * k[h * kw + col];
+                        }
+                        let update = beta[h] * (v[h * vw + row] - prediction);
+                        let mut result = 0.;
+                        for col in 0..kw {
+                            state[base + col] += update * k[h * kw + col];
+                            result += state[base + col] * q[h * kw + col];
+                        }
+                        expected_output[h * vw + row] = result / (kw as f32).sqrt();
+                    }
+                }
+                let (primitive_output, primitive_state) = delta_reference(&inputs)?;
+                let (output, next) = super::gated_delta_step(
+                    &inputs[0], &inputs[1], &inputs[2], &inputs[3], &inputs[4], &inputs[5],
+                )?;
+                delta_check(&output, &expected_output, "scalar output")?;
+                delta_check(&next, &state, "scalar state")?;
+                delta_check(&output, &primitive_output.flatten_all()?.to_vec1::<f32>()?, "HIP output")?;
+                delta_check(&next, &primitive_state.flatten_all()?.to_vec1::<f32>()?, "HIP state")?;
+                inputs[0] = next;
+            }
+            assert_eq!(snapshot.flatten_all()?.to_vec1::<f32>()?, initial);
+            let wrong_shape = inputs[1].unsqueeze(0)?;
+            assert!(super::gated_delta_step(
+                &inputs[0], &wrong_shape, &inputs[2], &inputs[3], &inputs[4], &inputs[5],
+            ).is_err());
+            let bad = inputs[1].to_dtype(DType::U32)?;
+            assert!(super::gated_delta_step(
+                &inputs[0], &bad, &inputs[2], &inputs[3], &inputs[4], &inputs[5],
+            ).is_err());
+            let cpu = inputs[1].to_device(&crate::Device::Cpu)?;
+            assert!(super::gated_delta_step(
+                &inputs[0], &cpu, &inputs[2], &inputs[3], &inputs[4], &inputs[5],
+            ).is_err());
+            if heads == 48 {
+                for fused in [false, true] {
+                    let mut samples = Vec::new();
+                    for iteration in 0..18 {
+                        dev.synchronize()?;
+                        let start = std::time::Instant::now();
+                        let result = if fused {
+                            super::gated_delta_step(&inputs[0], &inputs[1], &inputs[2],
+                                &inputs[3], &inputs[4], &inputs[5])?
+                        } else { delta_reference(&inputs)? };
+                        dev.synchronize()?;
+                        if iteration >= 3 { samples.push(start.elapsed().as_secs_f64() * 1000.); }
+                        drop(result);
+                    }
+                    samples.sort_by(f64::total_cmp);
+                    eprintln!("gated_delta exact48x128x128 fused={fused} median_ms={:.6}", samples[7]);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn argmax_last_dim() -> Result<()> {
         let Some(dev) = gpu() else {
             return Ok(());
@@ -5173,6 +5571,50 @@ mod op_tests {
         let cb = Tensor::from_vec(b, (2, 3, 4), &Device::Cpu)?;
         let c = ca.matmul(&cb)?.flatten_all()?.to_vec1::<f32>()?;
         close(&g, &c, 5e-2, "matmul_f16_batched");
+        Ok(())
+    }
+
+    /// Widening u8 codes to u32 is what lets a compressed KV page hold one
+    /// byte per code and still feed index_select, which takes u32 ids. Without
+    /// it the page must be four bytes per code, exactly what the f32 cache it
+    /// replaces costs, so this cast is the difference between a saving and none.
+    #[test]
+    fn cast_u8_u32_roundtrip() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        // Spans the byte range including both endpoints. Built directly from
+        // bytes, which is how a page store uploads codes: F32 -> U8 does not
+        // exist on this backend and is not needed, since the host already holds
+        // the codes as bytes.
+        let bytes: Vec<u8> = vec![0, 1, 7, 15, 128, 254, 255, 3];
+        let codes: Vec<f32> = bytes.iter().map(|b| *b as f32).collect();
+        let as_u8 = Tensor::from_vec(bytes, (8,), &dev)?;
+        assert_eq!(as_u8.dtype(), DType::U8);
+        let widened = as_u8.to_dtype(DType::U32)?;
+        assert_eq!(widened.dtype(), DType::U32);
+        let back: Vec<f32> = widened.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        close(&back, &codes, 0.0, "cast_u8_u32");
+
+        // And the narrowing direction. Read back as bytes rather than via f32:
+        // U8 -> F32 does not exist here either, and a page store reads codes as
+        // bytes anyway.
+        let narrowed: Vec<u8> = widened.to_dtype(DType::U8)?.to_vec1::<u8>()?;
+        assert_eq!(
+            narrowed,
+            codes.iter().map(|c| *c as u8).collect::<Vec<u8>>(),
+            "cast_u32_u8"
+        );
+
+        // The point of the cast: u32 ids drive index_select over a codebook.
+        let codebook = Tensor::from_vec(
+            (0..256).map(|i| i as f32 * 0.5).collect::<Vec<f32>>(),
+            (256,),
+            &dev,
+        )?;
+        let picked: Vec<f32> = codebook.index_select(&widened, 0)?.to_vec1::<f32>()?;
+        let expected: Vec<f32> = codes.iter().map(|c| c * 0.5).collect();
+        close(&picked, &expected, 1e-6, "index_select_by_u8_codes");
         Ok(())
     }
 

@@ -1,0 +1,109 @@
+{{- if .Values.transcripts.enabled }}
+{{- $db := .Values.transcripts.database -}}
+{{- $mountPath := $db.certMountPath -}}
+{{- $dsn := printf "postgres://%s@%s:%v/%s?sslmode=%s&sslrootcert=%s/ca.crt&sslcert=%s/tls.crt&sslkey=%s/tls.key" $db.read.user $db.host $db.port $db.name $db.sslmode $mountPath $mountPath $mountPath -}}
+{{- $tokenMountPath := .Values.transcripts.bearerToken.mountPath -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-transcripts-mcp
+  labels:
+    {{- include "akh-medu.transcripts.labels" (dict "root" . "role" "mcp") | nindent 4 }}
+spec:
+  replicas: {{ .Values.transcripts.mcp.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "akh-medu.transcripts.selectorLabels" (dict "root" . "role" "mcp") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.transcripts.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "akh-medu.transcripts.selectorLabels" (dict "root" . "role" "mcp") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: akh-transcripts-mcp
+          image: {{ include "akh-medu.transcripts.image" . }}
+          imagePullPolicy: {{ .Values.transcripts.image.pullPolicy }}
+          args: ["akh-transcripts-mcp"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.transcripts.mcp.service.port }}
+              protocol: TCP
+          env:
+            {{- range $key, $val := .Values.transcripts.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+            - name: AKH_TRANSCRIPTS_DATABASE_URL
+              value: {{ $dsn | quote }}
+            - name: AKH_TRANSCRIPTS_BIND
+              value: {{ .Values.transcripts.mcp.bind | quote }}
+            - name: AKH_TRANSCRIPTS_BEARER_TOKEN_FILE
+              value: {{ $tokenMountPath | quote }}
+            # OTLP service instance ID from the pod name.
+            - name: OTEL_SERVICE_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: harvest-pg-cert
+              mountPath: {{ $mountPath }}
+              readOnly: true
+            - name: bearer-token
+              mountPath: {{ $tokenMountPath }}
+              subPath: token
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.transcripts.mcp.resources | nindent 12 }}
+      volumes:
+        - name: harvest-pg-cert
+          secret:
+            # Same libpq key-permission requirement as the derive deployment
+            # — see the comment there.
+            secretName: {{ $db.read.certSecret }}
+            defaultMode: 0400
+        - name: bearer-token
+          secret:
+            secretName: {{ .Values.transcripts.bearerToken.existingSecret }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.transcripts.bearerToken.secretKey }}
+                path: token
+      {{- with .Values.transcripts.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.transcripts.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- include "akh-medu.archAffinity" . | nindent 8 }}
+        {{- with .Values.transcripts.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}

@@ -399,7 +399,7 @@ impl Runtime {
                 "runtime is quarantined until unknown jobs and possible orphan processes are reconciled",
             ));
         }
-        // One provider child per daemon keeps credential files and capacity ownership unambiguous.
+        // One provider job per daemon keeps credentials and compute capacity ownership unambiguous.
         // Scale runtime replicas with distinct service IDs for additional capacity.
         if !active.is_empty() {
             return Err(Fault::new("busy", "runtime capacity is occupied"));
@@ -630,6 +630,30 @@ impl RemoteHost {
             arguments,
         }
     }
+    /// One bounded exchange with the session daemon. `Ok(None)` when the daemon
+    /// predates the route (HTTP 404 without a fault body), so newer runtimes
+    /// degrade to the old behaviour instead of failing the turn.
+    fn post_optional<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: Value,
+    ) -> std::result::Result<Option<T>, String> {
+        if self.cancel.load(Ordering::SeqCst) {
+            return Err("runtime cancelled".into());
+        }
+        match self
+            .handle
+            .block_on(self.service.client.post::<T>("sessions", path, &body))
+        {
+            Ok(reply) => Ok(Some(reply)),
+            Err(error)
+                if error.code == "not_found" && error.message.contains("returned HTTP 404") =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
     fn callback(&self, path: &str, body: Value) -> std::result::Result<CallbackReply, String> {
         let mut failures = 0;
         loop {
@@ -786,6 +810,63 @@ impl akh_runtime::Host for RemoteHost {
             operation.success();
         }
         result
+    }
+    fn recall(
+        &mut self,
+        id: &str,
+        space: &neural_spans::SpanSpace,
+        vector: &[u8],
+        limit: usize,
+    ) -> std::result::Result<Option<Vec<neural_spans::SpanHit>>, String> {
+        let request = neural_spans::RecallRequest {
+            call: self.call(id, neural_spans::RecallRequest::CALL_NAME, json!({})),
+            space: space.clone(),
+            vector: vector.to_vec(),
+            limit,
+        };
+        Ok(self
+            .post_optional::<neural_spans::RecallReply>("/v1/runtime/recall", json!(request))?
+            .filter(|reply| reply.supported)
+            .map(|reply| reply.hits))
+    }
+    fn spans(
+        &mut self,
+        id: &str,
+        captures: &[neural_spans::SpanCapture],
+    ) -> std::result::Result<bool, String> {
+        let delivery = neural_spans::SpanDelivery {
+            call: self.call(id, neural_spans::SpanDelivery::CALL_NAME, json!({})),
+            captures: captures.to_vec(),
+        };
+        Ok(self
+            .post_optional::<neural_spans::SpanDeliveryReply>("/v1/runtime/spans", json!(delivery))?
+            .is_some_and(|reply| reply.accepted))
+    }
+    fn assemble_context(
+        &mut self,
+        messages: &[Value],
+        window_tokens: usize,
+        reserved_output_tokens: usize,
+    ) -> std::result::Result<Option<akh_session_types::AssembledContext>, String> {
+        let request = akh_session_types::RuntimeContextRequest {
+            call: self.call(
+                &self.request.turn_id,
+                akh_session_types::RuntimeContextRequest::CALL_NAME,
+                json!({}),
+            ),
+            input: self.request.input.clone(),
+            messages: messages.to_vec(),
+            budget: akh_session_types::ContextBudget {
+                window_tokens,
+                reserved_output_tokens,
+            },
+        };
+        Ok(self
+            .post_optional::<akh_session_types::RuntimeContextReply>(
+                "/v1/runtime/context",
+                json!(request),
+            )?
+            .and_then(|reply| reply.assembled))
     }
 }
 

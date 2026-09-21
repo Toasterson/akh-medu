@@ -1,0 +1,81 @@
+{
+  "documents": [
+    {
+      "key": "index",
+      "anima_id": "01a0abe4-c776-7770-881d-db822d7f409b",
+      "seshat_id": "ec511d34-1f0d-425a-ba18-3a4354fc5c83",
+      "sha256": "d60329d8550c9b35265622493df2ea534d63e70ec576b6849240e2b87c10f18d",
+      "hash_matches": true,
+      "chunks": 5
+    },
+    {
+      "key": "analysis",
+      "anima_id": "01a0abe4-c7bf-7851-8d67-62abf6eb9799",
+      "seshat_id": "036a7dec-04c0-44df-9bc2-53d8c38b6ea3",
+      "sha256": "749646599830c1e07ffb5b2229d7c0cda0456aa681e27992702c40ce106825d4",
+      "hash_matches": true,
+      "chunks": 4
+    },
+    {
+      "key": "conversation",
+      "anima_id": "01a0abe4-c80f-7271-9f58-62a6106e5aa6",
+      "seshat_id": "da2c5116-814b-414e-be1e-4be2697ac7c3",
+      "sha256": "103260b9993c486f57e8d908511ea9887a8774ed03a72425b5cc75f6fd932968",
+      "hash_matches": true,
+      "chunks": 11
+    },
+    {
+      "key": "paper",
+      "anima_id": "01a0abe4-c979-7083-b500-7817656ab39c",
+      "seshat_id": "04dcc74a-a595-43e8-a78a-5524deb192cf",
+      "sha256": "fd25e52e3ec9ce3c10c8b4b9145d31069596ceaa77d824d47df5417c0387f5b9",
+      "hash_matches": true,
+      "chunks": 137
+    },
+    {
+      "key": "sources",
+      "anima_id": "01a0abe4-c9a8-7cf1-b9c7-5113f5544af9",
+      "seshat_id": "a6a99c95-d8ec-4ce2-a5db-ae612a131d9d",
+      "sha256": "20b274b9c075515f847526926f1fe627cdda6ee30e375a87eac39f30b3bb9088",
+      "hash_matches": true,
+      "chunks": 4
+    },
+    {
+      "key": "project",
+      "anima_id": "01a0abe4-c9f3-74f3-8a44-ae2d8623e3e8",
+      "seshat_id": "44d923fe-071d-4b17-8fd9-549230ea3245",
+      "sha256": "3fbaab00a22d3db2bbcaec37d3a798fbf9587ae24b54eb587377887a01674af9",
+      "hash_matches": true,
+      "chunks": 11
+    },
+    {
+      "key": "repository",
+      "anima_id": "01a0abe4-ca48-7181-9967-6461ed915b10",
+      "seshat_id": "905d863f-17fa-4bc5-8ed9-5024da719b29",
+      "sha256": "88d12a26bc683b49b74824488d40661ea91ad28feac25566aa4d1ef8fa064747",
+      "hash_matches": true,
+      "chunks": 9
+    },
+    {
+      "key": "tweet",
+      "anima_id": "01a0abe4-ca8c-7a93-aa14-538ff2b1b583",
+      "seshat_id": "7dad9262-5cf5-484e-a4f3-6b24e4e3c98b",
+      "sha256": "86ec068f7ed126d49c3fa667209f5d265f8405e2ac22b6bc1a7324cb385bfc19",
+      "hash_matches": true,
+      "chunks": 1
+    },
+    {
+      "key": "architecture",
+      "anima_id": "01a0abe4-cade-7521-87c6-93fd8155af30",
+      "seshat_id": "2485dd99-1367-402a-909e-461e8114ac73",
+      "sha256": "3834907613d6763b06d333c5cc525c6d3ccf542cc799b1280c2e42d0cbc90075",
+      "hash_matches": true,
+      "chunks": 49
+    }
+  ],
+  "total_chunks": 231,
+  "source_hashes_verified": true,
+  "paper_and_conversation_search_verified": true,
+  "metadata_visibility": "private",
+  "scope": "Import receipts match exact local body hashes; metadata pointers and semantic retrieval verified. Original PDF and HTML are local artifacts, full paper text is in Seshat."
+}

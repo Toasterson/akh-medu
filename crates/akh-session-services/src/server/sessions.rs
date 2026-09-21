@@ -12,11 +12,22 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use std::time::Instant;
+
+#[cfg(all(test, feature = "core-integration-tests", feature = "candle-runtime"))]
+#[path = "sessions_native_gate.rs"]
+mod native_gate;
 
 // Fresh wakes must not jump ahead of older turns backing off on the same
 // single-worker runtime. Only capacity waiters participate: a bad credential
 // or unavailable profile must not become a permanent head-of-line blocker.
-fn capacity_waiter_precedes(runtime: &str, turn: &TurnRecord, other_runtime: &str, other: &TurnRecord, error: Option<&Fault>) -> bool {
+fn capacity_waiter_precedes(
+    runtime: &str,
+    turn: &TurnRecord,
+    other_runtime: &str,
+    other: &TurnRecord,
+    error: Option<&Fault>,
+) -> bool {
     runtime == other_runtime
         && other.status == TurnStatus::Dispatching
         && !other.cancel_requested
@@ -62,23 +73,74 @@ mod backoff_tests {
 
     #[test]
     fn capacity_waiters_are_fifo_without_blocking_on_unrelated_failures() {
-        let turn = |id: &str, at| TurnRecord { id: id.into(), request_id: id.into(),
-            input: TurnInput { origin: InputOrigin::Human { principal: "test".into() }, text: String::new(), data: None, artifacts: vec![] },
-            status: TurnStatus::Dispatching, generation: 1, runtime_job_id: id.into(),
-            cancel_requested: false, output: None, error: None, created_at: at };
+        let turn = |id: &str, at| TurnRecord {
+            id: id.into(),
+            request_id: id.into(),
+            input: TurnInput {
+                origin: InputOrigin::Human {
+                    principal: "test".into(),
+                },
+                text: String::new(),
+                data: None,
+                artifacts: vec![],
+            },
+            status: TurnStatus::Dispatching,
+            generation: 1,
+            runtime_job_id: id.into(),
+            cancel_requested: false,
+            output: None,
+            error: None,
+            created_at: at,
+        };
         let newer = turn("new", 2);
         let mut older = turn("old", 1);
         let busy = Fault::new("busy", "occupied");
-        assert!(capacity_waiter_precedes("r", &newer, "r", &older, Some(&busy)));
-        assert!(!capacity_waiter_precedes("r", &older, "r", &newer, Some(&busy)));
-        assert!(!capacity_waiter_precedes("r", &newer, "other", &older, Some(&busy)));
-        assert!(!capacity_waiter_precedes("r", &newer, "r", &older, Some(&Fault::new("forbidden", "bad credential"))));
+        assert!(capacity_waiter_precedes(
+            "r",
+            &newer,
+            "r",
+            &older,
+            Some(&busy)
+        ));
+        assert!(!capacity_waiter_precedes(
+            "r",
+            &older,
+            "r",
+            &newer,
+            Some(&busy)
+        ));
+        assert!(!capacity_waiter_precedes(
+            "r",
+            &newer,
+            "other",
+            &older,
+            Some(&busy)
+        ));
+        assert!(!capacity_waiter_precedes(
+            "r",
+            &newer,
+            "r",
+            &older,
+            Some(&Fault::new("forbidden", "bad credential"))
+        ));
         older.status = TurnStatus::Running;
-        assert!(!capacity_waiter_precedes("r", &newer, "r", &older, Some(&busy)));
-        older.status = TurnStatus::Dispatching; older.cancel_requested = true;
-        assert!(!capacity_waiter_precedes("r", &newer, "r", &older, Some(&busy)));
+        assert!(!capacity_waiter_precedes(
+            "r",
+            &newer,
+            "r",
+            &older,
+            Some(&busy)
+        ));
+        older.status = TurnStatus::Dispatching;
+        older.cancel_requested = true;
+        assert!(!capacity_waiter_precedes(
+            "r",
+            &newer,
+            "r",
+            &older,
+            Some(&busy)
+        ));
     }
-
 
     #[test]
     fn backoff_grows_and_saturates() {
@@ -115,7 +177,16 @@ pub struct SessionApp {
     pub broker: Broker,
     pub client: Client,
     pub admission_lock: Arc<std::sync::Mutex<()>>,
+    /// Per-core `neural_spans_v1` capability, cached briefly so every turn
+    /// does not re-ask. Transient failures are not cached.
+    core_capabilities: Arc<std::sync::Mutex<std::collections::HashMap<String, (Instant, bool)>>>,
 }
+
+/// Retained runtime captures for a turn, keyed by session and turn.
+fn span_captures_key(session_id: &str, turn_id: &str) -> String {
+    key("span_captures", &[session_id, turn_id])
+}
+
 impl SessionApp {
     pub fn new(config: Arc<Config>, store: Store) -> Result<Self> {
         let sessions = Sessions::new(store, config.clone());
@@ -124,43 +195,216 @@ impl SessionApp {
             admission_lock: Default::default(),
             sessions,
             client: Client::new(config)?,
+            core_capabilities: Default::default(),
         })
+    }
+
+    /// Whether `core` advertises the neural span annex. An older core without
+    /// `/v1/capabilities` is remembered as unsupported; unreachable cores are
+    /// treated as unsupported for this call only.
+    pub async fn core_supports_neural_spans(&self, core: &str) -> bool {
+        const TTL: Duration = Duration::from_secs(60);
+        if let Some((at, supported)) = self
+            .core_capabilities
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(core)
+        {
+            if at.elapsed() < TTL {
+                return *supported;
+            }
+        }
+        let supported = match self.client.get::<Value>(core, "/v1/capabilities").await {
+            Ok(capabilities) => capabilities["neural_spans_v1"] == true,
+            Err(error) if error.code == "not_found" => false,
+            Err(error) => {
+                tracing::debug!(%core, error = %error, "core capabilities unavailable");
+                return false;
+            }
+        };
+        self.core_capabilities
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(core.to_string(), (Instant::now(), supported));
+        supported
+    }
+
+    /// Same-space recall on behalf of the runtime, under this service's core
+    /// principal and the session's akh/session scope. Never invents hits.
+    pub async fn neural_recall(
+        &self,
+        session: &SessionRecord,
+        request: neural_spans::RecallRequest,
+    ) -> Result<neural_spans::RecallReply> {
+        request.validate()?;
+        let Some(core) = &session.core_service else {
+            return Ok(neural_spans::RecallReply::default());
+        };
+        if !self.core_supports_neural_spans(core).await {
+            return Ok(neural_spans::RecallReply::default());
+        }
+        let query = neural_spans::SpanQuery {
+            akh: session.akh.clone(),
+            session_id: session.id.clone(),
+            space: request.space,
+            vector: request.vector,
+            limit: request.limit,
+        };
+        match self
+            .client
+            .post::<Vec<neural_spans::SpanHit>>(core, "/v1/spans/query", &query)
+            .await
+        {
+            Ok(hits) => Ok(neural_spans::RecallReply {
+                supported: true,
+                hits,
+            }),
+            // Capture policy disabled for this akh: recall is simply unavailable.
+            Err(error) if error.code == "forbidden" => Ok(neural_spans::RecallReply::default()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Forward a runtime's per-turn context assembly to the akh's cognitive core.
+    ///
+    /// The runtime holds the conversation and initiates the call; the session
+    /// daemon holds the akh identity and the core credential and forwards. No
+    /// core (`None`) or an empty candidate set returns `assembled: None`, and
+    /// the runtime then windows locally — the same fail-soft as neural recall.
+    pub async fn assemble_turn_context(
+        &self,
+        session: &SessionRecord,
+        request: RuntimeContextRequest,
+    ) -> Result<RuntimeContextReply> {
+        let Some(core) = &session.core_service else {
+            return Ok(RuntimeContextReply { assembled: None });
+        };
+        if request.messages.is_empty() {
+            return Ok(RuntimeContextReply { assembled: None });
+        }
+        let context: ContextResponse = self
+            .client
+            .post(
+                core,
+                "/v1/context",
+                &ContextRequest {
+                    request_id: request.call.turn_id.clone(),
+                    akh: session.akh.clone(),
+                    session_id: session.id.clone(),
+                    turn_id: request.call.turn_id.clone(),
+                    input: request.input,
+                    tools: session.tools.clone(),
+                    messages: request.messages,
+                    budget: Some(request.budget),
+                },
+            )
+            .await?;
+        if context.schema_version != SCHEMA_VERSION {
+            return Err(Fault::conflict("unsupported cognitive context schema"));
+        }
+        if context
+            .model
+            .as_ref()
+            .is_some_and(|model| session.runtime.model.as_ref() != Some(model))
+        {
+            return Err(Fault::conflict(
+                "session runtime model differs from the authoritative Akh model; reconcile the profile before dispatch",
+            ));
+        }
+        Ok(RuntimeContextReply {
+            assembled: context.assembled,
+        })
+    }
+
+    /// Retain runtime captures of the active turn's input until the turn is
+    /// published to the core. Validated now against the accepted input text so
+    /// publication cannot fail later on a malformed capture.
+    pub fn retain_span_captures(
+        &self,
+        session: &SessionRecord,
+        delivery: neural_spans::SpanDelivery,
+    ) -> Result<neural_spans::SpanDeliveryReply> {
+        let turn = session
+            .turns
+            .iter()
+            .find(|t| t.id == delivery.call.turn_id)
+            .ok_or_else(|| Fault::missing("turn not found"))?;
+        delivery.validate(&turn.input.text)?;
+        if session.core_service.is_none() || delivery.captures.is_empty() {
+            return Ok(neural_spans::SpanDeliveryReply { accepted: false });
+        }
+        let k = span_captures_key(&session.id, &turn.id);
+        self.sessions
+            .store
+            .transaction(|tx| tx.put(&k, &delivery.captures))?;
+        Ok(neural_spans::SpanDeliveryReply { accepted: true })
     }
     /// Each session progresses independently. Dropping this task aborts its owned
     /// JoinSet, so shutdown cannot leave detached allocation/dispatch workers.
     pub async fn run_dispatcher(self) {
         use std::collections::{HashMap, HashSet};
         let mut workers: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
-        let mut running: HashMap<tokio::task::Id, String> = HashMap::new();
+        let mut running: HashMap<tokio::task::Id, (String, bool)> = HashMap::new();
         let mut last = HashMap::new();
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        // Scan on change, not on a timer. Every store commit signals
+        // `changes`, so a submitted turn, a tool result or a closure is still
+        // picked up within one interval; the interval is now a minimum
+        // spacing between scans rather than a cadence. The previous
+        // unconditional 1s scan deserialised every session record — 592
+        // closed ones, ~19 MB — every second for no work, which was most of
+        // this daemon's CPU and all of its memory churn.
+        //
+        // A closed session only stays in this scanned "session/" prefix while
+        // the dispatcher still has cleanup to do for it (see
+        // `archive_if_clean`); once credentials are removed, the workspace is
+        // released, every completed turn is accepted, and every repository
+        // publication is settled, it moves to "archived_session/" and this
+        // scan never deserialises it again.
+        //
+        // The fallback bounds how late any signal-free state change can be
+        // noticed. Its one real cost: a session in dispatch-failure backoff
+        // is retried up to this long after the backoff expires, instead of at
+        // the next second, because expiry alone writes nothing.
+        let changes = self.sessions.store.changes();
+        let mut dirty = true;
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut fallback = tokio::time::interval(Duration::from_secs(5));
+        fallback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                _ = changes.notified() => { dirty = true; }
+                _ = fallback.tick() => { dirty = true; }
                 result = workers.join_next_with_id(), if !workers.is_empty() => {
                     match result {
                         Some(Ok((id, result))) => {
-                            let session = running.remove(&id).unwrap_or_default();
+                            let (session, _) = running.remove(&id).unwrap_or_default();
                             if let Err(error) = result { tracing::error!(%session,code=%error.code,"session reconciliation failed"); }
                         }
                         Some(Err(error)) => {
-                            let session = running.remove(&error.id()).unwrap_or_default();
+                            let (session, _) = running.remove(&error.id()).unwrap_or_default();
                             tracing::error!(%session,"session reconciliation task interrupted");
                         }
                         None => {}
                     }
                 }
-                _ = interval.tick() => {
+                _ = interval.tick(), if dirty => {
+                    dirty = false;
                     let mut sessions = match self.sessions.store.scan::<SessionRecord>("session/") {
                         Ok(sessions) => sessions,
                         Err(error) => { tracing::error!(code=%error.code,"session scan failed"); continue; }
                     };
-                    // Oldest scheduled first prevents inactive sessions at the start
-                    // of the ledger from starving later sessions when capacity is full.
-                    sessions.sort_by_key(|session| last.get(&session.id).copied());
-                    let active: HashSet<_> = running.values().cloned().collect();
+                    // Lease-bearing work must not queue behind historical cleanup.
+                    // Keep cleanup bounded even when its remote executor is gone;
+                    // oldest-first within each class still makes cleanup progress.
+                    sessions.sort_by_key(|session| (session.closed_at.is_some(), last.get(&session.id).copied()));
+                    let active: HashSet<_> = running.values().map(|(id, _)| id.clone()).collect();
+                    let mut cleanup_workers = running.values().filter(|(_, closed)| *closed).count();
                     for session in sessions {
                         if workers.len() >= 64 { break; }
                         if active.contains(&session.id) { continue; }
+                        let closed = session.closed_at.is_some();
+                        if closed && cleanup_workers >= 4 { continue; }
                         let retry_after = if session.closed_at.is_some() {
                             Duration::from_secs(5)
                         } else {
@@ -171,7 +415,8 @@ impl SessionApp {
                         let worker = self.clone();
                         last.insert(id.clone(), tokio::time::Instant::now());
                         let task = workers.spawn(async move { worker.tick_session(session).await });
-                        running.insert(task.id(), id);
+                        running.insert(task.id(), (id, closed));
+                        if closed { cleanup_workers += 1; }
                     }
                 }
             }
@@ -242,6 +487,11 @@ impl SessionApp {
         if let Err(error) = self.reconcile_progress(&session) {
             tracing::warn!(session=%session.id,code=%error.code,"session progress reconciliation deferred");
         }
+        if session.closed_at.is_some()
+            && let Err(error) = self.archive_if_clean(&session)
+        {
+            tracing::warn!(session=%session.id,code=%error.code,"session archival deferred");
+        }
         if !session.turns.iter().any(|t| !t.status.terminal()) {
             return Ok(());
         }
@@ -249,8 +499,7 @@ impl SessionApp {
             tracing::warn!(session=%session.id,code=%error.code,"session reconciliation deferred");
             self.sessions.store.transaction(|tx| {
                 let k = key("dispatch_error", &[&session.id]);
-                let mut current: SessionRecord = tx
-                    .get(&key("session", &[&session.id]))?
+                let mut current = crate::session::load_record(tx, &session.id)?
                     .ok_or_else(|| Fault::missing("session disappeared"))?;
                 // Tracked on every failure, not only the first with a new
                 // message, so the dispatcher's retry backoff (jittered_backoff)
@@ -267,17 +516,16 @@ impl SessionApp {
                         json!({"error":error}),
                     )?;
                 } else {
-                    tx.put(&key("session", &[&session.id]), &current)?;
+                    crate::session::save_record(tx, &current)?;
                 }
                 Ok(())
             })?;
         } else if session.dispatch_failures != 0 {
             self.sessions.store.transaction(|tx| {
-                let mut current: SessionRecord = tx
-                    .get(&key("session", &[&session.id]))?
+                let mut current = crate::session::load_record(tx, &session.id)?
                     .ok_or_else(|| Fault::missing("session disappeared"))?;
                 current.dispatch_failures = 0;
-                tx.put(&key("session", &[&session.id]), &current)
+                crate::session::save_record(tx, &current)
             })?;
         }
         Ok(())
@@ -313,11 +561,15 @@ impl SessionApp {
             .store
             .transaction(|tx| tx.put(&k, &now_ms()))?;
         let mut retiring = session.retirement.is_some();
-        let waiting_for_capacity = session.turns.iter().any(|t|
-            !t.cancel_requested && matches!(t.status, TurnStatus::Queued | TurnStatus::Dispatching))
-            && self.sessions.store.get::<Fault>(&key("dispatch_error", &[&session.id]))?
-                .is_some_and(|e| e.code == "busy");
-        if !retiring && !waiting_for_capacity
+        let waiting_for_capacity = session.turns.iter().any(|t| {
+            !t.cancel_requested && matches!(t.status, TurnStatus::Queued | TurnStatus::Dispatching)
+        }) && self
+            .sessions
+            .store
+            .get::<Fault>(&key("dispatch_error", &[&session.id]))?
+            .is_some_and(|e| e.code == "busy");
+        if !retiring
+            && !waiting_for_capacity
             && crate::session::is_stalled(
                 session.last_progress_at,
                 now_ms(),
@@ -337,10 +589,9 @@ impl SessionApp {
         // Re-read: `force_retire` just above may be what set retirement, and
         // a session with no turns at all can go straight from admitted to
         // closed in this same pass instead of waiting for another sweep.
-        let current: SessionRecord = self
+        let current = self
             .sessions
-            .store
-            .get(&key("session", &[&session.id]))?
+            .get_record(&session.id)?
             .ok_or_else(|| Fault::missing("session disappeared"))?;
         if let Some(retirement) = &current.retirement
             && crate::session::should_force_cancel(
@@ -381,6 +632,71 @@ impl SessionApp {
         }
         Ok(())
     }
+    /// A closed session stays in the scanned `session/` prefix only while the
+    /// dispatcher still has cleanup to do for it. Once every piece of that
+    /// cleanup is done — MCP credentials removed, workspace released, every
+    /// completed turn accepted by core (mirroring `publish_completions`'s own
+    /// notion of "nothing left to do"), and every repository publication
+    /// intent settled — the record moves to `archived_session/`, which this
+    /// dispatcher never scans. Reads by id (`Sessions::get`/`get_record`) and
+    /// `Sessions::list` still check both prefixes.
+    fn archive_if_clean(&self, session: &SessionRecord) -> Result<()> {
+        if self
+            .sessions
+            .store
+            .get::<bool>(&key("mcp_credentials_removed", &[&session.id]))?
+            != Some(true)
+        {
+            return Ok(());
+        }
+        if self
+            .sessions
+            .store
+            .get::<bool>(&key("workspace_released", &[&session.id]))?
+            != Some(true)
+        {
+            return Ok(());
+        }
+        for turn in session
+            .turns
+            .iter()
+            .filter(|turn| turn.status == TurnStatus::Completed)
+        {
+            if self
+                .sessions
+                .store
+                .get::<ToolResult>(&key("core_accepted", &[&turn.id]))?
+                .is_none()
+            {
+                return Ok(());
+            }
+        }
+        if !crate::session_publication::publications_settled(&self.sessions.store, &session.id)? {
+            return Ok(());
+        }
+        let archived = self.sessions.store.transaction(|tx| {
+            let Some(record) = crate::session::load_record(tx, &session.id)? else {
+                return Ok(false);
+            };
+            if record.closed_at.is_none() {
+                return Ok(false);
+            }
+            if tx
+                .get::<SessionRecord>(&crate::session::record_key(&session.id))?
+                .is_none()
+            {
+                // Already archived by an earlier tick or a concurrent worker.
+                return Ok(false);
+            }
+            tx.put(&crate::session::archived_key(&session.id), &record)?;
+            tx.delete(&crate::session::record_key(&session.id))?;
+            Ok(true)
+        })?;
+        if archived {
+            tracing::info!(session=%session.id, "session archived");
+        }
+        Ok(())
+    }
     async fn publish_completions(&self, session: &SessionRecord) -> Result<()> {
         let Some(core) = &session.core_service else {
             return Ok(());
@@ -394,29 +710,44 @@ impl SessionApp {
             if self.sessions.store.get::<ToolResult>(&k)?.is_some() {
                 continue;
             }
-            let tools: Vec<ToolEvidence> = self
-                .sessions
-                .store
-                .scan::<crate::broker::ToolRecord>(&key("tool", &[&session.id, &turn.id]))?
-                .into_iter()
-                .filter_map(|record| {
-                    record.result.map(|result| ToolEvidence {
-                        tool: record.call.name,
-                        ok: result.success,
-                        receipt: result.receipt,
-                    })
-                })
-                .collect();
-            let receipts = tools
-                .iter()
-                .filter_map(|tool| tool.receipt.clone())
-                .collect();
-            let result: ToolResult = self
-                .client
-                .post(
-                    core,
-                    "/v1/turns/accepted",
-                    &AcceptedTurn {
+            let request_key = key("core_accepted_request", &[&session.id, &turn.id]);
+            let request =
+                if let Some(request) = self.sessions.store.get::<AcceptedTurn>(&request_key)? {
+                    request
+                } else {
+                    let tools: Vec<ToolEvidence> = self
+                        .sessions
+                        .store
+                        .scan::<crate::broker::ToolRecord>(&key("tool", &[&session.id, &turn.id]))?
+                        .into_iter()
+                        .filter_map(|record| {
+                            record.result.map(|result| ToolEvidence {
+                                tool: record.call.name,
+                                ok: result.success,
+                                receipt: result.receipt,
+                            })
+                        })
+                        .collect();
+                    let receipts = tools
+                        .iter()
+                        .filter_map(|tool| tool.receipt.clone())
+                        .collect();
+                    // Only a core that advertises the annex receives the new field;
+                    // an empty list preserves the original wire payload and fingerprint.
+                    let span_captures =
+                        match self.sessions.store.get::<Vec<neural_spans::SpanCapture>>(
+                            &span_captures_key(&session.id, &turn.id),
+                        )? {
+                            Some(captures)
+                                if !captures.is_empty()
+                                    && self.core_supports_neural_spans(core).await =>
+                            {
+                                captures
+                            }
+                            _ => vec![],
+                        };
+                    let candidate = AcceptedTurn {
+                        span_captures,
                         request_id: format!("turn-{}", turn.id),
                         akh: session.akh.clone(),
                         session_id: session.id.clone(),
@@ -426,16 +757,37 @@ impl SessionApp {
                         model: session.runtime.model.clone(),
                         tool_receipts: receipts,
                         tools,
-                    },
-                )
+                    };
+                    // Persist before any send: a lost reply must never cause this
+                    // operation ID to acquire a different payload after restart,
+                    // capability changes, or late runtime capture delivery.
+                    let admitted = self.sessions.store.transaction(|tx| {
+                        if tx.get::<ToolResult>(&k)?.is_some() {
+                            return Ok(None);
+                        }
+                        if let Some(existing) = tx.get::<AcceptedTurn>(&request_key)? {
+                            return Ok(Some(existing));
+                        }
+                        tx.put(&request_key, &candidate)?;
+                        Ok(Some(candidate))
+                    })?;
+                    let Some(admitted) = admitted else { continue };
+                    admitted
+                };
+            let result: ToolResult = self
+                .client
+                .post(core, "/v1/turns/accepted", &request)
                 .await?;
             if !result.success {
                 return Err(Fault::new("core_error", result.text));
             }
             self.sessions.store.transaction(|tx| {
+                if tx.get::<ToolResult>(&k)?.is_some() {
+                    return Ok(());
+                }
                 tx.put(&k, &result)?;
-                let mut current: SessionRecord = tx
-                    .get(&key("session", &[&session.id]))?
+                tx.delete(&request_key)?;
+                let mut current = crate::session::load_record(tx, &session.id)?
                     .ok_or_else(|| Fault::missing("session disappeared"))?;
                 crate::session::append_event(
                     tx,
@@ -485,10 +837,9 @@ impl SessionApp {
                 allocation.bootstrap_result,
             )?;
         }
-        let current: SessionRecord = self
+        let current = self
             .sessions
-            .store
-            .get(&key("session", &[&session.id]))?
+            .get_record(&session.id)?
             .ok_or_else(|| Fault::missing("session disappeared"))?;
         let Some(turn) = current.turns.iter().find(|t| !t.status.terminal()) else {
             return Ok(());
@@ -509,6 +860,11 @@ impl SessionApp {
                                 turn_id: turn.id.clone(),
                                 input: turn.input.clone(),
                                 tools: current.tools.clone(),
+                                // Local selection still decides this turn; the
+                                // core assembles only once this carries the
+                                // session's messages.
+                                messages: Vec::new(),
+                                budget: None,
                             },
                         )
                         .await?;
@@ -526,9 +882,8 @@ impl SessionApp {
                     }
                     self.sessions.store.transaction(|tx| {
                         tx.put(&k, &context)?;
-                        let mut session: SessionRecord =
-                            tx.get(&key("session", &[&current.id]))?
-                                .ok_or_else(|| Fault::missing("session disappeared"))?;
+                        let mut session = crate::session::load_record(tx, &current.id)?
+                            .ok_or_else(|| Fault::missing("session disappeared"))?;
                         crate::session::append_event(
                             tx,
                             &mut session,
@@ -559,20 +914,41 @@ impl SessionApp {
         let runtime = &request.binding.runtime;
         let mut job: RuntimeJob = match self.client.get(runtime, &path).await {
             Ok(job) => job,
-            Err(error) if error.code == "not_found" && turn.cancel_requested
-                && matches!(turn.status, TurnStatus::Queued | TurnStatus::Dispatching) => {
-                self.client.post(runtime, "/v1/jobs/cancel-unsubmitted", &request).await?
+            Err(error)
+                if error.code == "not_found"
+                    && turn.cancel_requested
+                    && matches!(turn.status, TurnStatus::Queued | TurnStatus::Dispatching) =>
+            {
+                self.client
+                    .post(runtime, "/v1/jobs/cancel-unsubmitted", &request)
+                    .await?
             }
             Err(error)
                 if error.code == "not_found"
                     && matches!(turn.status, TurnStatus::Queued | TurnStatus::Dispatching) =>
             {
                 for waiting in self.sessions.store.scan::<SessionRecord>("session/")? {
-                    if waiting.closed_at.is_some() || waiting.workspace.is_none() { continue; }
-                    let Some(other) = waiting.turns.iter().find(|t| !t.status.terminal()) else { continue; };
-                    let error = self.sessions.store.get::<Fault>(&key("dispatch_error", &[&waiting.id]))?;
-                    if capacity_waiter_precedes(runtime, turn, &waiting.runtime.runtime, other, error.as_ref()) {
-                        return Err(Fault::new("busy", "older turn is waiting for this runtime's capacity"));
+                    if waiting.closed_at.is_some() || waiting.workspace.is_none() {
+                        continue;
+                    }
+                    let Some(other) = waiting.turns.iter().find(|t| !t.status.terminal()) else {
+                        continue;
+                    };
+                    let error = self
+                        .sessions
+                        .store
+                        .get::<Fault>(&key("dispatch_error", &[&waiting.id]))?;
+                    if capacity_waiter_precedes(
+                        runtime,
+                        turn,
+                        &waiting.runtime.runtime,
+                        other,
+                        error.as_ref(),
+                    ) {
+                        return Err(Fault::new(
+                            "busy",
+                            "older turn is waiting for this runtime's capacity",
+                        ));
                     }
                 }
                 // Repeating this request is safe only because the runtime persists exact request identity.
@@ -666,6 +1042,9 @@ pub fn session_router(app: SessionApp) -> Router {
             .route("/v1/runtime/tools", post(runtime_tool))
             .route("/v1/runtime/tools/reconcile", post(reconcile_tool))
             .route("/v1/runtime/input", post(runtime_input))
+            .route("/v1/runtime/recall", post(runtime_recall))
+            .route("/v1/runtime/context", post(runtime_context))
+            .route("/v1/runtime/spans", post(runtime_spans))
             .with_state(app),
         config,
     )
@@ -1037,6 +1416,30 @@ async fn runtime_input(
         request.prompt,
     )?))
 }
+async fn runtime_recall(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Json(request): Json<neural_spans::RecallRequest>,
+) -> Api<neural_spans::RecallReply> {
+    let session = app.sessions.validate_runtime_call(&p, &request.call)?;
+    Ok(Json(app.neural_recall(&session, request).await?))
+}
+async fn runtime_context(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Json(request): Json<RuntimeContextRequest>,
+) -> Api<RuntimeContextReply> {
+    let session = app.sessions.validate_runtime_call(&p, &request.call)?;
+    Ok(Json(app.assemble_turn_context(&session, request).await?))
+}
+async fn runtime_spans(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Json(delivery): Json<neural_spans::SpanDelivery>,
+) -> Api<neural_spans::SpanDeliveryReply> {
+    let session = app.sessions.validate_runtime_call(&p, &delivery.call)?;
+    Ok(Json(app.retain_span_captures(&session, delivery)?))
+}
 
 async fn session_access(
     State(app): State<SessionApp>,
@@ -1256,6 +1659,706 @@ mod lifecycle_tests {
             "a proven absent allocation needs no release"
         );
         server.abort();
+    }
+
+    /// A private fake cognitive core: records span queries and accepted turns,
+    /// answers capability discovery, and returns canned hits.
+    struct FakeCore {
+        address: std::net::SocketAddr,
+        fail_next_accept: Arc<std::sync::atomic::AtomicBool>,
+        advertise_spans: Arc<std::sync::atomic::AtomicBool>,
+        queries: Arc<std::sync::Mutex<Vec<Value>>>,
+        accepted: Arc<std::sync::Mutex<Vec<Value>>>,
+        server: tokio::task::JoinHandle<()>,
+    }
+    async fn fake_core(with_capabilities: bool, hits: Vec<Value>) -> FakeCore {
+        use axum::routing::{get, post};
+        let queries: Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+        let accepted: Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+        let (q, a) = (queries.clone(), accepted.clone());
+        let fail_next_accept = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let advertise_spans = Arc::new(std::sync::atomic::AtomicBool::new(with_capabilities));
+        let fail = fail_next_accept.clone();
+        let mut router = Router::new()
+            .route(
+                "/v1/spans/query",
+                post(move |Json(body): Json<Value>| {
+                    let q = q.clone();
+                    let hits = hits.clone();
+                    async move {
+                        q.lock().unwrap().push(body);
+                        Json(Value::Array(hits))
+                    }
+                }),
+            )
+            .route(
+                "/v1/turns/accepted",
+                post(move |Json(body): Json<Value>| {
+                    let a = a.clone();
+                    let fail = fail.clone();
+                    async move {
+                        a.lock().unwrap().push(body.clone());
+                        if fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"code":"unavailable","message":"reply lost after acceptance"})));
+                        }
+                        (StatusCode::OK, Json(json!({"success":true,"text":"staged","data":{"captured":true},"receipt":body["request_id"]})))
+                    }
+                }),
+            );
+        if with_capabilities {
+            let advertised = advertise_spans.clone();
+            router = router.route(
+                "/v1/capabilities",
+                get(move || {
+                    let supported = advertised.load(std::sync::atomic::Ordering::SeqCst);
+                    async move { Json(json!({"neural_spans_v1":supported,"vector_bits":10000})) }
+                }),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        FakeCore {
+            address,
+            fail_next_accept,
+            advertise_spans,
+            queries,
+            accepted,
+            server,
+        }
+    }
+
+    fn neural_test_config(
+        dir: &std::path::Path,
+        token: &std::path::Path,
+        core: std::net::SocketAddr,
+    ) -> Value {
+        json!({
+            "service_id":"sessions","listen":"127.0.0.1:0","data_dir":dir,
+            "endpoints":{"core":{"url":format!("http://{core}"),"token_file":token}},
+            "principals":[
+                {"id":"user","token_file":token,"roles":["client"],"akhs":["test"]},
+                {"id":"runtime","token_file":token,"roles":["runtime"]}
+            ],
+            "akhs":{"test":{"instructions":"test","core_service":"core","runtime":{"runtime":"runtime","profile":"test","revision":"1","kind":"internal","execution_mode":"brokered"},"workspace_profiles":["local"]}}
+        })
+    }
+
+    fn span_space() -> neural_spans::SpanSpace {
+        neural_spans::SpanSpace {
+            model_sha256: "1".repeat(64),
+            tokenizer_sha256: "2".repeat(64),
+            policy_sha256: "3".repeat(64),
+            projector_sha256: "4".repeat(64),
+        }
+    }
+
+    /// Create a session with one dispatched turn and return (app, runtime
+    /// principal, session record).
+    async fn dispatched_session(
+        config: Value,
+        dir: &std::path::Path,
+    ) -> (SessionApp, Principal, SessionRecord) {
+        let config: Config = serde_json::from_value(config).unwrap();
+        let user = config.principals[0].clone();
+        let runtime = config.principals[1].clone();
+        let app = SessionApp::new(
+            Arc::new(config),
+            Store::open(&dir.join("state.redb")).unwrap(),
+        )
+        .unwrap();
+        let session = app
+            .sessions
+            .create(
+                &user,
+                &NewSession {
+                    request_id: "create".into(),
+                    akh: "test".into(),
+                    workspace_profile: "local".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        app.sessions
+            .submit(
+                &user,
+                &session.id,
+                &SubmitInput {
+                    request_id: "turn".into(),
+                    text: "  Remember the word cedar  ".into(),
+                    artifacts: vec![],
+                },
+            )
+            .unwrap();
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let mut record: SessionRecord = tx.get(&key("session", &[&session.id]))?.unwrap();
+                record.turns[0].status = TurnStatus::Running;
+                tx.put(&key("session", &[&session.id]), &record)
+            })
+            .unwrap();
+        let record = app.sessions.get(&user, &session.id).unwrap();
+        (app, runtime, record)
+    }
+
+    fn runtime_call(record: &SessionRecord, name: &str) -> ToolCall {
+        ToolCall {
+            id: format!("neural-{}", record.turns[0].id),
+            session_id: record.id.clone(),
+            turn_id: record.turns[0].id.clone(),
+            generation: record.turns[0].generation,
+            name: name.into(),
+            arguments: json!({}),
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_payload_is_frozen_across_reply_loss_and_capability_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-neural-test-credential").unwrap();
+        let core = fake_core(true, vec![]).await;
+        let (app, _, record) = dispatched_session(
+            neural_test_config(dir.path(), &token, core.address),
+            dir.path(),
+        )
+        .await;
+        app.retain_span_captures(
+            &record,
+            neural_spans::SpanDelivery {
+                call: runtime_call(&record, neural_spans::SpanDelivery::CALL_NAME),
+                captures: vec![neural_spans::SpanCapture {
+                    space: span_space(),
+                    source: neural_spans::SpanSource::User,
+                    byte_start: 2,
+                    byte_end: 25,
+                    vector: vec![9; neural_spans::VECTOR_BYTES],
+                }],
+            },
+        )
+        .unwrap();
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let mut current: SessionRecord = tx.get(&key("session", &[&record.id]))?.unwrap();
+                current.turns[0].status = TurnStatus::Completed;
+                current.turns[0].output = Some("cedar".into());
+                tx.put(&key("session", &[&record.id]), &current)
+            })
+            .unwrap();
+        let user = &app.sessions.config.principals[0];
+        let completed = app.sessions.get(user, &record.id).unwrap();
+        core.fail_next_accept
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(app.publish_completions(&completed).await.is_err());
+        core.advertise_spans
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        // Fresh app discards the capability cache, as a daemon restart would.
+        let restarted =
+            SessionApp::new(app.sessions.config.clone(), app.sessions.store.clone()).unwrap();
+        restarted.publish_completions(&completed).await.unwrap();
+        let accepted = core.accepted.lock().unwrap().clone();
+        assert_eq!(accepted.len(), 2);
+        assert!(accepted[0].get("span_captures").is_some());
+        assert_eq!(
+            accepted[0], accepted[1],
+            "a retry must preserve the accepted operation fingerprint"
+        );
+        restarted.publish_completions(&completed).await.unwrap();
+        assert_eq!(core.accepted.lock().unwrap().len(), 2);
+        assert!(
+            restarted
+                .sessions
+                .store
+                .get::<AcceptedTurn>(&key(
+                    "core_accepted_request",
+                    &[&record.id, &record.turns[0].id]
+                ))
+                .unwrap()
+                .is_none(),
+            "receipt must replace the temporary outbox payload"
+        );
+        core.server.abort();
+    }
+
+    #[tokio::test]
+    async fn runtime_recall_and_span_delivery_ride_the_session_scope_to_the_core() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-neural-test-credential").unwrap();
+        let hit = json!({"turn_id":"old","source":"user","byte_start":0,"byte_end":5,"text":"cedar","hamming_distance":12});
+        let core = fake_core(true, vec![hit.clone()]).await;
+        let (app, runtime, record) = dispatched_session(
+            neural_test_config(dir.path(), &token, core.address),
+            dir.path(),
+        )
+        .await;
+
+        // Recall: the daemon adds akh/session scope and forwards the vector.
+        let request = neural_spans::RecallRequest {
+            call: runtime_call(&record, neural_spans::RecallRequest::CALL_NAME),
+            space: span_space(),
+            vector: vec![9; neural_spans::VECTOR_BYTES],
+            limit: 4,
+        };
+        let session = app
+            .sessions
+            .validate_runtime_call(&runtime, &request.call)
+            .unwrap();
+        let reply = app.neural_recall(&session, request.clone()).await.unwrap();
+        assert!(reply.supported);
+        assert_eq!(reply.hits.len(), 1);
+        assert_eq!(reply.hits[0].text, "cedar");
+        let queries = core.queries.lock().unwrap().clone();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0]["akh"], "test");
+        assert_eq!(queries[0]["session_id"], record.id);
+        assert_eq!(queries[0]["limit"], 4);
+        assert_eq!(queries[0]["vector"][0], 9);
+        // A client principal or a stale generation never reaches the core.
+        let user = app.sessions.config.principals[0].clone();
+        assert!(
+            app.sessions
+                .validate_runtime_call(&user, &request.call)
+                .is_err()
+        );
+        let mut stale = request.clone();
+        stale.call.generation += 1;
+        assert!(
+            app.sessions
+                .validate_runtime_call(&runtime, &stale.call)
+                .is_err()
+        );
+
+        // Delivery: validated against the turn's accepted input, retained, and
+        // attached to the accepted turn on publication.
+        let capture = neural_spans::SpanCapture {
+            space: span_space(),
+            source: neural_spans::SpanSource::User,
+            byte_start: 2,
+            byte_end: 25,
+            vector: vec![9; neural_spans::VECTOR_BYTES],
+        };
+        let mut bad = capture.clone();
+        bad.byte_end = 200;
+        let delivery = neural_spans::SpanDelivery {
+            call: runtime_call(&record, neural_spans::SpanDelivery::CALL_NAME),
+            captures: vec![bad],
+        };
+        assert!(app.retain_span_captures(&session, delivery).is_err());
+        let delivery = neural_spans::SpanDelivery {
+            call: runtime_call(&record, neural_spans::SpanDelivery::CALL_NAME),
+            captures: vec![capture.clone()],
+        };
+        assert!(
+            app.retain_span_captures(&session, delivery)
+                .unwrap()
+                .accepted
+        );
+
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let mut record: SessionRecord = tx.get(&key("session", &[&session.id]))?.unwrap();
+                record.turns[0].status = TurnStatus::Completed;
+                record.turns[0].output = Some("cedar".into());
+                tx.put(&key("session", &[&session.id]), &record)
+            })
+            .unwrap();
+        let completed = app.sessions.get(&user, &session.id).unwrap();
+        app.publish_completions(&completed).await.unwrap();
+        let accepted = core.accepted.lock().unwrap().clone();
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0]["input"]["text"], "  Remember the word cedar  ");
+        assert_eq!(accepted[0]["span_captures"].as_array().unwrap().len(), 1);
+        assert_eq!(accepted[0]["span_captures"][0]["byte_end"], 25);
+        assert_eq!(accepted[0]["span_captures"][0]["source"], "user");
+        // Publication is idempotent: the receipt prevents a second post.
+        app.publish_completions(&completed).await.unwrap();
+        assert_eq!(core.accepted.lock().unwrap().len(), 1);
+        core.server.abort();
+    }
+
+    #[tokio::test]
+    async fn runtime_context_assembly_fails_soft_and_never_blocks_a_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-neural-test-credential").unwrap();
+        let core = fake_core(true, vec![]).await;
+        let (app, runtime, record) = dispatched_session(
+            neural_test_config(dir.path(), &token, core.address),
+            dir.path(),
+        )
+        .await;
+        let session = app
+            .sessions
+            .validate_runtime_call(
+                &runtime,
+                &runtime_call(&record, RuntimeContextRequest::CALL_NAME),
+            )
+            .unwrap();
+        let budget = ContextBudget {
+            window_tokens: 1024,
+            reserved_output_tokens: 16,
+        };
+
+        // Empty candidate set: no assembly, and crucially no call to core -
+        // fake_core serves no /v1/context route, so a stray call would error
+        // rather than return None.
+        let empty = RuntimeContextRequest {
+            call: runtime_call(&record, RuntimeContextRequest::CALL_NAME),
+            input: record.turns[0].input.clone(),
+            messages: vec![],
+            budget,
+        };
+        assert_eq!(
+            app.assemble_turn_context(&session, empty).await.unwrap(),
+            RuntimeContextReply { assembled: None }
+        );
+
+        // A session with no cognitive core windows locally: fail-soft to None
+        // even with real candidate messages, again without touching core.
+        let mut no_core = session.clone();
+        no_core.core_service = None;
+        let populated = RuntimeContextRequest {
+            call: runtime_call(&record, RuntimeContextRequest::CALL_NAME),
+            input: record.turns[0].input.clone(),
+            messages: vec![json!({"role":"user","content":"hi"})],
+            budget,
+        };
+        assert_eq!(
+            app.assemble_turn_context(&no_core, populated)
+                .await
+                .unwrap(),
+            RuntimeContextReply { assembled: None }
+        );
+        core.server.abort();
+    }
+
+    #[cfg(feature = "core-integration-tests")]
+    #[tokio::test]
+    async fn accepted_capture_round_trips_through_real_core_http() {
+        real_core_roundtrip(false, None).await;
+    }
+
+    #[cfg(all(feature = "core-integration-tests", feature = "candle-runtime"))]
+    #[tokio::test]
+    #[ignore = "requires pinned Ptah artifacts, explicit device/output and exclusive GPU access"]
+    async fn exact_ptah_capture_round_trips_through_real_core_http() {
+        real_core_roundtrip(true, None).await;
+    }
+
+    #[cfg(all(feature = "core-integration-tests", feature = "candle-runtime"))]
+    #[tokio::test]
+    #[ignore = "requires pinned Ptah artifacts, explicit device/output and exclusive GPU access"]
+    async fn exact_ptah_explicit_notes_round_trip_through_real_core_http() {
+        real_core_roundtrip(true, Some(native_gate::EXPLICIT_INSTRUCTIONS)).await;
+    }
+
+    #[cfg(feature = "core-integration-tests")]
+    async fn real_core_roundtrip(_exact: bool, _instructions: Option<&str>) {
+        use akh_medu::{
+            akh_config::AkhConfig,
+            core_service::{CoreApp, CoreBackend, CoreConfig, CoreFuture, CorePrincipal},
+            engine::Engine,
+        };
+        use tower::ServiceExt;
+
+        struct Backend(Arc<Engine>);
+        impl CoreBackend for Backend {
+            fn engine<'a>(&'a self, _: &'a str) -> CoreFuture<'a, Arc<Engine>> {
+                Box::pin(async { Ok(self.0.clone()) })
+            }
+            fn config<'a>(&'a self, _: &'a str) -> CoreFuture<'a, Arc<AkhConfig>> {
+                Box::pin(async {
+                    Ok(Arc::new(AkhConfig {
+                        capture_transcripts: true,
+                        ..Default::default()
+                    }))
+                })
+            }
+        }
+        // Abort even on assertion failure; no detached local server survives.
+        struct Server(tokio::task::JoinHandle<()>);
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        async fn post(
+            router: &Router,
+            path: &str,
+            token: &str,
+            body: Value,
+        ) -> (StatusCode, Value) {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+        assert!(
+            std::env::var_os("AKH_TRANSCRIPT_CAPTURE").is_none(),
+            "run without a process-wide transcript policy override"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("core.token");
+        std::fs::write(&token, "private-real-core-test-credential").unwrap();
+        let runtime_token = dir.path().join("runtime.token");
+        let runtime_secret = "private-runtime-test-credential";
+        std::fs::write(&runtime_token, runtime_secret).unwrap();
+        let core = CoreApp::new(
+            CoreConfig {
+                sqlite: false,
+                listen: "127.0.0.1:0".parse().unwrap(),
+                data_dir: dir.path().join("core"),
+                principals: vec![CorePrincipal {
+                    id: "sessions".into(),
+                    token_file: token.clone(),
+                    akhs: vec!["test".into()],
+                }],
+            },
+            Arc::new(Backend(Arc::new(Engine::new(Default::default()).unwrap()))),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _server = Server(tokio::spawn(async move {
+            axum::serve(listener, akh_medu::core_service::router(core))
+                .await
+                .unwrap();
+        }));
+        let mut config = neural_test_config(dir.path(), &token, address);
+        config["principals"][1]["token_file"] = json!(runtime_token);
+        let (app, _, record) = dispatched_session(config, dir.path()).await;
+        let router = session_router(app.clone());
+        let query = json!(neural_spans::RecallRequest {
+            call: runtime_call(&record, neural_spans::RecallRequest::CALL_NAME),
+            space: span_space(),
+            vector: vec![9; neural_spans::VECTOR_BYTES],
+            limit: 4,
+        });
+        let before = post(&router, "/v1/runtime/recall", runtime_secret, query.clone()).await;
+        assert_eq!(before.0, StatusCode::OK);
+        assert_eq!(before.1, json!({"supported":true,"hits":[]}));
+        let delivery = json!(neural_spans::SpanDelivery {
+            call: runtime_call(&record, neural_spans::SpanDelivery::CALL_NAME),
+            captures: vec![neural_spans::SpanCapture {
+                space: span_space(),
+                source: neural_spans::SpanSource::User,
+                byte_start: 2,
+                byte_end: 25,
+                vector: vec![9; neural_spans::VECTOR_BYTES]
+            }],
+        });
+        assert_eq!(
+            post(&router, "/v1/runtime/spans", runtime_secret, delivery).await,
+            (StatusCode::OK, json!({"accepted":true}))
+        );
+        // Capturing a running turn must not publish unaccepted memory.
+        assert_eq!(
+            post(&router, "/v1/runtime/recall", runtime_secret, query.clone())
+                .await
+                .1,
+            json!({"supported":true,"hits":[]})
+        );
+        // Scheduler fixture: this test supplies completion, not model inference.
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let mut current: SessionRecord = tx.get(&key("session", &[&record.id]))?.unwrap();
+                current.turns[0].status = TurnStatus::Completed;
+                current.turns[0].output = Some("Noted.".into());
+                tx.put(&key("session", &[&record.id]), &current)
+            })
+            .unwrap();
+        let owner = &app.sessions.config.principals[0];
+        let completed = app.sessions.get(owner, &record.id).unwrap();
+        app.publish_completions(&completed).await.unwrap();
+        app.publish_completions(&completed).await.unwrap();
+        app.sessions
+            .submit(
+                owner,
+                &record.id,
+                &SubmitInput {
+                    request_id: "query-turn".into(),
+                    text: "What word should I remember?".into(),
+                    artifacts: vec![],
+                },
+            )
+            .unwrap();
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let mut current: SessionRecord = tx.get(&key("session", &[&record.id]))?.unwrap();
+                current.turns[1].status = TurnStatus::Running;
+                tx.put(&key("session", &[&record.id]), &current)
+            })
+            .unwrap();
+        let current = app.sessions.get(owner, &record.id).unwrap();
+        // A completed turn cannot replay a recall callback with its original
+        // (otherwise valid) generation and runtime credential.
+        assert_eq!(
+            post(&router, "/v1/runtime/recall", runtime_secret, query.clone())
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        let mut recall = query;
+        recall["call"]["turn_id"] = json!(current.turns[1].id);
+        recall["call"]["generation"] = json!(current.turns[1].generation);
+        let after = post(
+            &router,
+            "/v1/runtime/recall",
+            runtime_secret,
+            recall.clone(),
+        )
+        .await;
+        assert_eq!(after.0, StatusCode::OK);
+        assert_eq!(
+            after.1["hits"],
+            json!([{"turn_id":record.turns[0].id,
+            "source":"user","byte_start":2,"byte_end":25,
+            "text":"Remember the word cedar","hamming_distance":0}])
+        );
+        assert_eq!(
+            post(
+                &router,
+                "/v1/runtime/recall",
+                "incorrect-credential",
+                recall.clone()
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let mut stale = recall.clone();
+        stale["call"]["generation"] = json!(current.generation + 1);
+        assert_eq!(
+            post(&router, "/v1/runtime/recall", runtime_secret, stale)
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        let other = app
+            .sessions
+            .create(
+                owner,
+                &NewSession {
+                    request_id: "other-session".into(),
+                    akh: "test".into(),
+                    workspace_profile: "local".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        let other_turn = app
+            .sessions
+            .submit(
+                owner,
+                &other.id,
+                &SubmitInput {
+                    request_id: "other-query".into(),
+                    text: "What word should I remember?".into(),
+                    artifacts: vec![],
+                },
+            )
+            .unwrap();
+        recall["call"]["session_id"] = json!(other.id);
+        recall["call"]["turn_id"] = json!(other_turn.id);
+        recall["call"]["generation"] = json!(other_turn.generation);
+        assert_eq!(
+            post(&router, "/v1/runtime/recall", runtime_secret, recall).await,
+            (StatusCode::OK, json!({"supported":true,"hits":[]}))
+        );
+        #[cfg(feature = "candle-runtime")]
+        native_gate::run(
+            app,
+            router,
+            runtime_secret,
+            dir.path(),
+            _exact,
+            _instructions,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_older_core_without_capabilities_gets_the_legacy_payload_and_no_recall() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-neural-test-credential").unwrap();
+        let core = fake_core(false, vec![]).await;
+        let (app, runtime, record) = dispatched_session(
+            neural_test_config(dir.path(), &token, core.address),
+            dir.path(),
+        )
+        .await;
+        let request = neural_spans::RecallRequest {
+            call: runtime_call(&record, neural_spans::RecallRequest::CALL_NAME),
+            space: span_space(),
+            vector: vec![0; neural_spans::VECTOR_BYTES],
+            limit: 2,
+        };
+        let session = app
+            .sessions
+            .validate_runtime_call(&runtime, &request.call)
+            .unwrap();
+        let reply = app.neural_recall(&session, request).await.unwrap();
+        assert!(!reply.supported);
+        assert!(
+            core.queries.lock().unwrap().is_empty(),
+            "no query without capability"
+        );
+        let delivery = neural_spans::SpanDelivery {
+            call: runtime_call(&record, neural_spans::SpanDelivery::CALL_NAME),
+            captures: vec![neural_spans::SpanCapture {
+                space: span_space(),
+                source: neural_spans::SpanSource::User,
+                byte_start: 2,
+                byte_end: 25,
+                vector: vec![1; neural_spans::VECTOR_BYTES],
+            }],
+        };
+        assert!(
+            app.retain_span_captures(&session, delivery)
+                .unwrap()
+                .accepted
+        );
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let mut record: SessionRecord = tx.get(&key("session", &[&session.id]))?.unwrap();
+                record.turns[0].status = TurnStatus::Completed;
+                record.turns[0].output = Some("cedar".into());
+                tx.put(&key("session", &[&session.id]), &record)
+            })
+            .unwrap();
+        let user = app.sessions.config.principals[0].clone();
+        let completed = app.sessions.get(&user, &session.id).unwrap();
+        app.publish_completions(&completed).await.unwrap();
+        let accepted = core.accepted.lock().unwrap().clone();
+        assert_eq!(accepted.len(), 1);
+        assert!(
+            accepted[0].get("span_captures").is_none(),
+            "legacy wire payload must not carry the new field: {}",
+            accepted[0]
+        );
+        core.server.abort();
     }
 
     fn lifecycle_test_config(dir: &std::path::Path, token: &std::path::Path) -> Value {
@@ -1541,6 +2644,158 @@ mod lifecycle_tests {
         assert!(
             after.closed_at.is_some(),
             "retirement must finalize even though no runtime ever confirmed this turn"
+        );
+    }
+
+    /// The 19 MB / 5 s scan floor came from closed sessions with nothing
+    /// left to do sitting forever in the scanned "session/" prefix. Once
+    /// every piece of cleanup is done (MCP credentials removed, workspace
+    /// released, every completed turn accepted, every repository publication
+    /// settled) the record must move to "archived_session/" — invisible to
+    /// the dispatcher scan — while still being reachable by id and by list().
+    #[tokio::test]
+    async fn closed_session_with_completed_cleanup_moves_to_the_archived_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-lifecycle-test-credential").unwrap();
+        let config: Config =
+            serde_json::from_value(lifecycle_test_config(dir.path(), &token)).unwrap();
+        let principal = config.principals[0].clone();
+        let app = SessionApp::new(
+            Arc::new(config),
+            Store::open(&dir.path().join("state.redb")).unwrap(),
+        )
+        .unwrap();
+        let session = app
+            .sessions
+            .create(
+                &principal,
+                &NewSession {
+                    request_id: "create".into(),
+                    akh: "test".into(),
+                    workspace_profile: "local".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        let closed = app.sessions.archive(&principal, &session.id).unwrap();
+        assert!(closed.closed_at.is_some());
+        // A session with no MCP requirements, no completed turns, and no
+        // repository publication intents satisfies those three conditions
+        // for free; only these two markers are ever driven by an external
+        // dependency (credential removal, sandbox release), so the test sets
+        // them directly instead of faking those subsystems.
+        app.sessions
+            .store
+            .transaction(|tx| {
+                tx.put(&key("mcp_credentials_removed", &[&closed.id]), &true)?;
+                tx.put(&key("workspace_released", &[&closed.id]), &true)
+            })
+            .unwrap();
+        let live_key = key("session", &[&closed.id]);
+        let archived_key = key("archived_session", &[&closed.id]);
+        app.tick_session(closed.clone()).await.unwrap();
+        assert_eq!(
+            app.sessions.store.get::<SessionRecord>(&live_key).unwrap(),
+            None,
+            "cleanup is done; the record must leave the scanned prefix"
+        );
+        assert!(
+            app.sessions
+                .store
+                .get::<SessionRecord>(&archived_key)
+                .unwrap()
+                .is_some(),
+            "the record must land in archived_session/"
+        );
+        let fetched = app.sessions.get(&principal, &closed.id).unwrap();
+        assert_eq!(fetched.id, closed.id);
+        let listed = app.sessions.list(&principal).unwrap();
+        assert!(
+            listed.iter().any(|s| s.id == closed.id),
+            "list() must still surface archived sessions"
+        );
+        // A second tick, now driven by the archived record (as the
+        // dispatcher would never scan it again, only a caller reading it by
+        // id could hand it back), must be a no-op: no failure, and no
+        // resurrection in the scanned prefix.
+        app.tick_session(fetched).await.unwrap();
+        assert_eq!(
+            app.sessions.store.get::<SessionRecord>(&live_key).unwrap(),
+            None,
+            "a repeat tick on an already-archived session must not recreate session/"
+        );
+        assert!(
+            app.sessions
+                .store
+                .get::<SessionRecord>(&archived_key)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// Missing any one of the cleanup markers must block archival — here,
+    /// `workspace_released` never lands, so the session must stay in
+    /// "session/" for the dispatcher to keep retrying its release.
+    #[tokio::test]
+    async fn closed_session_without_workspace_release_is_not_archived() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-lifecycle-test-credential").unwrap();
+        // `lifecycle_test_config` configures no "sandboxes" endpoint, so
+        // `release_archived`'s call to it can never succeed; that is exactly
+        // what keeps `workspace_released` from ever landing here.
+        let config: Config =
+            serde_json::from_value(lifecycle_test_config(dir.path(), &token)).unwrap();
+        let principal = config.principals[0].clone();
+        let app = SessionApp::new(
+            Arc::new(config),
+            Store::open(&dir.path().join("state.redb")).unwrap(),
+        )
+        .unwrap();
+        let session = app
+            .sessions
+            .create(
+                &principal,
+                &NewSession {
+                    request_id: "create".into(),
+                    akh: "test".into(),
+                    workspace_profile: "local".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        let closed = app.sessions.archive(&principal, &session.id).unwrap();
+        // mcp_credentials_removed is satisfied on the very first tick (this
+        // session never required any), but workspace_released never lands
+        // because there is no sandboxes endpoint configured to release
+        // against, so `release_archived` keeps failing and the marker never
+        // gets set.
+        app.tick_session(closed.clone()).await.unwrap();
+        let live_key = key("session", &[&closed.id]);
+        let archived_key = key("archived_session", &[&closed.id]);
+        assert_ne!(
+            app.sessions
+                .store
+                .get::<bool>(&key("workspace_released", &[&closed.id]))
+                .unwrap(),
+            Some(true),
+            "with no sandboxes endpoint configured, release cannot succeed"
+        );
+        assert!(
+            app.sessions
+                .store
+                .get::<SessionRecord>(&live_key)
+                .unwrap()
+                .is_some(),
+            "archival must not run while cleanup is still outstanding"
+        );
+        assert_eq!(
+            app.sessions
+                .store
+                .get::<SessionRecord>(&archived_key)
+                .unwrap(),
+            None
         );
     }
 }

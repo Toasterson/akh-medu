@@ -17,10 +17,21 @@ pub struct Endpoint {
     pub ca_file: Option<PathBuf>,
     #[serde(default)]
     pub allow_insecure_http: bool,
+    /// Total request deadline; slow cognitive cold starts may need more than 30s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
 }
 
 impl Endpoint {
     pub fn validate(&self) -> Result<()> {
+        if self
+            .request_timeout_secs
+            .is_some_and(|value| !(1..=300).contains(&value))
+        {
+            return Err(Fault::invalid(
+                "request_timeout_secs must be between 1 and 300",
+            ));
+        }
         let expanded = self.url.replace("{sandbox}", "allocated");
         if expanded.contains(['{', '}']) {
             return Err(Fault::invalid("unknown service URL placeholder"));
@@ -62,7 +73,9 @@ impl Endpoint {
         self.validate()?;
         let mut builder = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(
+                self.request_timeout_secs.unwrap_or(30),
+            ))
             .redirect(reqwest::redirect::Policy::none());
         if let Some(path) = &self.ca_file {
             let pem =
@@ -435,6 +448,12 @@ pub struct Config {
     pub public_url: Option<String>,
     pub listen: SocketAddr,
     pub data_dir: PathBuf,
+    /// Address for the heap-profiling listener. Deliberately separate from
+    /// `listen`: a heap profile contains live session content and tokens, and
+    /// `listen` is published through an HTTPRoute. Absent means no profiling
+    /// listener at all.
+    #[serde(default)]
+    pub profiling_listen: Option<SocketAddr>,
     /// Durable store backend. Defaults to the redb file under `data_dir`
     /// when absent; see [`StoreConfig`].
     #[serde(default)]
@@ -720,5 +739,53 @@ impl Config {
         self.endpoints
             .get(id)
             .ok_or_else(|| Fault::invalid(format!("service endpoint {id} is not configured")))
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn endpoint_deadline_is_configurable_and_bounded() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                "restored"
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut endpoint: Endpoint = serde_json::from_value(serde_json::json!({
+            "url": format!("http://{address}"), "token_file": "/unused"
+        }))
+        .unwrap();
+        assert_eq!(endpoint.request_timeout_secs, None);
+        endpoint.validate().unwrap();
+        for seconds in [0, 301] {
+            endpoint.request_timeout_secs = Some(seconds);
+            assert!(endpoint.http_client().is_err());
+        }
+        endpoint.request_timeout_secs = Some(1);
+        let error = endpoint
+            .http_client()
+            .unwrap()
+            .get(&endpoint.url)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_timeout());
+        endpoint.request_timeout_secs = Some(3);
+        let response = endpoint
+            .http_client()
+            .unwrap()
+            .get(&endpoint.url)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "restored");
+        server.abort();
     }
 }

@@ -1,0 +1,31 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== 1. projector dumps with rope: cpu, then hip ===
+"all_finite":true
+"rows":4
+wrote 20480 values to /tmp/vision/rope_cpu.f32
+"all_finite":true
+"forward_seconds":2.020255531
+wrote 20480 values to /tmp/vision/rope_hip.f32
+=== 2. device gate, cpu vs hip, with rope ===
+pair                        cosine      rel L2   worst abs  gate
+cpu vs hip            1.0000000000   4.885e-06   4.425e-04  PASS
+
+all pairs meet the 0.9999 cosine gate
+=== 3. rope must change the output: new cpu vs pre-rope cpu (expect FAIL) ===
+before_rope vs with_rope  0.7004377013   8.887e-01   9.061e+01  FAIL
+
+FAIL before_rope vs with_rope: cosine 0.7004377013 below 0.9999
+=== 4. geometry after the rope ===
+--- square_bar_bottom ---
+"text":"<think>\n\n</think>\n\nThis image displays a simple geometric composition featuring a solid red square positioned in the upper right quadrant of a white background, with a solid blue horizontal bar spanning the entire width along the bottom edge."
+--- square_bar_left ---
+"text":"<think>\n\n</think>\n\nThe image displays a simple graphic design featuring a vertical blue bar on the left side and a solid red square positioned in the upper right quadrant against a plain white background."
+--- stripes_vertical ---
+"text":"<think>\n\n</think>\n\nThe image displays the national flag of France, featuring three vertical stripes of equal width in blue, white, and red from left to right."
+--- stripes_horizontal ---
+"text":"<think>\n\n</think>\n\nThe image displays a flag with three horizontal stripes of equal width, colored blue on top, white in the middle, and red on the bottom."
+--- original synthetic (red square, blue bar bottom, built in the probe) ---
+"prompt_tokens":273
+"text":"<think>\n\n</think>\n\nThis image displays a minimalist graphic design featuring a solid red square positioned in the upper right quadrant against a white background, with a solid blue horizontal bar spanning the entire bottom edge of the composition."
+
+[exited with code 0]

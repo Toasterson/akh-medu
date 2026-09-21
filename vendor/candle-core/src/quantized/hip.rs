@@ -62,7 +62,23 @@ fn gemv_batch_enabled() -> bool {
 /// allocation or kernel error is returned to the caller; it never silently retries the f32
 /// path, because that would make canary measurements lie about which implementation ran.
 fn q8_gemv_enabled() -> bool {
-    std::env::var("AKH_HIP_Q8_GEMV").as_deref() != Ok("0")
+    !FULL_PRECISION_ACTIVATIONS.get()
+        && std::env::var("AKH_HIP_Q8_GEMV").as_deref() != Ok("0")
+}
+
+thread_local! {
+    static FULL_PRECISION_ACTIVATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn with_full_precision_activations<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FULL_PRECISION_ACTIVATIONS.set(self.0);
+        }
+    }
+    let _restore = Restore(FULL_PRECISION_ACTIVATIONS.replace(true));
+    run()
 }
 
 /// `(total_nanos, calls)` spent in the fused GEMV since process start. Flushes any
@@ -118,9 +134,12 @@ unsafe impl Sync for QuantKernels {}
 
 impl QuantKernels {
     fn load() -> std::result::Result<Self, String> {
-        let path = concat!(env!("OUT_DIR"), "/libcandle_hip_quant.so");
-        let lib = unsafe { libloading::Library::new(path) }.map_err(|e| {
-            format!("could not dlopen {path}: {e} (was the HIP toolchain present at build time?)")
+        let path = crate::hip_kernel_path::resolve(
+            "libcandle_hip_quant.so",
+            concat!(env!("OUT_DIR"), "/libcandle_hip_quant.so"),
+        )?;
+        let lib = unsafe { libloading::Library::new(&path) }.map_err(|e| {
+            format!("could not dlopen {}: {e} (was the HIP toolchain present at build time?)", path.display())
         })?;
         unsafe {
             let dequant_q4k: DequantQ4K = *lib
@@ -883,6 +902,22 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
 
 #[cfg(all(test, feature = "hip"))]
 mod test {
+    #[test]
+    fn full_precision_scope_is_nested_thread_local_and_unwind_safe() {
+        let _route_lock = Q8_ROUTE_ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original = super::q8_gemv_enabled();
+        super::with_full_precision_activations(|| {
+            assert!(!super::q8_gemv_enabled());
+            super::with_full_precision_activations(|| assert!(!super::q8_gemv_enabled()));
+            assert!(!super::q8_gemv_enabled());
+            assert_eq!(std::thread::spawn(super::q8_gemv_enabled).join().unwrap(), original);
+        });
+        assert_eq!(super::q8_gemv_enabled(), original);
+        let result = std::panic::catch_unwind(|| super::with_full_precision_activations(|| panic!("scope unwind")));
+        assert!(result.is_err());
+        assert_eq!(super::q8_gemv_enabled(), original);
+    }
+
     use crate::quantized::{GgmlDType, QMatMul, QTensor};
     use crate::{Device, Module, Result, Tensor};
     use std::ffi::OsString;

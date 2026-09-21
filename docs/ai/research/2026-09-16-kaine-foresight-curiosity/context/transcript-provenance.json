@@ -1,0 +1,9 @@
+{
+  "t3_thread_id": "7e5cfbbd-084f-4cf8-96ab-16fcf9f39733",
+  "claude_session_path": "/Users/toasty/.claude/projects/-Users-toasty-ws-akh-medu/bfb0ce41-a104-407c-a0cc-6f5c801cc003.jsonl",
+  "codex_session_path": "/Users/toasty/.codex/sessions/2026/09/16/rollout-2026-09-16T20-34-10-01a0ab7f-6f83-7ea2-8cba-8c938422c48c.jsonl",
+  "claude_messages": 3,
+  "codex_messages": 22,
+  "fidelity": "Message strings are unchanged; JSON escaping and Markdown role wrappers are archival formatting.",
+  "scope": "Research conversation and retrieval evidence, no private reasoning or credentials."
+}

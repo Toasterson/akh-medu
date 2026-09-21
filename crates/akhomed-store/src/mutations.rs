@@ -9,8 +9,8 @@ use sea_orm::prelude::DateTimeUtc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::sqlx::Connection as _;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, Iterable, QueryFilter, QueryOrder, QuerySelect,
-    TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, Iterable,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -96,7 +96,11 @@ pub async fn append_mutations(
         return Ok(0);
     }
     let now = chrono::Utc::now();
-    let limit = if db.get_database_backend() == DatabaseBackend::Sqlite { 32_766 } else { PG_MAX_BIND_PARAMS };
+    let limit = if db.get_database_backend() == DatabaseBackend::Sqlite {
+        32_766
+    } else {
+        PG_MAX_BIND_PARAMS
+    };
     let chunk_size = (limit / mutation_log::Column::iter().count()).max(1);
     let mut inserted = 0u64;
     let txn = db.begin().await?;
@@ -138,7 +142,11 @@ pub async fn append_mutations_fenced(
     }
 
     if let Some(local) = &session.sqlite {
-        return local.lock().await.append(akh_id, workspace_id, residency_epoch, rows).await;
+        return local
+            .lock()
+            .await
+            .append(akh_id, workspace_id, residency_epoch, rows)
+            .await;
     }
 
     // The state mutex covers both the local lock marker and the physical

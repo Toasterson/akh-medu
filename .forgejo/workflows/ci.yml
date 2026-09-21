@@ -51,7 +51,10 @@ jobs:
           test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
           sh .forgejo/scripts/run-logged.sh daemon-profiles python3 scripts/session-platform/check-profiles.py
-          sh .forgejo/scripts/run-logged.sh platform-tests cargo test --quiet --locked -p akh-session-services --all-features -p akh-runtime -p akh-session-types -p akh-service-store
+          # Every akh-session-services feature except the GPU backends: `metal`
+          # pulls objc2 (Apple-only) and `hip`/`vulkan` need driver SDKs, none
+          # of which exist on the Linux runner, so `--all-features` cannot build here.
+          sh .forgejo/scripts/run-logged.sh platform-tests cargo test --quiet --locked -p akh-session-services --features session,runtime,candle-runtime,core-integration-tests,executor,sandbox,events,helpers,client,admin,profiling,trigger,kagent -p akh-runtime -p akh-session-types -p akh-service-store
 
   # Sokar artifact daemon (Phase 52, ADR 108): unit + integration tests on the
   # OpenDAL memory/fs services. Postgres and MinIO contract tests skip or are
@@ -421,6 +424,130 @@ jobs:
           case "$BRANCH" in
             main|develop)
               if ! docker push "$REGISTRY/sokard:$BRANCH"; then
+                echo "non-fatal: branch tag push returned non-zero (digest likely already current in registry)" >&2
+              fi
+              ;;
+            *)
+              echo "skipping branch tag — branch '$BRANCH' is not main/develop"
+              ;;
+          esac
+
+  # Agent-session transcript harvest image (ADR 108, plan
+  # docs/ai/plans/2026-09-19-transcript-harvest.md) — same shape as the
+  # seshd/sokard jobs: SHORT_SHA tag always pushed (the flux HelmRelease
+  # pins it), branch tag on main/develop.
+  #
+  # Unlike seshd/sokard, docker/akh-transcripts.Dockerfile uses BuildKit
+  # cache mounts keyed on TARGETPLATFORM (repo Dockerfile convention), so
+  # this job exports DOCKER_BUILDKIT=1 explicitly — plain `docker build`
+  # without it cannot parse `--mount=type=cache`. seshd/sokard deliberately
+  # avoid this ("legacy docker builder... without buildx") for the `rust`
+  # runner; if that constraint turns out to still apply here, this job (and
+  # only this job) will need to drop the cache mounts from the Dockerfile.
+  docker-akh-transcripts:
+    runs-on: rust
+    # Intentionally independent of check-seshat so that one doesn't block the
+    # other. The docker build itself catches anything check missed.
+    #
+    # Auth: Solstice's workflow-runner writes /home/sol/.docker/config.json
+    # at VM boot from repo secrets in priority order
+    #   REGISTRY_TOKEN > PACKAGES_TOKEN > FORGEJO_TOKEN > GITHUB_TOKEN
+    # with username from REGISTRY_USERNAME (default "token", which Forgejo's
+    # registry rejects on POST). Required repo secrets for push to succeed:
+    #   REGISTRY_TOKEN     = a Forgejo PAT with scope: write:package
+    #   REGISTRY_USERNAME  = toasterson
+    # Both live at .../toasterson/akh-medu/settings/actions/secrets.
+    # We deliberately do NOT add an explicit `docker login` step here:
+    # Solstice's auto-auth runs before any step, and an explicit login step
+    # would just overwrite ~/.docker/config.json with whatever raw string
+    # we give it (Solstice doesn't yet substitute ${{ secrets.X }} inside
+    # step env: blocks — only in runs-on).
+    #
+    # Branch detection lives in `.forgejo/scripts/resolve-branch.sh` — it's
+    # called inline in each step that needs $BRANCH because $GITHUB_ENV
+    # isn't reliably set on Solstice (an earlier `echo BRANCH=... >> "$GITHUB_ENV"`
+    # crashed dash with `ambiguous redirect` and silently killed the job).
+    steps:
+      - name: Build akh-transcripts image
+        # Always runs — PRs need to catch Dockerfile regressions. On
+        # main/develop the image gets an additional branch-named tag ready
+        # for the push step.
+        run: |
+          set -eu
+          export DOCKER_BUILDKIT=1
+          REGISTRY=code.aopc.cloud/toasterson
+          SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
+          SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
+          BRANCH=$(sh .forgejo/scripts/resolve-branch.sh)
+          echo "detected branch: '$BRANCH'"
+          TAGS="-t $REGISTRY/akh-transcripts:$SHORT_SHA"
+          case "$BRANCH" in
+            main|develop)
+              TAGS="$TAGS -t $REGISTRY/akh-transcripts:$BRANCH"
+              ;;
+          esac
+          echo "building with tags: $TAGS"
+          sh .forgejo/scripts/run-logged.sh build-akh-transcripts docker build -f docker/akh-transcripts.Dockerfile $TAGS .
+
+      - name: Smoke-test akh-transcripts binaries (catch stub-binary regression)
+        # Three binaries in this image; each is env-var-configured (no config
+        # file), so running with no env set should fail loudly with a miette
+        # diagnostic on stderr rather than exit silently — silence here is
+        # what a leftover `fn main() {}` stub build would look like.
+        run: |
+          set -eu
+          REGISTRY=code.aopc.cloud/toasterson
+          SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
+          SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
+          for bin in akh-harvest akh-derive akh-transcripts-mcp; do
+            SMOKE=$(docker run --rm --entrypoint "$bin" "$REGISTRY/akh-transcripts:$SHORT_SHA" /nonexistent 2>&1 || true)
+            echo "smoke output ($bin): $SMOKE"
+            if [ -z "$SMOKE" ]; then
+              echo "$bin produced no output for a missing config - likely stub binary" >&2
+              exit 1
+            fi
+          done
+
+      - name: Push akh-transcripts image
+        # Two pushes, two different gates:
+        #
+        #   * SHORT_SHA tag — always pushed, because downstream (the flux
+        #     HelmRelease) pins to this to get reproducible deploys. It's
+        #     the tag that actually matters.
+        #
+        #   * branch tag (`:main` / `:develop`) — only pushed when we can
+        #     confidently identify the branch. Resolving in-script means we
+        #     don't depend on `github.*` expression support (inconsistent on
+        #     Solstice) and don't die on the empty-branch case.
+        #     This push is non-fatal: some registry configurations return
+        #     non-200 when the same digest is pushed under an existing mutable
+        #     tag, but the artifact is present and correct.
+        #
+        run: |
+          set -eu
+          REGISTRY=code.aopc.cloud/toasterson
+          SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
+          SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
+
+          if [ "${CI_DEBUG:-0}" = "1" ]; then
+            echo "=== CI_DEBUG env ===" && env | sort
+            echo "=== git log --oneline -5 ===" && git log --oneline -5 || true
+            echo "=== docker info ===" && docker info || true
+            echo "=== docker images ===" && docker images || true
+          fi
+
+          # sha tag always gets pushed — this is the canonical deploy artifact
+          sh .forgejo/scripts/run-logged.sh push-akh-transcripts docker push "$REGISTRY/akh-transcripts:$SHORT_SHA"
+
+          # branch tag only if the branch actually resolves cleanly.
+          # Non-fatal: pushing the same digest under an existing mutable tag
+          # may return non-zero on some registry configurations; the SHA tag
+          # above already carries the important artifact.
+          BRANCH=$(sh .forgejo/scripts/resolve-branch.sh)
+          echo "resolved branch: '$BRANCH'"
+          case "$BRANCH" in
+            main|develop)
+              if ! docker push "$REGISTRY/akh-transcripts:$BRANCH"; then
                 echo "non-fatal: branch tag push returned non-zero (digest likely already current in registry)" >&2
               fi
               ;;

@@ -20,10 +20,10 @@ pub mod memberships;
 pub mod migration;
 pub mod mutations;
 mod pool;
-mod sqlite;
 pub mod repair;
 pub mod schema_registry;
 pub mod snapshots;
+mod sqlite;
 
 pub use error::{StoreError, StoreResult};
 pub use memberships::{
@@ -100,7 +100,9 @@ pub async fn run_migrations_locked(opts: &PoolOptions) -> StoreResult<()> {
     single.max_connections = 1;
     let _sqlite_guard = if opts.url.starts_with("sqlite:") {
         Some(sqlite::migration_guard(opts).await?)
-    } else { None };
+    } else {
+        None
+    };
     let db = connect(&single).await?;
 
     let backend = db.get_database_backend();

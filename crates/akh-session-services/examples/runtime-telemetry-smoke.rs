@@ -2,7 +2,12 @@
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let telemetry = akh_session_services::telemetry::init("akh-runtime-smoke", "synthetic")?;
-    let id = format!("otel-smoke-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs());
+    let id = format!(
+        "otel-smoke-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
+    );
     let session = id.clone();
     tokio::task::spawn_blocking(move || {
         let span = tracing::info_span!("runtime.turn", session.id=%session, turn.id="synthetic-turn", test.synthetic=true);

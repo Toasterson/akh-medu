@@ -1,0 +1,513 @@
+Dream-RSI · Recursive Self-Improvement through Evolving Worlds
+Skip to content
+Dream-RSI
+Idea
+Insight
+Method
+Demo
+Results
+Analysis
+Cite
+Paper ↗
+Dark
+Technical Report · 2026
+Dream-RSI: Recursive Self-Improvement
+through
+Evolving Worlds
+Tong Zheng
+1,2
+,
+        Xidong Wu
+1✉
+,
+        Zheng Zhang
+1✉
+,
+        Zhankui He
+3
+,
+        Chaoyi Zhang
+1
+,
+        Benjamin Coleman
+3
+,
+        Ruoqiao Wei
+1
+,
+        Di Bai
+3
+,
+        Haolin Liu
+4
+,
+        Rui Liu
+2
+,
+        Xue Wang
+1
+,
+        Yue Zhuan
+1
+,
+        Wang-Cheng Kang
+3
+,
+        Renkai Xiang
+1
+,
+        Heng Huang
+2
+,
+        Xinwu Cheng
+1
+,
+        Yunsong Guo
+1
+1
+Google  ·
+2
+University of Maryland, College Park  ·
+3
+Google DeepMind  ·
+4
+University of Virginia
+✉
+Corresponding authors
+An agent must dream to recursively
+self-improve
+.
+History
+is the world it dreams in.
+Paper
+arXiv
+Code
+Live demo
+01
+History is the world to dream in
+Not a learned world model and not an approximation. The discovery tree the agent already
+             built is an
+exact
+simulator of the search space it reached — a world that
+             came free, as a by-product of working.
+02
+Dreaming is how it self-improves
+A new exploration policy is tested by
+imagining
+it, not by living through it:
+             thousands of candidates dreamt against that world at zero executions, and only the
+             winner is ever deployed.
+03
+Every lap adds a world
+The winning policy goes back online and records a new discovery tree — one more
+             world, reaching places no earlier policy would have gone. The pool grows every lap, a
+             policy dreamt against more worlds beats one tuned to the luck of a single run, and that
+             policy brings back worlds no earlier one could. That is the recursion.
+Figure 1
+The loop.
+❶ Online Explore
+— the current policy guides a coding agent to
+          expand a discovery tree and log traces.
+❷ Construct Replay Simulator
+— that tree becomes a reusable
+          simulator pool.
+❸ Dreaming-based Policy Improvement
+— the agent dreams up
+          alternative policies and replays them for rapid feedback. The updated policy redeploys for
+          the next round.
+01 — The bottleneck & the idea
+Meta-level feedback is the bottleneck
+Recursive self-improvement runs on a discovery loop, and at the scale that now matters
+        that loop spans thousands of proposal–evaluation cycles. What decides whether those
+        cycles are worth their compute is
+exploration
+— where to branch, what to run
+        in parallel, when to cut a line off — and exploration is the one component still
+        hand-written and frozen. That leaves a dilemma with no good side. A fixed strategy cannot
+        learn from the experience it accumulates, so it keeps paying for directions that have
+        already failed. Optimizing it online walks into two walls at once: meta-level feedback is
+delayed and expensive
+, because judging an exploration policy means watching it
+        steer an entire discovery run to the end rather than scoring one candidate; and the
+        meta-policy space is
+vast
+, so most of the policies you would have to try are bad
+        ones — each costing a full rollout to find that out.
+The idea
+You have already paid for that feedback. A finished discovery run is not just text to
+        re-read — it is a structured tree of every exploration decision the agent made, each
+        one carrying the execution outcome it actually produced. And an exploration policy does
+        exactly one thing: given what it has seen, choose which attempt to continue next. So an
+alternative
+policy never has to re-run anything. It walks the same recorded tree in
+        a different order, and every outcome it asks for is already on disk. Screen thousands of
+        candidates against what already happened at
+zero executions
+, and spend a real
+        rollout only on the winner.
+02 — The key insight
+History is
+already
+a simulator
+A simulator is anything that can answer “what would have happened if…”
+        without running the world. For exploration policies that object already exists, fully
+        built and fully paid for, and nobody was using it.
+Think of an agent crossing unfamiliar terrain for the first time. It takes inefficient
+        routes, hits dead ends, backtracks — and in doing so it draws a map. The next policy
+        does not have to walk the ground again. It reasons over the map: it avoids the known dead
+        ends, reconsiders decisions the first policy committed to too early, and compares whole
+        routes before moving. Long-horizon discovery has exactly this structure, and the map is
+        already being written. A completed run records a tree of exploration decisions together
+        with their realized code-execution outcomes, so replaying a
+different
+policy over
+        it means traversing different branches, in a different order, with different parallel
+        groupings and different stopping points — over nodes that have all already been run.
+        The evaluation returns immediately and costs
+zero executions
+.
+That history has been sitting there all along; prior work just read it as something else
+        — static textual context to prompt against, or training data to fine-tune weights on.
+        Read as a tree, it is a simulator, and unlike a learned world model it is not an
+        approximation. Nothing is predicted: the simulator is
+exact
+over the search space
+        that was realized, because it
+is
+that search space. Its limit is just as sharp
+        — a policy can only be dreamt where history actually went. Which is what forces this
+        to be a loop rather than a one-off. Every online deployment records another tree, so what
+        the agent owns is not one world but a growing
+pool
+of them; a policy dreamt across
+        more worlds beats one tuned to the luck of a single run, and it comes back with worlds no
+        earlier policy could have reached. The worlds
+evolve
+along with the agent.
+Figure 2
+Discovery history as a replay simulator.
+Each node is an attempt with its full
+        observation. Thousands of candidate policies can be tested inside this simulator —
+        different search branches, exploration orders, concurrency levels and stopping rules. Because
+        all outcomes are pre-stored, a single costly online run enables thousands of rapid,
+zero-execution-cost
+off-policy evaluations.
+Dream-RSI
+is what falls out of that. A lightweight orchestration layer makes
+        exploration explicit and programmable while leaving the underlying coding agent unchanged.
+        Dreaming inside the replay simulator built from historical discovery trees buys immediate,
+        low-cost off-policy feedback for evaluating and refining exploration policies, without
+        repeating expensive online evaluations. The improved policy is redeployed to drive further
+        discovery, continuously expanding the simulator pool. Across algorithm engineering,
+        mathematical optimization and GPU kernel engineering, this reaches competitive or better
+        discovery quality at substantially lower discovery cost.
+03 — The RSI loop
+Recursive self-improvement on the meta-exploration layer
+Let $t = 1, 2, \dots$ index the outer iterations. Starting from an initial policy $\pi_1$ and
+        an empty history $\mathcal{H}_0 = ()$, iteration $t$ deploys $\pi_t$ online to guide the
+        discovery agent, collecting a discovery trace $\mathcal{T}_t$ with tree structure. The
+        completed tree is appended to the history:
+$$
+        \mathcal{H}_t = (\mathcal{T}_1, \dots, \mathcal{T}_t)
+        \;\xrightarrow{\;\text{replay}\;}\;
+        \pi_{t+1} \;\xrightarrow{\;\text{deploy}\;}\; \mathcal{T}_{t+1}.
+      $$
+The exploration policy is
+executable code
+: it decides where a fixed discovery agent
+        continues searching, which attempts run in parallel, and when exploration stops. A fixed
+        evaluator scores the resulting candidates and returns diagnostic feedback.
+Why the policy can never get worse
+The offline phase is a policy-development agent writing $M$ successive revisions of the
+        policy’s code, $\pi^0 = \pi_t, \pi^1, \dots, \pi^{M-1}$, and scoring each by replay over
+        the
+whole
+history. Since the currently deployed policy $\pi^0$ is itself a candidate,
+        the winner $\pi_{t+1} = \pi^{m^*}$ is never worse than $\pi_t$.
+04 — Demo
+Watch a policy dream itself better
+One lap of the loop in Figure 1. The agent explores online, appends the discovery tree to
+        its history, rewrites its exploration policy a few times and scores every version by replaying
+        it over that history — then redeploys the best one. Drawn live, not recorded.
+round t = 1
+Online explore
+agent calls
+0
+replays dreamed
+0
+replay score
+0.000
+score per round
+1 · Explore
+2 · Store
+3 · Dream
+4 · Update
+1×
+Growing the tree costs real agent calls; replaying it costs none, because every
+        node’s outcome is already recorded — so one expensive online rollout pays
+        for thousands of off‑policy evaluations. Each replayed version opens several
+        branches at once and drops each one when it stops paying, so what it covers is a
+subtree
+of the recorded tree, and it is charged for every node in it. The inner loop is a
+        policy‑development agent rewriting the exploration policy:
+        π
+0
+is the version already deployed and
+        π
+1
+…π
+3
+are its revisions, each scored by replay over
+        the whole history ℌ
+t
+. Because π
+0
+is in the candidate
+        set, the version that ships can never score worse than the one it replaces —
+        which is why the bars only go up. In the paper this cuts discovery-agent calls by
+        1.7× against fixed exploration and up to 162× against SimpleTES.
+        Numbers on the canvas are illustrative; the real ones are in
+Results
+.
+05 — Highlight results
+Three discovery domains
+Eight discovery tasks across algorithm engineering, mathematical optimization and GPU
+        kernel engineering. The controlled baseline is
+Recursive Fixed Exploration
+— identical agent,
+        evaluator, initialization and per-round budget, but the exploration policy never changes.
+        Both methods start from the same hand-written parallel-refine policy, so round 1 is
+        identical by construction.
+2.43×
+fewer generations on VGG16 at comparable performance
+2.09×
+higher score on ConvDiv at a comparable budget
+162×
+fewer discovery-agent calls than SimpleTES on Lasso
+Algorithm engineering — Lasso regularization path
+Method
+Model
+Compute
+Gisette
+RCV1
+DNA
+Leukemia
+Colon
+Duke Breast
+Avg.
+Previous solvers
+sklearn
+–
+–
+11275.2
+252881.7
+93.8
+227.2
+229.8
+374.0
+44180.3
+glmnet
+–
+–
+9063.6
+73072.8
+351.9
+45.0
+24.2
+47.7
+13767.5
+SimpleTES
+gpt-oss-120b
+51,200
+3141.9
+19625.6
+15.9
+15.5
+11.6
+18.1
+3804.8
+SimpleTES
+†
+gpt-oss-120b
+51,200
+8651.0
+41143.1
+37.6
+28.2
+19.5
+31.1
+8318.4
+Our system
+Recursive Fixed Exploration
+Gemini-3.1-Pro
+550
+1861.8
+19550.1
+41.5
+26.1
+14.5
+28.4
+3587.1
+Recursive Fixed Exploration
+Gemini-3.7-Flash
+3200
+1133.1
+13873.0
+29.8
+24.1
+15.7
+24.4
+2516.7
+Dream-RSI
+Gemini-3.1-Pro
+317
+2841.0
+14616.0
+49.9
+30.2
+16.4
+32.5
+2931.0
+Dream-RSI
+Gemini-3.7-Flash
+1879
+1091.9
+12923.4
+31.4
+21.0
+12.2
+23.6
+2350.6
+Final wall-clock runtime (ms) on six held-out downstream datasets;
+lower is better
+.
+      Compute is the cumulative number of discovery-agent calls.
+      † denotes our reproduction.
+Figure 3(b)
+Recursive discovery dynamics.
+Numbers next to markers are recursive rounds. The two
+        methods share round 1 by construction, then diverge: Dream-RSI reaches better downstream
+        performance at consistently lower cumulative compute.
+Mathematical optimization
+Method
+LLM
+Sum Diff ↑
+Auto Correlation ↓
+Circle Packing ↑
+AlphaEvolve
+Gemini-2.0 Pro + Flash
+–
+1.455700
+2.635862
+AlphaEvolveV2
+Gemini-2.0 Pro + Flash
+1.121936
+–
+2.635983
+OpenEvolve
+–
+–
+1.460000
+–
+CodeEvolve
+–
+–
+–
+2.635980
+ShinkaEvolve
+Mixed
+–
+1.457800
+2.635982
+TTS-Discovery
+Qwen3-8B
+–
+–
+2.635983
+ThetaEvolve
+Distilled-Qwen3-8B
+–
+1.493000
+2.635983
+EvoX
+Gemini-3.0-Pro
+–
+1.458900
+2.635900
+SimpleTES
+GPT-OSS-120B
+1.143975
+1.453675
+2.635983
+Our system
+Recursive Fixed Exploration
+Gemini-3.1-Pro
+1.144047
+1.456001
+2.635983
+Dream-RSI
+Gemini-3.1-Pro
+1.145427
+1.456375
+2.635983
+Higher is better for Sum Diff and Circle Packing; lower is better for Auto Correlation.
+      Best per column in
+bold
+.
+SimpleTES holds the best Auto Correlation number, but needs 51,200 generations — against
+      fewer than 1,000 here.
+GPU kernel engineering
+Figure 4
+Four KernelBench tasks.
+On VGG16 and LayerNorm, Dream-RSI reaches comparable
+        performance with
+2.43×
+and
+1.79×
+fewer generations. On ConvDiv and
+        ConvMax, it achieves
+2.09×
+and
+1.44×
+higher performance under
+        comparable budgets. Higher is better throughout.
+06 — Analysis
+What the learned policy actually does
+The policy is not monotonically greedier or broader — it is
+adaptive
+. As
+        performance improves it first conserves compute, cutting evaluated attempts from 110 to 50.
+        When progress plateaus it spends again, and those widenings line up with the next jumps in
+        round-best score.
+Semantic guidance is
+worse
+than replay
+A natural alternative is to abstract prior trajectories into high-level directional insights
+        and inject them into the prompt. Applied to both paradigms, this explicit guidance
+        consistently
+underperforms
+its unguided counterpart under equal budgets. In
+        long-horizon discovery with many parallel threads, strong semantic priors about where to
+        search over-constrain the space and suppress diverse exploration.
+Figure 6
+Evolution of exploration behavior on ConvDiv.
+(a) Round-best performance across recursive rounds. (b) Evaluated attempts per round.
+07 — Cite
+BibTeX
+Copy
+@article{zheng2026dreamrsi,
+  title   = {Dream-RSI: Recursive Self-Improvement through Evolving Worlds},
+  author  = {Zheng, Tong and Wu, Xidong and Zhang, Zheng and He, Zhankui and
+             Zhang, Chaoyi and Coleman, Benjamin and Wei, Ruoqiao and Bai, Di and
+             Liu, Haolin and Liu, Rui and Wang, Xue and Zhuan, Yue and
+             Kang, Wang-Cheng and Xiang, Renkai and Huang, Heng and
+             Cheng, Xinwu and Guo, Yunsong},
+  journal = {arXiv preprint arXiv:XXXX.XXXXX},
+  year    = {2026}
+}
+© 2026 Google · Dream-RSI
+[email protected]
+·
+[email protected]
+·
+GitHub

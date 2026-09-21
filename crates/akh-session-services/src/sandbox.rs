@@ -43,6 +43,40 @@ impl Sandboxes {
         crate::http::role(p, "admin")?;
         let allocation_lock = self.allocation_lock(session);
         let _lock = allocation_lock.lock().await;
+        let current = self.get(session)?;
+        let lost_executor = matches!(current.state.as_str(), "ready" | "attaching");
+        if lost_executor {
+            crate::recovery::validate(p, &current.request, &r.resolution)?;
+            if !r.observed_absent || r.resolution.status != TurnStatus::Completed {
+                return Err(Fault::conflict(
+                    "lost executor recovery requires observed resource absence",
+                ));
+            }
+            let profile = self
+                .config
+                .workspaces
+                .get(&current.request.profile)
+                .ok_or_else(|| Fault::missing("workspace profile not found"))?;
+            let Provisioner::Kubernetes { api, resource, .. } = &profile.provisioner else {
+                return Err(Fault::conflict(
+                    "lost executor absence must be verified through Kubernetes",
+                ));
+            };
+            let path = format!(
+                "{}/{}",
+                resource.trim_end_matches('/'),
+                segment(&current.id)
+            );
+            match self.client.get::<Value>(api, &path).await {
+                Err(error) if error.code == "not_found" => {}
+                Err(error) => return Err(error),
+                Ok(_) => {
+                    return Err(Fault::conflict(
+                        "allocation resource still exists; preserve its work before explicit removal",
+                    ));
+                }
+            }
+        }
         self.store.transaction(|tx| {
             let target = key("allocation", &[session]);
             let mut allocation: Allocation = tx
@@ -64,10 +98,12 @@ impl Sandboxes {
                 }
                 return Ok(allocation);
             }
-            if !matches!(
-                allocation.state.as_str(),
-                "unknown" | "release_unknown" | "creating" | "failed"
-            ) {
+            if !lost_executor
+                && !matches!(
+                    allocation.state.as_str(),
+                    "unknown" | "release_unknown" | "creating" | "failed"
+                )
+            {
                 return Err(Fault::conflict(
                     "allocation is not awaiting operator reconciliation",
                 ));

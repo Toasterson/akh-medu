@@ -17,7 +17,9 @@ use super::error::{NluError, NluResult};
 use super::llm_translator::{LlmTranslation, build_prompt_with_context, parse_abstree_json};
 
 #[cfg(feature = "candle-backend")]
-use candle_core::{Device, IndexOp, Tensor};
+use candle_core::{DType, Device, IndexOp, Tensor};
+
+use super::span_projection::LayerMean;
 
 /// Which model family is loaded — drives chat-prompt formatting and EOS tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +93,7 @@ impl ModelFamily {
 #[cfg(feature = "candle-backend")]
 enum LoadedModel {
     Qwen2(super::vendored::quantized_qwen2::ModelWeights),
-    Qwen35(super::vendored::quantized_qwen35::ModelWeights),
+    Qwen35(super::vendored::quantized_qwen35::InferenceSession),
     Gemma(super::vendored::quantized_gemma3::ModelWeights),
     Gemma4(super::vendored::quantized_gemma4::ModelWeights),
 }
@@ -149,6 +151,79 @@ impl Default for CandleConfig {
             hidden_layer: None,
         }
     }
+}
+
+/// Explicit placement for resident runtimes. Unsupported devices fail closed;
+/// only the older convenience loader performs automatic device selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandleDevice {
+    Cpu,
+    Hip { ordinal: usize },
+    Cuda { ordinal: usize },
+    Metal { ordinal: usize },
+    Vulkan { ordinal: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandleFinishReason {
+    Stop,
+    Length,
+}
+
+/// A complete, uncleaned model reply. `Length` must not authorize tool effects.
+#[derive(Debug, Clone)]
+pub struct CandleCompletion {
+    pub text: String,
+    pub prompt_tokens: usize,
+    /// Exact previously forwarded prompt tokens reused by this call.
+    pub reused_prompt_tokens: usize,
+    pub tokens_generated: u32,
+    pub finish_reason: CandleFinishReason,
+    /// Tokenization, prefill and first sampled token, including device readback.
+    /// Excludes model loading and the caller's queue wait.
+    pub time_to_first_token: std::time::Duration,
+    /// All subsequent decode/sample steps, including an EOS step when present.
+    pub decode_time: std::time::Duration,
+    /// Sampled positions after the first, including EOS (unlike tokens_generated).
+    pub decode_steps: u32,
+    /// Seconds per decode step, in order, one per position counted by
+    /// `decode_steps`. Measured at the sampling point, which reads the result
+    /// back and therefore includes the queued GPU work for that step.
+    ///
+    /// This is the resolution needed to tell a periodic expensive step, such as
+    /// a cache reallocation, from a uniformly slower kernel: the aggregate rate
+    /// cannot distinguish them.
+    pub step_seconds: Vec<f64>,
+    /// Pooled residual means of the requested prompt span, when it was newly
+    /// forwarded by this call. `None` is an explicit miss, never a replay.
+    pub prompt_span_taps: Option<PromptSpanTaps>,
+}
+
+/// Pooled post-block residual means for one newly forwarded prompt span,
+/// read back from the device. Layer identity is preserved for projection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptSpanTaps {
+    pub layers: Vec<LayerMean>,
+    /// Absolute token positions of the span inside the forwarded prompt.
+    pub token_span: std::ops::Range<usize>,
+}
+
+/// Ask a keyed completion to pool the residual streams over a prompt byte range.
+#[derive(Debug, Clone)]
+pub struct CaptureRequest<'a> {
+    /// Byte range inside the rendered prompt; must align with token boundaries.
+    pub byte_span: std::ops::Range<usize>,
+    /// Distinct target block indices, at most five.
+    pub layers: &'a [usize],
+}
+
+/// Caller decision after the prompt taps were offered, before decoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecallDecision {
+    /// Decode from the prompt as forwarded.
+    Continue,
+    /// Rewind to the pre-call state and forward this re-rendered prompt instead.
+    Reprompt(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +469,10 @@ pub struct CandleBackend {
     /// the budget window (Phase 44b), replacing a hardcoded guess. Falls back to
     /// [`MAX_PROMPT_TOKENS`] when the metadata is absent.
     context_length: usize,
+    /// Optional smaller physical window for resident session generation.
+    completion_context_limit: Option<usize>,
+    #[cfg(feature = "candle-backend")]
+    active_completion_session: Option<String>,
     config: CandleConfig,
     model_path: PathBuf,
     /// Live, lock-free inference toggles shared (by `Arc`) with this akh's
@@ -401,6 +480,9 @@ pub struct CandleBackend {
     /// standalone (benches/tests) — eligibility then falls back to the `AKH_SPEC_DECODE` env
     /// flag. Wired by `CandleChatBackend` construction so a runtime tool flip is seen next turn.
     runtime_options: Option<std::sync::Arc<crate::inference_options::InferenceOptions>>,
+    /// The vision tower, loaded on first use and held for the model's lifetime.
+    #[cfg(feature = "candle-backend")]
+    vision: Option<crate::nlu::vision_tower::VisionTower>,
 }
 
 impl std::fmt::Debug for CandleBackend {
@@ -426,6 +508,54 @@ impl CandleBackend {
         tokenizer_path: &Path,
         config: CandleConfig,
     ) -> NluResult<Self> {
+        Self::load_with_device(model_path, tokenizer_path, config, Self::select_device())
+    }
+
+    /// Load on exactly the requested device, without a CPU fallback.
+    #[cfg(feature = "candle-backend")]
+    pub fn load_on_device(
+        model_path: &Path,
+        tokenizer_path: &Path,
+        config: CandleConfig,
+        device: CandleDevice,
+    ) -> NluResult<Self> {
+        let unavailable = |name| NluError::ModelLoadFailed {
+            reason: format!("{name} backend is not available in this build"),
+        };
+        #[cfg(any(feature = "hip", feature = "metal", feature = "vulkan"))]
+        let failure = |error: candle_core::Error| NluError::ModelLoadFailed {
+            reason: format!("requested device {device:?} failed: {error}"),
+        };
+        let selected = match device {
+            CandleDevice::Cpu => Device::Cpu,
+            #[cfg(feature = "hip")]
+            CandleDevice::Hip { ordinal: 0 } => Device::new_cuda(0).map_err(failure)?,
+            #[cfg(feature = "hip")]
+            CandleDevice::Hip { .. } => return Err(NluError::ModelLoadFailed {
+                reason: "resident HIP currently supports ordinal 0 only: allocator and rocBLAS state are process-wide".into(),
+            }),
+            #[cfg(not(feature = "hip"))]
+            CandleDevice::Hip { .. } => return Err(unavailable("HIP")),
+            CandleDevice::Cuda { .. } => return Err(unavailable("CUDA")),
+            #[cfg(feature = "metal")]
+            CandleDevice::Metal { ordinal } => Device::new_metal(ordinal).map_err(failure)?,
+            #[cfg(not(feature = "metal"))]
+            CandleDevice::Metal { .. } => return Err(unavailable("Metal")),
+            #[cfg(feature = "vulkan")]
+            CandleDevice::Vulkan { ordinal } => Device::new_vulkan(ordinal).map_err(failure)?,
+            #[cfg(not(feature = "vulkan"))]
+            CandleDevice::Vulkan { .. } => return Err(unavailable("Vulkan")),
+        };
+        Self::load_with_device(model_path, tokenizer_path, config, selected)
+    }
+
+    #[cfg(feature = "candle-backend")]
+    fn load_with_device(
+        model_path: &Path,
+        tokenizer_path: &Path,
+        config: CandleConfig,
+        device: Device,
+    ) -> NluResult<Self> {
         if !model_path.exists() {
             return Err(NluError::ModelNotFound {
                 path: model_path.to_path_buf(),
@@ -436,9 +566,6 @@ impl CandleBackend {
                 path: tokenizer_path.to_path_buf(),
             });
         }
-
-        // Select device: Metal on macOS, CPU elsewhere.
-        let device = Self::select_device();
 
         tracing::info!(
             model = %model_path.display(),
@@ -487,7 +614,7 @@ impl CandleBackend {
 
         let model = match family {
             ModelFamily::Qwen35 => {
-                let m = super::vendored::quantized_qwen35::ModelWeights::from_gguf(
+                let m = super::vendored::quantized_qwen35::InferenceSession::from_gguf(
                     content, &mut file, &device,
                 )
                 .map_err(|e| NluError::ModelLoadFailed {
@@ -539,6 +666,10 @@ impl CandleBackend {
             device,
             family,
             context_length,
+            completion_context_limit: None,
+            active_completion_session: None,
+            #[cfg(feature = "candle-backend")]
+            vision: None,
             config,
             model_path: model_path.to_path_buf(),
             runtime_options: None,
@@ -568,6 +699,58 @@ impl CandleBackend {
     #[cfg(feature = "candle-backend")]
     pub fn context_length(&self) -> usize {
         self.context_length
+    }
+
+    /// Bound resident prompt plus output memory without changing model metadata
+    /// or silently discarding history. Operators must choose a tested physical
+    /// context window, which can be smaller than the model's advertised maximum.
+    #[cfg(feature = "candle-backend")]
+    pub fn set_context_limit(&mut self, limit: usize) -> NluResult<()> {
+        if limit == 0 || limit > self.context_length {
+            return Err(NluError::ModelLoadFailed {
+                reason: format!(
+                    "context limit {limit} must be positive and at most model capability {}",
+                    self.context_length
+                ),
+            });
+        }
+        self.completion_context_limit = Some(limit);
+        Ok(())
+    }
+
+    /// Shader specialization cache counters when this backend is resident on a
+    /// Vulkan device. `None` on other devices. These count application-held
+    /// residency and compilation events, not driver-internal caches or
+    /// compiled pipeline bytes.
+    #[cfg(feature = "vulkan")]
+    pub fn vulkan_pipeline_cache_stats(&self) -> Option<candle_core::PipelineCacheStats> {
+        match &self.device {
+            Device::Vulkan(device) => device.pipeline_cache_stats().ok(),
+            _ => None,
+        }
+    }
+
+    /// Consume this backend and return unused cached device memory to the driver.
+    ///
+    /// HIP callers must serialize this with inference and graph capture, just as
+    /// they serialize the process-wide HIP compute stream. The native runtime
+    /// calls it only when replacing resident weights, never between ordinary
+    /// turns. Other devices release their owned allocations through normal drop.
+    /// The returned byte count covers the HIP free list, not all device memory.
+    #[cfg(feature = "candle-backend")]
+    pub fn unload(self) -> NluResult<usize> {
+        #[cfg(feature = "hip")]
+        let release_hip_cache = self.device.is_cuda();
+        drop(self);
+        #[cfg(feature = "hip")]
+        if release_hip_cache {
+            return candle_core::cuda::release_cached_memory().map_err(|error| {
+                NluError::ModelLoadFailed {
+                    reason: format!("releasing unused HIP memory after model unload: {error}"),
+                }
+            });
+        }
+        Ok(0)
     }
 
     /// Non-feature-gated stub.
@@ -1885,16 +2068,19 @@ impl CandleBackend {
         Ok(clean_generated_text(&result.text))
     }
 
-    /// Path to the multimodal projector sidecar for the loaded model:
-    /// `<model-stem>.mmproj.gguf` next to the GGUF.
+    /// Path to the loaded model's multimodal projector.
+    ///
+    /// The Gemma sidecar (`<model-stem>.mmproj.gguf`) is tried first. A
+    /// content-addressed model such as the pinned Ptah blob has no derivable
+    /// sidecar name, so the projector is resolved through the manifest that
+    /// lists both layers; see [`crate::nlu::projector_artifact`].
     #[cfg(feature = "candle-backend")]
     fn mmproj_path(&self) -> NluResult<PathBuf> {
-        // gemma4-12b.gguf -> gemma4-12b.mmproj.gguf
-        let path = self.model_path.with_extension("mmproj.gguf");
-        if !path.exists() {
-            return Err(NluError::ModelNotFound { path });
-        }
-        Ok(path)
+        crate::nlu::projector_artifact::locate(&self.model_path).ok_or_else(|| {
+            NluError::ModelNotFound {
+                path: self.model_path.with_extension("mmproj.gguf"),
+            }
+        })
     }
 
     /// Non-feature-gated stub.
@@ -2043,7 +2229,838 @@ impl CandleBackend {
         crate::vsa::polar_quant::decompress(qvec, seed, std_dev_hint)
     }
 
+    /// Resident KV bytes this model adds per additional context token.
+    ///
+    /// Only the attention blocks grow with context; the recurrent blocks hold a
+    /// fixed-size state. `None` for families whose growth is not modelled here.
+    /// The figure covers key and value tensors only, not activations, weights or
+    /// allocator overhead, so it is a floor for planning rather than a
+    /// prediction of device occupancy.
+    #[cfg(feature = "candle-backend")]
+    pub fn kv_bytes_per_token(&self) -> Option<usize> {
+        match &self.model {
+            LoadedModel::Qwen35(model) => Some(model.kv_bytes_per_token()),
+            _ => None,
+        }
+    }
+
+    /// Live device memory, when the platform can report it.
+    ///
+    /// HIP asks the driver directly. Vulkan has no portable free-memory query in
+    /// wgpu, so on AMD the kernel's sysfs counters are read instead - the same
+    /// numbers the idle-power probe samples. A device that can report neither
+    /// yields `None`, and the caller must not invent a number for it.
+    #[cfg(feature = "candle-backend")]
+    pub fn device_memory(&self) -> Option<DeviceMemory> {
+        match &self.device {
+            #[cfg(feature = "hip")]
+            Device::Cuda(_) => candle_core::cuda::device_memory_info().map(|(free, total)| {
+                DeviceMemory { free, total, source: "hipMemGetInfo" }
+            }),
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(_) => amd_sysfs_memory(),
+            _ => None,
+        }
+    }
+
+    /// Tokens of context that actually fit on this device, weights resident.
+    ///
+    /// The declared window is what the GGUF advertises; this is what the hardware
+    /// can hold. For the pinned Qwen3.8 artifact the two differ by more than an
+    /// order of magnitude, so treating the declared window as an admission limit
+    /// means accepting requests that can only end in an allocation failure part
+    /// way through prefill.
+    ///
+    /// `None` when either the per-token cost or the device memory is unknown,
+    /// which is the honest answer rather than a guess.
+    #[cfg(feature = "candle-backend")]
+    pub fn memory_bound_context_limit(&self) -> Option<usize> {
+        let per_token = self.effective_bytes_per_token()?;
+        if per_token == 0 {
+            return None;
+        }
+        let memory = self.device_memory()?;
+        let budget = memory.free.saturating_sub(kv_headroom_bytes());
+        Some((budget / per_token).min(self.context_length))
+    }
+
+    /// Device bytes a context token really costs, not just its KV.
+    ///
+    /// Sizing on KV alone was wrong by more than 4x. A 10,417-token request
+    /// consumed 5.44 GiB, of which KV is 1.30 GiB: the rest is prefill
+    /// intermediates and allocator blocks that are not returned between
+    /// requests. Attention scores alone scale with chunk x positions, so the
+    /// overhead grows with context and no fixed reserve can absorb it.
+    ///
+    /// The multiplier is **empirical and from a single measurement** on one
+    /// model and device - see the long-context gate research note. It admits the
+    /// largest request measured to work (10,417 tokens) and refuses the smallest
+    /// measured to fail (20,833). `AKH_CANDLE_CONTEXT_COST_MULTIPLIER` overrides
+    /// it, which is how a different model or card gets a right answer here.
+    #[cfg(feature = "candle-backend")]
+    pub fn effective_bytes_per_token(&self) -> Option<usize> {
+        let kv = self.kv_bytes_per_token()?;
+        let multiplier = std::env::var("AKH_CANDLE_CONTEXT_COST_MULTIPLIER")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| *value >= 1.0)
+            .unwrap_or(DEFAULT_CONTEXT_COST_MULTIPLIER);
+        Some((kv as f64 * multiplier) as usize)
+    }
+
+    /// Snapshot everything the memory gate needs, borrowing nothing afterwards.
+    ///
+    /// Taken once per request rather than per call site: each one costs a driver
+    /// query, and a limit that shifted between two checks of the same request
+    /// would be worse than either answer.
+    #[cfg(feature = "candle-backend")]
+    fn context_admission(&self) -> ContextAdmission {
+        ContextAdmission {
+            fits_tokens: self.memory_bound_context_limit(),
+            declared_window: self.context_length,
+            per_token_bytes: self.effective_bytes_per_token().unwrap_or(0),
+            kv_bytes_per_token: self.kv_bytes_per_token().unwrap_or(0),
+            available_bytes: self.device_memory().map_or(0, |memory| memory.free),
+            headroom_bytes: kv_headroom_bytes(),
+        }
+    }
+
+    /// Admit, and if the device's own allocator cache is what stands in the way,
+    /// give it back and try once more.
+    ///
+    /// `hipMemGetInfo` does not count blocks the pool holds for reuse, so after
+    /// one request the figure can drop by gigabytes that are in fact available:
+    /// a repeat of a request that had just succeeded was refused at a 913-token
+    /// limit. Reclaiming turns those blocks back into driver-free memory, which
+    /// any allocation size can use - the honest figure, where adding the cached
+    /// total to free memory would over-admit whenever cached block sizes do not
+    /// match the new request. It runs only on the refuse path, so the cache
+    /// keeps its value everywhere else. The reclaim checks its own preconditions
+    /// (default stream, no capture) and fails closed; then the original refusal
+    /// stands. Vulkan has no pool and is unchanged.
+    #[cfg(feature = "candle-backend")]
+    fn admit_context_reclaiming(
+        &self,
+        prompt_tokens: usize,
+        max_new_tokens: usize,
+    ) -> NluResult<ContextAdmission> {
+        let first = self.context_admission();
+        let refused = match first.check(prompt_tokens, max_new_tokens) {
+            Ok(()) => return Ok(first),
+            Err(error) => error,
+        };
+        #[cfg(feature = "hip")]
+        if matches!(self.device, Device::Cuda(_)) {
+            match candle_core::cuda::release_cached_memory() {
+                Ok(released) if released > 0 => {
+                    let second = self.context_admission();
+                    return match second.check(prompt_tokens, max_new_tokens) {
+                        Ok(()) => {
+                            tracing::info!(
+                                released_bytes = released,
+                                fits_before = ?first.fits_tokens,
+                                fits_after = ?second.fits_tokens,
+                                "admitted after reclaiming the allocator cache"
+                            );
+                            Ok(second)
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "allocator cache not reclaimable at admission; refusal stands");
+                }
+            }
+        }
+        Err(refused)
+    }
+
+    /// Resident KV bytes for a full `tokens`-long context, when modelled.
+    #[cfg(feature = "candle-backend")]
+    pub fn projected_kv_bytes(&self, tokens: usize) -> Option<usize> {
+        self.kv_bytes_per_token()
+            .map(|per_token| per_token.saturating_mul(tokens))
+    }
+
+    /// Round-trip quality of PolarQuant on this model's resident KV cache.
+    ///
+    /// Measurement only: nothing is compressed in the live path. The unit is the
+    /// per-head, per-position vector of `head_dim` values, which is what a paged
+    /// KV compressor would actually quantize. Keys are post-RoPE and values are
+    /// not, so they are reported separately rather than pooled.
+    #[cfg(feature = "candle-backend")]
+    pub fn kv_quantization_report(&self, seed: u64) -> NluResult<Vec<KvLayerQuality>> {
+        self.kv_report_with(&move |values| {
+            let mean = values.iter().map(|v| *v as f64).sum::<f64>() / values.len() as f64;
+            let variance = values
+                .iter()
+                .map(|v| (*v as f64 - mean).powi(2))
+                .sum::<f64>()
+                / values.len() as f64;
+            Self::decompress_kv_vector(
+                &Self::compress_kv_vector(values, seed),
+                seed,
+                variance.sqrt() as f32,
+            )
+        })
+    }
+
+    /// The same report for TurboQuant at a chosen bit-width.
+    ///
+    /// The rotation and codebook are built once for the head dimension and
+    /// reused across every vector, which is how an online quantizer would run.
+    #[cfg(feature = "candle-backend")]
+    pub fn kv_turboquant_report(&self, seed: u64, bits: u8) -> NluResult<Vec<KvLayerQuality>> {
+        use std::cell::RefCell;
+        // Head dimension is constant across layers, but build lazily so the
+        // dimension comes from the tensors rather than an assumption.
+        let quantizer: RefCell<Option<crate::nlu::turbo_quant::TurboQuant>> = RefCell::new(None);
+        self.kv_report_with(&move |values| {
+            let mut slot = quantizer.borrow_mut();
+            let turbo = slot.get_or_insert_with(|| {
+                crate::nlu::turbo_quant::TurboQuant::new(values.len(), bits, seed)
+            });
+            turbo.dequantize(&turbo.quantize(values))
+        })
+    }
+
+    /// What the live compressed KV pages occupy, or `None` when compression is
+    /// off or nothing has aged out of the exact window yet.
+    ///
+    /// Unlike the quality reports above this reads the live path rather than
+    /// simulating one, so it is the figure that backs any claim about how much
+    /// the compression actually saves on this device.
+    /// The lossy-KV width this process is configured to use, if any. `None`
+    /// means compression is off. Used by the daemon's task-level gate to refuse
+    /// enabling compression without matching canary evidence.
+    #[cfg(feature = "candle-backend")]
+    pub fn configured_kv_bits(&self) -> Option<u8> {
+        crate::nlu::vendored::quantized_qwen35::configured_kv_quant().map(|(bits, _)| bits)
+    }
+
+    #[cfg(feature = "candle-backend")]
+    pub fn kv_page_residency(&self) -> Option<KvPageResidency> {
+        let LoadedModel::Qwen35(model) = &self.model else {
+            return None;
+        };
+        model.kv_page_residency().map(|live| KvPageResidency {
+            layout: live.layout,
+            stored_bytes: live.stored_bytes,
+            uncompressed_bytes: live.uncompressed_bytes,
+            positions: live.positions,
+            layers: live.layers,
+            fidelity: live.fidelity.map(|measured| KvPagedFidelity {
+                vectors: measured.vectors,
+                min_cosine: measured.min_cosine,
+                mean_cosine: measured.mean_cosine(),
+                max_relative_l2: measured.max_relative_l2,
+            }),
+        })
+    }
+
+    #[cfg(feature = "candle-backend")]
+    fn kv_report_with(
+        &self,
+        round_trip: &dyn Fn(&[f32]) -> Vec<f32>,
+    ) -> NluResult<Vec<KvLayerQuality>> {
+        let LoadedModel::Qwen35(model) = &self.model else {
+            return Err(NluError::ModelLoadFailed {
+                reason: "KV quantization report requires the Qwen35 family".into(),
+            });
+        };
+        let mut report = Vec::new();
+        for (layer, key, value) in model.attention_states() {
+            report.push(KvLayerQuality {
+                layer,
+                positions: key.dim(2).map_err(|e| NluError::ModelLoadFailed {
+                    reason: format!("kv state shape: {e}"),
+                })?,
+                key: measure_kv_tensor(key, round_trip)?,
+                value: measure_kv_tensor(value, round_trip)?,
+            });
+        }
+        Ok(report)
+    }
+
     // ── Internal generation loop ─────────────────────────────────────────
+
+    /// Generate a session reply without NLU cleanup or blank-line stopping.
+    ///
+    /// The caller owns compute serialization. `check` runs before prefill and
+    /// between GPU steps, and may return a cancellation/deadline error. It cannot
+    /// interrupt a kernel already submitted to the device. Each call starts a
+    /// fresh prefill, so no other conversation's position-dependent state is reused.
+    #[cfg(feature = "candle-backend")]
+    pub fn generate_completion(
+        &mut self,
+        prompt: &str,
+        max_tokens: u32,
+        check: &mut dyn FnMut() -> NluResult<()>,
+    ) -> NluResult<CandleCompletion> {
+        self.generate_completion_scoped(
+            None,
+            prompt,
+            None,
+            max_tokens,
+            check,
+            &mut |_| Ok(RecallDecision::Continue),
+        )
+    }
+
+    /// Generate from a prompt that contains one image.
+    ///
+    /// The prompt carries `<|vision_start|><|image_pad|><|vision_end|>` where
+    /// the image belongs; the single pad is expanded to one token per merged
+    /// patch. Image rows come from the projector and are spliced in place of
+    /// those tokens, and every token gets a `(t, h, w)` rope triple - text
+    /// tokens degenerate ones, image tokens their grid cell. Decode then
+    /// continues from the rope cursor the image left, not from the cache
+    /// length. Qwen3.5 only; the projector must sit alongside the model.
+    #[cfg(feature = "candle-backend")]
+    pub fn generate_with_image(
+        &mut self,
+        prompt: &str,
+        image_bytes: &[u8],
+        max_tokens: u32,
+        check: &mut dyn FnMut() -> NluResult<()>,
+    ) -> NluResult<CandleCompletion> {
+        use crate::nlu::vision_positions::position_triples;
+        use crate::nlu::vision_prompt::{expand_single_image, VisionTokens};
+        let started = std::time::Instant::now();
+        check()?;
+        let fail = |error: candle_core::Error| NluError::LlmGenerationFailed {
+            reason: format!("image generation: {error}"),
+        };
+        #[cfg(feature = "hip")]
+        if let Device::Cuda(device) = &self.device {
+            Device::new_cuda(device.ordinal()).map_err(fail)?;
+        }
+        if self.family != ModelFamily::Qwen35 {
+            return Err(NluError::LlmGenerationFailed {
+                reason: format!("image input needs the Qwen35 family, this model is {:?}", self.family),
+            });
+        }
+        if max_tokens == 0 {
+            return Err(NluError::LlmGenerationFailed {
+                reason: "generation needs a positive token budget".into(),
+            });
+        }
+        let specials = {
+            let id = |name: &str| {
+                self.tokenizer.token_to_id(name).ok_or_else(|| NluError::LlmGenerationFailed {
+                    reason: format!("tokenizer has no `{name}` token; this model cannot take images"),
+                })
+            };
+            VisionTokens {
+                start: id("<|vision_start|>")?,
+                pad: id("<|image_pad|>")?,
+                end: id("<|vision_end|>")?,
+            }
+        };
+
+        // Image first: its grid decides how many tokens the placeholder becomes.
+        self.ensure_vision_tower()?;
+        let tower = self.vision.as_ref().expect("loaded above");
+        let config = tower.config().clone();
+        let prepared = crate::nlu::vision_preprocess::prepare_image(
+            image_bytes,
+            &config.resize_policy(),
+            config.patch_size,
+            config.spatial_merge_size,
+            config.image_mean,
+            config.image_std,
+        )?;
+        let raw_tokens = self.encode_prompt(prompt)?;
+        let expanded = expand_single_image(&raw_tokens, specials, prepared.grid)?;
+        let total = expanded.tokens.len();
+
+        // Same gates as text: the declared window and what the device holds.
+        let limit = self.completion_context_limit.unwrap_or(self.context_length);
+        validate_completion_budget(total, max_tokens, limit)?;
+        self.admit_context_reclaiming(total, max_tokens as usize)?;
+        check()?;
+
+        let pixels = Tensor::from_vec(
+            prepared.pixels,
+            (3, prepared.height, prepared.width),
+            &self.device,
+        )
+        .map_err(fail)?;
+        let image_rows = tower.forward(&pixels)?;
+        let (rows, width) = image_rows.dims2().map_err(fail)?;
+        if rows != prepared.grid.tokens() {
+            return Err(NluError::LlmGenerationFailed {
+                reason: format!("projector produced {rows} rows for a {}-token grid", prepared.grid.tokens()),
+            });
+        }
+        check()?;
+
+        // Looked up before the model is borrowed mutably for the whole loop.
+        let eos = self.find_eos_token();
+        let LoadedModel::Qwen35(model) = &mut self.model else {
+            unreachable!("family checked above");
+        };
+        if width != model.embedding_width() {
+            return Err(NluError::LlmGenerationFailed {
+                reason: format!("projector width {width} does not match the residual width {}", model.embedding_width()),
+            });
+        }
+        let tokens = Tensor::new(expanded.tokens.as_slice(), &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(fail)?;
+        let text_rows = model.embed_tokens(&tokens).map_err(fail)?;
+        let span = expanded.image_span.clone();
+        let spliced = Tensor::cat(
+            &[
+                &text_rows.narrow(1, 0, span.start).map_err(fail)?,
+                &image_rows.to_dtype(text_rows.dtype()).map_err(fail)?.unsqueeze(0).map_err(fail)?,
+                &text_rows.narrow(1, span.end, total - span.end).map_err(fail)?,
+            ],
+            1,
+        )
+        .and_then(|t| t.contiguous())
+        .map_err(fail)?;
+        let positions = position_triples(&expanded.pieces);
+
+        let mut logits = model.prefill_embedded(&tokens, &spliced, &positions).map_err(fail)?;
+
+        // The decode loop below mirrors the text path's sampling, stop and
+        // timing. It is separate because the text path drives the tracked
+        // `forward_token`, which the embedded prefill does not prepare; the
+        // rope continuation after the image lives inside the model instead.
+        let mut generated = Vec::new();
+        let mut finish_reason = CandleFinishReason::Length;
+        let mut first_sample_at = None;
+        let mut last_sample_at = None;
+        let mut step_seconds: Vec<f64> = Vec::new();
+        let mut decode_steps = 0;
+        for index in 0..max_tokens {
+            check()?;
+            let row = match logits.rank() {
+                3 => logits.i((0, logits.dim(1).map_err(fail)? - 1, ..)),
+                _ => logits.i((0, ..)),
+            }
+            .map_err(fail)?;
+            let token = if self.config.temperature == 0.0 {
+                row.argmax(0).and_then(|t| t.to_scalar::<u32>()).map_err(fail)?
+            } else {
+                let scaled = (&row / self.config.temperature as f64).map_err(fail)?;
+                let probs = candle_nn::ops::softmax(&scaled, 0).map_err(fail)?;
+                sample_from_probs(&probs.to_vec1::<f32>().map_err(fail)?)
+            };
+            let sampled_now = std::time::Instant::now();
+            if first_sample_at.is_none() {
+                first_sample_at = Some(sampled_now);
+            } else {
+                decode_steps += 1;
+                if let Some(previous) = last_sample_at {
+                    step_seconds.push(sampled_now.duration_since(previous).as_secs_f64());
+                }
+            }
+            last_sample_at = Some(sampled_now);
+            if eos.contains(&token) {
+                finish_reason = CandleFinishReason::Stop;
+                break;
+            }
+            generated.push(token);
+            if index + 1 < max_tokens {
+                check()?;
+                let input = Tensor::new(&[[token]], &self.device).map_err(fail)?;
+                logits = model
+                    .decode_step(&input, total + index as usize)
+                    .map_err(fail)?;
+            }
+        }
+        let sampled_at = std::time::Instant::now();
+        // An image session is not a reusable text prefix; do not let a later
+        // keyed text call believe it can extend this state.
+        self.discard_completion_state();
+        let text = self.tokenizer.decode(&generated, false).map_err(|e| {
+            NluError::LlmGenerationFailed { reason: format!("detokenization: {e}") }
+        })?;
+        Ok(CandleCompletion {
+            text,
+            prompt_tokens: total,
+            reused_prompt_tokens: 0,
+            tokens_generated: generated.len() as u32,
+            finish_reason,
+            time_to_first_token: first_sample_at.unwrap().duration_since(started),
+            decode_time: sampled_at.duration_since(first_sample_at.unwrap()),
+            step_seconds,
+            decode_steps,
+            prompt_span_taps: None,
+        })
+    }
+
+    /// Load the projector next to the model, once.
+    #[cfg(feature = "candle-backend")]
+    fn ensure_vision_tower(&mut self) -> NluResult<()> {
+        if self.vision.is_some() {
+            return Ok(());
+        }
+        let path = self.mmproj_path()?;
+        let mut file = std::fs::File::open(&path).map_err(|e| NluError::ModelLoadFailed {
+            reason: format!("open projector {}: {e}", path.display()),
+        })?;
+        let content = candle_core::quantized::gguf_file::Content::read(&mut file).map_err(|e| {
+            NluError::ModelLoadFailed { reason: format!("read projector {}: {e}", path.display()) }
+        })?;
+        let tower = crate::nlu::vision_tower::VisionTower::load(&content, &mut file, &self.device)?;
+        self.vision = Some(tower);
+        Ok(())
+    }
+
+    /// Reuse one active conversation's exact forwarded prefix. The caller must
+    /// supply a stable key scoped to its canonical session and provider binding.
+    /// Another key evicts only mutable inference state, not immutable weights.
+    #[cfg(feature = "candle-backend")]
+    pub fn generate_completion_for_session(
+        &mut self,
+        session_key: &str,
+        prompt: &str,
+        max_tokens: u32,
+        check: &mut dyn FnMut() -> NluResult<()>,
+    ) -> NluResult<CandleCompletion> {
+        self.generate_completion_for_session_with_capture(
+            session_key,
+            prompt,
+            None,
+            max_tokens,
+            check,
+            &mut |_| Ok(RecallDecision::Continue),
+        )
+    }
+
+    /// Keyed completion that pools post-block residual means over one newly
+    /// forwarded prompt byte span and offers them to `recall` before decoding.
+    ///
+    /// The taps are `None` when the span is not aligned to token boundaries or
+    /// already lies in the reused prefix; generation still proceeds. `recall`
+    /// runs inside the compute lane after prefill: returning
+    /// [`RecallDecision::Reprompt`] rewinds to the state before this call and
+    /// forwards the re-rendered prompt (reusing whatever prefix still matches),
+    /// which is the honest memory-before-query layout rather than a same-pass
+    /// splice. A `recall` error discards the conversation cache like any other
+    /// generation failure. Only Qwen3.5 supports capture; other families report
+    /// a miss.
+    #[cfg(feature = "candle-backend")]
+    pub fn generate_completion_for_session_with_capture(
+        &mut self,
+        session_key: &str,
+        prompt: &str,
+        capture: Option<CaptureRequest<'_>>,
+        max_tokens: u32,
+        check: &mut dyn FnMut() -> NluResult<()>,
+        recall: &mut dyn FnMut(Option<&PromptSpanTaps>) -> NluResult<RecallDecision>,
+    ) -> NluResult<CandleCompletion> {
+        if session_key.is_empty() {
+            self.discard_completion_state();
+            return Err(NluError::LlmGenerationFailed {
+                reason: "empty completion session key".into(),
+            });
+        }
+        self.generate_completion_scoped(Some(session_key), prompt, capture, max_tokens, check, recall)
+    }
+
+    /// Target block count and residual width of a resident Qwen3.5 model.
+    #[cfg(feature = "candle-backend")]
+    pub fn qwen35_shape(&self) -> Option<(usize, usize)> {
+        match &self.model {
+            LoadedModel::Qwen35(model) => Some((model.block_count(), model.hidden_size())),
+            _ => None,
+        }
+    }
+
+    /// Discard uncommitted or invalid response state while retaining weights.
+    #[cfg(feature = "candle-backend")]
+    pub fn discard_completion_state(&mut self) {
+        self.active_completion_session = None;
+        if let LoadedModel::Qwen35(model) = &mut self.model {
+            *model = model.new_session();
+        }
+    }
+
+    #[cfg(feature = "candle-backend")]
+    fn generate_completion_scoped(
+        &mut self,
+        session_key: Option<&str>,
+        prompt: &str,
+        capture: Option<CaptureRequest<'_>>,
+        max_tokens: u32,
+        check: &mut dyn FnMut() -> NluResult<()>,
+        recall: &mut dyn FnMut(Option<&PromptSpanTaps>) -> NluResult<RecallDecision>,
+    ) -> NluResult<CandleCompletion> {
+        if session_key.is_none() || self.active_completion_session.as_deref() != session_key {
+            self.discard_completion_state();
+            self.active_completion_session = session_key.map(str::to_owned);
+        }
+        // Cached recurrence must remain consistent with full prompt prefill.
+        // Q8 decode activations failed that gate even when greedy IDs agreed.
+        // Scope precision to this synchronous call, leaving other users' Q8
+        // policy and the compressed GGUF weights untouched.
+        #[cfg(feature = "hip")]
+        let result =
+            if session_key.is_some() && self.family == ModelFamily::Qwen35 && self.device.is_cuda()
+            {
+                candle_core::cuda::with_full_precision_activations(|| {
+                    self.generate_completion_inner(prompt, capture, max_tokens, check, recall)
+                })
+            } else {
+                self.generate_completion_inner(prompt, capture, max_tokens, check, recall)
+            };
+        #[cfg(not(feature = "hip"))]
+        let result = self.generate_completion_inner(prompt, capture, max_tokens, check, recall);
+        if result.as_ref().map_or(true, |reply| {
+            reply.finish_reason == CandleFinishReason::Length
+        }) {
+            self.discard_completion_state();
+        }
+        result
+    }
+
+    /// Map a prompt byte range onto the exact tokens that cover it.
+    ///
+    /// `None` when the range is empty, not on character boundaries, or when a
+    /// token straddles either boundary; capture then reports an explicit miss.
+    #[cfg(feature = "candle-backend")]
+    fn token_span_for_bytes(
+        &self,
+        prompt: &str,
+        byte_span: &std::ops::Range<usize>,
+    ) -> NluResult<Option<std::ops::Range<usize>>> {
+        if self.family != ModelFamily::Qwen35
+            || byte_span.start >= byte_span.end
+            || byte_span.end > prompt.len()
+            || !prompt.is_char_boundary(byte_span.start)
+            || !prompt.is_char_boundary(byte_span.end)
+        {
+            return Ok(None);
+        }
+        let encoding =
+            self.tokenizer
+                .encode(prompt, true)
+                .map_err(|e| NluError::LlmGenerationFailed {
+                    reason: format!("tokenization: {e}"),
+                })?;
+        let mut first = None;
+        let mut last = None;
+        for (index, (start, end)) in encoding.get_offsets().iter().enumerate() {
+            if end <= start {
+                continue;
+            }
+            if *start >= byte_span.start && *end <= byte_span.end {
+                if first.is_none() {
+                    if *start != byte_span.start {
+                        return Ok(None);
+                    }
+                    first = Some(index);
+                }
+                last = Some((index, *end));
+            } else if *start < byte_span.end && *end > byte_span.start {
+                return Ok(None);
+            }
+        }
+        Ok(match (first, last) {
+            (Some(first), Some((last, end))) if end == byte_span.end => Some(first..last + 1),
+            _ => None,
+        })
+    }
+
+    #[cfg(feature = "candle-backend")]
+    fn generate_completion_inner(
+        &mut self,
+        prompt: &str,
+        capture: Option<CaptureRequest<'_>>,
+        max_tokens: u32,
+        check: &mut dyn FnMut() -> NluResult<()>,
+        recall: &mut dyn FnMut(Option<&PromptSpanTaps>) -> NluResult<RecallDecision>,
+    ) -> NluResult<CandleCompletion> {
+        let started = std::time::Instant::now();
+        check()?;
+        let fail = |error: candle_core::Error| NluError::LlmGenerationFailed {
+            reason: format!("session generation: {error}"),
+        };
+        // HIP device selection is thread-local. A resident model can be called
+        // from different serialized spawn_blocking workers across session jobs.
+        #[cfg(feature = "hip")]
+        if let Device::Cuda(device) = &self.device {
+            Device::new_cuda(device.ordinal()).map_err(fail)?;
+        }
+        if max_tokens == 0 || !self.config.temperature.is_finite() || self.config.temperature < 0.0
+        {
+            return Err(NluError::LlmGenerationFailed {
+                reason: "generation needs positive token budget and finite nonnegative temperature"
+                    .into(),
+            });
+        }
+        let limit = self.completion_context_limit.unwrap_or(self.context_length);
+        let mut prompt_tokens = self.encode_prompt(prompt)?;
+        validate_completion_budget(prompt_tokens.len(), max_tokens, limit)?;
+        // The declared window says what the artifact supports; this says what
+        // the device can hold. On the pinned model the two differ fivefold.
+        let admission = self.admit_context_reclaiming(prompt_tokens.len(), max_tokens as usize)?;
+        let token_span = match &capture {
+            Some(request) => self.token_span_for_bytes(prompt, &request.byte_span)?,
+            None => None,
+        };
+        check()?;
+        let mut prompt_span_taps = None;
+        let (mut logits, reused_prompt_tokens) = if let LoadedModel::Qwen35(model) = &mut self.model
+        {
+            // Bound the attention score allocation and make long prefill
+            // cancellation cooperative between chunks, not only after prefill.
+            let checkpoint = model.checkpoint();
+            let (logits, reused) = match (token_span, capture.as_ref()) {
+                (Some(span), Some(request)) => {
+                    let layers = request.layers.to_vec();
+                    let captured = with_interrupt(check, |guard| {
+                        model.resume_prompt_with_taps(&prompt_tokens, span.clone(), &layers, guard)
+                    })?;
+                    if let Some(taps) = captured.taps {
+                        let mut means = Vec::with_capacity(taps.len());
+                        for tap in taps {
+                            means.push(LayerMean {
+                                layer: tap.layer,
+                                mean: tap
+                                    .mean
+                                    .to_dtype(DType::F32)
+                                    .and_then(|mean| mean.to_vec1::<f32>())
+                                    .map_err(fail)?,
+                            });
+                        }
+                        prompt_span_taps = Some(PromptSpanTaps {
+                            layers: means,
+                            token_span: span,
+                        });
+                    }
+                    (captured.logits, captured.reused_tokens)
+                }
+                _ => with_interrupt(check, |guard| model.resume_prompt(&prompt_tokens, guard))?,
+            };
+            check()?;
+            match recall(prompt_span_taps.as_ref())? {
+                RecallDecision::Continue => (logits, reused),
+                RecallDecision::Reprompt(new_prompt) => {
+                    model.rewind(checkpoint).map_err(fail)?;
+                    let new_tokens = encode_prompt_tokens(&self.tokenizer, self.family, &new_prompt)?;
+                    validate_completion_budget(new_tokens.len(), max_tokens, limit)?;
+                    admission.check(new_tokens.len(), max_tokens as usize)?;
+                    check()?;
+                    let forwarded =
+                        with_interrupt(check, |guard| model.resume_prompt(&new_tokens, guard))?;
+                    prompt_tokens = new_tokens;
+                    forwarded
+                }
+            }
+        } else {
+            recall(None)?;
+            let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
+                .and_then(|t| t.unsqueeze(0))
+                .map_err(fail)?;
+            (self.model.forward(&input, 0).map_err(fail)?, 0)
+        };
+        let eos = self.find_eos_token();
+        let mut generated = Vec::new();
+        let mut finish_reason = CandleFinishReason::Length;
+        let mut first_sample_at = None;
+        let mut last_sample_at = None;
+        let mut step_seconds: Vec<f64> = Vec::new();
+        let mut decode_steps = 0;
+        for index in 0..max_tokens {
+            check()?;
+            let row = match logits.rank() {
+                3 => logits.i((0, logits.dim(1).map_err(fail)? - 1, ..)),
+                _ => logits.i((0, ..)),
+            }
+            .map_err(fail)?;
+            let token = if self.config.temperature == 0.0 {
+                row.argmax(0)
+                    .and_then(|t| t.to_scalar::<u32>())
+                    .map_err(fail)?
+            } else {
+                let scaled = (&row / self.config.temperature as f64).map_err(fail)?;
+                let probs = candle_nn::ops::softmax(&scaled, 0).map_err(fail)?;
+                sample_from_probs(&probs.to_vec1::<f32>().map_err(fail)?)
+            };
+            // Sampling reads the result back and therefore includes queued GPU
+            // work. Timing forward's return alone would measure enqueue time.
+            let sampled_now = std::time::Instant::now();
+            if first_sample_at.is_none() {
+                first_sample_at = Some(sampled_now);
+            } else {
+                decode_steps += 1;
+                if let Some(previous) = last_sample_at {
+                    step_seconds.push(sampled_now.duration_since(previous).as_secs_f64());
+                }
+            }
+            last_sample_at = Some(sampled_now);
+            if eos.contains(&token) {
+                finish_reason = CandleFinishReason::Stop;
+                break;
+            }
+            generated.push(token);
+            // No redundant forward after consuming the final output token.
+            if index + 1 < max_tokens {
+                check()?;
+                logits = if let LoadedModel::Qwen35(model) = &mut self.model {
+                    let mut interrupted = None;
+                    let result = model.forward_token(token, &mut || {
+                        check().map_err(|error| {
+                            interrupted = Some(error);
+                            candle_core::Error::Msg("session decode interrupted".into())
+                        })
+                    });
+                    if let Some(error) = interrupted {
+                        return Err(error);
+                    }
+                    result.map_err(fail)?
+                } else {
+                    let input = Tensor::new(&[token], &self.device)
+                        .and_then(|t| t.unsqueeze(0))
+                        .map_err(fail)?;
+                    self.model
+                        .forward(&input, prompt_tokens.len() + index as usize)
+                        .map_err(fail)?
+                };
+            }
+        }
+        let sampled_at = std::time::Instant::now();
+        check()?;
+        // Decode the sequence together: byte-level tokens may split a UTF-8 code
+        // point. Decoding individual tokens inserts replacement characters.
+        let text = self.tokenizer.decode(&generated, false).map_err(|e| {
+            NluError::LlmGenerationFailed {
+                reason: format!("detokenization: {e}"),
+            }
+        })?;
+        Ok(CandleCompletion {
+            text,
+            prompt_tokens: prompt_tokens.len(),
+            reused_prompt_tokens,
+            tokens_generated: generated.len() as u32,
+            finish_reason,
+            time_to_first_token: first_sample_at.unwrap().duration_since(started),
+            decode_time: sampled_at.duration_since(first_sample_at.unwrap()),
+            step_seconds,
+            decode_steps,
+            prompt_span_taps,
+        })
+    }
+
+    #[cfg(feature = "candle-backend")]
+    /// Owned, exact counter using the completion path's family-specific encoding.
+    /// Safe to retain across a mutable generation call; encoding errors propagate.
+    pub fn completion_prompt_counter(&self) -> impl Fn(&str) -> NluResult<usize> + use<> {
+        let tokenizer = self.tokenizer.clone();
+        let family = self.family;
+        move |prompt| encode_prompt_tokens(&tokenizer, family, prompt).map(|tokens| tokens.len())
+    }
+
+    #[cfg(feature = "candle-backend")]
+    fn encode_prompt(&self, prompt: &str) -> NluResult<Vec<u32>> {
+        encode_prompt_tokens(&self.tokenizer, self.family, prompt)
+    }
 
     #[cfg(feature = "candle-backend")]
     fn generate_inner(
@@ -2052,27 +3069,7 @@ impl CandleBackend {
         max_tokens: u32,
         stop: StopMode,
     ) -> NluResult<GenerationResult> {
-        let encoding =
-            self.tokenizer
-                .encode(prompt, true)
-                .map_err(|e| NluError::LlmGenerationFailed {
-                    reason: format!("tokenization: {e}"),
-                })?;
-        let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
-
-        // Gemma is critically dependent on a leading BOS token: without it the
-        // residual stream is un-anchored and greedy decoding collapses to a single
-        // repeated token (e.g. "." / "1"). The Gemma 4 tokenizer's `TemplateProcessing`
-        // post-processor does NOT prepend BOS (it relies on the model's `add_bos_token`
-        // flag, which `encode(.., true)` does not honour here), so we prepend it
-        // ourselves when missing. Other families (Qwen2) carry BOS via their template.
-        if matches!(self.family, ModelFamily::Gemma | ModelFamily::Gemma4) {
-            if let Some(bos) = self.tokenizer.token_to_id("<bos>") {
-                if prompt_tokens.first() != Some(&bos) {
-                    prompt_tokens.insert(0, bos);
-                }
-            }
-        }
+        let prompt_tokens = self.encode_prompt(prompt)?;
 
         tracing::debug!(
             prompt_tokens = prompt_tokens.len(),
@@ -2088,6 +3085,9 @@ impl CandleBackend {
                 ),
             });
         }
+        // The declared window is not an admission limit on its own: it is what
+        // the artifact advertises, not what fits with the weights resident.
+        self.admit_context_reclaiming(prompt_tokens.len(), max_tokens as usize)?;
 
         // Prefill: process all prompt tokens at once.
         let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
@@ -2634,6 +3634,9 @@ impl CandleBackend {
                 ),
             });
         }
+        // Prefill sizes the cache to the prompt; what the caller then generates
+        // is gated where the generation limit is known.
+        self.admit_context_reclaiming(prompt_tokens.len(), 0)?;
 
         let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
             .map_err(|e| NluError::LlmGenerationFailed {
@@ -2742,14 +3745,6 @@ impl CandleBackend {
                 return device;
             }
         }
-        // Try CUDA.
-        #[cfg(feature = "cuda")]
-        {
-            if let Ok(device) = Device::new_cuda(0) {
-                tracing::info!("using CUDA device for Candle inference");
-                return device;
-            }
-        }
         // AMD ROCm/HIP via the vendored candle-core HIP backend (Phase 45f / ADR 073).
         // The `hip` feature fills candle's `cuda` module slot, so `new_cuda(0)` builds a
         // real `HipDevice`. The whole forward then runs GPU-resident — quantized weights
@@ -2768,14 +3763,22 @@ impl CandleBackend {
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
-                        "HIP device construction failed; falling back to CPU. Verify the ROCm \
+                        "HIP device construction failed; trying remaining backends. Verify the ROCm \
                          runtime (ROCM_PATH, default /opt/rocm) and that the GPU is visible \
                          (`rocminfo`)."
                     );
                 }
             }
         }
-        // No GPU backend selected (or HIP construction failed): probe the host so the log
+        #[cfg(feature = "vulkan")]
+        match Device::new_vulkan(0) {
+            Ok(device) => {
+                tracing::info!("using Vulkan device for Candle inference");
+                return device;
+            }
+            Err(error) => tracing::warn!(%error, "Vulkan device construction failed"),
+        }
+        // No GPU backend selected: probe the host so the log
         // tells the user *why* we are on CPU and what to do about it.
         Self::report_rocm_status();
         tracing::info!("using CPU device for Candle inference");
@@ -2847,6 +3850,52 @@ impl CandleBackend {
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
+
+/// Tokenize a prompt, inserting the Gemma BOS marker when the family needs it.
+#[cfg(feature = "candle-backend")]
+fn encode_prompt_tokens(
+    tokenizer: &tokenizers::Tokenizer,
+    family: ModelFamily,
+    prompt: &str,
+) -> NluResult<Vec<u32>> {
+    let encoding = tokenizer
+        .encode(prompt, true)
+        .map_err(|e| NluError::LlmGenerationFailed {
+            reason: format!("tokenization: {e}"),
+        })?;
+    let mut tokens = encoding.get_ids().to_vec();
+    if matches!(family, ModelFamily::Gemma | ModelFamily::Gemma4) {
+        if let Some(bos) = tokenizer.token_to_id("<bos>") {
+            if tokens.first() != Some(&bos) {
+                tokens.insert(0, bos);
+            }
+        }
+    }
+    Ok(tokens)
+}
+
+/// Run a model operation whose cooperative check may raise a caller error.
+/// The caller's cancellation/deadline error is returned verbatim instead of
+/// the model's wrapped interruption message.
+#[cfg(feature = "candle-backend")]
+fn with_interrupt<T>(
+    check: &mut dyn FnMut() -> NluResult<()>,
+    run: impl FnOnce(&mut dyn FnMut() -> candle_core::Result<()>) -> candle_core::Result<T>,
+) -> NluResult<T> {
+    let mut interrupted = None;
+    let result = run(&mut || {
+        check().map_err(|error| {
+            interrupted = Some(error);
+            candle_core::Error::Msg("session generation interrupted".into())
+        })
+    });
+    if let Some(error) = interrupted {
+        return Err(error);
+    }
+    result.map_err(|error| NluError::LlmGenerationFailed {
+        reason: format!("session generation: {error}"),
+    })
+}
 
 /// Stop mode for the generation loop.
 #[derive(Debug, Clone, Copy)]
@@ -2997,9 +4046,472 @@ fn sample_from_probs(probs: &[f32]) -> u32 {
 // Tests
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "candle-backend")]
+fn validate_completion_budget(prompt: usize, output: u32, context: usize) -> NluResult<()> {
+    if prompt == 0
+        || output == 0
+        || prompt
+            .checked_add(output as usize)
+            .is_none_or(|n| n > context)
+    {
+        return Err(NluError::LlmGenerationFailed {
+            reason: format!(
+                "prompt ({prompt}) plus output budget ({output}) must fit model context ({context}); history is never silently truncated"
+            ),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keyed capture/recall on the tiny CPU Qwen3.5 fixture: zero mixers make
+    /// every post-block residual equal the token embedding (id 1 = ones), so
+    /// pooled means are exactly known, and the argmax always lands on id 0,
+    /// which the fixture tokenizer declares as `<|im_end|>`.
+    #[cfg(feature = "candle-backend")]
+    mod capture {
+        use super::super::*;
+        use crate::nlu::span_projection::CapturePolicy;
+
+        /// Exact-model projection gate. Loads the pinned Ptah GGUF/tokenizer
+        /// from `AKH_QWEN35_TEST_MODEL` / `AKH_QWEN35_TEST_TOKENIZER` on the
+        /// device in `AKH_QWEN35_SESSION_DEVICE` (cpu|hip|vulkan), captures the
+        /// user span of chat-rendered prompts through the keyed completion
+        /// path, projects them with the production policy/projector, and
+        /// checks that (1) the projection is deterministic across fresh
+        /// sessions, (2) every paraphrase pair is closer than any unrelated
+        /// pair, and (3) unrelated pairs are not near-duplicates. This is a
+        /// same-pipeline neural-span similarity check, not grounded concept
+        /// recall. Run serially with exclusive device access.
+        #[test]
+        #[ignore = "requires the exact pinned Ptah artifacts and exclusive device access"]
+        fn installed_artifact_span_projection_ranks_paraphrases_above_unrelated_text() {
+            use crate::nlu::span_projection::{Projector, hamming};
+            let model = std::path::PathBuf::from(
+                std::env::var_os("AKH_QWEN35_TEST_MODEL").expect("exact Ptah GGUF required"),
+            );
+            let tokenizer = std::path::PathBuf::from(
+                std::env::var_os("AKH_QWEN35_TEST_TOKENIZER").expect("exact tokenizer required"),
+            );
+            let device = match std::env::var("AKH_QWEN35_SESSION_DEVICE")
+                .unwrap_or_else(|_| "cpu".into())
+                .as_str()
+            {
+                "hip" => CandleDevice::Hip { ordinal: 0 },
+                "vulkan" => CandleDevice::Vulkan { ordinal: 0 },
+                "cpu" => CandleDevice::Cpu,
+                other => panic!("unsupported AKH_QWEN35_SESSION_DEVICE {other}"),
+            };
+            let started = std::time::Instant::now();
+            let mut backend =
+                CandleBackend::load_on_device(&model, &tokenizer, CandleConfig::default(), device)
+                    .unwrap();
+            backend.set_context_limit(2048).unwrap();
+            eprintln!("loaded exact model in {:.2?}", started.elapsed());
+            let (blocks, hidden) = backend.qwen35_shape().unwrap();
+            assert_eq!((blocks, hidden), (64, 5120));
+            let policy = CapturePolicy::for_model(blocks, hidden).unwrap();
+            assert_eq!(policy.layers, [5, 19, 33, 47, 61]);
+            let projector = Projector::default();
+
+            let groups: [[&str; 2]; 3] = [
+                [
+                    "Please remember that my cat is named Cedar and she only eats tuna.",
+                    "Note for later: the name of my cat is Cedar, and tuna is the only thing she eats.",
+                ],
+                [
+                    "The deployment pipeline fails whenever the Docker layer cache is cold.",
+                    "A cold Docker layer cache makes the deploy pipeline fall over every time.",
+                ],
+                [
+                    "What is the capital city of Portugal, and roughly how many people live there?",
+                    "Tell me Portugal's capital and its approximate population.",
+                ],
+            ];
+            let fixture_path = std::env::var_os("AKH_SPAN_GATE_FIXTURE");
+            let fact_query = fixture_path.is_some();
+            let groups: [[String; 2]; 3] = if let Some(path) = fixture_path {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                std::fs::File::open(path).unwrap().take(65537).read_to_end(&mut bytes).unwrap();
+                assert!(bytes.len() <= 65536, "fixture exceeds 64 KiB");
+                let groups: [[String; 2]; 3] = serde_json::from_slice(&bytes).unwrap();
+                assert!(groups.iter().flatten().all(|text| !text.trim().is_empty() && text.len() <= 8192));
+                groups
+            } else {
+                groups.map(|pair| pair.map(str::to_owned))
+            };
+            let render = |text: &str| {
+                format!(
+                    "<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            };
+            let mut vectors: Vec<Vec<Vec<u8>>> = Vec::new();
+            for (g, group) in groups.iter().enumerate() {
+                let mut projected = Vec::new();
+                for (i, text) in group.iter().enumerate() {
+                    let prompt = render(text);
+                    let start = prompt.find(text).unwrap();
+                    let key = format!("gate-{g}-{i}");
+                    let mut capture_one = |backend: &mut CandleBackend, key: &str| {
+                        let reply = backend
+                            .generate_completion_for_session_with_capture(
+                                key,
+                                &prompt,
+                                Some(CaptureRequest {
+                                    byte_span: start..start + text.len(),
+                                    layers: &policy.layers,
+                                }),
+                                1,
+                                &mut || Ok(()),
+                                &mut |_| Ok(RecallDecision::Continue),
+                            )
+                            .unwrap();
+                        let taps = reply.prompt_span_taps.expect("fresh user span captured");
+                        assert_eq!(taps.layers.len(), 5);
+                        for layer in &taps.layers {
+                            assert_eq!(layer.mean.len(), 5120);
+                            assert!(layer.mean.iter().all(|v| v.is_finite()));
+                            assert!(layer.mean.iter().any(|v| *v != 0.0));
+                        }
+                        projector.project(&policy, &taps.layers).unwrap()
+                    };
+                    let first = capture_one(&mut backend, &key);
+                    // A fresh session over the same prompt must project identically.
+                    let again = capture_one(&mut backend, &format!("{key}-again"));
+                    assert_eq!(first, again, "projection must be deterministic");
+                    let ones: u32 = first.iter().map(|b| b.count_ones()).sum();
+                    eprintln!("group {g} text {i}: {ones} set bits of 10000");
+                    projected.push(first);
+                }
+                vectors.push(projected);
+            }
+            // Bounded synthetic fixture output only; never export raw means.
+            // create_new prevents an accidental overwrite of earlier evidence.
+            if let Some(path) = std::env::var_os("AKH_SPAN_GATE_OUTPUT") {
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .unwrap();
+                serde_json::to_writer_pretty(file, &serde_json::json!({
+                    "schema": "akh-span-paraphrase-gate/1",
+                    "task": if fact_query { "fact_query" } else { "paraphrase" },
+                    "backend": std::env::var("AKH_QWEN35_SESSION_DEVICE").unwrap_or_else(|_| "cpu".into()),
+                    "model_path": model,
+                    "tokenizer_path": tokenizer,
+                    "policy_sha256": policy.sha256(),
+                    "projector_sha256": projector.sha256(),
+                    "groups": groups,
+                    "vectors": vectors,
+                })).unwrap();
+            }
+            let mut within = Vec::new();
+            let mut between = Vec::new();
+            for g in 0..groups.len() {
+                let d = hamming(&vectors[g][0], &vectors[g][1]);
+                eprintln!("paraphrase distance group {g}: {d}");
+                within.push(d);
+                for h in (g + 1)..groups.len() {
+                    for a in 0..2 {
+                        for b in 0..2 {
+                            let d = hamming(&vectors[g][a], &vectors[h][b]);
+                            eprintln!("unrelated distance {g}.{a} vs {h}.{b}: {d}");
+                            between.push(d);
+                        }
+                    }
+                }
+            }
+            let max_within = *within.iter().max().unwrap();
+            let min_between = *between.iter().min().unwrap();
+            eprintln!("max paraphrase distance {max_within}, min unrelated distance {min_between}");
+            if fact_query {
+                // Questions are queries, not evidence candidates. Keep all
+                // three closely related facts in the candidate pool.
+                let mut correct = 0;
+                for g in 0..groups.len() {
+                    let distances: Vec<_> = vectors.iter()
+                        .map(|pair| hamming(&vectors[g][1], &pair[0])).collect();
+                    let expected = distances[g];
+                    let unique = distances.iter().enumerate()
+                        .all(|(other, &d)| other == g || expected < d);
+                    eprintln!("fact query {g}: distances {distances:?}, unique correct={unique}");
+                    correct += usize::from(unique);
+                }
+                assert_eq!(correct, 3, "all held-out questions must retrieve their unique supporting fact");
+            } else {
+                assert!(
+                    max_within < min_between,
+                    "every paraphrase pair must be closer than every unrelated pair"
+                );
+                assert!(min_between > 500, "unrelated spans must not look like near-duplicates");
+            }
+        }
+
+        use crate::nlu::vendored::quantized_qwen35::test_fixture::{
+            TINY_TOKENIZER_JSON as TOKENIZER, tiny_gguf_with_shape,
+        };
+
+        fn fixture(dir: &std::path::Path) -> CandleBackend {
+            let model = dir.join("tiny.gguf");
+            std::fs::write(&model, tiny_gguf_with_shape(64, 8)).unwrap();
+            let tokenizer = dir.join("tokenizer.json");
+            std::fs::write(&tokenizer, TOKENIZER).unwrap();
+            CandleBackend::load_on_device(
+                &model,
+                &tokenizer,
+                CandleConfig::default(),
+                CandleDevice::Cpu,
+            )
+            .unwrap()
+        }
+
+        fn span(prompt: &str, text: &str) -> std::ops::Range<usize> {
+            let start = prompt.find(text).unwrap();
+            start..start + text.len()
+        }
+
+        #[test]
+        fn keyed_capture_pools_the_span_and_cached_spans_are_misses() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut backend = fixture(dir.path());
+            let (blocks, hidden) = backend.qwen35_shape().unwrap();
+            assert_eq!((blocks, hidden), (8, 8));
+            let policy = CapturePolicy::for_model(blocks, hidden).unwrap();
+            let prompt = "user hello world assistant";
+            let mut offered = None;
+            let reply = backend
+                .generate_completion_for_session_with_capture(
+                    "key",
+                    prompt,
+                    Some(CaptureRequest {
+                        byte_span: span(prompt, "hello world"),
+                        layers: &policy.layers,
+                    }),
+                    4,
+                    &mut || Ok(()),
+                    &mut |taps| {
+                        offered = taps.cloned();
+                        Ok(RecallDecision::Continue)
+                    },
+                )
+                .unwrap();
+            assert_eq!(reply.finish_reason, CandleFinishReason::Stop);
+            let taps = reply.prompt_span_taps.clone().expect("newly forwarded span");
+            assert_eq!(offered.as_ref(), Some(&taps));
+            assert_eq!(taps.token_span, 1..3);
+            assert_eq!(taps.layers.len(), 5);
+            assert_eq!(policy.layers, [0, 2, 3, 5, 7]);
+            for (mean, layer) in taps.layers.iter().zip(policy.layers) {
+                assert_eq!(mean.layer, layer);
+                assert_eq!(mean.mean.len(), 8);
+                assert!(mean.mean.iter().all(|v| (v - 1.0).abs() < 1e-5), "{mean:?}");
+            }
+            assert_eq!(reply.reused_prompt_tokens, 0);
+
+            // The same span is now inside the reused prefix: explicit miss,
+            // generation still reuses the four forwarded tokens.
+            let longer = "user hello world assistant more";
+            let mut offered = Some(taps);
+            let reply = backend
+                .generate_completion_for_session_with_capture(
+                    "key",
+                    longer,
+                    Some(CaptureRequest {
+                        byte_span: span(longer, "hello world"),
+                        layers: &policy.layers,
+                    }),
+                    4,
+                    &mut || Ok(()),
+                    &mut |taps| {
+                        offered = taps.cloned();
+                        Ok(RecallDecision::Continue)
+                    },
+                )
+                .unwrap();
+            assert_eq!(reply.reused_prompt_tokens, 4);
+            assert!(reply.prompt_span_taps.is_none());
+            assert!(offered.is_none());
+        }
+
+        #[test]
+        fn unaligned_or_foreign_spans_are_misses_not_errors() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut backend = fixture(dir.path());
+            let prompt = "user hello world assistant";
+            for byte_span in [
+                span(prompt, "hel"),
+                span(prompt, "lo world"),
+                0..0,
+                0..prompt.len() + 1,
+            ] {
+                let reply = backend
+                    .generate_completion_for_session_with_capture(
+                        "key",
+                        prompt,
+                        Some(CaptureRequest {
+                            byte_span,
+                            layers: &[0, 1, 2, 3, 4],
+                        }),
+                        4,
+                        &mut || Ok(()),
+                        &mut |taps| {
+                            assert!(taps.is_none());
+                            Ok(RecallDecision::Continue)
+                        },
+                    )
+                    .unwrap();
+                assert!(reply.prompt_span_taps.is_none());
+            }
+            // Zero embeddings pool to a zero mean: captured, but the projector
+            // will reject it as degenerate rather than the model failing.
+            let prompt = "user zero zero assistant";
+            let reply = backend
+                .generate_completion_for_session_with_capture(
+                    "other",
+                    prompt,
+                    Some(CaptureRequest {
+                        byte_span: span(prompt, "zero zero"),
+                        layers: &[0, 1, 2, 3, 4],
+                    }),
+                    4,
+                    &mut || Ok(()),
+                    &mut |_| Ok(RecallDecision::Continue),
+                )
+                .unwrap();
+            let taps = reply.prompt_span_taps.unwrap();
+            assert!(taps.layers.iter().all(|m| m.mean.iter().all(|v| *v == 0.0)));
+        }
+
+        #[test]
+        fn reprompt_rewinds_to_the_pre_call_state_and_forwards_the_new_prompt() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut backend = fixture(dir.path());
+            // First turn establishes a prefix that the rewind must return to.
+            let first = "user greet assistant";
+            let reply = backend
+                .generate_completion_for_session("key", first, 4, &mut || Ok(()))
+                .unwrap();
+            assert_eq!((reply.prompt_tokens, reply.reused_prompt_tokens), (3, 0));
+
+            let second = "user greet assistant cedar assistant";
+            let rewritten = "user greet assistant note cedar assistant";
+            let reply = backend
+                .generate_completion_for_session_with_capture(
+                    "key",
+                    second,
+                    Some(CaptureRequest {
+                        byte_span: span(second, "cedar"),
+                        layers: &[0, 1, 2, 3, 4],
+                    }),
+                    4,
+                    &mut || Ok(()),
+                    &mut |taps| {
+                        assert_eq!(taps.unwrap().token_span, 3..4);
+                        Ok(RecallDecision::Reprompt(rewritten.to_string()))
+                    },
+                )
+                .unwrap();
+            // Rewound to the three-token first turn, then forwarded the rewrite.
+            assert_eq!((reply.prompt_tokens, reply.reused_prompt_tokens), (6, 3));
+            assert!(reply.prompt_span_taps.is_some(), "taps come from the original forward");
+
+            // The resident state now matches the rewritten prompt, not the original.
+            let reply = backend
+                .generate_completion_for_session(
+                    "key",
+                    "user greet assistant note cedar assistant next",
+                    4,
+                    &mut || Ok(()),
+                )
+                .unwrap();
+            assert_eq!(reply.reused_prompt_tokens, 6);
+            let reply = backend
+                .generate_completion_for_session(
+                    "key",
+                    "user greet assistant cedar assistant next",
+                    4,
+                    &mut || Ok(()),
+                )
+                .unwrap();
+            // Recurrent state cannot be sliced: divergence after the shared
+            // prefix forces a fresh prefill rather than a partial reuse.
+            assert_eq!(reply.reused_prompt_tokens, 0, "divergence forces fresh prefill");
+        }
+
+        #[test]
+        fn recall_failure_discards_the_conversation_cache() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut backend = fixture(dir.path());
+            let prompt = "user hello assistant";
+            let error = backend
+                .generate_completion_for_session_with_capture(
+                    "key",
+                    prompt,
+                    Some(CaptureRequest {
+                        byte_span: span(prompt, "hello"),
+                        layers: &[0, 1, 2, 3, 4],
+                    }),
+                    4,
+                    &mut || Ok(()),
+                    &mut |_| {
+                        Err(NluError::LlmGenerationFailed {
+                            reason: "recall transport failed".into(),
+                        })
+                    },
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("recall transport failed"));
+            let reply = backend
+                .generate_completion_for_session("key", prompt, 4, &mut || Ok(()))
+                .unwrap();
+            assert_eq!(reply.reused_prompt_tokens, 0);
+            // An oversized rewrite is rejected before any forward and also discards.
+            let reply = backend.generate_completion_for_session_with_capture(
+                "key",
+                "user hello assistant again",
+                Some(CaptureRequest {
+                    byte_span: span("user hello assistant again", "again"),
+                    layers: &[0, 1, 2, 3, 4],
+                }),
+                4,
+                &mut || Ok(()),
+                &mut |_| Ok(RecallDecision::Reprompt("x ".repeat(70))),
+            );
+            assert!(reply.is_err());
+            assert!(backend.active_completion_session.is_none());
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "candle-backend")]
+    fn completion_budget_reserves_output_and_rejects_empty_or_overflowing_context() {
+        assert!(validate_completion_budget(6, 4, 10).is_ok());
+        assert!(validate_completion_budget(7, 4, 10).is_err());
+        assert!(validate_completion_budget(0, 4, 10).is_err());
+        assert!(validate_completion_budget(6, 0, 10).is_err());
+        assert!(validate_completion_budget(usize::MAX, 1, usize::MAX).is_err());
+    }
+
+    #[test]
+    #[cfg(all(feature = "candle-backend", not(feature = "vulkan")))]
+    fn explicit_unavailable_device_never_falls_back_to_cpu() {
+        let error = CandleBackend::load_on_device(
+            Path::new("/not/a/model.gguf"),
+            Path::new("/not/a/tokenizer.json"),
+            CandleConfig::default(),
+            CandleDevice::Vulkan { ordinal: 0 },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Vulkan backend is not available")
+        );
+    }
 
     #[test]
     fn extract_json_from_mixed_output() {
@@ -3111,4 +4623,245 @@ Some trailing text."#;
         assert!(!config.extract_hidden);
         assert!(config.hidden_layer.is_none());
     }
+}
+
+
+/// What the device can hold, captured before any of a request is allocated.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, Copy)]
+struct ContextAdmission {
+    /// `None` when the device cannot report memory, in which case the gate
+    /// stands down rather than inventing a limit.
+    fits_tokens: Option<usize>,
+    declared_window: usize,
+    /// Total device cost of a token, KV plus prefill overhead.
+    per_token_bytes: usize,
+    /// The KV share of it, reported so the two are never confused again.
+    kv_bytes_per_token: usize,
+    available_bytes: usize,
+    headroom_bytes: usize,
+}
+
+#[cfg(feature = "candle-backend")]
+impl ContextAdmission {
+    /// Reject a request that cannot fit, before any of it is allocated.
+    ///
+    /// Checked against prompt plus the tokens the caller intends to generate,
+    /// since the cache grows through decode: a prompt that just fits can still
+    /// run the device out part way through its reply.
+    fn check(self, prompt_tokens: usize, max_new_tokens: usize) -> NluResult<()> {
+        let requested = prompt_tokens.saturating_add(max_new_tokens);
+        let Some(fits_tokens) = self.fits_tokens else {
+            return Ok(());
+        };
+        if requested <= fits_tokens {
+            return Ok(());
+        }
+        Err(NluError::ContextExceedsDeviceMemory {
+            requested,
+            declared_window: self.declared_window,
+            fits_tokens,
+            per_token_bytes: self.per_token_bytes,
+            kv_bytes_per_token: self.kv_bytes_per_token,
+            needed_bytes: self.per_token_bytes.saturating_mul(requested),
+            available_bytes: self.available_bytes,
+            headroom_bytes: self.headroom_bytes,
+        })
+    }
+}
+
+/// Live device memory in bytes, and where the figure came from.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct DeviceMemory {
+    pub free: usize,
+    pub total: usize,
+    /// Named so a report says which query produced it rather than implying all
+    /// devices answer the same way.
+    pub source: &'static str,
+}
+
+/// Reserve held back from the KV budget for activations, logits and workspace.
+///
+/// Prefill allocates intermediates proportional to the prompt, so spending every
+/// free byte on cache would fail inside the forward pass instead of at the gate.
+/// Two gibibytes by default, overridable because the right reserve depends on
+/// batch and prompt shape and no single constant is right for all of them.
+#[cfg(feature = "candle-backend")]
+/// Total device cost of a context token as a multiple of its KV.
+///
+/// Measured once, on the pinned Qwen3.8 artifact on a 24 GiB card: 547.5 KiB
+/// per token against 128 KiB of KV. Not derived from the architecture, so a
+/// different model or device needs its own figure via the environment override.
+#[cfg(feature = "candle-backend")]
+const DEFAULT_CONTEXT_COST_MULTIPLIER: f64 = 4.5;
+
+fn kv_headroom_bytes() -> usize {
+    const DEFAULT: usize = 2 * 1024 * 1024 * 1024;
+    std::env::var("AKH_CANDLE_KV_HEADROOM_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT)
+}
+
+/// Free and total VRAM from the AMD kernel driver's sysfs counters.
+///
+/// Used where the graphics API has no free-memory query. Returns `None` on any
+/// other vendor or if the counters are absent, rather than guessing.
+#[cfg(all(feature = "candle-backend", feature = "vulkan"))]
+fn amd_sysfs_memory() -> Option<DeviceMemory> {
+    let read = |card: &std::path::Path, name: &str| -> Option<usize> {
+        std::fs::read_to_string(card.join("device").join(name))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    for entry in std::fs::read_dir("/sys/class/drm").ok()?.flatten() {
+        let path = entry.path();
+        let Some(total) = read(&path, "mem_info_vram_total") else {
+            continue;
+        };
+        let Some(used) = read(&path, "mem_info_vram_used") else {
+            continue;
+        };
+        if total == 0 {
+            continue;
+        }
+        return Some(DeviceMemory {
+            free: total.saturating_sub(used),
+            total,
+            source: "amdgpu sysfs mem_info_vram",
+        });
+    }
+    None
+}
+
+/// What the live compressed KV pages occupy, summed over attention layers.
+///
+/// `stored_bytes` is what the device allocator actually charges for the code
+/// layout in use, not a nominal one-byte-per-code count, so the ratio against
+/// `uncompressed_bytes` is the saving this device really gets.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct KvPageResidency {
+    /// Which [`code layout`](crate::nlu) the pages use: `byte` or `packed-triple`.
+    pub layout: &'static str,
+    pub stored_bytes: usize,
+    pub uncompressed_bytes: usize,
+    /// Paged positions summed over layers, so layers x positions per layer.
+    pub positions: usize,
+    pub layers: usize,
+    /// Agreement between the live paged reconstruction and the exact rows it
+    /// replaced. Present only when `AKH_QWEN35_KV_PAGE_FIDELITY=1`, since
+    /// measuring costs a device-to-host copy per absorbed chunk.
+    pub fidelity: Option<KvPagedFidelity>,
+}
+
+/// Agreement between what the paged path reconstructs and what it replaced.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct KvPagedFidelity {
+    pub vectors: usize,
+    /// Worst cosine over every absorbed vector. This is the figure the 0.9999
+    /// gate applies to.
+    pub min_cosine: f64,
+    pub mean_cosine: f64,
+    /// Worst relative L2 error, `||x - x'|| / ||x||`.
+    pub max_relative_l2: f64,
+}
+
+/// Per-layer PolarQuant round-trip quality for one resident KV cache.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KvLayerQuality {
+    pub layer: usize,
+    pub positions: usize,
+    pub key: KvVectorQuality,
+    pub value: KvVectorQuality,
+}
+
+/// Aggregate error over every per-head, per-position vector in one tensor.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KvVectorQuality {
+    /// Vectors measured.
+    pub vectors: usize,
+    /// Worst cosine similarity between a vector and its round trip.
+    pub min_cosine: f64,
+    /// Mean cosine similarity.
+    pub mean_cosine: f64,
+    /// Worst relative L2 error, `||x - x'|| / ||x||`.
+    pub max_relative_l2: f64,
+    /// Mean relative L2 error.
+    pub mean_relative_l2: f64,
+}
+
+/// Compress and decompress every `head_dim` vector of a `(batch, heads, pos, dim)`
+/// KV tensor and summarize the error. A zero vector is skipped rather than
+/// scored, since cosine is undefined there and it carries no information.
+#[cfg(feature = "candle-backend")]
+fn measure_kv_tensor(
+    tensor: &Tensor,
+    round_trip: &dyn Fn(&[f32]) -> Vec<f32>,
+) -> NluResult<KvVectorQuality> {
+    let shape = |e: candle_core::Error| NluError::ModelLoadFailed {
+        reason: format!("kv state read: {e}"),
+    };
+    let (_, heads, positions, dim) = tensor.dims4().map_err(shape)?;
+    let flat: Vec<f32> = tensor
+        .to_dtype(DType::F32)
+        .map_err(shape)?
+        .flatten_all()
+        .map_err(shape)?
+        .to_vec1()
+        .map_err(shape)?;
+    let mut vectors = 0usize;
+    let mut min_cosine = f64::INFINITY;
+    let mut sum_cosine = 0.0;
+    let mut max_rel = 0.0f64;
+    let mut sum_rel = 0.0;
+    for head in 0..heads {
+        for position in 0..positions {
+            let start = (head * positions + position) * dim;
+            let original = &flat[start..start + dim];
+            let norm: f64 = original.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
+            if norm == 0.0 {
+                continue;
+            }
+            let restored = round_trip(original);
+            let mut dot = 0.0f64;
+            let mut restored_norm = 0.0f64;
+            let mut diff = 0.0f64;
+            for (a, b) in original.iter().zip(&restored) {
+                let (a, b) = (*a as f64, *b as f64);
+                dot += a * b;
+                restored_norm += b * b;
+                diff += (a - b) * (a - b);
+            }
+            let cosine = if restored_norm > 0.0 {
+                dot / (norm * restored_norm.sqrt())
+            } else {
+                0.0
+            };
+            let relative = diff.sqrt() / norm;
+            vectors += 1;
+            sum_cosine += cosine;
+            sum_rel += relative;
+            min_cosine = min_cosine.min(cosine);
+            max_rel = max_rel.max(relative);
+        }
+    }
+    if vectors == 0 {
+        return Err(NluError::ModelLoadFailed {
+            reason: "kv state held no non-zero vectors to measure".into(),
+        });
+    }
+    Ok(KvVectorQuality {
+        vectors,
+        min_cosine,
+        mean_cosine: sum_cosine / vectors as f64,
+        max_relative_l2: max_rel,
+        mean_relative_l2: sum_rel / vectors as f64,
+    })
 }

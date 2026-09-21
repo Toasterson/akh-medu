@@ -1,0 +1,20 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== A-no-compression ===
+{"context_length":262144,"family":"Qwen35","kv_bytes_per_token":131072,"phase":"loaded","projected_kv_bytes_at_full_context":34359738368,"seconds":31.971612466}
+{"decode_seconds":2.709719821,"decode_steps_including_eos":30,"decode_steps_per_second":11.071255325921019,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":0,"seconds_including_prefill":4.099339384,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!","time_to_first_token_seconds":1.389319431,"tokens":30}
+{"decode_seconds":2.242501986,"decode_steps_including_eos":30,"decode_steps_per_second":13.377914573672978,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":1,"seconds_including_prefill":3.157015792,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!","time_to_first_token_seconds":0.91405532,"tokens":30}
+=== end A-no-compression rc=0 ===
+=== B-byte-layout ===
+{"context_length":262144,"family":"Qwen35","kv_bytes_per_token":131072,"phase":"loaded","projected_kv_bytes_at_full_context":34359738368,"seconds":30.011029535}
+{"decode_seconds":4.692992172,"decode_steps_including_eos":30,"decode_steps_per_second":6.3925101301021305,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":0,"seconds_including_prefill":7.227562953,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!","time_to_first_token_seconds":2.534447673,"tokens":30}
+{"decode_seconds":3.61645351,"decode_steps_including_eos":30,"decode_steps_per_second":8.295419785446102,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":1,"seconds_including_prefill":5.6432823,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!","time_to_first_token_seconds":2.026369954,"tokens":30}
+{"layers":16,"layout":"byte","paged_positions":592,"phase":"kv_pages","ratio":3.9384615384615387,"stored_bytes":1231360,"uncompressed_bytes":4849664}
+=== end B-byte-layout rc=0 ===
+=== C-packed-triple ===
+{"context_length":262144,"family":"Qwen35","kv_bytes_per_token":131072,"phase":"loaded","projected_kv_bytes_at_full_context":34359738368,"seconds":31.566684378}
+{"decode_seconds":4.901835244,"decode_steps_including_eos":30,"decode_steps_per_second":6.12015673858499,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":0,"seconds_including_prefill":7.425771296,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!","time_to_first_token_seconds":2.523818116,"tokens":30}
+{"decode_seconds":3.799174373,"decode_steps_including_eos":30,"decode_steps_per_second":7.8964525064193465,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":1,"seconds_including_prefill":5.80536478,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!","time_to_first_token_seconds":2.005751305,"tokens":30}
+{"layers":16,"layout":"packed-triple","paged_positions":592,"phase":"kv_pages","ratio":2.942528735632184,"stored_bytes":1648128,"uncompressed_bytes":4849664}
+=== end C-packed-triple rc=0 ===
+
+[exited with code 0]

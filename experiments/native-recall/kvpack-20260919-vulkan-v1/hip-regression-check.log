@@ -1,0 +1,10 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== HIP, no compression ===
+{"decode_seconds":1.485381415,"decode_steps_including_eos":30,"decode_steps_per_second":20.196832744133935,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":0,"seconds_including_prefill":2.340885292,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!","time_to_first_token_seconds":0.855266677,"tokens":30}
+{"decode_seconds":1.488559853,"decode_steps_including_eos":30,"decode_steps_per_second":20.153707584910933,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":1,"seconds_including_prefill":2.104443226,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!","time_to_first_token_seconds":0.615751904,"tokens":30}
+=== HIP, 4-bit paged (byte layout) ===
+{"decode_seconds":1.514213701,"decode_steps_including_eos":23,"decode_steps_per_second":15.18940159160533,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":0,"seconds_including_prefill":3.490521396,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello!","time_to_first_token_seconds":1.976219397,"tokens":23}
+{"decode_seconds":1.506739467,"decode_steps_including_eos":23,"decode_steps_per_second":15.264749151221377,"finish":"Stop","phase":"generation","prompt_tokens":15,"round":1,"seconds_including_prefill":3.325456904,"text":"<think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello!","time_to_first_token_seconds":1.818553968,"tokens":23}
+{"layers":16,"layout":"byte","paged_positions":480,"phase":"kv_pages","ratio":3.9384615384615387,"stored_bytes":998400,"uncompressed_bytes":3932160}
+
+[exited with code 0]

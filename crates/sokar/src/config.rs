@@ -173,13 +173,151 @@ pub struct DatabaseConfig {
 pub struct ServerConfig {
     pub api_bind: SocketAddr,
     pub admin_bind: SocketAddr,
+    pub public_api_url: Option<url::Url>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             api_bind: ([127, 0, 0, 1], 9400).into(),
             admin_bind: ([127, 0, 0, 1], 9401).into(),
+            public_api_url: None,
         }
+    }
+}
+/// Literal MCP mount path. Disabled MCP configuration may retain an unchecked
+/// path; validate it before mounting (including after toggling enabled).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub struct RoutePath(String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
+pub enum RoutePathError {
+    #[error("mcp.path is not absolute; start it with /, for example /mcp")]
+    #[diagnostic(
+        code(sokar::config),
+        help("Start mcp.path with '/', for example /mcp.")
+    )]
+    NotAbsolute,
+    #[error("mcp.path has a trailing slash; use a non-root mount without a trailing slash")]
+    #[diagnostic(
+        code(sokar::config),
+        help("Use a non-root mount path without a trailing slash, for example /mcp.")
+    )]
+    TrailingSlash,
+    #[error("mcp.path contains an empty or dot segment; remove empty, . and .. segments")]
+    #[diagnostic(code(sokar::config), help("Remove empty, '.' and '..' path segments."))]
+    DotSegment,
+    #[error("mcp.path contains an illegal byte; use only ASCII letters, digits, /, _, - and .")]
+    #[diagnostic(
+        code(sokar::config),
+        help(
+            "Use only ASCII letters, digits, '/', '_', '-' and '.'; route parameters and URL escapes are forbidden."
+        )
+    )]
+    IllegalByte,
+    #[error("mcp.path overlaps the reserved /v1 API; choose a mount outside /v1, for example /mcp")]
+    #[diagnostic(
+        code(sokar::config),
+        help("Choose a mount outside /v1, for example /mcp or /agents/sokar.")
+    )]
+    ReservedV1,
+}
+impl RoutePath {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn validate(&self) -> Result<(), RoutePathError> {
+        let path = self.as_str();
+        if !path.starts_with('/') {
+            return Err(RoutePathError::NotAbsolute);
+        }
+        if path.ends_with('/') {
+            return Err(RoutePathError::TrailingSlash);
+        }
+        if path
+            .split('/')
+            .skip(1)
+            .any(|p| p.is_empty() || p == "." || p == "..")
+        {
+            return Err(RoutePathError::DotSegment);
+        }
+        if path
+            .bytes()
+            .any(|b| !b.is_ascii_alphanumeric() && !b"/_-.".contains(&b))
+        {
+            return Err(RoutePathError::IllegalByte);
+        }
+        if path == "/v1" || path.starts_with("/v1/") {
+            return Err(RoutePathError::ReservedV1);
+        }
+        Ok(())
+    }
+}
+impl std::str::FromStr for RoutePath {
+    type Err = RoutePathError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value.to_owned())
+    }
+}
+impl TryFrom<String> for RoutePath {
+    type Error = RoutePathError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let path = Self(value);
+        path.validate()?;
+        Ok(path)
+    }
+}
+impl std::fmt::Display for RoutePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+/// Bounds apply to decoded bytes for both upload and download tools.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "RawMcpConfig")]
+pub struct McpConfig {
+    pub enabled: bool,
+    pub path: RoutePath,
+    pub max_inline_bytes: usize,
+    pub session_idle_secs: u64,
+}
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawMcpConfig {
+    enabled: bool,
+    path: String,
+    max_inline_bytes: usize,
+    session_idle_secs: u64,
+}
+impl Default for RawMcpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: "/mcp".into(),
+            max_inline_bytes: 8_388_608,
+            session_idle_secs: 900,
+        }
+    }
+}
+impl TryFrom<RawMcpConfig> for McpConfig {
+    type Error = RoutePathError;
+    fn try_from(raw: RawMcpConfig) -> Result<Self, Self::Error> {
+        let path = if raw.enabled {
+            raw.path.parse()?
+        } else {
+            RoutePath(raw.path)
+        };
+        Ok(Self {
+            enabled: raw.enabled,
+            path,
+            max_inline_bytes: raw.max_inline_bytes,
+            session_idle_secs: raw.session_idle_secs,
+        })
+    }
+}
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self::try_from(RawMcpConfig::default()).expect("valid default MCP path")
     }
 }
 #[derive(Debug, Clone, Deserialize)]
@@ -204,6 +342,8 @@ pub struct DeliveryConfig {
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
     /// Omit for an explicitly ephemeral local index; startup reindexes the stores.
     pub database: Option<DatabaseConfig>,
     pub default_store: StoreName,
@@ -246,6 +386,26 @@ impl Config {
         }
         for principal in &self.principals {
             principal.credential()?;
+        }
+        if self.mcp.enabled {
+            self.mcp.path.validate()?;
+            if self.mcp.max_inline_bytes == 0 || self.mcp.session_idle_secs == 0 {
+                return Err(SokarError::Config(
+                    "mcp.max_inline_bytes and mcp.session_idle_secs must be positive".into(),
+                ));
+            }
+        }
+        if let Some(url) = &self.server.public_api_url
+            && (!matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some())
+        {
+            return Err(SokarError::Config(
+                "public_api_url requires HTTP(S) with no credentials, query or fragment".into(),
+            ));
         }
         if self.limits.max_body_bytes == 0 {
             return Err(SokarError::Config("max_body_bytes must be positive".into()));

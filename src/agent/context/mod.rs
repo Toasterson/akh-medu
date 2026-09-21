@@ -31,6 +31,7 @@
 //! [`bench_phase44`](crate::bench_phase44) (44j A/B harness), and the deferred
 //! [`policy`] seams (44k KV-cache, 44l retrieval swap — recorded, not built).
 
+pub mod selecting;
 pub mod budget;
 pub mod compacting;
 pub mod core_memory;

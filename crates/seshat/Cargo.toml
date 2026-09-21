@@ -62,10 +62,10 @@ opentelemetry-semantic-conventions = { version = "=0.27", features = ["semconv_e
 # Hashing (for query cache keys)
 sha2 = "0.10"
 
-# Embedding (ONNX for sentence embeddings) — feature-gated
-ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["std", "load-dynamic"] }
-tokenizers = { version = "0.22", optional = true, default-features = false, features = ["progressbar", "fancy-regex"] }
-ndarray = { version = "0.17", optional = true }
+# Embedding (shared ONNX sentence embedder, extracted from this crate —
+# see docs/wayfinder/transcript-harvest/tickets/embedding-pipeline.md §3) —
+# feature-gated
+akh-embed = { path = "../akh-embed", optional = true }
 
 # LLM synthesis via Candle (aligned with Phase 26b) — feature-gated
 candle-core = { version = "0.8", optional = true }
@@ -89,7 +89,7 @@ sea-orm = { version = "1", features = ["mock"] }
 
 [features]
 default = ["embedding", "tracing-otel"]
-embedding = ["ort", "tokenizers", "ndarray"]
+embedding = ["dep:akh-embed"]
 synthesis = ["candle-core", "candle-nn", "candle-transformers"]
 # Phase 38i: OTLP tracing for seshd. Default-on (research §8: accept-parent
 # sampling on seshd). Off-by-default build excludes all OTel crates from link.

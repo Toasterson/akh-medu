@@ -9,16 +9,24 @@ description = "Independent Akh session, runtime, sandbox, executor and ingress s
 default = ["session", "runtime", "executor", "sandbox", "events", "client"]
 session = ["dep:jsonschema", "dep:async-stream", "dep:rmcp", "axum/ws"]
 runtime = ["dep:akh-runtime", "helpers"]
+candle-runtime = ["runtime", "dep:akh-medu", "akh-medu/candle-backend", "dep:base64"]
+# Opt-in real-core transport tests, without requiring GPU inference.
+core-integration-tests = ["session", "dep:akh-medu", "akh-medu/core-server"]
+hip = ["candle-runtime", "akh-medu/hip"]
+vulkan = ["candle-runtime", "akh-medu/vulkan"]
+metal = ["candle-runtime", "akh-medu/metal"]
 executor = ["helpers", "dep:regex", "dep:globset", "dep:base64", "dep:tempfile"]
 sandbox = []
 events = ["dep:lapin", "dep:tokio-executor-trait", "dep:tokio-reactor-trait", "dep:chrono"]
 helpers = []
 client = ["helpers", "dep:tokio-tungstenite", "dep:rustls", "dep:rustls-pemfile"]
 admin = []
+profiling = ["dep:tikv-jemallocator", "dep:jemalloc_pprof"]
 trigger = ["dep:chrono"]
 kagent = ["dep:async-stream"]
 
 [dependencies]
+akh-medu = { path = "../..", default-features = false, optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 rustls-pemfile = { version = "2", optional = true }
 akh-session-types = { path = "../akh-session-types" }
@@ -39,6 +47,15 @@ sha2 = "0.10"
 tempfile = { version = "3", optional = true }
 base64 = { version = "0.22", optional = true }
 libc = "0.2"
+# Heap profiling. jemalloc's sampling profiler is the only practical way to see
+# where a Rust service's resident memory actually went, and jemalloc_pprof
+# renders its dumps as pprof so Pyroscope and Grafana read them directly.
+# unprefixed_malloc_on_supported_platforms is required by jemalloc_pprof.
+tikv-jemallocator = { version = "0.7", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
+# `symbolize` resolves stack addresses to function names in-process. Without
+# it the dump is raw addresses plus a build id, which Pyroscope renders as an
+# empty call graph — profiles that look healthy and explain nothing.
+jemalloc_pprof = { version = "0.9", features = ["symbolize"], optional = true }
 clap = { version = "4", features = ["derive"] }
 opentelemetry = "=0.27"
 opentelemetry_sdk = { version = "=0.27", features = ["rt-tokio", "logs", "metrics"] }

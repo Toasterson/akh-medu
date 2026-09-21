@@ -10,6 +10,7 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
     let config = akh_runtime::ProviderConfig {
         isolation: None,
         model_endpoint: None,
+        native_candle: None,
         revision: "embedded-compat-v1".into(),
         kind,
         working_dir: turn.runtime.config.working_dir.clone(),
@@ -101,7 +102,8 @@ impl akh_runtime::Host for Turn<'_> {
             } => self.bind(&provider_session, model.as_deref()),
             wire::RuntimeEvent::Text { text } => self.text(&text),
             wire::RuntimeEvent::Reasoning { text } => self.sink.emit(&AkhMessage::Reasoning {
-                step: text, expression: None,
+                step: text,
+                expression: None,
             }),
             wire::RuntimeEvent::ToolStarted { id, name } => {
                 self.sink.emit(&AkhMessage::ToolCallStarted {

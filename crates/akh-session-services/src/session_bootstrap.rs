@@ -2,7 +2,6 @@
 use crate::{
     config::{AkhProfile, Principal, validate_checkout},
     session::Sessions,
-    store::key,
     types::*,
 };
 use bootstrap::*;
@@ -31,8 +30,7 @@ impl Sessions {
         crate::http::role(principal, "session_bootstrap")?;
         validate_checkout(request)?;
         self.store.transaction(|tx| {
-            let mut session: SessionRecord = tx
-                .get(&key("session", &[id]))?
+            let mut session = crate::session::load_record(tx, id)?
                 .ok_or_else(|| Fault::missing("session not found"))?;
             if session.principal != principal.id && !principal.has_role("admin") {
                 return Err(Fault::new(

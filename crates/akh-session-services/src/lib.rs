@@ -28,6 +28,8 @@ pub mod http;
 pub mod ingress;
 #[cfg(feature = "session")]
 pub mod mcp;
+#[cfg(feature = "profiling")]
+pub mod profiling;
 pub mod recovery;
 #[cfg(feature = "sandbox")]
 pub mod repository_bootstrap;
@@ -72,4 +74,8 @@ pub mod runtime_profile;
 #[cfg(feature = "runtime")]
 pub mod internal;
 
+#[cfg(any(feature = "candle-runtime", test))]
+mod native_recall;
+#[cfg(any(feature = "candle-runtime", test))]
+mod native_window;
 pub mod telemetry;

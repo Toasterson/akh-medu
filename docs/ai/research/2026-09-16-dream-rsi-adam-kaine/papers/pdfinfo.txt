@@ -1,0 +1,18 @@
+Title:           Dream-RSI: Recursive Self-Improvement through Evolving Worlds
+Author:          Tong Zheng; Xidong Wu; Zheng Zhang; Zhankui He; Chaoyi Zhang; Benjamin Coleman; Ruoqiao Wei; Di Bai; Haolin Liu; Rui Liu; Xue Wang; Yue Zhuan; Wang-Cheng Kang; Renkai Xiang; Heng Huang; Xinwu Cheng; Yunsong Guo
+Creator:         arXiv GenPDF (tex2pdf:0d14211)
+Producer:        pikepdf 8.15.1
+Custom Metadata: yes
+Metadata Stream: yes
+Tagged:          no
+UserProperties:  no
+Suspects:        no
+Form:            none
+JavaScript:      no
+Pages:           36
+Encrypted:       no
+Page size:       595.276 x 841.89 pts (A4)
+Page rot:        0
+File size:       954448 bytes
+Optimized:       no
+PDF version:     1.7

@@ -1,0 +1,24 @@
+---
+# LAN-facing LoadBalancer for the harvest-pg primary, so transcript harvesters on
+# compute hosts (hephaistos, the Mac mini) reach Postgres at a stable LAN IP:5432.
+# Mirrors akh-pg-lb.yaml. Address comes from homelab-pool-2 (192.168.1.60-70),
+# added because homelab-pool (.11-.19) is fully allocated.
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvest-pg-lan
+  namespace: akh-medu
+  labels:
+    app: harvest-pg
+  annotations:
+    lbipam.cilium.io/ips: "192.168.1.60"
+spec:
+  type: LoadBalancer
+  selector:
+    cnpg.io/cluster: harvest-pg
+    cnpg.io/instanceRole: primary
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: 5432
+    protocol: TCP

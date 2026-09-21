@@ -2,8 +2,8 @@
 use crate::{
     config::Principal,
     server::SessionApp,
-    session::{Sessions, append_event},
-    store::{Transaction, key},
+    session::{Sessions, append_event, load_record},
+    store::{Store, Transaction, key},
     types::*,
 };
 use publication::{
@@ -29,8 +29,7 @@ fn load(tx: &Transaction<'_>, session: &str, request: &str) -> Result<Intent> {
         .ok_or_else(|| Fault::missing("publication intent not found"))
 }
 fn session_in(tx: &Transaction<'_>, id: &str) -> Result<SessionRecord> {
-    tx.get(&key("session", &[id]))?
-        .ok_or_else(|| Fault::missing("session not found"))
+    load_record(tx, id)?.ok_or_else(|| Fault::missing("session not found"))
 }
 fn save(tx: &mut Transaction<'_>, intent: &Intent, kind: &str) -> Result<()> {
     let action = &intent.action;
@@ -71,6 +70,16 @@ pub(crate) fn ensure_settled(tx: &Transaction<'_>, id: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Same check as `ensure_settled`, without a transaction and without turning
+/// "not yet settled" into an error: the session archival sweep just wants to
+/// know whether it still has work to do for this session.
+pub(crate) fn publications_settled(store: &Store, id: &str) -> Result<bool> {
+    Ok(store
+        .scan::<Intent>(&key("repository_publication", &[id]))?
+        .iter()
+        .all(|intent| intent.action.settled()))
 }
 
 impl Sessions {

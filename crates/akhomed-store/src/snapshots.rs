@@ -34,7 +34,11 @@ const PG_MAX_BIND_PARAMS: usize = 65_535;
 /// Chunk size for a multi-row insert so the total bind parameters stay under
 /// the Postgres extended-query limit.
 fn sqlite_row_limit(db: &DatabaseConnection) -> usize {
-    if db.get_database_backend() == DatabaseBackend::Sqlite { 500 } else { usize::MAX }
+    if db.get_database_backend() == DatabaseBackend::Sqlite {
+        500
+    } else {
+        usize::MAX
+    }
 }
 
 pub(crate) fn chunk_size_for_columns(columns: usize) -> usize {
@@ -179,10 +183,17 @@ pub async fn publish_snapshot(
                 .exec(&$transaction)
                 .await?;
             for chunk in $rows.chunks(sqlite_row_limit(db)) {
-                if chunk.is_empty() { continue; }
+                if chunk.is_empty() {
+                    continue;
+                }
                 crate::entity::$module::Entity::insert_many(
-                    chunk.iter().cloned().map(IntoActiveModel::into_active_model),
-                ).exec(&$transaction).await?;
+                    chunk
+                        .iter()
+                        .cloned()
+                        .map(IntoActiveModel::into_active_model),
+                )
+                .exec(&$transaction)
+                .await?;
             }
         }};
     }
@@ -369,7 +380,8 @@ pub async fn replace_workspace_facts(
         .exec(&txn)
         .await?;
     if !unique_rows.is_empty() {
-        let chunk_size = chunk_size_for_columns(fact::Column::iter().count()).min(sqlite_row_limit(db));
+        let chunk_size =
+            chunk_size_for_columns(fact::Column::iter().count()).min(sqlite_row_limit(db));
         for chunk in unique_rows.chunks(chunk_size) {
             fact::Entity::insert_many(
                 chunk
@@ -523,7 +535,8 @@ pub async fn replace_provenance_inputs(
         .exec(&txn)
         .await?;
     if !unique_rows.is_empty() {
-        let chunk_size = chunk_size_for_columns(provenance_input::Column::iter().count()).min(sqlite_row_limit(db));
+        let chunk_size = chunk_size_for_columns(provenance_input::Column::iter().count())
+            .min(sqlite_row_limit(db));
         for chunk in unique_rows.chunks(chunk_size) {
             provenance_input::Entity::insert_many(
                 chunk
@@ -590,7 +603,8 @@ pub async fn replace_workspace_seed_packs(
         .exec(&txn)
         .await?;
     if !unique_rows.is_empty() {
-        let chunk_size = chunk_size_for_columns(workspace_seed_pack::Column::iter().count()).min(sqlite_row_limit(db));
+        let chunk_size = chunk_size_for_columns(workspace_seed_pack::Column::iter().count())
+            .min(sqlite_row_limit(db));
         for chunk in unique_rows.chunks(chunk_size) {
             workspace_seed_pack::Entity::insert_many(
                 chunk

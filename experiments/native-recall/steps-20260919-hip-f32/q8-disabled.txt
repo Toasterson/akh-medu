@@ -1,0 +1,12 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== Q8 GEMV disabled (f32 everywhere) ===
+turn 0 ctx_end  58 rate 17.23 | median 0.0578s min 0.0566s spikes 0/35
+turn 1 ctx_end 128 rate 16.95 | median 0.0586s min 0.0575s spikes 0/47
+turn 2 ctx_end 191 rate 16.71 | median 0.0594s min 0.0585s spikes 0/37
+turn 3 ctx_end 256 rate 14.24 | median 0.0748s min 0.0590s spikes 0/42
+turn 4 ctx_end 322 rate 12.30 | median 0.0820s min 0.0597s spikes 0/42
+turn 5 ctx_end 381 rate 12.03 | median 0.0829s min 0.0663s spikes 0/35
+turn 6 ctx_end 440 rate 11.88 | median 0.0848s min 0.0711s spikes 0/34
+turn 7 ctx_end 510 rate 11.68 | median 0.0859s min 0.0804s spikes 0/47
+
+[exited with code 0]

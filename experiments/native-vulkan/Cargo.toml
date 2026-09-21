@@ -1,0 +1,28 @@
+[package]
+name = "akh-native-vulkan-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+default = ["hip", "vulkan"]
+hip = ["candle-core/hip"]
+vulkan = ["candle-core/vulkan"]
+
+[dependencies]
+candle-core = { path = "../../vendor/candle-core", default-features = false, features = ["hip", "vulkan"] }
+wgpu = { version = "=29.0.4", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
+pollster = "0.4"
+bytemuck = "1.25"
+
+[dev-dependencies]
+candle-nn = "=0.10.2"
+candle-transformers = "=0.10.2"
+sha2 = "0.10"
+serde_json = "1"
+tokenizers = { version = "=0.22.2", default-features = false, features = ["fancy-regex"] }
+
+[patch.crates-io]
+candle-core = { path = "../../vendor/candle-core" }

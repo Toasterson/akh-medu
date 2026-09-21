@@ -1,0 +1,113 @@
+{{- if .Values.transcripts.enabled }}
+{{- $db := .Values.transcripts.database -}}
+{{- $mountPath := $db.certMountPath -}}
+{{- $ownerMountPath := $db.ownerCertMountPath -}}
+{{- $dsn := printf "postgres://%s@%s:%v/%s?sslmode=%s&sslrootcert=%s/ca.crt&sslcert=%s/tls.crt&sslkey=%s/tls.key" $db.derive.user $db.host $db.port $db.name $db.sslmode $mountPath $mountPath $mountPath -}}
+{{- $ownerDsn := printf "postgres://%s@%s:%v/%s?sslmode=%s&sslrootcert=%s/ca.crt&sslcert=%s/tls.crt&sslkey=%s/tls.key" $db.owner.user $db.host $db.port $db.name $db.sslmode $ownerMountPath $ownerMountPath $ownerMountPath -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-transcripts-derive
+  labels:
+    {{- include "akh-medu.transcripts.labels" (dict "root" . "role" "derive") | nindent 4 }}
+spec:
+  replicas: {{ .Values.transcripts.derive.replicaCount }}
+  strategy:
+    type: Recreate  # akh-derive is an advisory-locked singleton (derivation-worker.md #4).
+  selector:
+    matchLabels:
+      {{- include "akh-medu.transcripts.selectorLabels" (dict "root" . "role" "derive") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.transcripts.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "akh-medu.transcripts.selectorLabels" (dict "root" . "role" "derive") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      initContainers:
+        # Runs migrations before the derive loop starts, authenticated as the
+        # database OWNER (harvest) rather than harvest_derive — the store's
+        # default privileges are declared FOR ROLE harvest, so tables must be
+        # *created by* harvest for harvest_derive/harvest_read to receive
+        # their grants automatically. Uses its own cert, mounted at a
+        # separate path from the main container's harvest_derive cert.
+        - name: migrate
+          image: {{ include "akh-medu.transcripts.image" . }}
+          imagePullPolicy: {{ .Values.transcripts.image.pullPolicy }}
+          args: ["akh-derive", "--migrate"]
+          env:
+            - name: AKH_TRANSCRIPTS_DATABASE_URL
+              value: {{ $ownerDsn | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.transcripts.env.RUST_LOG | default "akh_transcripts=info" | quote }}
+          volumeMounts:
+            - name: harvest-pg-owner-cert
+              mountPath: {{ $ownerMountPath }}
+              readOnly: true
+      containers:
+        - name: akh-derive
+          image: {{ include "akh-medu.transcripts.image" . }}
+          imagePullPolicy: {{ .Values.transcripts.image.pullPolicy }}
+          args: ["akh-derive"]
+          env:
+            {{- range $key, $val := .Values.transcripts.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+            - name: AKH_TRANSCRIPTS_DATABASE_URL
+              value: {{ $dsn | quote }}
+            - name: AKH_TRANSCRIPTS_DERIVE_INTERVAL_SECS
+              value: {{ .Values.transcripts.derive.intervalSecs | quote }}
+            - name: AKH_TRANSCRIPTS_DERIVE_BATCH
+              value: {{ .Values.transcripts.derive.batchSize | quote }}
+            # OTLP service instance ID from the pod name.
+            - name: OTEL_SERVICE_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: harvest-pg-cert
+              mountPath: {{ $mountPath }}
+              readOnly: true
+          resources:
+            {{- toYaml .Values.transcripts.derive.resources | nindent 12 }}
+      volumes:
+        - name: harvest-pg-cert
+          secret:
+            # tls.key must not be group/world-readable or libpq refuses it —
+            # defaultMode 0400 plus the pod's runAsUser/fsGroup above keep it
+            # readable only by the akh-transcripts uid (999, baked into the
+            # image — see docker/akh-transcripts.Dockerfile).
+            secretName: {{ $db.derive.certSecret }}
+            defaultMode: 0400
+        - name: harvest-pg-owner-cert
+          secret:
+            # Owner (harvest) cert, migrate initContainer only — see the
+            # comment there and on transcripts.database.owner in values.yaml.
+            secretName: {{ $db.owner.certSecret }}
+            defaultMode: 0400
+      {{- with .Values.transcripts.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.transcripts.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- include "akh-medu.archAffinity" . | nindent 8 }}
+        {{- with .Values.transcripts.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}

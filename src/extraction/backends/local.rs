@@ -1,4 +1,4 @@
-//! Local LLM backend for triple extraction (Qwen2.5-1.5B via llama-cpp-2).
+//! Native Candle backend for local triple extraction.
 //!
 //! Shares the `LlmTranslator` model with the NLU pipeline — no second load.
 

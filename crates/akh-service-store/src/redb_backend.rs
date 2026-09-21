@@ -11,11 +11,21 @@ pub(crate) struct RedbInner(Database);
 
 pub(crate) struct RedbTxState<'a> {
     table: redb::Table<'a, &'static str, &'static [u8]>,
+    wrote: bool,
 }
 
 impl<'a> RedbTxState<'a> {
     pub(crate) fn new(table: redb::Table<'a, &'static str, &'static [u8]>) -> Self {
-        Self { table }
+        Self {
+            table,
+            wrote: false,
+        }
+    }
+
+    /// Whether any `put` or `delete` ran in this transaction; see
+    /// [`crate::Store::changes`].
+    pub(crate) fn wrote(&self) -> bool {
+        self.wrote
     }
 }
 
@@ -53,7 +63,7 @@ impl RedbInner {
         let write = self.0.begin_write().map_err(failure)?;
         let result = {
             let table = write.open_table(RECORDS).map_err(failure)?;
-            action(&mut RedbTxState { table })?
+            action(&mut RedbTxState::new(table))?
         };
         write.commit().map_err(failure)?;
         Ok(result)
@@ -95,10 +105,12 @@ impl RedbTxState<'_> {
     pub(crate) fn put<T: Serialize>(&mut self, key: &str, value: &T) -> Result<()> {
         let data = serde_json::to_vec(value).map_err(failure)?;
         self.table.insert(key, data.as_slice()).map_err(failure)?;
+        self.wrote = true;
         Ok(())
     }
     pub(crate) fn delete(&mut self, key: &str) -> Result<()> {
         self.table.remove(key).map_err(failure)?;
+        self.wrote = true;
         Ok(())
     }
     pub(crate) fn scan<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<T>> {

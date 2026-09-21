@@ -1,0 +1,23 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== pass 1 Q8=1 ===
+   turn 2 ctx 191 rate 16.77
+   turn 3 ctx 256 rate 14.00
+   turn 6 ctx 440 rate 11.90
+   turn 7 ctx 510 rate  7.26
+=== pass 1 Q8=0 ===
+   turn 2 ctx 191 rate 16.76
+   turn 3 ctx 256 rate 14.11
+   turn 6 ctx 440 rate 11.65
+   turn 7 ctx 510 rate 11.64
+=== pass 2 Q8=1 ===
+   turn 2 ctx 191 rate 16.74
+   turn 3 ctx 256 rate 13.88
+   turn 6 ctx 440 rate 11.86
+   turn 7 ctx 510 rate  7.41
+=== pass 2 Q8=0 ===
+   turn 2 ctx 191 rate 16.74
+   turn 3 ctx 256 rate 14.18
+   turn 6 ctx 440 rate 11.90
+   turn 7 ctx 510 rate 11.51
+
+[exited with code 0]

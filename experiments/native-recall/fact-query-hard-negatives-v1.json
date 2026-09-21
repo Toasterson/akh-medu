@@ -1,0 +1,14 @@
+[
+  [
+    "The Atlas backup service listens on TCP port 4317.",
+    "Which TCP port does the Atlas backup service listen on?"
+  ],
+  [
+    "The Boreal backup service listens on TCP port 8629.",
+    "Which TCP port does the Boreal backup service listen on?"
+  ],
+  [
+    "The Atlas backup service retains snapshots for 19 days.",
+    "For how many days does the Atlas backup service retain snapshots?"
+  ]
+]
