@@ -194,7 +194,7 @@ impl AdapterBenchmark {
     /// Evaluate a set of responses against expected answers.
     ///
     /// `inference_fn` takes an input prompt and returns the model's response.
-    /// Pass a closure that calls your inference backend (candle/llama-cpp/ollama).
+    /// Pass a closure that calls Candle or a configured HTTP inference provider.
     pub fn evaluate<F>(
         &self,
         agent: AgentId,

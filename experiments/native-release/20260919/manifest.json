@@ -1,0 +1,116 @@
+{
+  "ambiguous_same_named_libraries": {
+    "libakh_hip_kernels.so": [
+      "target/release/build/akh-medu-19c4f717fe8a40f0/out/libakh_hip_kernels.so",
+      "target/release/build/akh-medu-4b1f0efae49f6dfe/out/libakh_hip_kernels.so",
+      "target/release/build/akh-medu-50e98aeddfef9d02/out/libakh_hip_kernels.so",
+      "target/release/build/akh-medu-7137bdb44e61fbc4/out/libakh_hip_kernels.so",
+      "target/release/build/akh-medu-75666bbbe7ec798b/out/libakh_hip_kernels.so",
+      "target/release/build/akh-medu-7c12c575ff36c257/out/libakh_hip_kernels.so"
+    ],
+    "libcandle_hip_kernels.so": [
+      "target/release/build/candle-core-01f6ad139da78337/out/libcandle_hip_kernels.so",
+      "target/release/build/candle-core-4d8951b95dddb2c7/out/libcandle_hip_kernels.so",
+      "target/release/build/candle-core-ba230538b8ca570c/out/libcandle_hip_kernels.so",
+      "target/release/build/candle-core-e13219964f178351/out/libcandle_hip_kernels.so"
+    ],
+    "libcandle_hip_quant.so": [
+      "target/release/build/candle-core-01f6ad139da78337/out/libcandle_hip_quant.so",
+      "target/release/build/candle-core-4d8951b95dddb2c7/out/libcandle_hip_quant.so",
+      "target/release/build/candle-core-ba230538b8ca570c/out/libcandle_hip_quant.so",
+      "target/release/build/candle-core-e13219964f178351/out/libcandle_hip_quant.so"
+    ]
+  },
+  "artifacts": {
+    "model": {
+      "bytes": 16810714496,
+      "path": "/usr/share/ollama/.ollama/models/blobs/sha256-3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+      "sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec"
+    },
+    "projector": {
+      "bytes": 931145984,
+      "path": "/usr/share/ollama/.ollama/models/blobs/sha256-add205b7bfdb3f71f6da36b0a82aa20928dd829a920878c602628cdfbebc5288",
+      "sha256": "add205b7bfdb3f71f6da36b0a82aa20928dd829a920878c602628cdfbebc5288"
+    },
+    "tokenizer": {
+      "bytes": 19997292,
+      "path": "/home/toasty/.local/share/akh-medu/models/llm/ptah-qwen38.tokenizer.json",
+      "sha256": "e271c182ffa63eebd6d0f60a688fb90d3e87a1141c99c4d87a0d4508badfefea"
+    }
+  },
+  "binaries": {
+    "akhexecd": {
+      "bytes": 47418824,
+      "path": "/home/toasty/ws/agi/akh-medu/target/release/akhexecd",
+      "sha256": "50dda7a498ae5694700ac18f737a5f8b05fbfeacabb6714ab62034456e0847ca"
+    },
+    "akhomed": {
+      "bytes": 45530064,
+      "path": "/home/toasty/ws/agi/akh-medu/target/release/akhomed",
+      "sha256": "e1d3e93e0883e9250e1cc3996a72f9f239807253187cf32d1da0d9bc2a07ecc1"
+    },
+    "akhrtd": {
+      "bytes": 47411512,
+      "path": "/home/toasty/ws/agi/akh-medu/target/release/akhrtd",
+      "sha256": "ba34aba1a6d6e85293d8e518b2383611d5ac17a6209176f9b21d449283b80f43"
+    },
+    "akhsbxd": {
+      "bytes": 47415720,
+      "path": "/home/toasty/ws/agi/akh-medu/target/release/akhsbxd",
+      "sha256": "ecd12746d88ac1fc2977cb532f925c69190ce158cf47334a85254e7cf2bfbc7e"
+    },
+    "akhsessd": {
+      "bytes": 47418976,
+      "path": "/home/toasty/ws/agi/akh-medu/target/release/akhsessd",
+      "sha256": "b1a32a1578853b5dcddab3f7d63b929d9b898776c9c160a23534d82f8c5622f9"
+    }
+  },
+  "commit": "b715a629b2e61859788c2834aa120ad427418c45",
+  "commit_subject": "docs(plan): bring the goal brief up to the end of 2026-09-19",
+  "kernel_libraries_by_binary": {
+    "akhexecd": {
+      "/home/toasty/ws/agi/akh-medu/target/release/build/candle-core-e13219964f178351/out/libcandle_hip_kernels.so": {
+        "bytes": 165520,
+        "sha256": "2b671ba1aa23fc34cc6d353a05c606a6da84199bd29a1325e7a2c045e9a773ca"
+      },
+      "/home/toasty/ws/agi/akh-medu/target/release/build/candle-core-e13219964f178351/out/libcandle_hip_quant.so": {
+        "bytes": 247544,
+        "sha256": "6df366dd60c8ee046d3adc21abd9c12c0011e3e5446175b386db3328976796ba"
+      }
+    },
+    "akhomed": {},
+    "akhrtd": {
+      "/home/toasty/ws/agi/akh-medu/target/release/build/candle-core-e13219964f178351/out/libcandle_hip_kernels.so": {
+        "bytes": 165520,
+        "sha256": "2b671ba1aa23fc34cc6d353a05c606a6da84199bd29a1325e7a2c045e9a773ca"
+      },
+      "/home/toasty/ws/agi/akh-medu/target/release/build/candle-core-e13219964f178351/out/libcandle_hip_quant.so": {
+        "bytes": 247544,
+        "sha256": "6df366dd60c8ee046d3adc21abd9c12c0011e3e5446175b386db3328976796ba"
+      }
+    },
+    "akhsbxd": {
+      "/home/toasty/ws/agi/akh-medu/target/release/build/candle-core-e13219964f178351/out/libcandle_hip_kernels.so": {
+        "bytes": 165520,
+        "sha256": "2b671ba1aa23fc34cc6d353a05c606a6da84199bd29a1325e7a2c045e9a773ca"
+      },
+      "/home/toasty/ws/agi/akh-medu/target/release/build/candle-core-e13219964f178351/out/libcandle_hip_quant.so": {
+        "bytes": 247544,
+        "sha256": "6df366dd60c8ee046d3adc21abd9c12c0011e3e5446175b386db3328976796ba"
+      }
+    },
+    "akhsessd": {
+      "/home/toasty/ws/agi/akh-medu/target/release/build/candle-core-e13219964f178351/out/libcandle_hip_kernels.so": {
+        "bytes": 165520,
+        "sha256": "2b671ba1aa23fc34cc6d353a05c606a6da84199bd29a1325e7a2c045e9a773ca"
+      },
+      "/home/toasty/ws/agi/akh-medu/target/release/build/candle-core-e13219964f178351/out/libcandle_hip_quant.so": {
+        "bytes": 247544,
+        "sha256": "6df366dd60c8ee046d3adc21abd9c12c0011e3e5446175b386db3328976796ba"
+      }
+    }
+  },
+  "note": "identity only; this records a build, it does not install one",
+  "schema": "native-ptah-release-manifest/1",
+  "tree_clean": true
+}

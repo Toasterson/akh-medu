@@ -1,0 +1,5 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== defect reproduction: 10,417-token prompt, two rounds; round 1 was refused at limit 913 before the fix ===
+{"context_length":262144,"device_memory":{"free":8516534272,"source":"hipMemGetInfo","total":25753026560},"family":"Qwen35","kv_bytes_per_token":131072,"memory_bound_context_limit":10798,"phase":"loaded","projected_kv_bytes_at_full_context":34359738368,"seconds":25.02787073}
+
+[exited with code 144]

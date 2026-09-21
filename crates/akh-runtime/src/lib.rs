@@ -6,7 +6,9 @@ pub mod profile;
 mod questions;
 
 use akh_session_types::{
-    ApprovalPolicy, ExecutionMode, RuntimeEvent, RuntimeJobRequest, RuntimeKind, ToolResult,
+    ApprovalPolicy, AssembledContext, ExecutionMode, RuntimeEvent, RuntimeJobRequest, RuntimeKind,
+    ToolResult,
+    neural_spans::{SpanCapture, SpanHit, SpanSpace},
 };
 use serde_json::{Value, json};
 use std::{
@@ -18,10 +20,43 @@ use std::{
 pub use akh_session_types::ProviderConfig;
 
 pub trait Host {
+    /// Optional provider usage observation; never participates in tool authority.
+    fn usage(&mut self, _usage: &Value) {}
     fn event(&mut self, event: RuntimeEvent) -> Result<(), String>;
     fn tool(&mut self, id: &str, name: &str, arguments: Value) -> Result<ToolResult, String>;
     fn approval(&mut self, id: &str, name: &str, arguments: &Value) -> Result<bool, String>;
     fn question(&mut self, id: &str, questions: &Value) -> Result<Value, String>;
+    /// Same-space neural recall for the active turn. `Ok(None)` means the host
+    /// cannot serve recall (older daemon, missing capability or policy); the
+    /// runtime then continues without recalled context. Hosts never fabricate hits.
+    fn recall(
+        &mut self,
+        _id: &str,
+        _space: &SpanSpace,
+        _vector: &[u8],
+        _limit: usize,
+    ) -> Result<Option<Vec<SpanHit>>, String> {
+        Ok(None)
+    }
+    /// Deliver bounded captures of the active turn's accepted input. `Ok(false)`
+    /// means the host does not retain them; the turn itself is unaffected.
+    fn spans(&mut self, _id: &str, _captures: &[SpanCapture]) -> Result<bool, String> {
+        Ok(false)
+    }
+    /// Ask the cognitive core to assemble this turn's context to budget.
+    ///
+    /// `Ok(None)` means the host has no core to defer to — no core configured
+    /// for this session, or a session daemon that predates the route — and the
+    /// runtime then windows the conversation locally, exactly as before. A host
+    /// never fabricates an assembly; the returned messages are the core's.
+    fn assemble_context(
+        &mut self,
+        _messages: &[Value],
+        _window_tokens: usize,
+        _reserved_output_tokens: usize,
+    ) -> Result<Option<AssembledContext>, String> {
+        Ok(None)
+    }
 }
 
 pub fn run(

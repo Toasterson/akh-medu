@@ -131,6 +131,38 @@ sokard image reference.
 {{- end }}
 
 {{/*
+transcripts component labels (akh-transcripts: harvest/derive/mcp, ADR 108).
+Unlike akhomed/seshd/sokard, "transcripts" is two sibling Deployments
+(akh-derive, akh-transcripts-mcp) sharing one image, so these take a dict
+argument rather than the bare root context: (dict "root" . "role" "derive")
+or (dict "root" . "role" "mcp"). The role becomes the component label, which
+keeps each Deployment's pod selector from matching the other's pods.
+*/}}
+{{- define "akh-medu.transcripts.labels" -}}
+{{ include "akh-medu.labels" .root }}
+app.kubernetes.io/component: transcripts-{{ .role }}
+{{- end }}
+
+{{- define "akh-medu.transcripts.selectorLabels" -}}
+{{ include "akh-medu.selectorLabels" .root }}
+app.kubernetes.io/component: transcripts-{{ .role }}
+{{- end }}
+
+{{/*
+akh-transcripts image reference.
+*/}}
+{{- define "akh-medu.transcripts.image" -}}
+{{- $registry := .Values.global.imageRegistry -}}
+{{- $repo := .Values.transcripts.image.repository -}}
+{{- $tag := .Values.transcripts.image.tag | default .Chart.AppVersion -}}
+{{- if $registry -}}
+{{- printf "%s/%s:%s" $registry $repo $tag -}}
+{{- else -}}
+{{- printf "%s:%s" $repo $tag -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Architecture affinity — pins pods to nodes whose kubernetes.io/arch matches
 one of the architectures we have actually published images for. Merges with
 any user-supplied affinity via `toYaml` in the caller.

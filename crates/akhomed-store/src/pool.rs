@@ -51,7 +51,10 @@ impl StablePgSession {
         if opts.url.starts_with("sqlite:") {
             return Ok(Self {
                 sqlite: Some(Mutex::new(crate::sqlite::LocalSession::open(opts).await?)),
-                state: Mutex::new(StablePgSessionState { connection: None, locked_akh: None }),
+                state: Mutex::new(StablePgSessionState {
+                    connection: None,
+                    locked_akh: None,
+                }),
             });
         }
         let connect = PgConnection::connect(&opts.url);
@@ -81,7 +84,9 @@ impl StablePgSession {
     /// Re-checks for the same Akh are local no-ops so PostgreSQL's re-entrant
     /// advisory-lock counter is never incremented twice.
     pub async fn try_acquire_akh_lock(&self, akh_id: Uuid) -> StoreResult<bool> {
-        if let Some(local) = &self.sqlite { return local.lock().await.acquire(akh_id); }
+        if let Some(local) = &self.sqlite {
+            return local.lock().await.acquire(akh_id);
+        }
         let mut state = self.state.lock().await;
         if state.locked_akh == Some(akh_id) {
             return Ok(true);
@@ -118,7 +123,9 @@ impl StablePgSession {
     /// particular, this must never be implemented through a connection pool:
     /// the pooled transaction would not be protected by this session's lock.
     pub async fn claim_akh_residency(&self, akh_id: Uuid, workspace_id: Uuid) -> StoreResult<i64> {
-        if let Some(local) = &self.sqlite { return local.lock().await.claim(akh_id).await; }
+        if let Some(local) = &self.sqlite {
+            return local.lock().await.claim(akh_id).await;
+        }
         let mut state = self.state.lock().await;
         if state.locked_akh != Some(akh_id) {
             return Err(StoreError::Conflict {
@@ -189,7 +196,9 @@ impl StablePgSession {
     /// every retained WAL handle immediately.  Dropping the connection is the
     /// final PostgreSQL-side release guarantee.
     pub async fn release_akh_lock(&self, akh_id: Uuid) -> StoreResult<bool> {
-        if let Some(local) = &self.sqlite { return local.lock().await.release(akh_id); }
+        if let Some(local) = &self.sqlite {
+            return local.lock().await.release(akh_id);
+        }
         let mut state = self.state.lock().await;
         if state.locked_akh != Some(akh_id) {
             return Ok(false);

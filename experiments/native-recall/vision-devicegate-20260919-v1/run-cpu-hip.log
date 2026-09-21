@@ -1,0 +1,9 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== CPU ===
+{"all_finite":true,"blocks":27,"device":"cpu","forward_seconds":2.008681839,"head":[1.1553245782852173,-0.443493515253067,-0.24368585646152496,-0.21625559031963348,-1.1893961429595947,0.2765832245349884,-0.6585840582847595,-0.42179185152053833],"input_side":64,"l2_norm":158.2223714927232,"load_seconds":1.771089864,"mean":-0.00884243113890193,"phase":"vision_projection","projector":"sha256-add205b7bfdb3f71f6da36b0a82aa20928dd829a920878c602628cdfbebc5288","rows":4,"std_dev":1.1055770715147217,"width":5120}
+wrote 20480 values to /tmp/vision/cpu.f32
+=== HIP ===
+{"all_finite":true,"blocks":27,"device":"hip","forward_seconds":1.8128095800000001,"head":[1.155332326889038,-0.4434894323348999,-0.2436886727809906,-0.2162574976682663,-1.1893908977508545,0.2765856087207794,-0.6585872769355774,-0.4217952489852905],"input_side":64,"l2_norm":158.22226963436555,"load_seconds":3.325063702,"mean":-0.008842409463500189,"phase":"vision_projection","projector":"sha256-add205b7bfdb3f71f6da36b0a82aa20928dd829a920878c602628cdfbebc5288","rows":4,"std_dev":1.1055763599084065,"width":5120}
+wrote 20480 values to /tmp/vision/hip.f32
+
+[exited with code 0]

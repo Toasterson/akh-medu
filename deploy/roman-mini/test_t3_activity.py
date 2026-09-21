@@ -11,6 +11,49 @@ class ProjectionTests(unittest.TestCase):
         self.assertIsNotNone(re.fullmatch(r'Observe autonomous minerva session ([0-9a-f-]{36})',user_prompt(actual)))
         self.assertEqual(user_prompt('Record my correction'+actual[len(command):]),'Record my correction')
 
+    def test_multiple_transport_blocks_and_unknown_envelopes(self):
+        from t3_activity import user_prompt, observation_target, submit_feedback
+        from pathlib import Path
+        command='Observe autonomous vesta session 01a0ac7a-c3e3-7b51-ba8e-85eefaf33939'
+        suffix='<runtime_info>transport</runtime_info>\n\n<pull_request_linking>link PRs</pull_request_linking>'
+        self.assertEqual(user_prompt(command+suffix),command)
+        self.assertEqual(observation_target('vesta',command+suffix),command.split()[-1])
+        self.assertEqual(user_prompt('Keep this correction'+suffix),'Keep this correction')
+        self.assertEqual(user_prompt('Example <runtime_info>x</runtime_info> keep this'),'Example <runtime_info>x</runtime_info> keep this')
+        for prompt in [command+suffix, command+'<future>metadata</future>', command+' extra text']:
+            with self.assertRaises(ValueError):
+                submit_feedback(Path('/nonexistent'),'vesta','chat',prompt)
+        with self.assertRaises(ValueError):
+            observation_target('minerva',command+suffix)
+
+    def test_acp_observation_with_both_envelopes_never_posts_feedback(self):
+        import io, json, tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from t3_activity import acp
+        class InlineThread:
+            def __init__(self, target, args, **kwargs): self.target, self.args = target, args
+            def start(self): self.target(*self.args)
+            def is_alive(self): return False
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);(root/'secrets').mkdir();(root/'secrets/t3-vesta.key').write_text('test')
+            command='Observe autonomous vesta session 01a0ac7a-c3e3-7b51-ba8e-85eefaf33939'
+            prompt=command+'<runtime_info>transport</runtime_info>\n<pull_request_linking>link PRs</pull_request_linking>'
+            message={'jsonrpc':'2.0','id':1,'method':'session/prompt','params':{'sessionId':'display','prompt':[{'type':'text','text':prompt}]}}
+            calls=[]
+            def read(url, token, data=None):
+                self.assertIsNone(data)
+                calls.append(url)
+                if '/events?' in url:return []
+                if url.endswith('/tools'):return {'records':[]}
+                return {'akh':'vesta','runtime':{'model':'test'},'turns':[{'status':'completed'}],'next_sequence':1}
+            output=io.StringIO()
+            with patch('t3_activity.sys.stdin',io.StringIO(json.dumps(message)+'\n')), patch('t3_activity.sys.stdout',output), patch('t3_activity.threading.Thread',InlineThread), patch('t3_activity.request',side_effect=read), patch('t3_activity.submit_feedback') as feedback:
+                acp(root,'vesta')
+            feedback.assert_not_called()
+            self.assertEqual(len(calls),4)
+            self.assertIn('Outcome: completed',output.getvalue())
+
     def test_reasoning_is_not_final_answer(self):
         self.assertEqual(project_event({'kind':'runtime','data':{'kind':'reasoning','text':'think'}}),
                          {'sessionUpdate':'agent_thought_chunk','content':{'type':'text','text':'think'}})

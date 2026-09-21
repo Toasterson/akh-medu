@@ -11,6 +11,8 @@ impl Tensor {
         f: &mut std::fmt::Formatter,
     ) -> std::fmt::Result {
         let device_str = match self.device().location() {
+            #[cfg(feature = "vulkan")]
+            crate::DeviceLocation::Vulkan { gpu_id } => format!(", vulkan:{gpu_id}"),
             crate::DeviceLocation::Cpu => "".to_owned(),
             crate::DeviceLocation::Cuda { gpu_id } => {
                 format!(", cuda:{gpu_id}")
@@ -538,6 +540,8 @@ impl std::fmt::Display for Tensor {
         };
 
         let device_str = match self.device().location() {
+            #[cfg(feature = "vulkan")]
+            crate::DeviceLocation::Vulkan { gpu_id } => format!(", vulkan:{gpu_id}"),
             crate::DeviceLocation::Cpu => "".to_owned(),
             crate::DeviceLocation::Cuda { gpu_id } => {
                 format!(", cuda:{gpu_id}")

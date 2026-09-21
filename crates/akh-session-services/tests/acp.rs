@@ -139,9 +139,14 @@ async fn websocket_preserves_prompt_order_permissions_and_replays_before_load_re
             provider_session: Some("provider".into()),
             output: Some("world".into()),
             error: None,
-            events: vec![RuntimeEvent::Reasoning { text: "checking evidence".into() }, RuntimeEvent::Text {
-                text: "world".into(),
-            }],
+            events: vec![
+                RuntimeEvent::Reasoning {
+                    text: "checking evidence".into(),
+                },
+                RuntimeEvent::Text {
+                    text: "world".into(),
+                },
+            ],
         })
         .unwrap();
     let mut saw_text = false;

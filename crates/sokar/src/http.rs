@@ -1,6 +1,6 @@
 use crate::{
     Sokar, SokarError, SokarResult,
-    authz::{Permission, Principal},
+    authz::{Permission, Principal, Resource},
 };
 use axum::{
     Extension, Json, Router,
@@ -14,6 +14,7 @@ use axum::{
 use futures::{StreamExt, TryStreamExt};
 use sokar_client::*;
 use std::sync::Arc;
+use tower::{Layer, ServiceExt};
 use tower_http::{
     limit::RequestBodyLimitLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -21,7 +22,7 @@ use tower_http::{
 };
 
 pub fn api(state: Arc<Sokar>) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/v1/collections", post(create_collection))
         .route("/v1/collections/by-scope", get(by_scope))
         .route("/v1/collections/{id}", get(collection))
@@ -31,7 +32,43 @@ pub fn api(state: Arc<Sokar>) -> Router {
             get(by_path),
         )
         .route("/v1/artifacts/{id}", get(artifact).delete(delete))
-        .route("/v1/artifacts/{id}/content", get(content))
+        .route("/v1/artifacts/{id}/content", get(content));
+    if state.config.mcp.enabled {
+        let limit = state.config.mcp.max_inline_bytes.saturating_mul(4) / 3;
+        let mcp = crate::mcp::service(state.clone());
+        // Collect the limited body before rmcp parses it. Without this adapter,
+        // rmcp maps a chunked-body LengthLimitError to 500 instead of 413.
+        let bounded =
+            tower::service_fn(move |request: Request<tower_http::body::Limited<Body>>| {
+                let mcp = mcp.clone();
+                async move {
+                    use http_body_util::BodyExt;
+                    let (parts, body) = request.into_parts();
+                    match body.collect().await {
+                        Ok(body) => {
+                            mcp.oneshot(Request::from_parts(parts, Body::from(body.to_bytes())))
+                                .await
+                        }
+                        Err(error) => {
+                            let mut source: &(dyn std::error::Error + 'static) = error.as_ref();
+                            let status = loop {
+                                if source.is::<http_body_util::LengthLimitError>() {
+                                    break StatusCode::PAYLOAD_TOO_LARGE;
+                                }
+                                match source.source() {
+                                    Some(next) => source = next,
+                                    None => break StatusCode::BAD_REQUEST,
+                                }
+                            };
+                            Ok(status.into_response())
+                        }
+                    }
+                }
+            });
+        let service = RequestBodyLimitLayer::new(limit.saturating_add(64 * 1024)).layer(bounded);
+        router = router.nest_service(state.config.mcp.path.as_str(), service);
+    }
+    router
         .layer(DefaultBodyLimit::max(state.config.limits.max_body_bytes))
         .layer(RequestBodyLimitLayer::new(
             state.config.limits.max_body_bytes,
@@ -90,26 +127,35 @@ async fn api_boundary(
     next: Next,
 ) -> Response {
     let id = request_id(&request);
-    let response = match crate::auth::authenticate(&state.config.principals, request.headers()) {
-        Ok(principal) => {
-            let permission = match *request.method() {
-                axum::http::Method::POST => Permission::Write,
-                axum::http::Method::DELETE => Permission::Delete,
-                _ => Permission::Read,
-            };
-            match state
-                .authorizer
-                .authorize(&principal, request.uri().path(), permission)
-            {
-                Ok(()) => {
-                    request.extensions_mut().insert(principal);
-                    next.run(request).await
-                }
-                Err(e) => e.into_response(),
-            }
-        }
-        Err(e) => e.into_response(),
+    let path = request.uri().path();
+    let mount = state.config.mcp.path.as_str();
+    let is_mcp = state.config.mcp.enabled
+        && (path == mount
+            || path
+                .strip_prefix(mount)
+                .is_some_and(|tail| tail.starts_with('/')));
+    let principal = match crate::auth::authenticate(&state.config.principals, request.headers()) {
+        Ok(principal) => principal,
+        Err(error) => return normalize_problem(error.into_response(), id).await,
     };
+    // MCP transport requests have an endpoint grant; each tool subsequently
+    // authorizes its typed artifact resource. REST handlers use the same types.
+    if is_mcp {
+        let permission = match *request.method() {
+            axum::http::Method::POST => Permission::Write,
+            axum::http::Method::DELETE => Permission::Delete,
+            _ => Permission::Read,
+        };
+        if let Err(error) = state.authorizer.authorize(&principal, path, permission) {
+            return normalize_problem(error.into_response(), id).await;
+        }
+    }
+    request.extensions_mut().insert(principal);
+    let response = next.run(request).await;
+    if is_mcp {
+        return response;
+    }
+
     normalize_problem(response, id).await
 }
 async fn problem_boundary(request: Request, next: Next) -> Response {
@@ -153,11 +199,22 @@ async fn normalize_problem(response: Response, id: String) -> Response {
         Body::from(serde_json::to_vec(&problem).expect("problem serialization")),
     )
 }
+fn authorize(
+    state: &Sokar,
+    principal: &Principal,
+    resource: Resource<'_>,
+    permission: Permission,
+) -> SokarResult<()> {
+    state
+        .authorizer
+        .authorize(principal, &resource.to_string(), permission)
+}
 async fn create_collection(
     State(state): State<Arc<Sokar>>,
     Extension(p): Extension<Principal>,
     Json(input): Json<CreateCollection>,
 ) -> SokarResult<Response> {
+    authorize(&state, &p, Resource::Collections, Permission::Write)?;
     let (collection, created) = state.create_collection_outcome(&p.id, input).await?;
     Ok((
         if created {
@@ -171,8 +228,10 @@ async fn create_collection(
 }
 async fn collection(
     State(state): State<Arc<Sokar>>,
+    Extension(p): Extension<Principal>,
     Path(id): Path<CollectionId>,
 ) -> SokarResult<Json<Collection>> {
+    authorize(&state, &p, Resource::Collection(id), Permission::Read)?;
     Ok(Json(state.index.collection(id).await?))
 }
 #[derive(serde::Deserialize)]
@@ -181,8 +240,10 @@ struct ScopeQuery {
 }
 async fn by_scope(
     State(state): State<Arc<Sokar>>,
+    Extension(p): Extension<Principal>,
     Query(query): Query<ScopeQuery>,
 ) -> SokarResult<Json<Collection>> {
+    authorize(&state, &p, Resource::ByScope, Permission::Read)?;
     // Accept canonical scope keys and normalize JSON object field order.
     let scope: CollectionScope = serde_json::from_str(&query.scope_key)
         .map_err(|_| SokarError::Invalid("scope_key must be a JSON CollectionScope".into()))?;
@@ -190,36 +251,47 @@ async fn by_scope(
 }
 async fn artifact(
     State(state): State<Arc<Sokar>>,
+    Extension(p): Extension<Principal>,
     Path(id): Path<ArtifactId>,
 ) -> SokarResult<Json<Artifact>> {
+    authorize(&state, &p, Resource::Artifact(id), Permission::Read)?;
     Ok(Json(state.index.artifact(id).await?))
 }
 async fn list(
     State(state): State<Arc<Sokar>>,
+    Extension(p): Extension<Principal>,
     Path(id): Path<CollectionId>,
     Query(query): Query<ListArtifacts>,
 ) -> SokarResult<Json<ArtifactPage>> {
+    authorize(&state, &p, Resource::Artifacts(id), Permission::Read)?;
     state.index.collection(id).await?;
     Ok(Json(state.index.list(id, &query).await?))
 }
 async fn by_path(
     State(state): State<Arc<Sokar>>,
+    Extension(p): Extension<Principal>,
     Path((id, path)): Path<(CollectionId, String)>,
 ) -> SokarResult<Json<Artifact>> {
-    Ok(Json(state.index.latest(id, &path.parse()?).await?))
+    let path = path.parse()?;
+    authorize(&state, &p, Resource::ByPath(id, &path), Permission::Read)?;
+    Ok(Json(state.index.latest(id, &path).await?))
 }
 async fn delete(
     State(state): State<Arc<Sokar>>,
+    Extension(p): Extension<Principal>,
     Path(id): Path<ArtifactId>,
 ) -> SokarResult<StatusCode> {
+    authorize(&state, &p, Resource::Artifact(id), Permission::Delete)?;
     state.delete_artifact(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 async fn content(
     State(state): State<Arc<Sokar>>,
+    Extension(p): Extension<Principal>,
     Path(id): Path<ArtifactId>,
     headers: HeaderMap,
 ) -> SokarResult<Response> {
+    authorize(&state, &p, Resource::Content(id), Permission::Read)?;
     let a = state.index.artifact(id).await?;
     let c = state.index.collection(a.collection).await?;
     let store = state.stores.get(&c.store)?;
@@ -248,6 +320,7 @@ async fn upload(
     Extension(p): Extension<Principal>,
     request: Request,
 ) -> SokarResult<Response> {
+    authorize(&state, &p, Resource::Artifacts(id), Permission::Write)?;
     let collection = state.index.collection(id).await?;
     let store = state.stores.get(&collection.store)?;
     let headers = request.headers();

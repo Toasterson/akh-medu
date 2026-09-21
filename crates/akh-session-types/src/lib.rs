@@ -1,6 +1,7 @@
 //! Shared wire contracts. This crate deliberately has no engine, transport or provider dependency.
 pub mod bootstrap;
 pub mod credentials;
+pub mod neural_spans;
 pub mod publication;
 pub mod questions;
 pub mod repository;
@@ -375,6 +376,95 @@ pub struct ContextRequest {
     pub turn_id: String,
     pub input: TurnInput,
     pub tools: Vec<ToolSpec>,
+    /// Candidate messages for this turn, newest last, when the caller wants the
+    /// cognitive core to assemble rather than deciding locally.
+    ///
+    /// Empty preserves the original payload exactly, so a core that predates
+    /// this field still accepts the request and a session that predates it
+    /// still gets the old behaviour.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<Value>,
+    /// Token budget the assembled context must fit. `None` leaves the core to
+    /// its own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<ContextBudget>,
+}
+
+/// Window and output reservation for one assembly.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextBudget {
+    /// The model's full context window, in tokens.
+    pub window_tokens: usize,
+    /// Tokens held back for the reply.
+    pub reserved_output_tokens: usize,
+}
+
+impl ContextBudget {
+    /// Tokens available for the prompt.
+    pub fn available(&self) -> usize {
+        self.window_tokens
+            .saturating_sub(self.reserved_output_tokens)
+    }
+}
+
+/// A runtime asking the session daemon to have the cognitive core assemble this
+/// turn's context. The runtime holds the conversation; the session daemon holds
+/// the akh identity and the core credential, so the runtime sends its candidate
+/// messages here and the daemon forwards them to `/v1/context` on the akh's core.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeContextRequest {
+    /// Identifies the active job; `name` must be [`RuntimeContextRequest::CALL_NAME`].
+    pub call: ToolCall,
+    /// The active turn's input, forwarded so the core can build its evidence.
+    pub input: TurnInput,
+    /// Candidate messages, newest last.
+    pub messages: Vec<Value>,
+    /// The budget the assembled context must fit.
+    pub budget: ContextBudget,
+}
+
+impl RuntimeContextRequest {
+    pub const CALL_NAME: &'static str = "assemble_context";
+}
+
+/// The assembled context, or `None` when the session has no cognitive core.
+///
+/// `None` keeps a runtime that always asks interoperating with a session that
+/// has no core configured: the runtime then windows locally, exactly as before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeContextReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembled: Option<AssembledContext>,
+}
+
+/// Marks a message the cognitive core already assembled to budget.
+///
+/// The core sets it on every message it returns; the runtime reads it to decide
+/// whether to verify the fit or run its own selector. It lives here because both
+/// sides must agree on the spelling: as two independent string literals in two
+/// crates, a change on one side would silently turn assembly off rather than
+/// fail to compile, and the runtime would quietly re-evict on top of the core's
+/// decision - a second context policy, which is the thing this seam exists to
+/// prevent.
+///
+/// Absent on legacy payloads, so a core and runtime at different versions
+/// interoperate: an unmarked list is selected locally exactly as before.
+pub const CONTEXT_BUDGETED: &str = "context_budgeted";
+
+/// What the core decided to include, when it assembled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssembledContext {
+    /// Messages to send, in order, already within budget.
+    pub messages: Vec<Value>,
+    /// How many candidate messages were left out.
+    pub dropped_messages: usize,
+    /// Tokens per context section, for telemetry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub section_tokens: BTreeMap<String, usize>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -383,6 +473,10 @@ pub struct ContextResponse {
     pub instructions: String,
     pub model: Option<String>,
     pub evidence: Vec<String>,
+    /// Present only when the request supplied messages, so a session that did
+    /// not ask for assembly never receives a field it would reject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembled: Option<AssembledContext>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -406,6 +500,10 @@ pub struct AcceptedTurn {
     pub tool_receipts: Vec<String>,
     #[serde(default)]
     pub tools: Vec<ToolEvidence>,
+    /// Send only after the core advertises neural_spans_v1. Empty preserves
+    /// the original wire payload and operation fingerprint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub span_captures: Vec<neural_spans::SpanCapture>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -656,6 +754,96 @@ pub fn validate_key(key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_context_request_without_assembly_serializes_exactly_as_before() {
+        let request = ContextRequest {
+            request_id: "r".into(),
+            akh: "a".into(),
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            input: TurnInput {
+                origin: InputOrigin::Human {
+                    principal: "p".into(),
+                },
+                text: "hello".into(),
+                data: None,
+                artifacts: vec![],
+            },
+            tools: vec![],
+            messages: vec![],
+            budget: None,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        let object = json.as_object().unwrap();
+        // The new fields must be absent, not null: a core that predates them
+        // uses deny_unknown_fields and would reject the request.
+        assert!(!object.contains_key("messages"), "{json}");
+        assert!(!object.contains_key("budget"), "{json}");
+        assert_eq!(
+            serde_json::from_value::<ContextRequest>(json).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn a_context_response_without_assembly_omits_the_field() {
+        let response = ContextResponse {
+            schema_version: SCHEMA_VERSION,
+            instructions: "be helpful".into(),
+            model: None,
+            evidence: vec![],
+            assembled: None,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("assembled"),
+            "{json}"
+        );
+        assert_eq!(
+            serde_json::from_value::<ContextResponse>(json).unwrap(),
+            response
+        );
+    }
+
+    #[test]
+    fn assembly_round_trips_when_present() {
+        let response = ContextResponse {
+            schema_version: SCHEMA_VERSION,
+            instructions: String::new(),
+            model: None,
+            evidence: vec![],
+            assembled: Some(AssembledContext {
+                messages: vec![serde_json::json!({"role": "user", "content": "hi"})],
+                dropped_messages: 3,
+                section_tokens: BTreeMap::from([("History".to_string(), 12)]),
+            }),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        let back: ContextResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back, response);
+        assert_eq!(back.assembled.unwrap().dropped_messages, 3);
+    }
+
+    #[test]
+    fn a_budget_reserves_output_from_the_window() {
+        let budget = ContextBudget {
+            window_tokens: 1024,
+            reserved_output_tokens: 256,
+        };
+        assert_eq!(budget.available(), 768);
+        // Never negative, however the operator configures it.
+        assert_eq!(
+            ContextBudget {
+                window_tokens: 10,
+                reserved_output_tokens: 99
+            }
+            .available(),
+            0
+        );
+    }
+
+    use super::*;
     #[test]
     fn client_cannot_claim_external_input_authority() {
         assert!(
@@ -689,6 +877,8 @@ mod tests {
 pub struct ProviderConfig {
     pub isolation: Option<RuntimeIsolation>,
     pub model_endpoint: Option<ModelEndpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_candle: Option<NativeCandle>,
     pub revision: String,
     pub kind: RuntimeKind,
     pub working_dir: std::path::PathBuf,
@@ -749,6 +939,62 @@ pub struct ModelEndpoint {
     /// Optional provider-supported reasoning budget; omitted preserves provider defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+}
+
+/// Explicit local inference configuration. No device or model discovery/fallback.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCandle {
+    /// Logical model identity exposed in runtime bindings, pinned to these artifacts.
+    pub model: String,
+    pub model_path: std::path::PathBuf,
+    pub model_sha256: String,
+    pub tokenizer_path: std::path::PathBuf,
+    pub tokenizer_sha256: String,
+    pub device: NativeCandleDevice,
+    pub max_context_tokens: usize,
+    pub max_iterations: u32,
+    pub max_output_tokens: u32,
+    /// Canary-pass evidence authorizing lossy KV compression at the configured
+    /// bit-width. Required whenever compressed KV is enabled for this load;
+    /// absent means compression must be off, and an enabled load without it is
+    /// refused. See [`KvGateEvidence`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_quant_evidence: Option<std::path::PathBuf>,
+}
+
+/// Evidence that the five-daemon canary passed with lossy KV compression at a
+/// given bit-width, pinned to the exact artifacts and device it ran against.
+///
+/// Compressed KV clears no numerical parity gate (worst cosine 0.99788 at 8
+/// bits), so it is admitted only behind a task-level check: the canary's
+/// recall/eviction/isolation assertions must hold at that width, for these
+/// weights, on this device. The runtime refuses to enable compression without a
+/// matching, passing document - the same fail-closed shape as runtime
+/// conformance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KvGateEvidence {
+    pub passed: bool,
+    pub model_sha256: String,
+    pub tokenizer_sha256: String,
+    pub device: NativeCandleDevice,
+    pub bits: u8,
+    pub recent: usize,
+    /// Worst per-vector cosine measured on the live paged path at this width.
+    pub min_cosine: f64,
+    /// The canary checks that held, for the record.
+    pub checks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeCandleDevice {
+    Cpu,
+    Hip { ordinal: usize },
+    Cuda { ordinal: usize },
+    Metal { ordinal: usize },
+    Vulkan { ordinal: usize },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

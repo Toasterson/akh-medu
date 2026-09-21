@@ -1,0 +1,37 @@
+{
+  "source_commit": "e291ab44d77ca3b0c82552f6ef7e1929cb9be77a",
+  "source_worktree": "/tmp/ptah-source-check.Dk4HAs/tree",
+  "clean_source_verified": true,
+  "cargo_target_dir": "/home/toasty/ws/agi/akh-medu/target",
+  "locked": true,
+  "offline": true,
+  "toolchain": [
+    "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "cargo 1.97.1 (c980f4866 2026-06-30)"
+  ],
+  "files": {
+    "target/release/akhomed": "6cce8f81576b9aa371fcffe216138ebf7b49680e053a0da256f0e9ce13dc83f8",
+    "target/release/akhsessd": "a8d9c917159ecb6df73d2d03e64f761ba5c09393c4501387fba767587cdb9dbd",
+    "target/release/akhrtd": "04259351920a2a05ec2412582d12e443470ac49ac3fe77dc1caaae237e30438d",
+    "target/release/akhsbxd": "60ce4312adfbda012c8111f2d615e67c6b0e6018fac2bab26034105b7add175e",
+    "target/release/akhexecd": "0c25f896d180c9a5e17ab93f140f34ffd4d78fe177c1495178b79e80de2ae20f",
+    "target/release/build/candle-core-e13219964f178351/out/libcandle_hip_kernels.so": "09c7e90bc16513b576f8465484aa033a43c4795b81170516b8c86ed38ec2147e",
+    "target/release/build/candle-core-e13219964f178351/out/libcandle_hip_quant.so": "fc57d59e7dc097a940c4b0e69f9a47e57b673c67fdb0bbd4e8ac8bb0c6ad94a0",
+    "target/release/build/akh-medu-7c12c575ff36c257/out/libakh_hip_kernels.so": "137f395b53f3f7c8a3f3cea833bab236437d7c27c7aa9ec199ba290a96e25703"
+  },
+  "rust_library_tests": {
+    "passed": 48,
+    "failed": 0,
+    "ignored": 5
+  },
+  "python_tests": {
+    "passed": 8,
+    "failed": 0
+  },
+  "builds": {
+    "core_cpu": "passed",
+    "session_runtime_sandbox_executor_hip_vulkan": "passed"
+  },
+  "kernel_path_provenance": "Exact OUT_DIR paths reported by the clean-source Cargo builds; no wildcard selection",
+  "scope": "Source closure/build identity only. Not a relocated bundle, GPU gate rerun, hermetic toolchain, or deployment acceptance."
+}

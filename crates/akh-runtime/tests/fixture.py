@@ -87,6 +87,8 @@ def codex():
     elif prompt == "malformed":
         print("this is not JSON", flush=True)
         return
+    send({"method": "item/reasoning/summaryTextDelta", "params": {"threadId": thread, "delta": "fixture reasoning"}})
+    send({"method": "thread/tokenUsage/updated", "params": {"threadId": thread, "tokenUsage": {"last": {"inputTokens": 17, "outputTokens": 3, "reasoningOutputTokens": 2}}}})
     send({"method": "item/agentMessage/delta", "params": {"threadId": thread, "itemId": "m", "delta": answer}})
     send({"method": "item/completed", "params": {"threadId": thread,
          "item": {"type": "agentMessage", "id": "m", "phase": "final_answer", "text": answer}}})
@@ -102,6 +104,8 @@ def claude():
     assert start["instructions"]
     session = start["resume"] or str(uuid.uuid4())
     send({"type": "session", "id": session})
+    send({"type": "reasoning", "text": "fixture Claude reasoning"})
+    send({"type": "usage", "usage": {"input_tokens": 11, "output_tokens": 5}})
     send({"type": "text", "text": start["prompt"]})
     send({"type": "done", "success": start["prompt"] != "failed", "text": start["prompt"], "error": "provider failure"})
 

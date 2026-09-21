@@ -2,7 +2,7 @@
 //!
 //! Extracts structured `(subject, predicate, object, confidence)` triples from
 //! natural-language text using a three-tier fallback:
-//! 1. Local LLM (Qwen2.5-1.5B via llama-cpp-2, shared with NLU pipeline)
+//! 1. Native Candle LLM (shared with NLU pipeline)
 //! 2. External OpenAI-compatible API (OpenRouter, DeepSeek, etc.)
 //! 3. Regex fallback (basic is-a/part-of patterns)
 //!
@@ -67,7 +67,7 @@ pub struct ExtractionOutput {
 /// produces structured triples from text.
 pub struct TripleExtractor {
     config: ExtractionConfig,
-    #[cfg(feature = "nlu-llm")]
+    #[cfg(feature = "candle-backend")]
     local_backend: Option<backends::local::LocalLlmBackend>,
     api_backend: Option<backends::api::ExternalApiBackend>,
 }
@@ -85,14 +85,14 @@ impl TripleExtractor {
 
         Self {
             config,
-            #[cfg(feature = "nlu-llm")]
+            #[cfg(feature = "candle-backend")]
             local_backend: None,
             api_backend,
         }
     }
 
     /// Set the local LLM backend (shared model from NLU pipeline).
-    #[cfg(feature = "nlu-llm")]
+    #[cfg(feature = "candle-backend")]
     pub fn with_local_llm(
         mut self,
         translator: std::sync::Arc<crate::nlu::llm_translator::LlmTranslator>,
@@ -117,7 +117,7 @@ impl TripleExtractor {
 
         for chunk in &chunks {
             // Tier 1: Local LLM
-            #[cfg(feature = "nlu-llm")]
+            #[cfg(feature = "candle-backend")]
             if self.config.prefer_local {
                 if let Some(ref local) = self.local_backend {
                     match local.extract(chunk, self.config.max_triples_per_chunk) {

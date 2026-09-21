@@ -1,0 +1,44 @@
+{
+  "service_id": "runtime-ptah",
+  "listen": "192.168.1.114:18110",
+  "data_dir": "/home/toasty/.local/share/akh-medu/runtime/ptah",
+  "principals": [
+    {
+      "id": "sessions",
+      "token_file": "/home/toasty/.config/akh-medu/runtime/ptah/sessions-incoming.sha256",
+      "token_sha256": true,
+      "roles": ["session"],
+      "akhs": ["ptah"]
+    }
+  ],
+  "endpoints": {
+    "sessions": {
+      "url": "https://anima.wegmueller.it/akh",
+      "token_file": "/home/toasty/.config/akh-medu/runtime/ptah/sessions-outgoing.token"
+    }
+  },
+  "runtimes": {
+    "ptah": {
+      "revision": "ptah-native-canary-v1",
+      "kind": "internal",
+      "working_dir": "/home/toasty/.local/share/akh-medu/runtime/ptah",
+      "binary": "/home/toasty/.local/lib/akh-medu/ptah-runtime/canary-v1/akhrtd",
+      "isolation": {
+        "directory": "/home/toasty/.local/share/akh-medu/runtime/ptah/profile"
+      },
+      "execution_mode": "brokered",
+      "timeout_secs": 600,
+      "native_candle": {
+        "model": "ptah-qwen38",
+        "model_path": "/usr/share/ollama/.ollama/models/blobs/sha256-3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+        "model_sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+        "tokenizer_path": "/home/toasty/.local/share/akh-medu/models/llm/ptah-qwen38.tokenizer.json",
+        "tokenizer_sha256": "e271c182ffa63eebd6d0f60a688fb90d3e87a1141c99c4d87a0d4508badfefea",
+        "device": {"kind": "hip", "ordinal": 0},
+        "max_context_tokens": 2048,
+        "max_iterations": 8,
+        "max_output_tokens": 512
+      }
+    }
+  }
+}

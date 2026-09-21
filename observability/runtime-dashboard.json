@@ -1,0 +1,179 @@
+{
+  "uid": "akh-runtime-turns",
+  "title": "Akh Runtime \u2014 Sessions and Turns",
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": [
+    "akh",
+    "runtime",
+    "otlp"
+  ],
+  "timezone": "browser",
+  "refresh": "15s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "session",
+        "label": "Session ID (regex)",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        }
+      },
+      {
+        "name": "turn",
+        "label": "Turn ID (regex)",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Operation latency p95 (seconds)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(akh_runtime_operation_duration_seconds_bucket{job=~\".*akhrtd\"}[$__rate_interval])))"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Operations per second, by outcome",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation, success) (rate(akh_runtime_operations_total{job=~\".*akhrtd\"}[$__rate_interval]))"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Provider tokens per second (reported usage)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (rate(akh_runtime_tokens_total{job=~\".*akhrtd\"}[$__rate_interval]))"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Stream bytes per second (not token counts)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (rate(akh_runtime_delta_bytes_total{job=~\".*akhrtd\"}[$__rate_interval]))"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Turn events \u2014 filter by session / turn; expand fields for trace ID",
+      "type": "logs",
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service_name=~\".*akhrtd\"} | json | attributes_session_id =~ \"$session\" | attributes_turn_id =~ \"$turn\"",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "sortOrder": "Ascending",
+        "enableLogDetails": true
+      }
+    },
+    {
+      "id": 6,
+      "title": "Turn traces \u2014 open a trace for the event waterfall",
+      "type": "table",
+      "datasource": {
+        "type": "tempo",
+        "uid": "P214B5B846CF3925F"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "traceql",
+          "query": "{ resource.service.name = \"akhrtd\" && name = \"runtime.turn\" && span.session.id =~ \"$session\" && span.turn.id =~ \"$turn\" }",
+          "limit": 50
+        }
+      ]
+    }
+  ]
+}

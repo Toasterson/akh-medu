@@ -12,6 +12,65 @@
 
 static hipStream_t g_akh_stream = 0; // Phase 46c: launch stream (0=default; set during graph capture)
 
+// One value row per block. All state writes target a fresh allocation: snapshots
+// keep their old storage. Each lane retains at most two decayed state elements.
+__global__ void gated_delta_step_f32(
+    const float* state, const float* q, const float* k, const float* v,
+    const float* decay, const float* beta, float* output, float* next,
+    size_t value_width, size_t key_width) {
+    const size_t row = blockIdx.x;
+    const size_t head = row / value_width;
+    const unsigned lane = threadIdx.x;
+    __shared__ float sums[128];
+    float values[2] = {0.f, 0.f};
+    float prediction = 0.f;
+    for (unsigned part = 0; part < 2; ++part) {
+        const size_t col = lane + 128 * part;
+        if (col < key_width) {
+            values[part] = state[row * key_width + col] * decay[head];
+            prediction += values[part] * k[head * key_width + col];
+        }
+    }
+    sums[lane] = prediction;
+    __syncthreads();
+    for (unsigned stride = 64; stride; stride >>= 1) {
+        if (lane < stride) sums[lane] += sums[lane + stride];
+        __syncthreads();
+    }
+    const float update = beta[head] * (v[row] - sums[0]);
+    // Every lane must consume prediction before sums is reused below.
+    __syncthreads();
+    float result = 0.f;
+    for (unsigned part = 0; part < 2; ++part) {
+        const size_t col = lane + 128 * part;
+        if (col < key_width) {
+            const float updated = values[part] + update * k[head * key_width + col];
+            next[row * key_width + col] = updated;
+            result += updated * q[head * key_width + col];
+        }
+    }
+    sums[lane] = result;
+    __syncthreads();
+    for (unsigned stride = 64; stride; stride >>= 1) {
+        if (lane < stride) sums[lane] += sums[lane + stride];
+        __syncthreads();
+    }
+    if (lane == 0) output[row] = sums[0] / sqrtf((float)key_width);
+}
+
+extern "C" int akh_gated_delta_step_f32(
+    const float* state, const float* q, const float* k, const float* v,
+    const float* decay, const float* beta, float* output, float* next,
+    size_t rows, size_t value_width, size_t key_width) {
+    if (!rows || !value_width || !key_width || key_width > 256 || rows > UINT32_MAX)
+        return 1;
+    // This opt-in inference kernel deliberately does not support graph streams.
+    if (g_akh_stream != nullptr) return 1;
+    hipLaunchKernelGGL(gated_delta_step_f32, dim3(rows), dim3(128), 0, 0,
+        state, q, k, v, decay, beta, output, next, value_width, key_width);
+    return hipGetLastError() == hipSuccess ? 0 : 1;
+}
+
 // Phase 45g: fixed-rank metadata passed BY VALUE in the kernel launch params (rides
 // along with the launch — no per-op hipMalloc + *synchronous* hipMemcpy + hipFree of
 // a device dims/strides array, which stalled the stream ~4000×/token). Rank ≤ 8 covers
@@ -333,6 +392,54 @@ __global__ void reduce_arg_f32(const float* x, unsigned int* y, size_t out_numel
     y[out_i] = best_idx;
 }
 
+// One block cooperatively reduces a contiguous vocabulary row. The generic
+// reduction above stays the fallback for non-last dimensions and short rows.
+// Preserve its strict comparison semantics: the first NaN sticks, later NaNs
+// are ignored, and equal values (including signed zero/infinity) choose the
+// lowest index regardless of the tree reduction order.
+template<int THREADS>
+__global__ void reduce_arg_rows_f32(const float* x, unsigned int* y,
+                                    size_t width, int op) {
+    const size_t row = blockIdx.x;
+    const float* values = x + row * width;
+    const unsigned int tid = threadIdx.x;
+    if (isnan(values[0])) {
+        if (tid == 0) y[row] = 0;
+        return;
+    }
+    const unsigned int invalid = UINT32_MAX;
+    float best = 0.0f;
+    unsigned int best_idx = invalid;
+    for (size_t i = tid; i < width; i += THREADS) {
+        const float value = values[i];
+        if (!isnan(value) && (best_idx == invalid ||
+            (op == 1 ? value > best : value < best))) {
+            best = value;
+            best_idx = (unsigned int)i;
+        }
+    }
+    __shared__ float candidates[THREADS];
+    __shared__ unsigned int indices[THREADS];
+    candidates[tid] = best;
+    indices[tid] = best_idx;
+    __syncthreads();
+    for (unsigned int stride = THREADS / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            const unsigned int other_idx = indices[tid + stride];
+            const float other = candidates[tid + stride];
+            const bool better = indices[tid] == invalid ||
+                (op == 1 ? other > candidates[tid] : other < candidates[tid]) ||
+                (other == candidates[tid] && other_idx < indices[tid]);
+            if (other_idx != invalid && better) {
+                candidates[tid] = other;
+                indices[tid] = other_idx;
+            }
+        }
+        __syncthreads();
+    }
+    if (tid == 0) y[row] = indices[0];
+}
+
 // ---- index_select (Phase 45d) ----------------------------------------------
 // Source viewed as [left, dim_size, right]; output [left, n_idx, right].
 // out[(l*n_idx + j)*right + r] = src[(l*dim_size + ids[j])*right + r].
@@ -619,6 +726,18 @@ int akh_reduce_arg_f32(const float* x, unsigned int* y, size_t out_numel, int nu
                        struct AkhI64x8 dims, struct AkhI64x8 strides, struct AkhI64x8 reduce_mask,
                        size_t reduce_numel, int op) {
     if (out_numel == 0) return 0;
+    bool contiguous_rows = num_dims > 0 && num_dims <= AKH_MAXR && reduce_numel >= 256;
+    size_t expected_stride = 1;
+    for (int d = num_dims - 1; contiguous_rows && d >= 0; --d) {
+        contiguous_rows = strides.v[d] == (long)expected_stride &&
+            reduce_mask.v[d] == (d == num_dims - 1 ? 1 : 0);
+        expected_stride *= (size_t)dims.v[d];
+    }
+    if (contiguous_rows && (size_t)dims.v[num_dims - 1] == reduce_numel) {
+        hipLaunchKernelGGL((reduce_arg_rows_f32<256>), dim3(out_numel), dim3(256), 0,
+                          g_akh_stream, x, y, reduce_numel, op);
+        return hipGetLastError() == hipSuccess ? 0 : 1;
+    }
     int t = 256;
     size_t blocks = (out_numel + t - 1) / t;
     hipLaunchKernelGGL(reduce_arg_f32, dim3(blocks), dim3(t), 0, g_akh_stream, x, y, out_numel,
@@ -859,6 +978,11 @@ int akh_cast_bf16_f16(const hip_bfloat16* x, __half* y, size_t n) {
 }
 int akh_cast_f32_u32(const float* x, uint32_t* y, size_t n) { AKH_CAST_LAUNCH(float, uint32_t, x, y, n); }
 int akh_cast_u32_f32(const uint32_t* x, float* y, size_t n) { AKH_CAST_LAUNCH(uint32_t, float, x, y, n); }
+// Widen packed codebook indices for index_select, which takes u32 ids. Without
+// this a compressed KV page has to be stored four bytes per code, which costs
+// exactly what the f32 cache it replaces costs.
+int akh_cast_u8_u32(const uint8_t* x, uint32_t* y, size_t n) { AKH_CAST_LAUNCH(uint8_t, uint32_t, x, y, n); }
+int akh_cast_u32_u8(const uint32_t* x, uint8_t* y, size_t n) { AKH_CAST_LAUNCH(uint32_t, uint8_t, x, y, n); }
 int akh_cast_f32_i64(const float* x, int64_t* y, size_t n) { AKH_CAST_LAUNCH(float, int64_t, x, y, n); }
 int akh_cast_i64_f32(const int64_t* x, float* y, size_t n) { AKH_CAST_LAUNCH(int64_t, float, x, y, n); }
 

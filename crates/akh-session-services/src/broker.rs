@@ -183,6 +183,22 @@ impl Broker {
                 receipt: None,
             }));
         }
+        // Serialize equivalent MCP effects within a session, including calls with
+        // new model-generated IDs. A lost reply must not cause a duplicate write.
+        let effect_lock = if matches!(tool.destination, ToolDestination::Mcp { .. }) {
+            let mut effect = call.clone();
+            effect.turn_id = "mcp-effect".into();
+            effect.id = crate::recovery::fingerprint(
+                &json!({"destination":tool.destination,"arguments":call.arguments}),
+            )?;
+            Some(self.call_lock(&effect))
+        } else {
+            None
+        };
+        let _effect_guard = match &effect_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         let k = record_key(&call);
         let mut record = match self.sessions.store.get::<ToolRecord>(&k)? {
             Some(old) => {
@@ -195,6 +211,9 @@ impl Broker {
                     return Ok(done(result));
                 }
                 if old.unknown {
+                    if matches!(old.destination, ToolDestination::Mcp { .. }) {
+                        return Ok(done(mcp_uncertain_result(&old)));
+                    }
                     return Err(Fault::new(
                         "unknown_outcome",
                         "tool delivery has an unknown outcome; it will not be repeated",
@@ -215,6 +234,21 @@ impl Broker {
                 record
             }
         };
+        if matches!(tool.destination, ToolDestination::Mcp { .. }) {
+            for previous in self
+                .sessions
+                .store
+                .scan::<ToolRecord>(&key("tool", &[&session.id]))?
+            {
+                if previous.call != call
+                    && previous.destination == tool.destination
+                    && previous.call.arguments == call.arguments
+                    && (previous.unknown || (previous.sent && previous.result.is_none()))
+                {
+                    return self.finish(k, record, mcp_uncertain_result(&previous));
+                }
+            }
+        }
         // Validate built-in semantics independently of a mistaken read_only annotation.
         let writes = !tool.read_only
             || matches!(&tool.destination, ToolDestination::Workspace { operation } if !matches!(operation.as_str(), "read"|"list"|"search"|"exec_poll"|"git_snapshot"));
@@ -265,7 +299,7 @@ impl Broker {
                 self.client.post(service, "/v1/tools/call", &json!({"request_id":record.operation_id,"session_id":session.id,"akh":session.akh,"tool":tool,"arguments":call.arguments})).await
             }
             ToolDestination::Mcp { service, tool } => {
-                if was_sent { record.unknown = true; self.sessions.store.transaction(|tx|tx.put(&k, &record))?; return Err(Fault::new("unknown_outcome", "MCP has no standard idempotency guarantee; inspect the server before reconciling")); }
+                if was_sent { return self.mcp_uncertain(k, record, "previous response unavailable"); }
                 let mut endpoint=self.sessions.config.endpoint(service)?.clone();
                 if endpoint.url.contains("{sandbox}") {
                     let workspace=session.workspace.as_ref().ok_or_else(||Fault::missing("MCP sandbox is unbound"))?;
@@ -274,7 +308,7 @@ impl Broker {
                 }
                 match crate::mcp::call_with_token(&endpoint, mcp_token.expect("resolved MCP capability"), &record.operation_id, tool, call.arguments.clone()).await {
                     Ok(result) => Ok(result),
-                    Err(error) => { record.unknown = true; self.sessions.store.transaction(|tx|tx.put(&k, &record))?; Err(Fault::new("unknown_outcome",format!("MCP exchange failed ({}); original call will not be repeated",error.code))) }
+                    Err(error) => { return self.mcp_uncertain(k, record, &error.code); }
                 }
             }
             ToolDestination::Client => {
@@ -306,6 +340,21 @@ impl Broker {
             ),
         }
     }
+    fn mcp_uncertain(
+        &self,
+        k: String,
+        mut record: ToolRecord,
+        code: &str,
+    ) -> Result<CallbackReply> {
+        record.unknown = true;
+        self.sessions.store.transaction(|tx| tx.put(&k, &record))?;
+        tracing::warn!(event.name="mcp.operation.unknown", session.id=%record.call.session_id,
+            turn.id=%record.call.turn_id, tool.name=%record.call.name,
+            operation.id=%record.operation_id, error.code=code,
+            "MCP response unavailable; operation retained for reconciliation without quarantining runtime");
+        Ok(done(mcp_uncertain_result(&record)))
+    }
+
     fn finish(
         &self,
         k: String,
@@ -360,6 +409,11 @@ impl Broker {
                         .store
                         .transaction(|tx| tx.put(&record_key(&record.call), &record))?;
                 }
+            }
+            if matches!(record.destination, ToolDestination::Mcp { .. }) {
+                // The remote outcome remains in the broker ledger. It is not
+                // evidence of a live local process, and cannot quarantine an Akh.
+                continue;
             }
             if record.unknown || (record.sent && record.result.is_none()) {
                 job.status = TurnStatus::Unknown;
@@ -419,5 +473,19 @@ fn done(result: ToolResult) -> CallbackReply {
         result: Some(result),
         response: None,
         pending: false,
+    }
+}
+
+fn mcp_uncertain_result(record: &ToolRecord) -> ToolResult {
+    ToolResult {
+        success: false,
+        text: format!(
+            "MCP operation {} has an unknown outcome because its response was unavailable. It may have executed remotely. Do not claim success or repeat this operation; inspect the remote service before reconciling it. Other independent work may continue.",
+            record.operation_id
+        ),
+        data: Some(
+            json!({"code":"mcp_outcome_unknown","outcome":"unknown","retryable":false,"operation_id":record.operation_id}),
+        ),
+        receipt: Some(record.operation_id.clone()),
     }
 }

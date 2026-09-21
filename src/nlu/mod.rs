@@ -7,8 +7,8 @@
 //!    negation, quantification, conditionals, temporal, modal, comparative
 //! 2. **Micro-ML NER** (feature-gated: `nlu-ml`) — ONNX-based multilingual
 //!    named entity recognition with intent classification
-//! 3. **Small LLM translator** (feature-gated: `nlu-llm`) — local LLM-based
-//!    semantic parsing with GBNF-constrained AbsTree JSON output
+//! 3. **Candle LLM translator** (feature-gated: `candle-backend`) — native
+//!    semantic parsing with constrained AbsTree JSON output
 //! 4. **VSA parse ranker** — ranks candidate parses using exemplar memory
 
 pub mod bandit;
@@ -16,7 +16,18 @@ pub mod cache;
 pub mod error;
 pub mod kg_context;
 pub mod parse_ranker;
+pub mod projector_artifact;
+pub mod turbo_quant;
+pub mod vision_preprocess;
+pub mod vision_positions;
+pub mod vision_prompt;
+/// The vision tower runs tensors, so it needs the Candle backend; the artifact
+/// locator, preprocessing geometry and quantizer above it deliberately do not,
+/// so a core-server build still compiles them.
+#[cfg(feature = "candle-backend")]
+pub mod vision_tower;
 pub mod router;
+pub mod span_projection;
 
 #[cfg(feature = "nlu-ml")]
 pub mod micro_ml;
@@ -91,12 +102,7 @@ pub struct NluPipeline {
     /// want to share the model across WS/MCP sessions.
     #[cfg(feature = "nlu-ml")]
     ml_layer: Option<std::sync::Arc<std::sync::Mutex<micro_ml::MicroMlLayer>>>,
-    /// Small LLM translator (Tier 3) — loaded if model file present.
-    /// Wrapped in Arc because loading is expensive (~1GB GGUF).
-    #[cfg(feature = "nlu-llm")]
-    llm_translator: Option<std::sync::Arc<llm_translator::LlmTranslator>>,
-    /// Candle LLM backend (Tier 3 alternative) — GGUF via Candle with hidden state access.
-    /// Mutually exclusive with llm_translator at runtime; Candle preferred when both available.
+    /// Native Candle LLM backend (Tier 3), shared across sessions and extraction.
     #[cfg(feature = "candle-backend")]
     candle_backend: Option<std::sync::Arc<std::sync::Mutex<candle_backend::CandleBackend>>>,
     /// Training data collector (Phase 27f) — logs parse successes as training pairs.
@@ -114,8 +120,6 @@ impl Clone for NluPipeline {
             ranker: self.ranker.clone(),
             #[cfg(feature = "nlu-ml")]
             ml_layer: self.ml_layer.clone(),
-            #[cfg(feature = "nlu-llm")]
-            llm_translator: self.llm_translator.clone(),
             #[cfg(feature = "candle-backend")]
             candle_backend: self.candle_backend.clone(),
             training_collector: self.training_collector.clone(),
@@ -131,8 +135,6 @@ impl NluPipeline {
             ranker: ParseRanker::new(),
             #[cfg(feature = "nlu-ml")]
             ml_layer: None,
-            #[cfg(feature = "nlu-llm")]
-            llm_translator: None,
             #[cfg(feature = "candle-backend")]
             candle_backend: None,
             training_collector: None,
@@ -146,8 +148,6 @@ impl NluPipeline {
             ranker,
             #[cfg(feature = "nlu-ml")]
             ml_layer: None,
-            #[cfg(feature = "nlu-llm")]
-            llm_translator: None,
             #[cfg(feature = "candle-backend")]
             candle_backend: None,
             training_collector: None,
@@ -278,36 +278,7 @@ impl NluPipeline {
                 }
             }
         }
-        #[cfg(feature = "nlu-llm")]
-        if std::env::var("AKH_NLU_LLM").as_deref() == Ok("0") {
-            tracing::info!(
-                tier = 3,
-                "NLU LLM tier disabled (AKH_NLU_LLM=0); skipping llama-cpp translator"
-            );
-        } else {
-            let llm_file = "llm/qwen2.5-1.5b-instruct-q4_k_m.gguf";
-            let result =
-                llm_translator::LlmTranslator::load(&_data_dir.join(llm_file)).or_else(|_| {
-                    if let Some(ref shared) = _shared_dir {
-                        llm_translator::LlmTranslator::load(
-                            &shared.join("llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"),
-                        )
-                    } else {
-                        llm_translator::LlmTranslator::load(&_data_dir.join(llm_file))
-                    }
-                });
-            match result {
-                Ok(translator) => {
-                    tracing::info!(tier = 3, "LLM translator model loaded");
-                    self.llm_translator = Some(std::sync::Arc::new(translator));
-                }
-                Err(e) => {
-                    tracing::warn!(tier = 3, error = %e, "LLM translator model not loaded");
-                    self.llm_translator = None;
-                }
-            }
-        }
-        // Candle backend (Tier 3 alternative): preferred over llama-cpp-2 when available.
+        // Candle backend (Tier 3).
         // Skippable via AKH_NLU_LLM=0 so a host whose *chat* backing already loads a
         // large in-process Candle model (ADR 070, e.g. Gemma 4 12B) does not pay for
         // a second copy of the weights — the two paths don't yet share one model
@@ -347,6 +318,22 @@ impl NluPipeline {
                     tracing::debug!(error = %e, "training data collector: NLG record failed");
                 }
             }
+        }
+    }
+
+    /// Share the loaded native model with local extraction without reloading weights.
+    pub fn local_llm(&self) -> Option<Arc<llm_translator::LlmTranslator>> {
+        #[cfg(feature = "candle-backend")]
+        {
+            self.candle_backend.as_ref().map(|backend| {
+                Arc::new(llm_translator::LlmTranslator::from_shared_backend(
+                    Arc::clone(backend),
+                ))
+            })
+        }
+        #[cfg(not(feature = "candle-backend"))]
+        {
+            None
         }
     }
 
@@ -546,8 +533,7 @@ impl NluPipeline {
 
     #[allow(unused_variables)] // kg_context used only when nlu-llm or candle-backend is enabled
     fn tier3_parse(&mut self, input: &str, kg_context: Option<&str>) -> NluResult<NluParseResult> {
-        // Tier 3 (Candle): Alternative LLM backend with hidden state access.
-        // Preferred over llama-cpp-2 when both are loaded.
+        // Tier 3: native LLM backend with hidden state access.
         #[cfg(feature = "candle-backend")]
         if let Some(candle_arc) = self.candle_backend.as_ref().map(Arc::clone) {
             tracing::debug!(
@@ -575,41 +561,6 @@ impl NluPipeline {
                 }
                 Err(e) => {
                     tracing::warn!(tier = 3, backend = "candle", error = %e, "Candle translation failed");
-                }
-            }
-        }
-
-        // Fallback: llama-cpp-2 LLM (Wrapped in catch_unwind: llama.cpp may abort).
-        #[cfg(feature = "nlu-llm")]
-        if let Some(ref llm_arc) = self.llm_translator {
-            let llm = Arc::clone(llm_arc);
-            let input_owned = input.to_string();
-            let ctx_owned = kg_context.map(str::to_string);
-            tracing::debug!(
-                tier = 3,
-                has_kg_context = ctx_owned.is_some(),
-                "attempting LLM translation"
-            );
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                llm.translate_with_context(&input_owned, ctx_owned.as_deref())
-            }));
-            match result {
-                Ok(Ok(translation)) => {
-                    tracing::info!(
-                        tier = 3,
-                        confidence = 0.70,
-                        tokens = translation.tokens_generated,
-                        "LLM translation succeeded"
-                    );
-                    self.ranker
-                        .record_success(input, &translation.tree, 3, 0.70);
-                    return Ok(self.make_result(input, translation.tree, 3, 0.70, None));
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(tier = 3, error = %e, "LLM translation failed");
-                }
-                Err(_) => {
-                    tracing::error!(tier = 3, "LLM translation panicked (llama.cpp assertion)");
                 }
             }
         }
@@ -764,27 +715,6 @@ impl NluPipeline {
             }
         }
 
-        // Fallback: llama.cpp llm_translator (legacy `nlu-llm`).
-        #[cfg(feature = "nlu-llm")]
-        if let Some(ref llm_arc) = self.llm_translator {
-            let llm = std::sync::Arc::clone(llm_arc);
-            let prompt = llm_translator::build_dialogue_prompt_with_kg(
-                act,
-                persona_name,
-                traits,
-                context,
-                kg_context,
-            );
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                llm.generate(&prompt, 64)
-            }));
-            match result {
-                Ok(Ok(text)) if !text.is_empty() => {
-                    return Some(text);
-                }
-                _ => {}
-            }
-        }
         None
     }
 
@@ -904,26 +834,17 @@ impl NluPipeline {
         traits: &[String],
         kg_context: Option<&str>,
     ) -> Option<String> {
-        #[cfg(feature = "nlu-llm")]
-        if let Some(ref llm_arc) = self.llm_translator {
-            let llm = std::sync::Arc::clone(llm_arc);
+        #[cfg(feature = "candle-backend")]
+        if let Some(candle_arc) = self.candle_backend.as_ref() {
             let prompt =
                 llm_translator::build_open_ended_prompt(query, persona_name, traits, kg_context);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                llm.generate(&prompt, 256)
-            }));
-            match result {
-                Ok(Ok(text)) if !text.is_empty() => {
-                    return Some(text);
-                }
-                Ok(Ok(_)) => {
-                    tracing::debug!("LLM open-ended generation returned empty text");
-                }
-                Ok(Err(e)) => {
-                    tracing::debug!(error = %e, "LLM open-ended generation failed");
-                }
-                Err(_) => {
-                    tracing::warn!("LLM open-ended generation panicked");
+            if let Ok(mut backend) = candle_arc.lock() {
+                match backend.generate(&prompt, 256) {
+                    Ok(text) if !text.is_empty() => return Some(text),
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Candle open-ended generation failed");
+                    }
                 }
             }
         }
@@ -945,16 +866,14 @@ impl NluPipeline {
                 }
             },
             tier3_llm: {
-                let mut available = false;
-                #[cfg(feature = "nlu-llm")]
-                {
-                    available = self.llm_translator.is_some();
-                }
                 #[cfg(feature = "candle-backend")]
                 {
-                    available = available || self.candle_backend.is_some();
+                    self.candle_backend.is_some()
                 }
-                available
+                #[cfg(not(feature = "candle-backend"))]
+                {
+                    false
+                }
             },
             tier4_ranker: true,
         }

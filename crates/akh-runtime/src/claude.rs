@@ -47,6 +47,8 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
                 turn.text(delta)?;
                 answer.push_str(delta);
             }
+            Some("reasoning") => turn.host.event(RuntimeEvent::Reasoning { text: message["text"].as_str().unwrap_or("").into() })?,
+            Some("usage") => turn.host.usage(&json!({"prompt_tokens":message["usage"]["input_tokens"],"completion_tokens":message["usage"]["output_tokens"]})),
             Some("tool") => {
                 let result = turn.tool(
                     &message["id"].to_string(),

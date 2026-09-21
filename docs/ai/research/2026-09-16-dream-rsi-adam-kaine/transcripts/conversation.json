@@ -1,0 +1,44 @@
+[
+  {
+    "role": "user",
+    "channel": null,
+    "text": "Today it rains papers to analyze have alook and see how relavant this is for ADAM and Kaine https://x.com/Dr_Singularity/status/2100204780010222076",
+    "timestamp": "2026-09-16T19:37:55.889Z"
+  },
+  {
+    "role": "assistant",
+    "channel": null,
+    "text": "I’ll trace the post to the paper and assess its relevance to ADAM and Kaine against the project context.",
+    "timestamp": "2026-09-16T19:37:58.915Z"
+  },
+  {
+    "role": "assistant",
+    "channel": null,
+    "text": "This is Dream-RSI, and its strongest fit is the exploration controller around ADAM and Kaine. It replays recorded attempts to improve branching and stopping decisions. The key limits are that replay cannot test unseen outcomes, and the headline 162× saving uses a different-model baseline; the controlled comparison is about 1.7× fewer discovery calls.",
+    "timestamp": "2026-09-16T19:38:31.340Z"
+  },
+  {
+    "role": "assistant",
+    "channel": null,
+    "text": "**Yes—highly relevant to Kaine’s exploration loop, and useful for ADAM’s surrounding harness now.** It gives us a concrete way to improve how the system spends attempts before changing model architecture.\n\nThe paper is [*Dream-RSI: Recursive Self-Improvement through Evolving Worlds*](https://arxiv.org/abs/2609.14858), from Google, DeepMind and university researchers.\n\n**What actually improves**\n\nAn agent records its discovery attempts as a tree: starting state, attempted solution, evaluation and descendants. A separate agent revises executable exploration-policy code—when to continue a branch, open another, batch attempts or stop. Candidate policies replay recorded outcomes cheaply; the winner guides new online exploration. Model weights remain fixed. [Paper, §3](https://arxiv.org/html/2609.14858v1#S3)\n\nThe important limitation: **replay only covers recorded possibilities.** It cannot establish what an untried action would accomplish. The guarantee of improvement applies to the historical replay score, not future performance. [Paper, §3](https://arxiv.org/html/2609.14858v1#S3)\n\nThe headline needs context:\n\n- **162× fewer discovery calls** compares against SimpleTES using a different underlying model.\n- The controlled Lasso comparison is **550 → 317 calls**, about **1.74× fewer**, with better average downstream solver runtime.\n- Discovery-call counts do not establish equivalent savings in total dollars, tokens or policy-development work. [Paper, §4.1](https://arxiv.org/html/2609.14858v1#S4.SS1)\n\n**Where I would apply it**\n\nI checked the current [architecture ladder](/Users/toasty/ws/akh-medu/docs/ai/decisions/111-kaine-architecture-ladder.md) and [character/environment design](/Users/toasty/ws/akh-medu/docs/ai/decisions/110-kaine-character-guided-reward-live-environment.md).\n\n| Area | Relevance | Proposed application |\n|---|---|---|\n| **ADAM inference** | High for tasks needing multiple attempts | Improve retry, branch and stopping choices around a frozen checkpoint. Measure whether the same model completes more tasks per budget. |\n| **ADAM training** | Indirect | Use successful exploration traces as potential corrected-sibling material. Selecting training exercises this way would be a separate extension requiring validation. |\n| **Kaine exploration** | Very high | Add an engine-owned controller that learns how to allocate effort across hypotheses and recovery paths. |\n| **Backbone architecture** | Low | This provides no reason to change the transformer/hybrid ladder. |\n\nFor Kaine, this connects neatly with today’s foresight and curiosity discussions. My proposed division is:\n\n- **Foresight:** propose a hypothesis and an experiment that could distinguish it.\n- **Curiosity:** estimate which unfamiliar problem is worth learning about.\n- **Replay-based exploration:** test which allocation of attempts has worked across prior searches.\n\nThat combination remains our research proposal; this paper does not validate the combined system.\n\nIt also fits the engine-as-captain boundary. Keep policy versions, observations, permissions and verification in the engine. Preserve ADR 110’s separate effect, validity, provenance, disposition and budget signals. A controller-selection objective need not become a new scalar reward for training Kaine.\n\n**The first experiment I’d prioritize**\n\nUse a frozen ADAM checkpoint on a small sandboxed repair-task set. Record branching attempts with parent snapshots, diagnostics, verified outcomes and costs. Compare:\n\n1. A fixed retry/branch policy.\n2. A simple hand-written adaptive policy.\n3. A policy improved through historical replay.\n\nSplit by **whole task**, hide unrevealed outcomes, and test the selected policy on **fresh online episodes**. Count policy-development cost too. Success means equal or better verified completion at lower total cost, without regressing the existing gates.\n\nThe main engineering trap is replaying stateful workflows: changing action order can change later outcomes. Start with isolated branches restored from snapshots; ordinary chronological tool logs are insufficient.\n\n**I would prioritize a bounded replay-controller experiment alongside P7’s environment work.** The mechanism is concrete, but the authors’ [repository](https://github.com/zhengkid/Dream-RSI) still lists the full implementation and reproduction scripts as pending, so this is currently an adaptation opportunity rather than a ready-to-run dependency.\n\n<oai-mem-citation>\n<citation_entries>\nMEMORY.md:49-51|note=[Prior ADAM experiments and Kaine reward boundaries checked against current ADRs]\n</citation_entries>\n<rollout_ids>\n01a0a98e-10f7-7af3-9aae-70685457a1a2\n</rollout_ids>\n</oai-mem-citation>",
+    "timestamp": "2026-09-16T19:39:10.917Z"
+  },
+  {
+    "role": "user",
+    "channel": null,
+    "text": "ok harvest that. this thread and papers and write them to the repo and seshat",
+    "timestamp": "2026-09-16T20:21:35.879Z"
+  },
+  {
+    "role": "assistant",
+    "channel": null,
+    "text": "I’ll archive this thread, the Dream-RSI paper and source material in the repo, then publish them to Seshat and verify the saved records.",
+    "timestamp": "2026-09-16T20:21:39.219Z"
+  },
+  {
+    "role": "assistant",
+    "channel": null,
+    "text": "I’ll preserve the conversation verbatim and archive Dream-RSI as the paper discussed here, with links to the existing foresight/curiosity collection. I’m using the PDF skill to check the downloaded paper and its text extraction.",
+    "timestamp": "2026-09-16T20:21:57.781Z"
+  }
+]

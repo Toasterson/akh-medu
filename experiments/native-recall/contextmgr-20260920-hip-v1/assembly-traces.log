@@ -1,0 +1,20 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+
+[exited with code 0]
+[2m2026-09-20T14:05:06.294411Z[0m [33m WARN[0m [2makh_session_services::runtime[0m[2m:[0m item4: /v1/runtime/context outcome [3mroute_reply[0m[2m=[0mtrue [3massembled[0m[2m=[0mtrue
+[2m2026-09-20T14:05:06.294446Z[0m [33m WARN[0m [2makh_session_services::internal[0m[2m:[0m item4: core assembly attempt [3mnative[0m[2m=[0mtrue [3massembled[0m[2m=[0mtrue [3mcandidate_messages[0m[2m=[0m1
+[2m2026-09-20T14:07:53.854260Z[0m [33m WARN[0m [2makh_session_services::runtime[0m[2m:[0m item4: /v1/runtime/context outcome [3mroute_reply[0m[2m=[0mtrue [3massembled[0m[2m=[0mtrue
+[2m2026-09-20T14:07:53.854306Z[0m [33m WARN[0m [2makh_session_services::internal[0m[2m:[0m item4: core assembly attempt [3mnative[0m[2m=[0mtrue [3massembled[0m[2m=[0mtrue [3mcandidate_messages[0m[2m=[0m3
+[2m2026-09-20T14:07:57.868740Z[0m [33m WARN[0m [2makh_session_services::runtime[0m[2m:[0m item4: /v1/runtime/context outcome [3mroute_reply[0m[2m=[0mtrue [3massembled[0m[2m=[0mtrue
+[2m2026-09-20T14:07:57.868773Z[0m [33m WARN[0m [2makh_session_services::internal[0m[2m:[0m item4: core assembly attempt [3mnative[0m[2m=[0mtrue [3massembled[0m[2m=[0mtrue [3mcandidate_messages[0m[2m=[0m5
+[2m2026-09-20T14:08:02.406044Z[0m [33m WARN[0m [2makh_session_services::runtime[0m[2m:[0m item4: /v1/runtime/context outcome [3mroute_reply[0m[2m=[0mtrue [3massembled[0m[2m=[0mtrue
+[2m2026-09-20T14:08:02.406081Z[0m [33m WARN[0m [2makh_session_services::internal[0m[2m:[0m item4: core assembly attempt [3mnative[0m[2m=[0mtrue [3massembled[0m[2m=[0mtrue [3mcandidate_messages[0m[2m=[0m7
+[2m2026-09-20T14:08:17.791655Z[0m [33m WARN[0m [2makh_session_services::runtime[0m[2m:[0m item4: /v1/runtime/context outcome [3mroute_reply[0m[2m=[0mtrue [3massembled[0m[2m=[0mtrue
+[2m2026-09-20T14:08:17.791696Z[0m [33m WARN[0m [2makh_session_services::internal[0m[2m:[0m item4: core assembly attempt [3mnative[0m[2m=[0mtrue [3massembled[0m[2m=[0mtrue [3mcandidate_messages[0m[2m=[0m9
+[2m2026-09-20T14:05:06.293894Z[0m [33m WARN[0m [2makh_session_services::server::sessions[0m[2m:[0m item4: assemble_turn_context entry [3mcore_service[0m[2m=[0mSome("core") [3mmessages[0m[2m=[0m1
+[2m2026-09-20T14:07:53.850156Z[0m [33m WARN[0m [2makh_session_services::server::sessions[0m[2m:[0m item4: assemble_turn_context entry [3mcore_service[0m[2m=[0mSome("core") [3mmessages[0m[2m=[0m3
+[2m2026-09-20T14:07:57.868088Z[0m [33m WARN[0m [2makh_session_services::server::sessions[0m[2m:[0m item4: assemble_turn_context entry [3mcore_service[0m[2m=[0mSome("core") [3mmessages[0m[2m=[0m5
+[2m2026-09-20T14:08:02.405261Z[0m [33m WARN[0m [2makh_session_services::server::sessions[0m[2m:[0m item4: assemble_turn_context entry [3mcore_service[0m[2m=[0mSome("core") [3mmessages[0m[2m=[0m7
+[2m2026-09-20T14:08:17.790799Z[0m [33m WARN[0m [2makh_session_services::server::sessions[0m[2m:[0m item4: assemble_turn_context entry [3mcore_service[0m[2m=[0mSome("core") [3mmessages[0m[2m=[0m9
+
+[exited with code 0]

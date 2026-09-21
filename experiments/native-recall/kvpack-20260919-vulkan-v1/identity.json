@@ -1,0 +1,34 @@
+{
+  "purpose": "Vulkan compressed-KV code layout: does packing three codes per u32 word pay, and what does it cost",
+  "device": "vulkan",
+  "source_commit": "a4997f164a6eb145b7d7618ffcbee3a0c89ac3d7",
+  "worktree_dirty": true,
+  "binary_sha256": "d2f9d53f4a1f533359473eaf1b8408e530cc073bbf0d5f90acbbf0a688c20310",
+  "tokenizer_sha256": "e271c182ffa63eebd6d0f60a688fb90d3e87a1141c99c4d87a0d4508badfefea",
+  "model_path": "/usr/share/ollama/.ollama/models/blobs/sha256-3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+  "model_size": 16810714496,
+  "model_identity_note": "Path and size only; model hash not recomputed by this recorder",
+  "arms": {
+    "A-no-compression": {},
+    "B-byte-layout": {
+      "AKH_QWEN35_KV_QUANT_BITS": "4",
+      "AKH_QWEN35_KV_QUANT_RECENT": "8",
+      "AKH_QWEN35_KV_PACK": "byte"
+    },
+    "C-packed-triple": {
+      "AKH_QWEN35_KV_QUANT_BITS": "4",
+      "AKH_QWEN35_KV_QUANT_RECENT": "8",
+      "AKH_QWEN35_KV_PACK": "packed"
+    }
+  },
+  "settings": {
+    "AKH_VULKAN_BATCH_ENCODER": "1",
+    "AKH_VULKAN_BATCH_PASS": "1",
+    "AKH_VULKAN_BATCH_SUBMIT": "1"
+  },
+  "logs": {
+    "three-way-stale-accounting.log": "All three arms. Decode rates valid; the byte arm's stored_bytes predate the device-aware accounting fix and read 3.94x, which is wrong.",
+    "byte-vs-packed-corrected-accounting.log": "Byte and packed arms rerun after the accounting fix. These stored_bytes figures are the ones to cite."
+  },
+  "note": "Identical preambles across arms, per the rule from the keyed-measurement-variance finding."
+}

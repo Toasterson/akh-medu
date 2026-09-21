@@ -1,0 +1,23 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== vulkan bits=8 ===
+TEXT: <think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!
+TEXT: <think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!
+{"fidelity":{"max_relative_l2":0.06687441145749655,"mean_cosine":0.9999379015070323,"min_cosine":0.9978774693775483,"vectors":4736},"layers":16,"layout":"packed-triple","paged_positions":592,"phase":"kv_pages","ratio":2.942528735632184,"stored_bytes":1648128,"uncompressed_bytes":4849664}
+=== end vulkan bits=8 rc=0 ===
+=== vulkan bits=4 ===
+TEXT: <think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!
+TEXT: <think>\nThe user wants me to say hello in one short sentence. Simple and straightforward.\n</think>\n\nHello, it's great to meet you!
+{"fidelity":{"max_relative_l2":0.17762690898679304,"mean_cosine":0.9953523676156519,"min_cosine":0.9854002149979055,"vectors":4736},"layers":16,"layout":"packed-triple","paged_positions":592,"phase":"kv_pages","ratio":2.942528735632184,"stored_bytes":1648128,"uncompressed_bytes":4849664}
+=== end vulkan bits=4 rc=0 ===
+=== vulkan bits=3 ===
+TEXT: <think>\nThe user wants me to say hello in one short sentence. This is straightforward - I just need to give a brief greeting.\n</think>\n\nHello, it's great to meet you!
+TEXT: <think>\nThe user wants me to say hello in one short sentence. This is straightforward - I just need to give a brief greeting.\n</think>\n\nHello, it's great to meet you!
+{"fidelity":{"max_relative_l2":0.25905679188058695,"mean_cosine":0.9828923145787241,"min_cosine":0.9662678669866545,"vectors":5888},"layers":16,"layout":"packed-triple","paged_positions":736,"phase":"kv_pages","ratio":2.942528735632184,"stored_bytes":2049024,"uncompressed_bytes":6029312}
+=== end vulkan bits=3 rc=0 ===
+=== vulkan bits=2 ===
+TEXT: <think>\n\n</think>\n\nHello!
+TEXT: <think>\n\n</think>\n\nHello!
+{"fidelity":{"max_relative_l2":0.403920962452592,"mean_cosine":0.9400755950012348,"min_cosine":0.9149084346533709,"vectors":1664},"layers":16,"layout":"packed-triple","paged_positions":208,"phase":"kv_pages","ratio":2.942528735632184,"stored_bytes":579072,"uncompressed_bytes":1703936}
+=== end vulkan bits=2 rc=0 ===
+
+[exited with code 0]

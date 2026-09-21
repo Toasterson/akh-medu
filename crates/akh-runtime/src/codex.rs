@@ -170,6 +170,16 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
             continue;
         }
         match method {
+            "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                turn.host.event(RuntimeEvent::Reasoning {
+                    text: params["delta"].as_str().unwrap_or("").into(),
+                })?;
+            }
+            "thread/tokenUsage/updated" => {
+                let usage = &params["tokenUsage"]["last"];
+                turn.host.usage(&json!({"prompt_tokens":usage["inputTokens"], "completion_tokens":usage["outputTokens"],
+                    "completion_tokens_details":{"reasoning_tokens":usage["reasoningOutputTokens"]}}));
+            }
             "turn/started" => {
                 active_turn = params["turn"]["id"].as_str().map(str::to_owned);
             }

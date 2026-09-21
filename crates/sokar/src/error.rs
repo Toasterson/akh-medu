@@ -11,6 +11,9 @@ pub enum SokarError {
         help("Check the TOML fields and env:/file: references; run sokard --check.")
     )]
     Config(String),
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    RoutePath(#[from] crate::config::RoutePathError),
     #[error("unknown store {0}")]
     #[diagnostic(
         code(sokar::config),
@@ -95,6 +98,20 @@ pub enum SokarError {
         help("Reduce the request size or raise limits.max_body_bytes.")
     )]
     BodyLimit,
+    #[error("inline content exceeds the effective limit of {limit} bytes")]
+    #[diagnostic(
+        code(sokar::inline_limit),
+        help(
+            "Use the HTTP content/upload API for larger artifacts, or raise max_bytes and mcp.max_inline_bytes."
+        )
+    )]
+    InlineLimit { limit: usize },
+    #[error("artifact content is not valid UTF-8")]
+    #[diagnostic(
+        code(sokar::not_utf8),
+        help("Use sokar_read_base64 to retrieve binary content without loss.")
+    )]
+    NotUtf8,
     #[error("unsupported manifest schema {actual}; expected {expected}")]
     #[diagnostic(
         code(sokar::manifest_schema),
@@ -144,7 +161,7 @@ fn storage_help(kind: ErrorKind) -> &'static str {
 impl SokarError {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Config(_) | Self::UnknownStore(_) => "sokar::config",
+            Self::Config(_) | Self::RoutePath(_) | Self::UnknownStore(_) => "sokar::config",
             Self::ScopeExists(_) => "sokar::scope_exists",
             Self::IdempotencyMismatch => "sokar::idempotency_mismatch",
             Self::StoreMismatch { .. } => "sokar::store_mismatch",
@@ -157,6 +174,8 @@ impl SokarError {
             Self::Conflict(_) => "sokar::conflict",
             Self::Invalid(_) => "sokar::request",
             Self::BodyLimit => "sokar::body_limit",
+            Self::InlineLimit { .. } => "sokar::inline_limit",
+            Self::NotUtf8 => "sokar::not_utf8",
             Self::ManifestSchema { .. } => "sokar::manifest_schema",
             Self::Range { .. } => "sokar::delivery",
             Self::Serde(_) => "sokar::manifest",
@@ -184,8 +203,8 @@ impl SokarError {
             | Self::StoreMismatch { .. } => S::CONFLICT,
             Self::Client(sokar_client::Error::ManifestSchema { .. }) => S::INTERNAL_SERVER_ERROR,
             Self::Client(_) => S::BAD_REQUEST,
-            Self::Invalid(_) => S::BAD_REQUEST,
-            Self::BodyLimit => S::PAYLOAD_TOO_LARGE,
+            Self::Invalid(_) | Self::NotUtf8 => S::BAD_REQUEST,
+            Self::BodyLimit | Self::InlineLimit { .. } => S::PAYLOAD_TOO_LARGE,
             Self::Range { .. } => S::RANGE_NOT_SATISFIABLE,
             Self::Storage { .. } | Self::Database(_) => S::SERVICE_UNAVAILABLE,
             _ => S::INTERNAL_SERVER_ERROR,
@@ -213,6 +232,7 @@ mod tests {
         let json_error = || serde_json::from_str::<serde_json::Value>("{").unwrap_err();
         let errors = vec![
             SokarError::Config("test".into()),
+            SokarError::RoutePath(crate::config::RoutePathError::NotAbsolute),
             SokarError::UnknownStore("missing".parse().unwrap()),
             SokarError::ScopeExists("scope".into()),
             SokarError::IdempotencyMismatch,
@@ -245,6 +265,8 @@ mod tests {
             SokarError::Conflict("test".into()),
             SokarError::Invalid("test".into()),
             SokarError::BodyLimit,
+            SokarError::InlineLimit { limit: 10 },
+            SokarError::NotUtf8,
             SokarError::ManifestSchema {
                 actual: "sokar.artifact.v2".into(),
                 expected: sokar_client::Artifact::SCHEMA,

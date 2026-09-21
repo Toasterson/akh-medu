@@ -1,0 +1,44 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== params layer of ptah-qwen3.8:stable ===
+{"stop":["\u003c|im_end|\u003e","\u003c|endoftext|\u003e"],"temperature":1,"top_k":20,"top_p":0.95}
+
+=== reference run ===
+--- square_bar_bottom (34s, prompt_eval=277) ---
+The image features a bold red square centered on a white background, with a solid blue horizontal bar spanning the bottom edge.
+--- square_bar_left (2s, prompt_eval=277) ---
+The image displays a simplified, abstract representation of the French flag, featuring a vertical blue stripe on the left and a solid red square centered on a white background.
+--- stripes_vertical (2s, prompt_eval=277) ---
+The image displays the national flag of France, featuring three vertical stripes of equal width in blue, white, and red from left to right.
+--- stripes_horizontal (2s, prompt_eval=277) ---
+The image displays a flag with three horizontal stripes: blue on top, white in the middle, and red on the bottom.
+--- square_left (2s, prompt_eval=277) ---
+The image displays a solid red square positioned in the upper-left quadrant of a white background.
+--- square_centre (2s, prompt_eval=277) ---
+This image features a solid red square centered on a plain white background.
+--- square_right (2s, prompt_eval=277) ---
+The image displays a solid red square positioned on the right side of a white background.
+--- text_ptah42 (2s, prompt_eval=277) ---
+The image displays the text "PTAH 412" in bold, black, uppercase letters against a plain white background.
+--- dot_bottom_left (2s, prompt_eval=277) ---
+The image displays a single, solid green circle positioned in the lower-left corner against a plain white background.
+--- three_dots (2s, prompt_eval=277) ---
+The image displays three solid black circles arranged horizontally in a straight line against a plain white background.
+--- triangle_above_circle (2s, prompt_eval=277) ---
+The image features a small blue triangle positioned above a larger red circle, both centered on a plain white background.
+
+=== stopping ollama ===
+api down after 1s
+VRAM used: 0.03 GiB
+no ollama process
+
+=== ours, the four semantic images ===
+--- text_ptah42 ---
+"text":"<think>\nThe user wants a one-sentence description of the image. I need to look carefully at what's present. The image shows black text on a white background. The text reads \"
+--- dot_bottom_left ---
+"text":"<think>\n\n</think>\n\nThis image features a single, solid green circle positioned in the bottom-left corner against a plain white background."
+--- three_dots ---
+"text":"<think>\n\n</think>\n\nThis image displays three solid black circles arranged horizontally in a straight line against a plain white background, evenly spaced and of identical size, resembling an ellipsis or a simple visual representation of a pause or continuation symbol."
+--- triangle_above_circle ---
+"text":"<think>\n\n</think>\n\nThe image displays a simple geometric composition featuring a solid blue triangle positioned directly above a larger, solid red circle, both centered on a plain white background."
+
+[exited with code 0]

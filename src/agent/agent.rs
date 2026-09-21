@@ -3769,9 +3769,11 @@ impl Agent {
             let json = serde_json::to_vec(psyche).map_err(|e| AgentError::ConsolidationFailed {
                 message: format!("failed to serialize psyche JSON: {e}"),
             })?;
-            store.put_meta(b"agent:psyche_json_v1", &json).map_err(|e| AgentError::ConsolidationFailed {
-                message: format!("failed to persist psyche JSON: {e}"),
-            })?;
+            store
+                .put_meta(b"agent:psyche_json_v1", &json)
+                .map_err(|e| AgentError::ConsolidationFailed {
+                    message: format!("failed to persist psyche JSON: {e}"),
+                })?;
             let psyche_bytes =
                 bincode::serialize(psyche).map_err(|e| AgentError::ConsolidationFailed {
                     message: format!("failed to serialize psyche: {e}"),
@@ -4196,18 +4198,28 @@ impl Agent {
             .unwrap_or_else(|| goal::restore_goals(&engine, &predicates).unwrap_or_default());
 
         // Restore psyche: prefer persisted state, fall back to compartment manager.
-        let psyche = if let Some(bytes) = store.get_meta(b"agent:psyche_json_v1")
-            .map_err(|e| AgentError::ConsolidationFailed { message: format!("failed to read psyche JSON: {e}") })? {
-            Some(serde_json::from_slice::<crate::compartment::psyche::Psyche>(&bytes)
-                .map_err(|e| AgentError::ConsolidationFailed { message: format!("invalid persisted psyche JSON: {e}") })?)
-        } else { store
-            .get_meta(b"agent:psyche")
-            .ok()
-            .flatten()
-            .and_then(|bytes| {
-                bincode::deserialize::<crate::compartment::psyche::Psyche>(&bytes).ok()
-            })
-            .or_else(|| engine.compartments().and_then(|cm| cm.psyche())) };
+        let psyche = if let Some(bytes) = store.get_meta(b"agent:psyche_json_v1").map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to read psyche JSON: {e}"),
+            }
+        })? {
+            Some(
+                serde_json::from_slice::<crate::compartment::psyche::Psyche>(&bytes).map_err(
+                    |e| AgentError::ConsolidationFailed {
+                        message: format!("invalid persisted psyche JSON: {e}"),
+                    },
+                )?,
+            )
+        } else {
+            store
+                .get_meta(b"agent:psyche")
+                .ok()
+                .flatten()
+                .and_then(|bytes| {
+                    bincode::deserialize::<crate::compartment::psyche::Psyche>(&bytes).ok()
+                })
+                .or_else(|| engine.compartments().and_then(|cm| cm.psyche()))
+        };
         // The cognitive core assembles prompts from the compartment view.
         // Restore that view from the same authoritative session identity.
         if let Some(restored) = psyche.as_ref()

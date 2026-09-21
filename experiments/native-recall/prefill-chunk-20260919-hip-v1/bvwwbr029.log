@@ -1,0 +1,11 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+=== materializing (flag off) ===
+{"path":"/tmp/grouped/off.f32","phase":"hidden_dump","values":5120}
+{"decode_seconds":2.32553258,"decode_steps_including_eos":47,"decode_steps_per_second":20.21042422893082,"finish":"Length","phase":"generation","prompt_tokens":26,"round":0,"seconds_including_prefill":3.122076048,"text":"<think>\nThe user asks me to explain in two sentences why a cache that..."resident model\" is a model that stays loaded in memory (e","time_to_first_token_seconds":0.79590699,"tokens":48}
+{"decode_seconds":2.3318949780000002,"decode_steps_including_eos":47,"decode_steps_per_second":20.155281624351094,"finish":"Length","phase":"generation","prompt_tokens":26,"round":1,"seconds_including_prefill":3.130137144,"text":"<think>\nThe user asks me to explain in two sentences why a cache that..."resident model\" is a model that stays loaded in memory (e","time_to_first_token_seconds":0.797955377,"tokens":48}
+=== grouped (flag on) ===
+{"path":"/tmp/grouped/on.f32","phase":"hidden_dump","values":5120}
+{"decode_seconds":2.241904344,"decode_steps_including_eos":47,"decode_steps_per_second":20.964319965651487,"finish":"Length","phase":"generation","prompt_tokens":26,"round":0,"seconds_including_prefill":3.040087767,"text":"<think>\nThe user asks me to explain in two sentences why a cache that..."resident model\" is a model that stays loaded in memory (e","time_to_first_token_seconds":0.797321529,"tokens":48}
+{"decode_seconds":2.225890842,"decode_steps_including_eos":47,"decode_steps_per_second":21.115141458495653,"finish":"Length","phase":"generation","prompt_tokens":26,"round":1,"seconds_including_prefill":3.026625278,"text":"<think>\nThe user asks me to explain in two sentences why a cache that..."resident model\" is a model that stays loaded in memory (e","time_to_first_token_seconds":0.8002561,"tokens":48}
+
+[exited with code 0]

@@ -1,16 +1,32 @@
 use akh_runtime::{Host, ProviderConfig};
 use akh_session_types::*;
 use serde_json::{Value, json};
-use std::{os::unix::fs::PermissionsExt, sync::atomic::AtomicBool};
+use std::{
+    os::unix::fs::PermissionsExt,
+    sync::{Mutex, MutexGuard, atomic::AtomicBool},
+};
+
+/// Every test here writes an executable fixture and then forks to run it. Two
+/// tests doing that concurrently race: a fork in one inherits the other's
+/// still-open write descriptor, and the exec then fails with ETXTBSY ("Text
+/// file busy"). Serialise the tests instead of hoping the scheduler is kind.
+static SERIAL: Mutex<()> = Mutex::new(());
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[derive(Default)]
 struct Witness {
     events: Vec<RuntimeEvent>,
+    usage: Vec<Value>,
     calls: usize,
     approvals: usize,
     structured: bool,
 }
 impl Host for Witness {
+    fn usage(&mut self, usage: &Value) {
+        self.usage.push(usage.clone());
+    }
     fn event(&mut self, event: RuntimeEvent) -> std::result::Result<(), String> {
         self.events.push(event);
         Ok(())
@@ -59,6 +75,7 @@ fn setup(
     let config = ProviderConfig {
         isolation: None,
         model_endpoint: None,
+        native_candle: None,
         revision: "1".into(),
         kind,
         working_dir: cwd.clone(),
@@ -118,6 +135,7 @@ fn setup(
 
 #[test]
 fn brokered_codex_uses_supplied_tools_and_never_approves_native_execution() {
+    let _serial = serial();
     let (_dir, config, mut request) = setup(RuntimeKind::Codex, ExecutionMode::Brokered);
     let mut host = Witness::default();
     let cancel = AtomicBool::new(false);
@@ -140,6 +158,16 @@ fn brokered_codex_uses_supplied_tools_and_never_approves_native_execution() {
         "7"
     );
     assert_eq!(host.calls, 1);
+    assert!(
+        host.events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::Reasoning { text } if text == "fixture reasoning"))
+    );
+    assert_eq!(host.usage.last().unwrap()["prompt_tokens"], 17);
+    assert_eq!(
+        host.usage.last().unwrap()["completion_tokens_details"]["reasoning_tokens"],
+        2
+    );
     host.structured = true;
     let output = akh_runtime::run(&config, &request, &mut host, &cancel).unwrap();
     let result: Value = serde_json::from_str(&output).unwrap();
@@ -150,11 +178,17 @@ fn brokered_codex_uses_supplied_tools_and_never_approves_native_execution() {
 
 #[test]
 fn standalone_transport_resumes_exact_provider_session() {
+    let _serial = serial();
     for kind in [RuntimeKind::Codex, RuntimeKind::Claude] {
         let (_dir, config, mut request) = setup(kind, ExecutionMode::Colocated);
         let mut host = Witness::default();
         let cancel = AtomicBool::new(false);
         akh_runtime::run(&config, &request, &mut host, &cancel).unwrap();
+        if kind == RuntimeKind::Claude {
+            assert_eq!(host.usage.last().unwrap()["prompt_tokens"], 11);
+            assert_eq!(host.usage.last().unwrap()["completion_tokens"], 5);
+            assert!(host.events.iter().any(|e| matches!(e, RuntimeEvent::Reasoning { text } if text == "fixture Claude reasoning")));
+        }
         request.provider_session = host.events.iter().find_map(|e| {
             if let RuntimeEvent::Bound {
                 provider_session, ..

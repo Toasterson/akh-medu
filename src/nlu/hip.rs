@@ -156,12 +156,26 @@ impl RocmBlas {
     pub fn load() -> NluResult<Self> {
         let hip = open_first(HIP_LIB_CANDIDATES, "libamdhip64")?;
         let rocblas = open_first(ROCBLAS_LIB_CANDIDATES, "librocblas")?;
-        // The dequant kernel lib is built into OUT_DIR by build.rs (optional).
-        let kernel_path = concat!(env!("OUT_DIR"), "/libakh_hip_kernels.so");
-        let kernels = unsafe { Library::new(kernel_path) }.ok();
+        // Optional for the older CPU-storage adapter, but an explicitly selected
+        // bundle must fail closed rather than silently lose quantized GPU support.
+        let kernel_path = candle_core::hip_kernel_path::resolve(
+            "libakh_hip_kernels.so",
+            concat!(env!("OUT_DIR"), "/libakh_hip_kernels.so"),
+        );
+        let kernels = kernel_path
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|path| unsafe { Library::new(path) }.map_err(|error| error.to_string()));
+        let kernels = match kernels {
+            Ok(library) => Some(library),
+            Err(reason) if std::env::var_os("AKH_HIP_KERNEL_DIR").is_some() => {
+                return Err(NluError::ModelLoadFailed { reason });
+            }
+            Err(_) => None,
+        };
         if kernels.is_none() {
             tracing::warn!(
-                path = kernel_path,
+                path = ?kernel_path,
                 "HIP dequant kernel not found — quantized GPU path unavailable"
             );
         }

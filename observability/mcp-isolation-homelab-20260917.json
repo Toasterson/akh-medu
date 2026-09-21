@@ -1,0 +1,99 @@
+{
+  "verified_at": "2026-09-17T18:55:59.083538+00:00",
+  "source_commit": "6951fedb0973315e265b1a1797ece4d61c4601d5",
+  "baseline": "c62a1928",
+  "tests_passed": 38,
+  "gitops_pr": "https://github.com/Toasterson/talos/pull/34",
+  "flux_revision": "main@sha1:cb42996d6ae395b24e00afbbc922c5309e81fcd2",
+  "flux_conditions": [
+    {
+      "type": "Ready",
+      "status": "True"
+    },
+    {
+      "type": "Healthy",
+      "status": "True"
+    }
+  ],
+  "image": "code.aopc.cloud/toasterson/akh-sessions@sha256:b2b667e7d63d82f5bf48f7f3253c75875c2aec6edeb621dfa412028aa048805d",
+  "deployment_generation": 19,
+  "observed_generation": 19,
+  "ready_replicas": 1,
+  "recovery": [
+    {
+      "akh": "minerva",
+      "old_job": "01a0af7d-3353-7093-a7e9-cfb4f1a91634",
+      "old_job_status": "failed",
+      "preserved_unknown_receipts": [
+        {
+          "name": "board__board_inbox",
+          "sent": true,
+          "unknown": true,
+          "result": null
+        }
+      ],
+      "queued_session": "01a0b0a0-9a15-74a0-92f0-6a978b92eb1e",
+      "current_status": "running"
+    },
+    {
+      "akh": "vesta",
+      "old_job": "01a0afbf-377a-7952-9d1c-c586c5c5e7ca",
+      "old_job_status": "failed",
+      "preserved_unknown_receipts": [
+        {
+          "name": "board__board_post_thread",
+          "sent": true,
+          "unknown": true,
+          "result": null
+        }
+      ],
+      "queued_session": "01a0b0a1-8a3a-70e1-87d1-e235a6da5240",
+      "current_status": "dispatching"
+    }
+  ],
+  "runtime_audit": {
+    "runtime-maat": {
+      "http_404": 9,
+      "failed": 28,
+      "cancelled": 2
+    },
+    "runtime-sekhmet": {
+      "http_404": 2,
+      "failed": 16
+    },
+    "runtime-anubis": {
+      "http_404": 2
+    },
+    "runtime-thoth-mac": {
+      "http_404": 3
+    },
+    "runtime-astra-impl-1": {
+      "http_404": 2
+    },
+    "runtime-astra-impl-3": {
+      "http_404": 2,
+      "failed": 5
+    },
+    "runtime-astra-impl-2": {
+      "http_404": 3,
+      "failed": 15
+    },
+    "runtime-astra-impl-4": {
+      "http_404": 1,
+      "failed": 3
+    },
+    "runtime-tecton": {
+      "failed": 8,
+      "unknown": 1,
+      "http_404": 6
+    }
+  },
+  "remaining_separate_blocker": {
+    "akh": "tecton",
+    "job": "01a0afb1-2328-7b40-bad5-2fee83a0886e",
+    "error": "timeout: internal runtime exceeded its turn deadline",
+    "unresolved_mcp_receipts": 0,
+    "action": "untouched; requires separate workspace/process reconciliation"
+  },
+  "topology": "unchanged"
+}

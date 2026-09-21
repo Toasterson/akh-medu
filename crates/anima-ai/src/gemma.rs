@@ -18,7 +18,6 @@ use crate::error::{GemmaError, GemmaResult};
 ///
 /// Implement this to connect an actual model:
 /// - local Gemma via Candle GGUF
-/// - local Gemma via llama-cpp-2
 /// - remote Gemma API proxy
 pub trait GemmaBackend: Send + Sync {
     /// Generate a completion for `prompt`, optionally grounded in `context`.

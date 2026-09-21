@@ -410,6 +410,7 @@ mod tests {
             token_file: token,
             ca_file: None,
             allow_insecure_http: false,
+            request_timeout_secs: None,
         };
         let config = super::super::Config {
             listen: "127.0.0.1:0".parse().unwrap(),

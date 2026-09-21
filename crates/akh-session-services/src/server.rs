@@ -61,10 +61,7 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
     use clap::Parser;
     let args = Args::parse();
     let config = Arc::new(Config::load(&args.config)?);
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .init();
+    let telemetry = crate::telemetry::init(kind, &config.service_id)?;
     for principal in &config.principals {
         principal.credential()?;
     }
@@ -75,7 +72,9 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
     let legacy_redb_path = config.data_dir.join(format!("{kind}.redb"));
     let store = match &config.store {
         None => Store::open(&legacy_redb_path)?,
-        Some(StoreConfig::Sqlite) => Store::open_sqlite(&config.data_dir.join(format!("{kind}.sqlite3")))?,
+        Some(StoreConfig::Sqlite) => {
+            Store::open_sqlite(&config.data_dir.join(format!("{kind}.sqlite3")))?
+        }
         Some(StoreConfig::Postgres { url_env, schema }) => {
             let url = std::env::var(url_env).map_err(|_| {
                 Fault::invalid(format!(
@@ -91,6 +90,9 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
                 // previously-redb deployment over to Postgres carries every
                 // in-flight session across exactly once.
                 legacy_redb_path: Some(legacy_redb_path),
+                // Default ceiling; the cache is a round-trip saver, and an
+                // unbounded one previously OOM-killed this daemon.
+                cache_capacity_bytes: None,
             })?
         }
     };
@@ -174,6 +176,16 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
     let router=router.route("/healthz",get(move||{let identity=identity.clone();async move{Json(json!({"service_id":identity,"schema_version":SCHEMA_VERSION,"status":"listening"}))}}));
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(service=%config.service_id,address=%listener.local_addr()?,"service listening");
+    // Separate listener on purpose: heap profiles carry live session content,
+    // and `listen` is published through an HTTPRoute.
+    #[cfg(feature = "profiling")]
+    if let Some(address) = config.profiling_listen {
+        tasks.push(tokio::spawn(async move {
+            if let Err(error) = crate::profiling::serve(address).await {
+                tracing::error!(%error, "heap profiling listener stopped");
+            }
+        }));
+    }
     use std::future::IntoFuture;
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = axum::serve(listener, router)
@@ -182,7 +194,7 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
         })
         .into_future();
     tokio::pin!(server);
-    tokio::select! { result=&mut server=>{return Ok(result?);}, _=shutdown()=>{} }
+    tokio::select! { result=&mut server=>{tokio::task::spawn_blocking(move || drop(telemetry)).await?; return Ok(result?);}, _=shutdown()=>{} }
     let _ = stop.send(());
     for task in tasks {
         task.abort();
@@ -201,6 +213,7 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
             "HTTP drain deadline reached; unresolved durable work remains fenced on restart"
         ),
     }
+    tokio::task::spawn_blocking(move || drop(telemetry)).await?;
     Ok(())
 }
 async fn shutdown() {

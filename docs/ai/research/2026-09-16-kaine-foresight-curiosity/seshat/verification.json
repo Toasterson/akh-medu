@@ -1,0 +1,66 @@
+[
+  {
+    "key": "handoff",
+    "document_id": "01a0aba4-dc34-7592-9b58-c7d3058ffc4f",
+    "chunks": 7,
+    "hash_matches": true,
+    "expected": "b90282bc0d65a0b452586d190d8b2d9450c99a37acc0584023097d47fecd9e80",
+    "actual": "b90282bc0d65a0b452586d190d8b2d9450c99a37acc0584023097d47fecd9e80"
+  },
+  {
+    "key": "claude-transcript",
+    "document_id": "01a0aba5-093b-7d30-a779-129252421e06",
+    "chunks": 11,
+    "hash_matches": true,
+    "expected": "268466ca0dac30dd617107f4b973619fad78db31d9ba814997183fdab3012a1e",
+    "actual": "268466ca0dac30dd617107f4b973619fad78db31d9ba814997183fdab3012a1e"
+  },
+  {
+    "key": "codex-transcript",
+    "document_id": "01a0aba5-09cc-7081-a0c2-ca1c512a8bdd",
+    "chunks": 24,
+    "hash_matches": true,
+    "expected": "0967a36fe7c7f4d0907e0d7f0d4d5ecb5560b9e4565b3b2dc4b3ae0554514f48",
+    "actual": "0967a36fe7c7f4d0907e0d7f0d4d5ecb5560b9e4565b3b2dc4b3ae0554514f48"
+  },
+  {
+    "key": "oxford-paper",
+    "document_id": "01a0aba5-0a9c-74a2-bb2c-a22038ab62f9",
+    "chunks": 115,
+    "hash_matches": true,
+    "expected": "d88de17f2d22946a9ac3844e14e1ddae570549306fcb45a1e5267952109e0268",
+    "actual": "d88de17f2d22946a9ac3844e14e1ddae570549306fcb45a1e5267952109e0268"
+  },
+  {
+    "key": "compression-paper",
+    "document_id": "01a0aba5-0b51-7fc0-82c2-0a1a8c913390",
+    "chunks": 94,
+    "hash_matches": true,
+    "expected": "3566d5921c0c8bb50fc1152b69debe9f14b590e0f326221c2a20198f7543f827",
+    "actual": "3566d5921c0c8bb50fc1152b69debe9f14b590e0f326221c2a20198f7543f827"
+  },
+  {
+    "key": "sources",
+    "document_id": "01a0aba5-0bd6-7690-abd5-87a4cbb9f661",
+    "chunks": 2,
+    "hash_matches": true,
+    "expected": "a028a76b5f5295946c29c6822693bf8d0efcf29f1a21cea5fa113073da9060c6",
+    "actual": "a028a76b5f5295946c29c6822693bf8d0efcf29f1a21cea5fa113073da9060c6"
+  },
+  {
+    "key": "architecture",
+    "document_id": "01a0aba5-0c75-79f0-af07-266341a2f62d",
+    "chunks": 50,
+    "hash_matches": true,
+    "expected": "de01a174d5dffd21caa3f48d7f9dca3c84724cb236f8bb6b232bb36095804e5d",
+    "actual": "de01a174d5dffd21caa3f48d7f9dca3c84724cb236f8bb6b232bb36095804e5d"
+  },
+  {
+    "key": "claude-evidence",
+    "document_id": "01a0aba5-0cfe-7f91-9080-10ba79c8af3f",
+    "chunks": 30,
+    "hash_matches": true,
+    "expected": "e1b05c0a7e7dfd1b81944db731aa42f5209692ffeaa0e19b3846ca379069ed53",
+    "actual": "e1b05c0a7e7dfd1b81944db731aa42f5209692ffeaa0e19b3846ca379069ed53"
+  }
+]

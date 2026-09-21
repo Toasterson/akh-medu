@@ -148,6 +148,19 @@ pub struct Runtime {
 fn job_key(id: &str) -> String {
     key("job", &[id])
 }
+/// A job moves here, out of the scanned `job/` prefix, the moment it becomes
+/// terminal (Completed/Failed/Cancelled). `submit`'s quarantine scan and
+/// `resolve_stale_unknown_jobs` only ever need to see live (Running/Unknown)
+/// jobs, so once a job is done, leaving its up-to-4-MiB `output` and
+/// up-to-4-MiB `events` sitting in `job/` costs a full deserialize of both on
+/// every scan for no reason — see `job_key`'s doc and the commit this
+/// accompanies.
+fn archived_job_key(id: &str) -> String {
+    key("archived_job", &[id])
+}
+fn event_bytes_key(id: &str) -> String {
+    key("runtime_event_bytes", &[id])
+}
 fn unknown_since_key(id: &str) -> String {
     key("unknown_since", &[id])
 }
@@ -159,6 +172,62 @@ fn note_unknown_since(tx: &mut Transaction<'_>, id: &str) -> Result<()> {
     if tx.get::<u64>(&unknown_since_key(id))?.is_none() {
         tx.put(&unknown_since_key(id), &now_ms())?;
     }
+    Ok(())
+}
+
+/// Which prefix a job record currently lives in. Returned by `load_job` so a
+/// caller can write back to the same prefix with `save_job` instead of
+/// guessing — a late write (e.g. an event appended by a worker racing a
+/// reconciliation) must never resurrect an archived job into `job/`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JobSlot {
+    Live,
+    Archived,
+}
+
+/// Reads a job record by id inside a transaction, checking the live `job/`
+/// prefix first and falling back to `archived_job/` for jobs whose terminal
+/// outcome has already been archived out of the scanned prefix.
+fn load_job(tx: &Transaction<'_>, id: &str) -> Result<Option<(RuntimeJob, JobSlot)>> {
+    if let Some(job) = tx.get::<RuntimeJob>(&job_key(id))? {
+        return Ok(Some((job, JobSlot::Live)));
+    }
+    if let Some(job) = tx.get::<RuntimeJob>(&archived_job_key(id))? {
+        return Ok(Some((job, JobSlot::Archived)));
+    }
+    Ok(None)
+}
+
+/// Non-transactional twin of `load_job`, for reads outside a transaction
+/// (e.g. `Runtime::get` and the idempotent-resubmit check in `submit`).
+fn load_job_record(store: &Store, id: &str) -> Result<Option<RuntimeJob>> {
+    if let Some(job) = store.get::<RuntimeJob>(&job_key(id))? {
+        return Ok(Some(job));
+    }
+    store.get(&archived_job_key(id))
+}
+
+/// Writes a job record back to whichever prefix `load_job` found it in, so a
+/// late write can never resurrect an archived job into the scanned `job/`
+/// prefix. Does not change slots — use `archive_job` for the terminal
+/// transition itself.
+fn save_job(tx: &mut Transaction<'_>, job: &RuntimeJob, slot: JobSlot) -> Result<()> {
+    match slot {
+        JobSlot::Live => tx.put(&job_key(&job.request.id), job),
+        JobSlot::Archived => tx.put(&archived_job_key(&job.request.id), job),
+    }
+}
+
+/// Moves a now-terminal job from `job/` to `archived_job/` in one
+/// transaction: put at the archived key, delete the live key, and delete the
+/// per-job side keys (`unknown_since`, `runtime_event_bytes`) that only ever
+/// matter while the job is live. Callers must only reach this once
+/// `job.status.terminal()` is true.
+fn archive_job(tx: &mut Transaction<'_>, job: &RuntimeJob) -> Result<()> {
+    tx.put(&archived_job_key(&job.request.id), job)?;
+    tx.delete(&job_key(&job.request.id))?;
+    tx.delete(&unknown_since_key(&job.request.id))?;
+    tx.delete(&event_bytes_key(&job.request.id))?;
     Ok(())
 }
 
@@ -177,7 +246,26 @@ impl Runtime {
                     tx.put(&job_key(&job.request.id), &job)?;
                     note_unknown_since(tx, &job.request.id)?;
                 }
-            } Ok(())
+            }
+            // One-time migration for records written by a binary from before
+            // job archival existed: a terminal job left in `job/` by that
+            // older code is otherwise never archived (nothing here re-visits
+            // an already-terminal job), so it would keep being deserialized
+            // by every future scan forever.
+            let mut migrated = 0usize;
+            for job in tx.scan::<RuntimeJob>("job/")? {
+                if job.request.binding.runtime == config.service_id && job.status.terminal() {
+                    archive_job(tx, &job)?;
+                    migrated += 1;
+                }
+            }
+            if migrated > 0 {
+                tracing::info!(
+                    count = migrated,
+                    "archived pre-existing terminal jobs out of the scanned job/ prefix"
+                );
+            }
+            Ok(())
         })?;
         Ok(Self {
             client: Client::new(config.clone())?,
@@ -213,16 +301,14 @@ impl Runtime {
                     "unknown_outcome",
                     "runtime automatically closed this job after its outcome stayed unknown past the reconciliation stall threshold; no completion was ever inferred",
                 ));
-                tx.put(&job_key(&job.request.id), &job)?;
+                archive_job(tx, &job)?;
                 resolved.push(job.request.id.clone());
             }
             Ok(resolved)
         })
     }
     pub fn get(&self, id: &str) -> Result<RuntimeJob> {
-        let job: RuntimeJob = self
-            .store
-            .get(&job_key(id))?
+        let job = load_job_record(&self.store, id)?
             .ok_or_else(|| Fault::missing("runtime job not found"))?;
         if job.request.binding.runtime != self.config.service_id {
             return Err(Fault::new(
@@ -234,21 +320,38 @@ impl Runtime {
     }
     /// Atomically fence a dispatch that was cancelled before admission. A late
     /// submit observes this exact tombstone and cannot start a model or tool.
-    pub fn cancel_unsubmitted(&self, principal: &Principal, request: RuntimeJobRequest) -> Result<RuntimeJob> {
+    pub fn cancel_unsubmitted(
+        &self,
+        principal: &Principal,
+        request: RuntimeJobRequest,
+    ) -> Result<RuntimeJob> {
         crate::http::role(principal, "session")?;
         validate_key(&request.id)?;
         if request.binding.runtime != self.config.service_id || request.generation == 0 {
-            return Err(Fault::new("forbidden", "runtime binding is not owned by this service"));
+            return Err(Fault::new(
+                "forbidden",
+                "runtime binding is not owned by this service",
+            ));
         }
         let _active = self.active.lock().unwrap_or_else(|e| e.into_inner());
         self.store.transaction(|tx| {
             if let Some(old) = tx.get::<RuntimeJob>(&job_key(&request.id))? {
-                if old.request != request { return Err(Fault::conflict("job id reused with a different dispatch")); }
+                if old.request != request {
+                    return Err(Fault::conflict("job id reused with a different dispatch"));
+                }
                 return Ok(old);
             }
-            let job = RuntimeJob { provider_session: request.provider_session.clone(), request,
-                status: TurnStatus::Cancelled, output: None,
-                error: Some(Fault::new("cancelled", "cancelled before runtime admission")), events: vec![] };
+            let job = RuntimeJob {
+                provider_session: request.provider_session.clone(),
+                request,
+                status: TurnStatus::Cancelled,
+                output: None,
+                error: Some(Fault::new(
+                    "cancelled",
+                    "cancelled before runtime admission",
+                )),
+                events: vec![],
+            };
             tx.put(&job_key(&job.request.id), &job)?;
             Ok(job)
         })
@@ -263,7 +366,7 @@ impl Runtime {
             ));
         }
         let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(old) = self.store.get::<RuntimeJob>(&job_key(&request.id))? {
+        if let Some(old) = load_job_record(&self.store, &request.id)? {
             if old.request != request {
                 return Err(Fault::conflict("job id reused with a different dispatch"));
             }
@@ -284,7 +387,8 @@ impl Runtime {
             ));
         }
         if self.store.scan::<RuntimeJob>("job/")?.iter().any(|j| {
-            j.request.binding.runtime == self.config.service_id && j.status == TurnStatus::Unknown
+            j.request.binding.runtime == self.config.service_id
+                && j.status == TurnStatus::Unknown
                 && (j.request.binding.kind != RuntimeKind::Internal
                     || profile.kind != RuntimeKind::Internal
                     || j.request.binding.profile == request.binding.profile
@@ -295,7 +399,7 @@ impl Runtime {
                 "runtime is quarantined until unknown jobs and possible orphan processes are reconciled",
             ));
         }
-        // One provider child per daemon keeps credential files and capacity ownership unambiguous.
+        // One provider job per daemon keeps credentials and compute capacity ownership unambiguous.
         // Scale runtime replicas with distinct service IDs for additional capacity.
         if !active.is_empty() {
             return Err(Fault::new("busy", "runtime capacity is occupied"));
@@ -320,27 +424,52 @@ impl Runtime {
         let service = self.clone();
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
+            let span = tracing::info_span!("runtime.turn", session.id=%request.session_id,
+                turn.id=%request.turn_id, job.id=%request.id, runtime.id=%request.binding.runtime, runtime.profile=%request.binding.profile,
+                model=%request.binding.model.as_deref().unwrap_or("unknown"), generation=request.generation,
+                otel.status_code=tracing::field::Empty);
+            let _entered = span.enter();
+            let mut operation = crate::telemetry::Operation::new("turn");
+            tracing::info!(event.name = "runtime.turn.started", "runtime turn started");
             let _profile_lease = profile_lease;
             let mut host = RemoteHost {
                 service: service.clone(),
                 request: request.clone(),
                 handle,
                 cancel: cancel.clone(),
+                native_tools: HashMap::new(),
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if profile.kind == RuntimeKind::Internal {
-                    crate::internal::run_loop(&service.store, &profile, &request, &mut host, &cancel)
+                    crate::internal::run_loop(
+                        &service.store,
+                        &profile,
+                        &request,
+                        &mut host,
+                        &cancel,
+                    )
                 } else {
                     akh_runtime::run(&profile, &request, &mut host, &cancel)
                         .map_err(|message| Fault::new("unknown_outcome", message))
                 }
             }))
             .unwrap_or_else(|_| {
-                Err(Fault::new("unknown_outcome", "runtime worker panicked; outcome requires reconciliation"))
+                Err(Fault::new(
+                    "unknown_outcome",
+                    "runtime worker panicked; outcome requires reconciliation",
+                ))
             });
+            if result.is_ok() {
+                operation.success();
+            } else {
+                span.record("otel.status_code", "ERROR");
+                tracing::error!(
+                    event.name = "runtime.turn.failed",
+                    "runtime turn failed; see provider and tool events"
+                );
+            }
             let saved = service.store.transaction(|tx| {
-                let mut job: RuntimeJob = tx
-                    .get(&job_key(&request.id))?
+                let (mut job, slot) = load_job(tx, &request.id)?
                     .ok_or_else(|| Fault::missing("runtime job disappeared"))?;
                 match result {
                     Ok(output) if output.len() <= 4 * 1024 * 1024 => {
@@ -354,13 +483,23 @@ impl Runtime {
                             "provider answer exceeded the durable job response budget",
                         ));
                     }
-                    Err(error) if profile.kind == RuntimeKind::Internal && matches!(error.code.as_str(), "model_incomplete" | "model_cancelled") => {
+                    Err(error)
+                        if profile.kind == RuntimeKind::Internal
+                            && matches!(
+                                error.code.as_str(),
+                                "model_incomplete" | "model_cancelled"
+                            ) =>
+                    {
                         // These typed errors occur only at model boundaries,
                         // with no callback outstanding and preceding tool
                         // results durable. Retire the continuation
                         // without claiming success or replaying earlier effects.
                         crate::internal::reconcile(tx, &job, false)?;
-                        job.status = if error.code == "model_cancelled" { TurnStatus::Cancelled } else { TurnStatus::Failed };
+                        job.status = if error.code == "model_cancelled" {
+                            TurnStatus::Cancelled
+                        } else {
+                            TurnStatus::Failed
+                        };
                         job.error = Some(error);
                     }
                     Err(error) => {
@@ -383,9 +522,13 @@ impl Runtime {
                         ));
                     }
                 }
-                tx.put(&job_key(&request.id), &job)?;
-                if job.status == TurnStatus::Unknown {
-                    note_unknown_since(tx, &request.id)?;
+                if job.status.terminal() {
+                    archive_job(tx, &job)?;
+                } else {
+                    save_job(tx, &job, slot)?;
+                    if job.status == TurnStatus::Unknown {
+                        note_unknown_since(tx, &request.id)?;
+                    }
                 }
                 Ok(())
             });
@@ -434,8 +577,16 @@ impl Runtime {
             return Err(Fault::new("busy", "runtime worker is still active"));
         }
         self.store.transaction(|tx| {
+            // `target` is the reconciliation audit's identity, not a storage
+            // key to read/write today: it must stay the `job_key(id)` string
+            // even after this job is archived, or a second identical
+            // reconcile call (whose `already` check compares `old.target !=
+            // target`) would see a mismatch and fault instead of returning
+            // the idempotent result.
             let target=job_key(id);
-            let mut job:RuntimeJob=tx.get(&target)?.ok_or_else(||Fault::missing("runtime job not found"))?;
+            let Some((mut job, _slot)) = load_job(tx, id)? else {
+                return Err(Fault::missing("runtime job not found"));
+            };
             if job.request.binding.runtime != self.config.service_id {
                 return Err(Fault::new("forbidden", "runtime job belongs to another service"));
             }
@@ -451,7 +602,8 @@ impl Runtime {
             job.status=resolution.status;
             job.output=resolution.output.clone();
             job.error=if job.status==TurnStatus::Completed {None} else {Some(Fault::new("operator_resolved","operator resolved the unknown turn; see reconciliation evidence"))};
-            tx.put(&target,&job)?;
+            // `recovery::validate` already required `resolution.status.terminal()`.
+            archive_job(tx, &job)?;
             crate::recovery::record(tx,principal,&target,resolution)?;
             Ok(job)
         })
@@ -465,6 +617,7 @@ struct RemoteHost {
     request: RuntimeJobRequest,
     handle: tokio::runtime::Handle,
     cancel: Arc<AtomicBool>,
+    native_tools: HashMap<String, (tracing::Span, crate::telemetry::Operation)>,
 }
 impl RemoteHost {
     fn call(&self, id: &str, name: &str, arguments: Value) -> ToolCall {
@@ -475,6 +628,30 @@ impl RemoteHost {
             generation: self.request.generation,
             name: name.into(),
             arguments,
+        }
+    }
+    /// One bounded exchange with the session daemon. `Ok(None)` when the daemon
+    /// predates the route (HTTP 404 without a fault body), so newer runtimes
+    /// degrade to the old behaviour instead of failing the turn.
+    fn post_optional<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: Value,
+    ) -> std::result::Result<Option<T>, String> {
+        if self.cancel.load(Ordering::SeqCst) {
+            return Err("runtime cancelled".into());
+        }
+        match self
+            .handle
+            .block_on(self.service.client.post::<T>("sessions", path, &body))
+        {
+            Ok(reply) => Ok(Some(reply)),
+            Err(error)
+                if error.code == "not_found" && error.message.contains("returned HTTP 404") =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error.to_string()),
         }
     }
     fn callback(&self, path: &str, body: Value) -> std::result::Result<CallbackReply, String> {
@@ -504,12 +681,49 @@ impl RemoteHost {
     }
 }
 impl akh_runtime::Host for RemoteHost {
+    fn usage(&mut self, usage: &Value) {
+        crate::telemetry::usage(usage);
+    }
     fn event(&mut self, event: RuntimeEvent) -> std::result::Result<(), String> {
+        match &event {
+            RuntimeEvent::Bound {
+                provider_session,
+                model,
+            } => {
+                tracing::info!(event.name="runtime.bound", provider.session_id=%provider_session, model=?model, "provider session bound")
+            }
+            RuntimeEvent::Text { text } => crate::telemetry::delta("text", text),
+            RuntimeEvent::Reasoning { text } => crate::telemetry::delta("reasoning", text),
+            RuntimeEvent::ToolStarted { id, name } => {
+                let span = tracing::info_span!("runtime.tool", tool.id=%id, tool.name=%name, otel.status_code=tracing::field::Empty);
+                span.in_scope(|| {
+                    tracing::info!(event.name = "runtime.tool.started", "native tool started")
+                });
+                self.native_tools
+                    .insert(id.clone(), (span, crate::telemetry::Operation::new("tool")));
+            }
+            RuntimeEvent::ToolCompleted { id, success, .. } => {
+                if let Some((span, mut operation)) = self.native_tools.remove(id) {
+                    let _entered = span.enter();
+                    if *success {
+                        operation.success();
+                    } else {
+                        span.record("otel.status_code", "ERROR");
+                    }
+                    tracing::info!(event.name="runtime.tool.completed", tool.id=%id, success, "native tool completed");
+                    drop(operation);
+                }
+            }
+        }
         self.service
             .store
             .transaction(|tx| {
-                let mut job: RuntimeJob = tx
-                    .get(&job_key(&self.request.id))?
+                // A job is only ever Running while its own worker can still
+                // call back here, so this always finds it in `job/` — but it
+                // is routed through the same fallback as every other by-id
+                // read so this call site never needs to change if that ever
+                // stops being true.
+                let (mut job, slot) = load_job(tx, &self.request.id)?
                     .ok_or_else(|| Fault::missing("runtime job not found"))?;
                 if let RuntimeEvent::Bound {
                     provider_session, ..
@@ -541,7 +755,7 @@ impl akh_runtime::Host for RemoteHost {
                 }
                 tx.put(&bytes_key, &(old_bytes + event_bytes))?;
                 job.events.push(event);
-                tx.put(&job_key(&self.request.id), &job)
+                save_job(tx, &job, slot)
             })
             .map_err(|e| e.to_string())
     }
@@ -551,11 +765,19 @@ impl akh_runtime::Host for RemoteHost {
         name: &str,
         arguments: Value,
     ) -> std::result::Result<ToolResult, String> {
-        self.event(RuntimeEvent::ToolStarted { id: id.into(), name: name.into() })?;
-        let result = self.callback("/v1/runtime/tools", json!(self.call(id, name, arguments)))?
-            .result.ok_or_else(|| "tool callback has no result".to_owned())?;
-        self.event(RuntimeEvent::ToolCompleted { id: id.into(), success: result.success,
-            details: Some(json!({"receipt":result.receipt,"text":result.text})) })?;
+        self.event(RuntimeEvent::ToolStarted {
+            id: id.into(),
+            name: name.into(),
+        })?;
+        let result = self
+            .callback("/v1/runtime/tools", json!(self.call(id, name, arguments)))?
+            .result
+            .ok_or_else(|| "tool callback has no result".to_owned())?;
+        self.event(RuntimeEvent::ToolCompleted {
+            id: id.into(),
+            success: result.success,
+            details: Some(json!({"receipt":result.receipt,"text":result.text})),
+        })?;
         Ok(result)
     }
     fn approval(
@@ -564,14 +786,87 @@ impl akh_runtime::Host for RemoteHost {
         name: &str,
         arguments: &Value,
     ) -> std::result::Result<bool, String> {
+        let span = tracing::info_span!("runtime.approval", tool.id = id, tool.name = name);
+        let _entered = span.enter();
+        let mut operation = crate::telemetry::Operation::new("approval_wait");
+        tracing::info!(
+            event.name = "runtime.approval.waiting",
+            "waiting for approval"
+        );
         let reply = self.callback("/v1/runtime/input", json!({"call":self.call(id, name, arguments.clone()),"kind":"native_approval","prompt":{"name":name,"arguments":arguments}}))?;
+        operation.success();
         Ok(reply
             .response
             .as_ref()
             .is_some_and(|r| r["approved"] == true))
     }
     fn question(&mut self, id: &str, questions: &Value) -> std::result::Result<Value, String> {
-        self.callback("/v1/runtime/input", json!({"call":self.call(id, "question", questions.clone()),"kind":"question","prompt":questions}))?.response.ok_or_else(||"question has no answer".into())
+        let span = tracing::info_span!("runtime.question", question.id = id);
+        let _entered = span.enter();
+        let mut operation = crate::telemetry::Operation::new("question_wait");
+        tracing::info!(event.name = "runtime.question.waiting", "waiting for input");
+        let result = self.callback("/v1/runtime/input", json!({"call":self.call(id, "question", questions.clone()),"kind":"question","prompt":questions}))?.response.ok_or_else(||"question has no answer".into());
+        if result.is_ok() {
+            operation.success();
+        }
+        result
+    }
+    fn recall(
+        &mut self,
+        id: &str,
+        space: &neural_spans::SpanSpace,
+        vector: &[u8],
+        limit: usize,
+    ) -> std::result::Result<Option<Vec<neural_spans::SpanHit>>, String> {
+        let request = neural_spans::RecallRequest {
+            call: self.call(id, neural_spans::RecallRequest::CALL_NAME, json!({})),
+            space: space.clone(),
+            vector: vector.to_vec(),
+            limit,
+        };
+        Ok(self
+            .post_optional::<neural_spans::RecallReply>("/v1/runtime/recall", json!(request))?
+            .filter(|reply| reply.supported)
+            .map(|reply| reply.hits))
+    }
+    fn spans(
+        &mut self,
+        id: &str,
+        captures: &[neural_spans::SpanCapture],
+    ) -> std::result::Result<bool, String> {
+        let delivery = neural_spans::SpanDelivery {
+            call: self.call(id, neural_spans::SpanDelivery::CALL_NAME, json!({})),
+            captures: captures.to_vec(),
+        };
+        Ok(self
+            .post_optional::<neural_spans::SpanDeliveryReply>("/v1/runtime/spans", json!(delivery))?
+            .is_some_and(|reply| reply.accepted))
+    }
+    fn assemble_context(
+        &mut self,
+        messages: &[Value],
+        window_tokens: usize,
+        reserved_output_tokens: usize,
+    ) -> std::result::Result<Option<akh_session_types::AssembledContext>, String> {
+        let request = akh_session_types::RuntimeContextRequest {
+            call: self.call(
+                &self.request.turn_id,
+                akh_session_types::RuntimeContextRequest::CALL_NAME,
+                json!({}),
+            ),
+            input: self.request.input.clone(),
+            messages: messages.to_vec(),
+            budget: akh_session_types::ContextBudget {
+                window_tokens,
+                reserved_output_tokens,
+            },
+        };
+        Ok(self
+            .post_optional::<akh_session_types::RuntimeContextReply>(
+                "/v1/runtime/context",
+                json!(request),
+            )?
+            .and_then(|reply| reply.assembled))
     }
 }
 
@@ -584,12 +879,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config(dir.path());
         let principal = cfg.principals[0].clone();
-        let runtime = Runtime::new(cfg, Store::open(&dir.path().join("runtime.redb")).unwrap()).unwrap();
+        let runtime =
+            Runtime::new(cfg, Store::open(&dir.path().join("runtime.redb")).unwrap()).unwrap();
         let req = request("cancelled-before-admission");
         let job = runtime.cancel_unsubmitted(&principal, req.clone()).unwrap();
         assert_eq!(job.status, TurnStatus::Cancelled);
         assert_eq!(runtime.submit(&principal, req.clone()).unwrap(), job);
-        let mut changed = req; changed.input.text = "different".into();
+        let mut changed = req;
+        changed.input.text = "different".into();
         assert!(runtime.submit(&principal, changed).is_err());
         assert!(runtime.active.lock().unwrap().is_empty());
     }
@@ -620,20 +917,35 @@ mod tests {
             "model_endpoint":{"url":url,"max_iterations":2,"max_output_tokens":128}
         })).unwrap());
         let principal = cfg.principals[0].clone();
-        let runtime = Runtime::new(Arc::new(cfg), Store::open(&dir.path().join("runtime.redb")).unwrap()).unwrap();
+        let runtime = Runtime::new(
+            Arc::new(cfg),
+            Store::open(&dir.path().join("runtime.redb")).unwrap(),
+        )
+        .unwrap();
         // An uncertain callback in another provisioned internal profile must
         // remain uncertain without quarantining this independent role.
         let mut uncertain = unknown_job("other-role");
         uncertain.request.binding.kind = RuntimeKind::Internal;
         uncertain.request.binding.profile = "other-role".into();
         uncertain.request.session_id = "other-session".into();
-        runtime.store.transaction(|tx| {
-            tx.put(&job_key("other-role"), &uncertain)?;
-            tx.put(&unknown_since_key("other-role"), &0u64)
-        }).unwrap();
+        runtime
+            .store
+            .transaction(|tx| {
+                tx.put(&job_key("other-role"), &uncertain)?;
+                tx.put(&unknown_since_key("other-role"), &0u64)
+            })
+            .unwrap();
         assert!(runtime.resolve_stale_unknown_jobs().unwrap().is_empty());
-        assert_eq!(runtime.get("other-role").unwrap().status, TurnStatus::Unknown);
-        for id in ["limited-one", "malformed-plan", "limited-two", "cancel-model"] {
+        assert_eq!(
+            runtime.get("other-role").unwrap().status,
+            TurnStatus::Unknown
+        );
+        for id in [
+            "limited-one",
+            "malformed-plan",
+            "limited-two",
+            "cancel-model",
+        ] {
             let mut req = request(id);
             req.binding.profile = "local".into();
             req.binding.revision = "1".into();
@@ -646,15 +958,21 @@ mod tests {
                     while runtime.get(id).unwrap().events.is_empty() {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
-                }).await.unwrap();
+                })
+                .await
+                .unwrap();
                 runtime.cancel(id).unwrap();
             }
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
-                    if runtime.active.lock().unwrap().is_empty() { break; }
+                    if runtime.active.lock().unwrap().is_empty() {
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             let job = runtime.get(id).unwrap();
             if id == "cancel-model" {
                 assert_eq!(job.status, TurnStatus::Cancelled);
@@ -772,12 +1090,20 @@ mod tests {
     /// The exact incident this sweep exists for: a job left `Running` when the
     /// process died is marked `Unknown` at the next `Runtime::new`, and stays
     /// that way — quarantining the whole runtime via `submit`'s check — until
-    /// this sweep closes it out, well past the stall threshold.
+    /// this sweep closes it out, well past the stall threshold. The same
+    /// restart also carries a one-time migration: a terminal job written by a
+    /// binary from before job archival existed must be swept into
+    /// `archived_job/` on this first restart, while the freshly-Unknown job
+    /// and the still-Running-turned-Unknown job stay in the scanned `job/`
+    /// prefix untouched.
     #[test]
     fn restart_marks_running_jobs_unknown_and_the_sweep_leaves_them_alone_before_the_threshold() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config(dir.path());
         let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        let mut pre_existing_completed = unknown_job("done-before-restart");
+        pre_existing_completed.status = TurnStatus::Completed;
+        pre_existing_completed.output = Some("already finished".into());
         store
             .transaction(|tx| {
                 tx.put(
@@ -790,16 +1116,31 @@ mod tests {
                         error: None,
                         events: vec![],
                     },
-                )
+                )?;
+                // Simulates a record left by a binary predating job archival:
+                // already terminal, still sitting in the scanned prefix.
+                tx.put(&job_key("done-before-restart"), &pre_existing_completed)
             })
             .unwrap();
-        let runtime = Runtime::new(cfg, store).unwrap();
+        let runtime = Runtime::new(cfg, store.clone()).unwrap();
         assert_eq!(runtime.get("job-1").unwrap().status, TurnStatus::Unknown);
         assert!(
             runtime.resolve_stale_unknown_jobs().unwrap().is_empty(),
             "an unknown job younger than the stall threshold must not be force-closed"
         );
         assert_eq!(runtime.get("job-1").unwrap().status, TurnStatus::Unknown);
+        let live = store.scan::<RuntimeJob>("job/").unwrap();
+        assert_eq!(
+            live.len(),
+            1,
+            "only the still-live job-1 may remain in the scanned job/ prefix"
+        );
+        assert_eq!(live[0].request.id, "job-1");
+        assert_eq!(
+            runtime.get("done-before-restart").unwrap().status,
+            TurnStatus::Completed,
+            "the pre-existing terminal job must still be reachable by id after migration"
+        );
     }
 
     #[test]
@@ -815,11 +1156,35 @@ mod tests {
                 tx.put(&unknown_since_key("fresh"), &now_ms())
             })
             .unwrap();
-        let runtime = Runtime::new(cfg, store).unwrap();
+        let runtime = Runtime::new(cfg, store.clone()).unwrap();
         let resolved = runtime.resolve_stale_unknown_jobs().unwrap();
         assert_eq!(resolved, vec!["stale".to_string()]);
         assert_eq!(runtime.get("stale").unwrap().status, TurnStatus::Failed);
         assert_eq!(runtime.get("fresh").unwrap().status, TurnStatus::Unknown);
+        // The job the sweep just failed is terminal now, so it must leave the
+        // scanned prefix (and its unknown_since clock, which only matters
+        // while a job is live) — the still-fresh Unknown job must not.
+        assert!(
+            store
+                .get::<RuntimeJob>(&job_key("stale"))
+                .unwrap()
+                .is_none(),
+            "a job the sweep fails must be archived out of job/"
+        );
+        assert!(
+            store
+                .get::<u64>(&unknown_since_key("stale"))
+                .unwrap()
+                .is_none(),
+            "an archived job's unknown_since key must be cleaned up"
+        );
+        assert!(
+            store
+                .get::<RuntimeJob>(&job_key("fresh"))
+                .unwrap()
+                .is_some(),
+            "a job the sweep does not touch must stay in job/"
+        );
     }
 
     #[test]
@@ -868,6 +1233,174 @@ mod tests {
             resolved,
             vec!["job-1".to_string()],
             "the original unknown_since must survive repeated restarts"
+        );
+    }
+
+    fn admin_principal() -> Principal {
+        Principal {
+            id: "admin-1".into(),
+            token_file: "/not-read-by-runtime-tests".into(),
+            token_sha256: false,
+            roles: vec!["admin".into()],
+            akhs: vec![],
+            sources: vec![],
+        }
+    }
+
+    /// The terminal path (worker completion, the stale-unknown sweep, admin
+    /// `reconcile`, and the startup migration) all funnel through
+    /// `archive_job`. This test exercises that helper directly at the
+    /// smallest surface: once a job is terminal, it must vanish from a
+    /// `"job/"` scan yet remain reachable through `Runtime::get`.
+    #[test]
+    fn a_terminal_job_leaves_the_scanned_prefix_and_stays_reachable_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        let runtime = Runtime::new(cfg, store.clone()).unwrap();
+        let mut job = unknown_job("job-1");
+        job.status = TurnStatus::Completed;
+        job.output = Some("done".into());
+        store
+            .transaction(|tx| {
+                tx.put(&job_key("job-1"), &job)?;
+                tx.put(&unknown_since_key("job-1"), &now_ms())?;
+                tx.put(&event_bytes_key("job-1"), &0usize)?;
+                archive_job(tx, &job)
+            })
+            .unwrap();
+        assert!(
+            store.scan::<RuntimeJob>("job/").unwrap().is_empty(),
+            "a completed job must not be present in a job/ scan"
+        );
+        assert!(
+            store
+                .get::<u64>(&unknown_since_key("job-1"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get::<usize>(&event_bytes_key("job-1"))
+                .unwrap()
+                .is_none()
+        );
+        let fetched = runtime.get("job-1").unwrap();
+        assert_eq!(fetched.status, TurnStatus::Completed);
+        assert_eq!(fetched.output.as_deref(), Some("done"));
+    }
+
+    /// A resubmission of the same job id, with the exact same request, must
+    /// hand back the archived result instead of running the turn again —
+    /// callers cannot know or care that this job left `"job/"`.
+    #[test]
+    fn resubmitting_a_completed_archived_job_with_the_same_request_returns_it_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        let runtime = Runtime::new(cfg.clone(), store.clone()).unwrap();
+        let req = request("job-1");
+        let job = RuntimeJob {
+            request: req.clone(),
+            status: TurnStatus::Completed,
+            provider_session: None,
+            output: Some("done".into()),
+            error: None,
+            events: vec![],
+        };
+        store
+            .transaction(|tx| {
+                tx.put(&job_key("job-1"), &job)?;
+                archive_job(tx, &job)
+            })
+            .unwrap();
+        let principal = cfg.principals[0].clone();
+        let returned = runtime.submit(&principal, req).unwrap();
+        assert_eq!(returned.status, TurnStatus::Completed);
+        assert_eq!(returned.output.as_deref(), Some("done"));
+        assert!(
+            store.scan::<RuntimeJob>("job/").unwrap().is_empty(),
+            "an idempotent resubmit must not resurrect the job into job/"
+        );
+    }
+
+    /// The same job id reused with a materially different request must still
+    /// be rejected as a conflict, whether or not the prior job has been
+    /// archived.
+    #[test]
+    fn resubmitting_a_completed_archived_job_with_a_different_request_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        let runtime = Runtime::new(cfg.clone(), store.clone()).unwrap();
+        let req = request("job-1");
+        let job = RuntimeJob {
+            request: req.clone(),
+            status: TurnStatus::Completed,
+            provider_session: None,
+            output: Some("done".into()),
+            error: None,
+            events: vec![],
+        };
+        store
+            .transaction(|tx| {
+                tx.put(&job_key("job-1"), &job)?;
+                archive_job(tx, &job)
+            })
+            .unwrap();
+        let mut different = req;
+        different.instructions = "a materially different instruction".into();
+        let principal = cfg.principals[0].clone();
+        assert_eq!(
+            runtime.submit(&principal, different).unwrap_err().code,
+            "conflict"
+        );
+    }
+
+    /// `reconcile` archives the job it resolves, and a byte-identical repeat
+    /// call must stay idempotent via `recovery::already` even though the job
+    /// is now found only in `archived_job/`, not `job/`.
+    #[test]
+    fn reconcile_archives_the_job_and_a_repeat_call_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        store
+            .transaction(|tx| {
+                tx.put(&job_key("job-1"), &unknown_job("job-1"))?;
+                tx.put(&unknown_since_key("job-1"), &now_ms())
+            })
+            .unwrap();
+        let runtime = Runtime::new(cfg, store.clone()).unwrap();
+        let admin = admin_principal();
+        let job = runtime.get("job-1").unwrap();
+        let resolution = Reconciliation {
+            request_id: "reconcile-job-1".into(),
+            expected_request_sha256: crate::recovery::fingerprint(&job.request).unwrap(),
+            status: TurnStatus::Failed,
+            quiescent: true,
+            evidence: vec!["operator checked provider logs".into()],
+            output: None,
+            result: None,
+        };
+        let reconciled = runtime.reconcile(&admin, "job-1", &resolution).unwrap();
+        assert_eq!(reconciled.status, TurnStatus::Failed);
+        assert!(
+            store.scan::<RuntimeJob>("job/").unwrap().is_empty(),
+            "a reconciled job must leave the scanned job/ prefix"
+        );
+        assert!(
+            store
+                .get::<u64>(&unknown_since_key("job-1"))
+                .unwrap()
+                .is_none()
+        );
+        let repeat = runtime.reconcile(&admin, "job-1", &resolution).unwrap();
+        assert_eq!(
+            repeat.status,
+            TurnStatus::Failed,
+            "an identical repeat reconcile must still succeed idempotently, \
+             even though the job now lives only in archived_job/"
         );
     }
 }

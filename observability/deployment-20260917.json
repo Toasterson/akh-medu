@@ -1,0 +1,200 @@
+{
+  "verified_at_utc": "2026-09-17T15:06:22.279214+00:00",
+  "source_commit": "e47d291fad15df37631cf45c11380ccea04dbc68",
+  "gitops_revision": "main@sha1:511c94345759e8f41619aa76e7be576b1cf2e702",
+  "flux_ready": true,
+  "cluster_runtimes": [
+    {
+      "runtime": "runtime-anubis",
+      "generation": 18,
+      "ready": true,
+      "pod": "runtime-anubis-6979599b47-mldss",
+      "pod_started": "2026-09-17T15:00:11Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:60cbbbc81edaceb7285f1db446c276e271321424330211a7a317a18f0a373f6b",
+      "legacy_events": true,
+      "fresh_loki_record_timestamp": "1789657383700368479"
+    },
+    {
+      "runtime": "runtime-astra-impl-1",
+      "generation": 21,
+      "ready": true,
+      "pod": "runtime-astra-impl-1-69ddfb46c9-z6sb5",
+      "pod_started": "2026-09-17T14:59:55Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:1999ce664c2d2d8b224c2485e7975422785d92f1413b8cef02990237dc7cddfd",
+      "legacy_events": true,
+      "native_conformance_exit": 0,
+      "fresh_loki_record_timestamp": "1789657305827515934"
+    },
+    {
+      "runtime": "runtime-astra-impl-2",
+      "generation": 21,
+      "ready": true,
+      "pod": "runtime-astra-impl-2-5cc6db75b7-2d5nw",
+      "pod_started": "2026-09-17T15:03:46Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:1999ce664c2d2d8b224c2485e7975422785d92f1413b8cef02990237dc7cddfd",
+      "legacy_events": true,
+      "native_conformance_exit": 0,
+      "fresh_loki_record_timestamp": "1789657575179486490"
+    },
+    {
+      "runtime": "runtime-astra-impl-3",
+      "generation": 21,
+      "ready": true,
+      "pod": "runtime-astra-impl-3-7b6b7d947-hpzc8",
+      "pod_started": "2026-09-17T15:04:14Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:1999ce664c2d2d8b224c2485e7975422785d92f1413b8cef02990237dc7cddfd",
+      "legacy_events": true,
+      "native_conformance_exit": 0,
+      "fresh_loki_record_timestamp": "1789657560095210896"
+    },
+    {
+      "runtime": "runtime-astra-impl-4",
+      "generation": 21,
+      "ready": true,
+      "pod": "runtime-astra-impl-4-5f7d66c6b7-9dmxg",
+      "pod_started": "2026-09-17T15:04:04Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:1999ce664c2d2d8b224c2485e7975422785d92f1413b8cef02990237dc7cddfd",
+      "legacy_events": true,
+      "native_conformance_exit": 0,
+      "fresh_loki_record_timestamp": "1789657462905676880"
+    },
+    {
+      "runtime": "runtime-deepseek",
+      "generation": 18,
+      "ready": true,
+      "pod": "runtime-deepseek-6787bd4697-nd9j8",
+      "pod_started": "2026-09-17T15:00:11Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:60cbbbc81edaceb7285f1db446c276e271321424330211a7a317a18f0a373f6b",
+      "legacy_events": true,
+      "fresh_loki_record_timestamp": "1789657374273402587"
+    },
+    {
+      "runtime": "runtime-fable-review-1",
+      "generation": 21,
+      "ready": true,
+      "pod": "runtime-fable-review-1-7b8c488bf5-9gdg2",
+      "pod_started": "2026-09-17T14:59:56Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:1999ce664c2d2d8b224c2485e7975422785d92f1413b8cef02990237dc7cddfd",
+      "legacy_events": true,
+      "native_conformance_exit": 0,
+      "fresh_loki_record_timestamp": "1789657309076409859"
+    },
+    {
+      "runtime": "runtime-fable-review-2",
+      "generation": 21,
+      "ready": true,
+      "pod": "runtime-fable-review-2-5cd546745f-dzw6k",
+      "pod_started": "2026-09-17T15:03:46Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:1999ce664c2d2d8b224c2485e7975422785d92f1413b8cef02990237dc7cddfd",
+      "legacy_events": true,
+      "native_conformance_exit": 0,
+      "fresh_loki_record_timestamp": "1789657569259275616"
+    },
+    {
+      "runtime": "runtime-gemma-mac",
+      "generation": 18,
+      "ready": true,
+      "pod": "runtime-gemma-mac-6d49f54968-5rlp4",
+      "pod_started": "2026-09-17T14:59:57Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:60cbbbc81edaceb7285f1db446c276e271321424330211a7a317a18f0a373f6b",
+      "legacy_events": true,
+      "fresh_loki_record_timestamp": "1789657292874722976"
+    },
+    {
+      "runtime": "runtime-horus",
+      "generation": 18,
+      "ready": true,
+      "pod": "runtime-horus-84997ccc8b-bxs6b",
+      "pod_started": "2026-09-17T14:59:57Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:60cbbbc81edaceb7285f1db446c276e271321424330211a7a317a18f0a373f6b",
+      "legacy_events": true,
+      "fresh_loki_record_timestamp": "1789657286586232717"
+    },
+    {
+      "runtime": "runtime-imhotep",
+      "generation": 18,
+      "ready": true,
+      "pod": "runtime-imhotep-776576758c-vskz8",
+      "pod_started": "2026-09-17T15:00:13Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:60cbbbc81edaceb7285f1db446c276e271321424330211a7a317a18f0a373f6b",
+      "legacy_events": true,
+      "fresh_loki_record_timestamp": "1789657399518173515"
+    },
+    {
+      "runtime": "runtime-maat",
+      "generation": 20,
+      "ready": true,
+      "pod": "runtime-maat-7df48fdcb4-dn7x9",
+      "pod_started": "2026-09-17T15:00:13Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:60cbbbc81edaceb7285f1db446c276e271321424330211a7a317a18f0a373f6b",
+      "legacy_events": true,
+      "fresh_loki_record_timestamp": "1789657426960000908"
+    },
+    {
+      "runtime": "runtime-sekhmet",
+      "generation": 20,
+      "ready": true,
+      "pod": "runtime-sekhmet-8474cc788d-rnmw8",
+      "pod_started": "2026-09-17T15:00:03Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:60cbbbc81edaceb7285f1db446c276e271321424330211a7a317a18f0a373f6b",
+      "legacy_events": true,
+      "fresh_loki_record_timestamp": "1789657295855701347"
+    },
+    {
+      "runtime": "runtime-tecton",
+      "generation": 18,
+      "ready": true,
+      "pod": "runtime-tecton-75b5bb5778-kc47d",
+      "pod_started": "2026-09-17T15:00:03Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:60cbbbc81edaceb7285f1db446c276e271321424330211a7a317a18f0a373f6b",
+      "legacy_events": true,
+      "fresh_loki_record_timestamp": "1789657289615307719"
+    },
+    {
+      "runtime": "runtime-thoth-mac",
+      "generation": 18,
+      "ready": true,
+      "pod": "runtime-thoth-mac-67df886f4d-vzdgm",
+      "pod_started": "2026-09-17T15:00:12Z",
+      "image": "code.aopc.cloud/toasterson/akh-runtime-otlp@sha256:60cbbbc81edaceb7285f1db446c276e271321424330211a7a317a18f0a373f6b",
+      "legacy_events": true,
+      "fresh_loki_record_timestamp": "1789657391008744002"
+    }
+  ],
+  "local_runtime": {
+    "schema_version": 1,
+    "service_id": "runtime",
+    "status": "listening",
+    "binary_sha256": "a25329b6bf444d8b830c97f3be5499b966d38faa36f783e191528001ca8bd045"
+  },
+  "dashboard": {
+    "url": "https://grafana.lab.home/d/akh-runtime-turns",
+    "provisioned": true,
+    "panels": 6
+  },
+  "real_local_turn": {
+    "akh": "Vesta",
+    "model": "glm-5.3",
+    "session_id": "01a0afbf-3775-73d1-9845-fcd2b6ddef9d",
+    "turn_id": "01a0afbf-377a-7952-9d1c-c586c5c5e7ca",
+    "trace_id": "e26df6844bba95749896671dfd9b9258",
+    "duration_ms": 122006.622,
+    "span_counts": {
+      "runtime.turn": 1,
+      "runtime.model.iteration": 5,
+      "runtime.provider.attempt": 5,
+      "runtime.tool": 7
+    }
+  },
+  "validation": {
+    "focused_rust_tests": 28,
+    "native_linux_arm64_measurements": 4,
+    "native_receipts_directory": "native-measurements-20260917-compat",
+    "preexisting_cluster_resources_topology_compared": 80
+  },
+  "limitations": [
+    "Delta events are transport chunks, not individual token timestamps.",
+    "Only provider-exposed reasoning and usage are available.",
+    "OTLP export is best effort; historical failed turns are not backfilled."
+  ]
+}

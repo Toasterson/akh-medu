@@ -16,6 +16,8 @@ members = [
     "crates/akh-service-store",
     "crates/akh-runtime",
     "crates/akh-session-services",
+    "crates/akh-embed",
+    "crates/akh-transcripts",
 ]
 resolver = "3"
 
@@ -45,6 +47,8 @@ pkg-fmt = "tgz"
 bin-dir = "{ bin }{ binary-ext }"
 
 [dependencies]
+# Representation pins for neural span captures (nlu::span_projection)
+sha2 = "0.10"
 # Error handling
 miette = { version = "7", features = ["fancy"] }
 thiserror = "2"
@@ -167,10 +171,9 @@ tar = "0.4"
 # NLU Tier 2: Micro-ML NER (feature-gated)
 ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["std", "load-dynamic"] }
 tokenizers = { version = "0.22", optional = true, default-features = false, features = ["progressbar", "fancy-regex"] }
-
-# NLU Tier 3: Small LLM translator (feature-gated)
-llama-cpp-2 = { version = "0.1", optional = true, features = ["sampler"] }
-encoding_rs = { version = "0.8", optional = true }
+# Image decoding for the vision path. PNG and JPEG only; the tower takes
+# normalized pixels, so no other format support is needed here.
+image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg"] }
 
 # NLU Candle backend: GGUF inference with hidden state access (feature-gated)
 candle-core = { version = "0.10", optional = true }
@@ -271,13 +274,14 @@ email = ["mail-parser", "imap", "native-tls", "lettre"]
 calendar = ["icalendar", "dep:chrono"]
 wasm-tools = ["wasmtime"]
 nlu-ml = ["ort", "tokenizers"]
-nlu-llm = ["llama-cpp-2", "encoding_rs"]
+# Compatibility feature: all local LLM inference uses native Candle.
+nlu-llm = ["candle-backend"]
 nlu-full = ["nlu-ml", "nlu-llm"]
 # WI-222: peer dispatch rides ACP (ADR-061 — the daemon is ACP-only over
 # Unix socket/TCP; there is no HTTP surface). reqwest is dropped entirely:
 # after this change nothing in the workspace references it.
 delegation = ["daemon", "acp"]
-candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers"]
+candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers", "image"]
 nlu-candle = ["candle-backend"]
 # WI-339: composite daemon profile for akhomed hosts that serve Candle-backed
 # akhs (in-process GGUF inference + the Candle token counter). This is THE
@@ -299,6 +303,7 @@ metal = ["candle-backend", "candle-core/metal", "candle-nn/metal", "candle-trans
 # candle-core HIP backend (fills the cuda module slot — see vendor/candle-core)
 # on top of the `rocm` dlopen runtime (nlu::hip). Off by default; superset of rocm.
 hip = ["rocm", "candle-core/hip"]
+vulkan = ["candle-backend", "candle-core/vulkan"]
 burn-training = ["candle-backend"]  # will add "burn" when sqlite3 conflict resolved
 grug-backend = ["dep:grug-train"]
 training-data = []
@@ -331,7 +336,6 @@ remote-executor = ["dep:russh", "dep:base64", "tokio"]
 tower = { version = "0.5", features = ["util"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
-sha2 = "0.10"
 # Phase 50 / W3 runner (examples/phase50_w3_runner.rs): links the RunRecord
 # schema + hashing/storage helpers. `chrono` is pulled in separately here
 # (rather than relying on the optional main-crate feature that also gates

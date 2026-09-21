@@ -1,0 +1,25 @@
+{
+  "verified_at": "2026-09-17T17:33:26.212919+00:00",
+  "source_commit": "d3521dcf",
+  "scope": "local Roman session broker (Janus, Minerva, Vesta)",
+  "deployed_binary_sha256": "95c3311f819ec734f5ecd31981a251466a361d99394c7c097a17f67ac9c6cae5",
+  "tests_passed": 59,
+  "test_command": "cargo test -p akh-session-services --no-default-features --features session,runtime --lib --test sessions --test telemetry",
+  "configuration_validated": true,
+  "broker_health": {
+    "schema_version": 1,
+    "service_id": "sessions",
+    "status": "listening"
+  },
+  "runtime_process_unchanged": true,
+  "live_progress": [
+    {
+      "turn": "01a0b068-1037-7993-a6a1-2c6376245b58",
+      "status": "completed",
+      "completed_tools_before": 13,
+      "completed_tools_after": 16,
+      "error": null
+    }
+  ],
+  "semantics": "Unknown MCP outcomes remain in broker receipts and return explicit failed-tool results. Equivalent unresolved operations cannot repeat in the same session. Non-MCP process gates remain enforced."
+}

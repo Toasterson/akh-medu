@@ -320,7 +320,7 @@ class Observer:
 
     def monitoring(self):
         now=int(time.time()); health={}
-        for name,port in [('core',18430),('sessions',18431),('runtime',18432),('events',18435)]:
+        for name,port in [('core',18430),('sessions',18431),('runtime',18432),('runtime-minerva',18442),('runtime-vesta',18443),('events',18435)]:
             try:fetch(f'http://127.0.0.1:{port}/healthz',timeout=4);health[name]='up'
             except Exception:health[name]='unavailable'
         try:

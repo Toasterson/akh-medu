@@ -382,6 +382,7 @@ mod tests {
                 token_file: token,
                 ca_file: None,
                 allow_insecure_http: false,
+                request_timeout_secs: None,
             },
             akh: "test".into(),
             public_url: "http://akh-byo.kagent:8080/".into(),
