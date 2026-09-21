@@ -1,0 +1,124 @@
+{
+  "verified_at": "2026-09-17T19:35:33.494093+00:00",
+  "fix_commit": "7ca1332a",
+  "acp_regression_commit": "4aec725a",
+  "tests_passed": 7,
+  "topology": "unchanged",
+  "cause": "T3 appended runtime_info plus pull_request_linking; observation command became feedback and recursively created model turns.",
+  "deployed_sha256": "044d7c1bd8fa3f5f3830554abed1c926618fbf3e71f445a7f23dd69ca2ed8d96",
+  "feedback_count_after_fix": 56,
+  "feedback_count_verified": 56,
+  "cancelled_synthetic_turns": [
+    {
+      "session": "01a0b0c3-8726-77c1-9bd5-61f78d676ecd",
+      "akh": "vesta",
+      "status": "cancelled"
+    },
+    {
+      "session": "01a0b0c8-b6af-7ba0-ac86-a4967fed8a2f",
+      "akh": "janus",
+      "status": "cancelled"
+    },
+    {
+      "session": "01a0b0ca-e89d-7990-a882-18319fe68b74",
+      "akh": "minerva",
+      "status": "cancelled"
+    },
+    {
+      "session": "01a0b0d1-1fd6-7401-b3e1-6aea52ffcf00",
+      "akh": "vesta",
+      "status": "cancelled"
+    }
+  ],
+  "real_wakes": [
+    {
+      "session": "01a0b0d8-97e8-78f1-afa6-d69c7569cc6c",
+      "akh": "minerva",
+      "status": "completed",
+      "origin": {
+        "kind": "automation",
+        "automation_id": "minerva",
+        "occurrence_id": "c88541b8a51337eb8ef0432389abf67ce4f83ea028d22a6dc46824e9112b4b5f"
+      },
+      "tools": [
+        {
+          "name": "memory_recall",
+          "success": true,
+          "unknown": false
+        },
+        {
+          "name": "board__board_inbox",
+          "success": true,
+          "unknown": false
+        },
+        {
+          "name": "memory_recall",
+          "success": true,
+          "unknown": false
+        },
+        {
+          "name": "anima__list_work_items",
+          "success": true,
+          "unknown": false
+        },
+        {
+          "name": "anima__list_projects",
+          "success": true,
+          "unknown": false
+        },
+        {
+          "name": "anima__list_work_items",
+          "success": true,
+          "unknown": false
+        },
+        {
+          "name": "anima__get_work_item_detail",
+          "success": true,
+          "unknown": false
+        },
+        {
+          "name": "memory_write",
+          "success": true,
+          "unknown": false
+        }
+      ]
+    },
+    {
+      "session": "01a0b0d8-af92-7cd3-bf73-daf4d7edc446",
+      "akh": "vesta",
+      "status": "running",
+      "origin": {
+        "kind": "automation",
+        "automation_id": "vesta",
+        "occurrence_id": "f93e49dbbfaa14b0dbfe7d9ca5f18354bfb1cead0dd70d8bd523a174b118c7cc"
+      },
+      "tools": [
+        {
+          "name": "memory_recall",
+          "success": true,
+          "unknown": false
+        },
+        {
+          "name": "monitoring_snapshot",
+          "success": true,
+          "unknown": false
+        },
+        {
+          "name": "anima__lane_occupancy",
+          "success": true,
+          "unknown": false
+        },
+        {
+          "name": "homelab_inspect",
+          "success": true,
+          "unknown": false
+        },
+        {
+          "name": "homelab_inspect",
+          "success": true,
+          "unknown": false
+        }
+      ]
+    }
+  ]
+}

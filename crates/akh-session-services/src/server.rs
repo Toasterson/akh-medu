@@ -61,10 +61,7 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
     use clap::Parser;
     let args = Args::parse();
     let config = Arc::new(Config::load(&args.config)?);
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .init();
+    let telemetry = crate::telemetry::init(kind, &config.service_id)?;
     for principal in &config.principals {
         principal.credential()?;
     }
@@ -75,6 +72,9 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
     let legacy_redb_path = config.data_dir.join(format!("{kind}.redb"));
     let store = match &config.store {
         None => Store::open(&legacy_redb_path)?,
+        Some(StoreConfig::Sqlite) => {
+            Store::open_sqlite(&config.data_dir.join(format!("{kind}.sqlite3")))?
+        }
         Some(StoreConfig::Postgres { url_env, schema }) => {
             let url = std::env::var(url_env).map_err(|_| {
                 Fault::invalid(format!(
@@ -194,7 +194,7 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
         })
         .into_future();
     tokio::pin!(server);
-    tokio::select! { result=&mut server=>{return Ok(result?);}, _=shutdown()=>{} }
+    tokio::select! { result=&mut server=>{tokio::task::spawn_blocking(move || drop(telemetry)).await?; return Ok(result?);}, _=shutdown()=>{} }
     let _ = stop.send(());
     for task in tasks {
         task.abort();
@@ -213,6 +213,7 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
             "HTTP drain deadline reached; unresolved durable work remains fenced on restart"
         ),
     }
+    tokio::task::spawn_blocking(move || drop(telemetry)).await?;
     Ok(())
 }
 async fn shutdown() {

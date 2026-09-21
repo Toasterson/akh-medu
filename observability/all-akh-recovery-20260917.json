@@ -1,0 +1,1023 @@
+{
+  "verified_at": "2026-09-17T19:47:58.115091+00:00",
+  "local_activity_sha256": {
+    "janus": "044d7c1bd8fa3f5f3830554abed1c926618fbf3e71f445a7f23dd69ca2ed8d96",
+    "minerva": "044d7c1bd8fa3f5f3830554abed1c926618fbf3e71f445a7f23dd69ca2ed8d96",
+    "vesta": "044d7c1bd8fa3f5f3830554abed1c926618fbf3e71f445a7f23dd69ca2ed8d96"
+  },
+  "local_recovery_wakes": [
+    {
+      "akh": "janus",
+      "session": "01a0b0e5-d23f-7480-8f5b-40397046f211",
+      "status": "completed"
+    },
+    {
+      "akh": "minerva",
+      "session": "01a0b0d8-97e8-78f1-afa6-d69c7569cc6c",
+      "status": "completed"
+    },
+    {
+      "akh": "vesta",
+      "session": "01a0b0d8-af92-7cd3-bf73-daf4d7edc446",
+      "status": "completed"
+    }
+  ],
+  "tecton_reconciliation": {
+    "request_id": "all-akh-recovery-20260917-tecton-timeout",
+    "expected_request_sha256": "7110aed83d233cd04a5ff50911b9cbdd98026e5b331190a0731480a7007220eb",
+    "status": "failed",
+    "quiescent": true,
+    "evidence": [
+      "Internal runtime job stopped with turn deadline timeout; reconcile endpoint checks no active worker.",
+      "Session 01a0afb1-2316-7ef1-bbb4-ffabd4ea3004 already closed at 1789657961729 after system retirement; original turn cancelled.",
+      "Archibald live Kubernetes pod inventory has no pod or metadata/spec referencing workspace akh-e87aba93faaf71897b70d6b273c3ec26; commands were confined to that Kubernetes workspace.",
+      "Relay reports allocation not found and active sandbox binding not found for the exact workspace.",
+      "50 process handles have completed receipts; three historical handles lacked final polls. Container removal establishes quiescence, not successful completion. All receipts and stored work preserved; no replay.",
+      "Resolve the unfinished runtime conversation as failed only; this does not certify the user task or Anima work item complete."
+    ],
+    "output": null,
+    "result": null
+  },
+  "tecton_resumed_session": "01a0b0e1-8799-7a70-84f9-34acaec17f8a",
+  "tecton_successful_tools_observed": 8,
+  "runtime_job_audit": {
+    "runtime-linux": {
+      "URLError": 4
+    },
+    "runtime-mac": {
+      "URLError": 4
+    },
+    "runtime-astra-impl-1": {
+      "http_404": 22,
+      "completed": 4
+    },
+    "runtime-fable-review-2": {
+      "http_404": 2
+    },
+    "runtime-fable-review-1": {
+      "http_404": 2
+    },
+    "runtime-maat": {
+      "http_404": 50,
+      "failed": 29,
+      "cancelled": 2,
+      "completed": 8
+    },
+    "runtime-sekhmet": {
+      "http_404": 45,
+      "completed": 61,
+      "failed": 17
+    },
+    "runtime-tecton": {
+      "http_404": 91,
+      "completed": 1,
+      "failed": 9,
+      "running": 1
+    },
+    "runtime-astra-impl-2": {
+      "http_404": 6,
+      "failed": 15,
+      "cancelled": 1,
+      "completed": 3
+    },
+    "runtime-thoth-mac": {
+      "http_404": 6,
+      "completed": 1
+    },
+    "runtime-anubis": {
+      "http_404": 2
+    },
+    "runtime-imhotep": {
+      "http_404": 2
+    },
+    "runtime-astra-impl-3": {
+      "http_404": 29,
+      "completed": 2,
+      "failed": 5
+    },
+    "runtime-astra-impl-4": {
+      "http_404": 2,
+      "failed": 3
+    }
+  },
+  "fleet_validation": {
+    "observed_at": "2026-09-17T19:45:24.372372+00:00",
+    "excluded_hosts_not_probed": [
+      "Hephaistos (192.168.1.114)"
+    ],
+    "cutover_mode": false,
+    "checks": [
+      {
+        "check": "combined Linux runtime retired",
+        "passed": true
+      },
+      {
+        "check": "sessions: ready",
+        "passed": true
+      },
+      {
+        "check": "sessions: placement replicas",
+        "passed": true
+      },
+      {
+        "check": "sessions: images",
+        "passed": true
+      },
+      {
+        "check": "sessions: private volume policy",
+        "passed": true
+      },
+      {
+        "check": "sandbox: ready",
+        "passed": true
+      },
+      {
+        "check": "sandbox: placement replicas",
+        "passed": true
+      },
+      {
+        "check": "sandbox: images",
+        "passed": true
+      },
+      {
+        "check": "sandbox: private volume policy",
+        "passed": true
+      },
+      {
+        "check": "events: ready",
+        "passed": true
+      },
+      {
+        "check": "events: placement replicas",
+        "passed": true
+      },
+      {
+        "check": "events: images",
+        "passed": true
+      },
+      {
+        "check": "events: private volume policy",
+        "passed": true
+      },
+      {
+        "check": "runtime-thoth-mac: ready",
+        "passed": true
+      },
+      {
+        "check": "runtime-thoth-mac: placement replicas",
+        "passed": true
+      },
+      {
+        "check": "runtime-thoth-mac: images",
+        "passed": true
+      },
+      {
+        "check": "runtime-thoth-mac: private volume policy",
+        "passed": true
+      },
+      {
+        "check": "runtime-tecton: ready",
+        "passed": true
+      },
+      {
+        "check": "runtime-tecton: placement replicas",
+        "passed": true
+      },
+      {
+        "check": "runtime-tecton: images",
+        "passed": true
+      },
+      {
+        "check": "runtime-tecton: private volume policy",
+        "passed": true
+      },
+      {
+        "check": "runtime-imhotep: ready",
+        "passed": true
+      },
+      {
+        "check": "runtime-imhotep: placement replicas",
+        "passed": true
+      },
+      {
+        "check": "runtime-imhotep: images",
+        "passed": true
+      },
+      {
+        "check": "runtime-imhotep: private volume policy",
+        "passed": true
+      },
+      {
+        "check": "runtime-maat: ready",
+        "passed": true
+      },
+      {
+        "check": "runtime-maat: placement replicas",
+        "passed": true
+      },
+      {
+        "check": "runtime-maat: images",
+        "passed": true
+      },
+      {
+        "check": "runtime-maat: private volume policy",
+        "passed": true
+      },
+      {
+        "check": "runtime-horus: ready",
+        "passed": true
+      },
+      {
+        "check": "runtime-horus: placement replicas",
+        "passed": true
+      },
+      {
+        "check": "runtime-horus: images",
+        "passed": true
+      },
+      {
+        "check": "runtime-horus: private volume policy",
+        "passed": true
+      },
+      {
+        "check": "runtime-sekhmet: ready",
+        "passed": true
+      },
+      {
+        "check": "runtime-sekhmet: placement replicas",
+        "passed": true
+      },
+      {
+        "check": "runtime-sekhmet: images",
+        "passed": true
+      },
+      {
+        "check": "runtime-sekhmet: private volume policy",
+        "passed": true
+      },
+      {
+        "check": "runtime-anubis: ready",
+        "passed": true
+      },
+      {
+        "check": "runtime-anubis: placement replicas",
+        "passed": true
+      },
+      {
+        "check": "runtime-anubis: images",
+        "passed": true
+      },
+      {
+        "check": "runtime-anubis: private volume policy",
+        "passed": true
+      },
+      {
+        "check": "runtime-gemma-mac: ready",
+        "passed": true
+      },
+      {
+        "check": "runtime-gemma-mac: placement replicas",
+        "passed": true
+      },
+      {
+        "check": "runtime-gemma-mac: images",
+        "passed": true
+      },
+      {
+        "check": "runtime-gemma-mac: private volume policy",
+        "passed": true
+      },
+      {
+        "check": "runtime-deepseek: ready",
+        "passed": true
+      },
+      {
+        "check": "runtime-deepseek: placement replicas",
+        "passed": true
+      },
+      {
+        "check": "runtime-deepseek: images",
+        "passed": true
+      },
+      {
+        "check": "runtime-deepseek: private volume policy",
+        "passed": true
+      },
+      {
+        "check": "executor: config",
+        "passed": true
+      },
+      {
+        "check": "sessions: config",
+        "passed": true
+      },
+      {
+        "check": "sandbox: config",
+        "passed": true
+      },
+      {
+        "check": "events: config",
+        "passed": true
+      },
+      {
+        "check": "runtime-thoth-mac: config",
+        "passed": true
+      },
+      {
+        "check": "runtime-tecton: config",
+        "passed": true
+      },
+      {
+        "check": "runtime-imhotep: config",
+        "passed": true
+      },
+      {
+        "check": "runtime-maat: config",
+        "passed": true
+      },
+      {
+        "check": "runtime-horus: config",
+        "passed": true
+      },
+      {
+        "check": "runtime-sekhmet: config",
+        "passed": true
+      },
+      {
+        "check": "runtime-anubis: config",
+        "passed": true
+      },
+      {
+        "check": "runtime-gemma-mac: config",
+        "passed": true
+      },
+      {
+        "check": "runtime-deepseek: config",
+        "passed": true
+      },
+      {
+        "check": "thoth-retirement: config",
+        "passed": true
+      },
+      {
+        "check": "session credential permissions",
+        "passed": true
+      },
+      {
+        "check": "anima-runner-claude-review: retired",
+        "passed": true
+      },
+      {
+        "check": "anima-runner-codex-1: retired",
+        "passed": true
+      },
+      {
+        "check": "anima-runner-codex-2: retired",
+        "passed": true
+      },
+      {
+        "check": "anima-runner-dind: retired",
+        "passed": true
+      },
+      {
+        "check": "legacy inventory",
+        "passed": true
+      },
+      {
+        "check": "anima-server: ready",
+        "passed": true
+      },
+      {
+        "check": "anima-server: image",
+        "passed": false
+      },
+      {
+        "check": "scheduler enabled",
+        "passed": true
+      },
+      {
+        "check": "default Astra routing",
+        "passed": true
+      },
+      {
+        "check": "Anima relay credential mode",
+        "passed": true
+      },
+      {
+        "check": "anima-pwa: ready",
+        "passed": true
+      },
+      {
+        "check": "anima-pwa: image",
+        "passed": false
+      },
+      {
+        "check": "legacy cloud akhomed removed",
+        "passed": true
+      },
+      {
+        "check": "Anima relay routes",
+        "passed": true
+      },
+      {
+        "check": "runtime-astra-impl-1: Mac retired",
+        "passed": true
+      },
+      {
+        "check": "runtime-astra-impl-2: Mac retired",
+        "passed": true
+      },
+      {
+        "check": "runtime-astra-impl-3: Mac retired",
+        "passed": true
+      },
+      {
+        "check": "runtime-astra-impl-4: Mac retired",
+        "passed": true
+      },
+      {
+        "check": "runtime-fable-review-1: Mac retired",
+        "passed": true
+      },
+      {
+        "check": "runtime-fable-review-2: Mac retired",
+        "passed": true
+      },
+      {
+        "check": "dev.anima.runner-akh-gateway: disabled",
+        "passed": true
+      },
+      {
+        "check": "dev.anima.runner-codex-1: disabled",
+        "passed": true
+      },
+      {
+        "check": "dev.anima.runner-codex-2: disabled",
+        "passed": true
+      },
+      {
+        "check": "dev.anima.runner-thoth: disabled",
+        "passed": true
+      },
+      {
+        "check": "dev.anima.runner-reviewers: disabled",
+        "passed": true
+      },
+      {
+        "check": "it.akh.akhrtd: disabled",
+        "passed": true
+      },
+      {
+        "check": "dev.akh-medu.akhomed: disabled",
+        "passed": true
+      },
+      {
+        "check": "it.akh.akhomed-core: retired",
+        "passed": true
+      },
+      {
+        "check": "it.akh.session-relay: retired",
+        "passed": true
+      },
+      {
+        "check": "Thoth retirement scheduled",
+        "passed": true
+      },
+      {
+        "check": "home/native-conformance-e9138c1c16e86305: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-thoth-mac: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-thoth-mac: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-thoth-mac: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-thoth-mac: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-thoth-mac: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-1: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-1: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-1: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-1: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-1: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-2: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-2: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-2: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-2: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-2: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-3: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-3: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-3: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-3: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-3: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-4: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-4: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-4: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-4: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-4: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-fable-review-1: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-fable-review-1: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-fable-review-1: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-fable-review-1: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-fable-review-1: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-fable-review-2: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-fable-review-2: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-fable-review-2: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-fable-review-2: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-fable-review-2: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-tecton: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-tecton: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-tecton: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-tecton: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-tecton: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-imhotep: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-imhotep: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-imhotep: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-imhotep: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-imhotep: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-maat: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-maat: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-maat: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-maat: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-maat: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-horus: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-horus: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-horus: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-horus: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-horus: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-sekhmet: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-sekhmet: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-sekhmet: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-sekhmet: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-sekhmet: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-anubis: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-anubis: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-anubis: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-anubis: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-anubis: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-gemma-mac: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-gemma-mac: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-gemma-mac: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-gemma-mac: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-gemma-mac: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-deepseek: config",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-deepseek: ready",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-deepseek: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-deepseek: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-deepseek: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/events: config",
+        "passed": true
+      },
+      {
+        "check": "home/events: ready",
+        "passed": true
+      },
+      {
+        "check": "home/events: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/events: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/events: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/core: config",
+        "passed": true
+      },
+      {
+        "check": "home/core: ready",
+        "passed": true
+      },
+      {
+        "check": "home/core: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/core: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/core: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/relay: config",
+        "passed": true
+      },
+      {
+        "check": "home/relay: ready",
+        "passed": true
+      },
+      {
+        "check": "home/relay: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/relay: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/relay: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/sessions: config",
+        "passed": true
+      },
+      {
+        "check": "home/sessions: ready",
+        "passed": true
+      },
+      {
+        "check": "home/sessions: image and command",
+        "passed": true
+      },
+      {
+        "check": "home/sessions: private process policy",
+        "passed": true
+      },
+      {
+        "check": "home/sessions: ARM placement",
+        "passed": true
+      },
+      {
+        "check": "home/native-conformance-otel-1c69226accfc: config",
+        "passed": true
+      },
+      {
+        "check": "home/native-conformance-otel-4e014c466a9d: config",
+        "passed": true
+      },
+      {
+        "check": "home/core: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-anubis: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-1: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-2: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-3: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-astra-impl-4: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-deepseek: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-fable-review-1: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-fable-review-2: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-gemma-mac: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-horus: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-imhotep: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-maat: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-sekhmet: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-tecton: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/runtime-thoth-mac: state retained",
+        "passed": true
+      },
+      {
+        "check": "home/sessions: state retained",
+        "passed": true
+      },
+      {
+        "check": "public route managed",
+        "passed": true
+      },
+      {
+        "check": "public ACP uses intended session route",
+        "passed": true
+      },
+      {
+        "check": "forward relay/sandbox",
+        "passed": true
+      },
+      {
+        "check": "Archibald/sessions: directs home",
+        "passed": true
+      },
+      {
+        "check": "Archibald/sessions-home-access: directs home",
+        "passed": true
+      },
+      {
+        "check": "gateway controller ready",
+        "passed": true
+      },
+      {
+        "check": "gateway Helm release ready",
+        "passed": true
+      },
+      {
+        "check": "gateway release managed",
+        "passed": true
+      },
+      {
+        "check": "reverse relay/sessions",
+        "passed": true
+      },
+      {
+        "check": "archibald/agent-sandbox: Flux ready",
+        "passed": true
+      },
+      {
+        "check": "archibald/akh-platform: Flux ready",
+        "passed": true
+      },
+      {
+        "check": "archibald/anima-runners: Flux ready",
+        "passed": true
+      },
+      {
+        "check": "home/anima: Flux ready",
+        "passed": true
+      },
+      {
+        "check": "home/akh-platform: Flux ready",
+        "passed": true
+      },
+      {
+        "check": "anima: managed",
+        "passed": true
+      },
+      {
+        "check": "Anima Helm release ready",
+        "passed": true
+      },
+      {
+        "check": "anima-pwa: managed",
+        "passed": true
+      }
+    ],
+    "passed": false
+  },
+  "notes": [
+    "Retired runtime-linux/runtime-mac services are absent; their historical records were not mutated.",
+    "Janus escalation calls rejected oversized summaries of 375 and 181 characters against a 160-character limit; runtime wake completed and checkpoint saved.",
+    "Two Anima image inventory mismatches retained; every Akh runtime readiness, image, policy and placement check passed."
+  ],
+  "topology": "unchanged"
+}

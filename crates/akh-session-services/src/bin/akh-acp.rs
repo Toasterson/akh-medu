@@ -26,6 +26,11 @@ struct Args {
     session: Option<String>,
     #[arg(long)]
     allow_insecure_ws: bool,
+    /// T3's Grok ACP driver authenticates again after transport authentication.
+    /// Acknowledge its cached-token method only after the bearer-authenticated
+    /// WebSocket handshake has succeeded. No client filesystem RPCs are enabled.
+    #[arg(long)]
+    t3_compat: bool,
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -89,6 +94,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             read=read_frame(&mut input,&mut line)=>{
                 if read?==0{break;}
                 let mut message:Value=serde_json::from_slice(&line)?;line.clear();
+                if args.t3_compat && matches!(message["method"].as_str(), Some("session/new" | "session/load")) {
+                    // T3 injects its own MCP server. Roman sessions use only the
+                    // operator's daemon grants; never forward editor credentials
+                    // or capabilities that can expose its project filesystem.
+                    message["params"]["mcpServers"] = json!([]);
+                    if let Some(params) = message["params"].as_object_mut() {
+                        params.remove("additionalDirectories");
+                    }
+                }
+                if args.t3_compat && message["method"] == "authenticate" && message["params"]["methodId"] == "cached_token" {
+                    let reply=json!({"jsonrpc":"2.0","id":message["id"],"result":{}});
+                    output.write_all(format!("{reply}\n").as_bytes()).await?;
+                    output.flush().await?;
+                    continue;
+                }
                 if message["method"]=="session/new"{
                     if let Some(session)=&args.session{
                         rewritten.insert(message["id"].to_string());message["method"]=json!("session/load");message["params"]["sessionId"]=json!(session);

@@ -123,7 +123,9 @@ impl RecallRequest {
     pub const CALL_NAME: &'static str = "neural_recall";
     pub fn validate(&self) -> Result<()> {
         if self.call.name != Self::CALL_NAME {
-            return Err(Fault::invalid("neural recall requires a neural_recall call"));
+            return Err(Fault::invalid(
+                "neural recall requires a neural_recall call",
+            ));
         }
         self.space.validate()?;
         if self.vector.len() != VECTOR_BYTES || !(1..=16).contains(&self.limit) {

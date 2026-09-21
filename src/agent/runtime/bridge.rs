@@ -101,6 +101,10 @@ impl akh_runtime::Host for Turn<'_> {
                 model,
             } => self.bind(&provider_session, model.as_deref()),
             wire::RuntimeEvent::Text { text } => self.text(&text),
+            wire::RuntimeEvent::Reasoning { text } => self.sink.emit(&AkhMessage::Reasoning {
+                step: text,
+                expression: None,
+            }),
             wire::RuntimeEvent::ToolStarted { id, name } => {
                 self.sink.emit(&AkhMessage::ToolCallStarted {
                     tool_id: id,

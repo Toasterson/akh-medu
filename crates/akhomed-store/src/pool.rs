@@ -1,4 +1,4 @@
-//! Connection-pool construction for the akhomed Postgres backing store.
+//! SeaORM PostgreSQL/SQLite pools and backend-specific residency ownership.
 
 use std::time::Duration;
 
@@ -25,7 +25,10 @@ pub struct PoolOptions {
     pub connect_timeout: Duration,
 }
 
-/// One physically pinned PostgreSQL session used to own an Akh residency lock.
+/// A pinned PostgreSQL session or an OS-locked local SQLite residency.
+///
+/// The historical type name is retained for API compatibility. SQLite ownership
+/// and fenced writes are implemented in `sqlite`, not PostgreSQL emulation.
 ///
 /// A one-connection *pool* is not sufficient for a session advisory lock: the
 /// pool may recycle or reconnect its sole socket while the Rust pool handle
@@ -33,6 +36,7 @@ pub struct PoolOptions {
 /// therefore makes subsequent fenced writes fail instead of silently running
 /// on a replacement session that never acquired the lock.
 pub struct StablePgSession {
+    pub(crate) sqlite: Option<Mutex<crate::sqlite::LocalSession>>,
     pub(crate) state: Mutex<StablePgSessionState>,
 }
 
@@ -44,6 +48,15 @@ pub(crate) struct StablePgSessionState {
 impl StablePgSession {
     /// Open a physically pinned PostgreSQL connection.
     pub async fn connect(opts: &PoolOptions) -> StoreResult<Self> {
+        if opts.url.starts_with("sqlite:") {
+            return Ok(Self {
+                sqlite: Some(Mutex::new(crate::sqlite::LocalSession::open(opts).await?)),
+                state: Mutex::new(StablePgSessionState {
+                    connection: None,
+                    locked_akh: None,
+                }),
+            });
+        }
         let connect = PgConnection::connect(&opts.url);
         let connection = tokio::time::timeout(opts.connect_timeout, connect)
             .await
@@ -59,6 +72,7 @@ impl StablePgSession {
                 source: sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(source)),
             })?;
         Ok(Self {
+            sqlite: None,
             state: Mutex::new(StablePgSessionState {
                 connection: Some(connection),
                 locked_akh: None,
@@ -70,6 +84,9 @@ impl StablePgSession {
     /// Re-checks for the same Akh are local no-ops so PostgreSQL's re-entrant
     /// advisory-lock counter is never incremented twice.
     pub async fn try_acquire_akh_lock(&self, akh_id: Uuid) -> StoreResult<bool> {
+        if let Some(local) = &self.sqlite {
+            return local.lock().await.acquire(akh_id);
+        }
         let mut state = self.state.lock().await;
         if state.locked_akh == Some(akh_id) {
             return Ok(true);
@@ -106,6 +123,9 @@ impl StablePgSession {
     /// particular, this must never be implemented through a connection pool:
     /// the pooled transaction would not be protected by this session's lock.
     pub async fn claim_akh_residency(&self, akh_id: Uuid, workspace_id: Uuid) -> StoreResult<i64> {
+        if let Some(local) = &self.sqlite {
+            return local.lock().await.claim(akh_id).await;
+        }
         let mut state = self.state.lock().await;
         if state.locked_akh != Some(akh_id) {
             return Err(StoreError::Conflict {
@@ -176,6 +196,9 @@ impl StablePgSession {
     /// every retained WAL handle immediately.  Dropping the connection is the
     /// final PostgreSQL-side release guarantee.
     pub async fn release_akh_lock(&self, akh_id: Uuid) -> StoreResult<bool> {
+        if let Some(local) = &self.sqlite {
+            return local.lock().await.release(akh_id);
+        }
         let mut state = self.state.lock().await;
         if state.locked_akh != Some(akh_id) {
             return Ok(false);
@@ -231,6 +254,9 @@ impl PoolOptions {
 /// On failure returns [`StoreError::Connect`] carrying a **credential-redacted**
 /// URL so the diagnostic can be logged safely.
 pub async fn connect(opts: &PoolOptions) -> StoreResult<DatabaseConnection> {
+    if opts.url.starts_with("sqlite:") {
+        return crate::sqlite::connect(opts).await;
+    }
     let mut connect_opts = ConnectOptions::new(opts.url.clone());
     connect_opts
         .max_connections(opts.max_connections)

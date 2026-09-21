@@ -57,6 +57,10 @@ tikv-jemallocator = { version = "0.7", features = ["profiling", "unprefixed_mall
 # empty call graph — profiles that look healthy and explain nothing.
 jemalloc_pprof = { version = "0.9", features = ["symbolize"], optional = true }
 clap = { version = "4", features = ["derive"] }
+opentelemetry = "=0.27"
+opentelemetry_sdk = { version = "=0.27", features = ["rt-tokio", "logs", "metrics"] }
+opentelemetry-otlp = { version = "=0.27", default-features = false, features = ["http-proto", "reqwest-client", "reqwest-rustls", "trace", "logs", "metrics"] }
+tracing-opentelemetry = "=0.28"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = { version = "1", optional = true }
@@ -69,6 +73,8 @@ tokio-executor-trait = { version = "2", optional = true }
 tokio-reactor-trait = { version = "1", optional = true }
 
 [dev-dependencies]
+prost = "0.13"
+opentelemetry-proto = { version = "=0.27", default-features = false, features = ["gen-tonic-messages", "trace", "logs", "metrics"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 

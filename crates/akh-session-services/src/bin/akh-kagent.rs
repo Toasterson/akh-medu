@@ -377,6 +377,7 @@ mod tests {
         let config = Config {
             listen: "127.0.0.1:0".parse().unwrap(),
             sessions: Endpoint {
+                token_env: None,
                 url: format!("http://{address}"),
                 token_file: token,
                 ca_file: None,

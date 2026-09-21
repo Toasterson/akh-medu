@@ -446,6 +446,7 @@ mod tests {
             std::fs::write(&token_file, "fixture-mcp-token-0123456789012345").unwrap();
             let result = call(
                 &Endpoint {
+                    token_env: None,
                     url,
                     token_file,
                     ca_file: None,

@@ -36,7 +36,20 @@ struct Conversation {
 pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result<()> {
     let (max_iterations, max_output_tokens) = limits(profile)?;
     if let Some(endpoint) = &profile.model_endpoint {
+        if endpoint.token_env.as_ref().is_some_and(|name| {
+            name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+                || name.as_bytes()[0].is_ascii_digit()
+        }) || (endpoint.token_env.is_some() && endpoint.token_file.is_some())
+        {
+            return Err(Fault::invalid(
+                "model authentication requires one valid credential source",
+            ));
+        }
         Endpoint {
+            token_env: None,
             ca_file: None,
             url: endpoint.url.clone(),
             token_file: endpoint
@@ -47,6 +60,13 @@ pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result
             request_timeout_secs: None,
         }
         .validate()?;
+        if endpoint
+            .reasoning_effort
+            .as_deref()
+            .is_some_and(|effort| !matches!(effort, "none" | "low" | "medium" | "high" | "max"))
+        {
+            return Err(Fault::invalid("unsupported reasoning effort"));
+        }
     }
     if let Some(native) = &profile.native_candle {
         if native.model.trim().is_empty()
@@ -128,7 +148,7 @@ pub fn run(
 ) -> std::result::Result<String, String> {
     run_loop(store, profile, request, host, cancel).map_err(|error| error.to_string())
 }
-fn run_loop(
+pub(crate) fn run_loop(
     store: &Store,
     profile: &ProviderConfig,
     request: &RuntimeJobRequest,
@@ -204,7 +224,13 @@ fn run_loop(
     let deadline = Instant::now() + Duration::from_secs(profile.timeout_secs);
     let tools:Vec<Value> = request.tools.iter().map(|tool| json!({"type":"function","function":{"name":tool.name,"description":tool.description,"parameters":tool.input_schema}})).collect();
     for iteration in 0..max_iterations {
-        check(cancel, deadline)?;
+        let span = tracing::info_span!(
+            "runtime.model.iteration",
+            iteration,
+            otel.status_code = tracing::field::Empty
+        );
+        let _entered = span.enter();
+        check(cancel, deadline).map_err(model_boundary)?;
         // Defer this turn's context assembly to the akh's cognitive core when it
         // has one: the runtime holds the conversation, the core decides which of
         // it survives to budget. `None` means no core is reachable and the
@@ -236,7 +262,14 @@ fn run_loop(
             Some(assembled) => messages.extend(assembled.messages.iter().cloned()),
             None => messages.extend(conversation.messages.iter().cloned()),
         }
-        let mut body = json!({"model":request.binding.model,"messages":messages,"stream":true,"max_tokens":max_output_tokens});
+        let mut body = json!({"model":request.binding.model,"messages":messages,"stream":true,"stream_options":{"include_usage":true},"max_tokens":max_output_tokens});
+        if let Some(effort) = profile
+            .model_endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.reasoning_effort.as_ref())
+        {
+            body["reasoning_effort"] = json!(effort);
+        }
         if !tools.is_empty() {
             body["tools"] = json!(tools);
         }
@@ -254,8 +287,24 @@ fn run_loop(
             let mut call = client.post(&endpoint.url).json(&body);
             if let Some(path) = &endpoint.token_file {
                 call = call.bearer_auth(crate::config::read_token(path)?);
+            } else if let Some(name) = &endpoint.token_env {
+                let token = std::env::var(name).map_err(|_| {
+                    Fault::new(
+                        "auth_unavailable",
+                        "model credential environment unavailable",
+                    )
+                })?;
+                if token.trim().len() < 24 || token.chars().any(char::is_whitespace) {
+                    return Err(Fault::new(
+                        "auth_unavailable",
+                        "invalid model credential environment",
+                    ));
+                }
+                call = call.bearer_auth(token);
             }
-            handle.block_on(completion(call, host, cancel, deadline))?
+            handle
+                .block_on(completion(call, host, cancel, deadline))
+                .map_err(model_boundary)?
         } else {
             #[cfg(feature = "candle-runtime")]
             {
@@ -310,49 +359,79 @@ fn run_loop(
                 "model tool response was truncated or malformed",
             ));
         }
+        // Validate the entire model plan before persisting it or executing its
+        // first call. Malformed model output is not an uncertain tool outcome.
+        let mut ids = HashSet::new();
+        let mut plan = Vec::new();
+        for call in &calls {
+            let raw_id = call["id"]
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 512)
+                .ok_or_else(|| Fault::new("model_incomplete", "model tool call has no valid ID"))?;
+            if !ids.insert(raw_id) {
+                return Err(Fault::new(
+                    "model_incomplete",
+                    "duplicate model tool call ID",
+                ));
+            }
+            let name = call["function"]["name"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| Fault::new("model_incomplete", "tool name missing"))?;
+            let arguments: Value =
+                serde_json::from_str(call["function"]["arguments"].as_str().ok_or_else(|| {
+                    Fault::new("model_incomplete", "tool arguments must be JSON text")
+                })?)
+                .map_err(|_| {
+                    Fault::new("model_incomplete", "model tool arguments are invalid JSON")
+                })?;
+            if !arguments.is_object() {
+                return Err(Fault::new(
+                    "model_incomplete",
+                    "model tool arguments must be an object",
+                ));
+            }
+            plan.push((raw_id.to_owned(), name.to_owned(), arguments));
+        }
         let output = message["content"].as_str().unwrap_or("").to_owned();
         conversation.messages.push(message);
-        // A returned tool plan is durable before any callback can have effects.
+        // A validated tool plan is durable before any callback can have effects.
         store.transaction(|tx| tx.put(&k, &conversation))?;
-        if calls.is_empty() {
+        if plan.is_empty() {
             conversation.active_job = None;
             store.transaction(|tx| tx.put(&k, &conversation))?;
             return Ok(output);
         }
-        let mut ids = HashSet::new();
-        for (index, call) in calls.iter().enumerate() {
-            let raw_id = call["id"]
-                .as_str()
-                .filter(|s| !s.is_empty() && s.len() <= 512)
-                .ok_or_else(|| Fault::invalid("model tool call has no valid ID"))?;
-            if !ids.insert(raw_id) {
-                return Err(Fault::invalid("duplicate model tool call ID"));
-            }
-            check(cancel, deadline)?;
-            let name = call["function"]["name"]
-                .as_str()
-                .ok_or_else(|| Fault::invalid("tool name missing"))?;
-            let arguments: Value = serde_json::from_str(
-                call["function"]["arguments"]
-                    .as_str()
-                    .ok_or_else(|| Fault::invalid("tool arguments must be JSON text"))?,
-            )
-            .map_err(|_| Fault::invalid("model tool arguments are invalid JSON"))?;
+        for (index, (raw_id, name, arguments)) in plan.into_iter().enumerate() {
+            check(cancel, deadline).map_err(model_boundary)?;
             let id = format!("internal-{iteration}-{index}");
             let result = if request.tools.iter().any(|t| t.name == name) {
-                host.tool(&id, name, arguments)
+                host.tool(&id, &name, arguments)
                     .map_err(|e| Fault::new("tool_callback", e))?
             } else {
-                ToolResult::denied(name, None)
+                ToolResult::denied(&name, None)
             };
             conversation.messages.push(json!({"role":"tool","tool_call_id":raw_id,"content":serde_json::to_string(&result).map_err(|_| Fault::invalid("cannot encode tool result"))?}));
             store.transaction(|tx| tx.put(&k, &conversation))?;
         }
     }
     Err(Fault::new(
-        "capacity",
+        "model_incomplete",
         "model iteration limit reached without a final answer",
     ))
+}
+
+// Only used where no broker callback is outstanding and all previous tool
+// results are durable. Never wrap callback or storage failures with this code.
+fn model_boundary(error: Fault) -> Fault {
+    Fault::new(
+        if error.code == "cancelled" {
+            "model_cancelled"
+        } else {
+            "model_incomplete"
+        },
+        error.to_string(),
+    )
 }
 
 pub fn reconcile(
@@ -403,7 +482,9 @@ struct Call {
 #[derive(Default)]
 struct Stream {
     text: String,
-    calls: BTreeMap<usize, Call>,
+    reasoning: BTreeMap<String, String>,
+    calls: BTreeMap<(usize, usize), Call>,
+    generations: BTreeMap<usize, usize>,
     finish: Option<String>,
     done: bool,
 }
@@ -427,6 +508,9 @@ impl Stream {
         if value.get("error").is_some() {
             return Err(Fault::new("model_error", "model reported an error"));
         }
+        if let Some(usage) = value.get("usage") {
+            crate::telemetry::usage(usage);
+        }
         let Some(choices) = value["choices"].as_array() else {
             return Err(Fault::invalid("model stream has no choices"));
         };
@@ -442,7 +526,24 @@ impl Stream {
                 "model sent another choice after its finish reason",
             ));
         }
-        if let Some(text) = choice["delta"]["content"].as_str() {
+        // Preserve the provider's exact field and text across tool rounds.
+        for field in ["reasoning_content", "reasoning"] {
+            if let Some(text) = choice["delta"][field]
+                .as_str()
+                .filter(|text| !text.is_empty())
+            {
+                self.reasoning
+                    .entry(field.into())
+                    .or_default()
+                    .push_str(text);
+                host.event(RuntimeEvent::Reasoning { text: text.into() })
+                    .map_err(Fault::invalid)?;
+            }
+        }
+        if let Some(text) = choice["delta"]["content"]
+            .as_str()
+            .filter(|text| !text.is_empty())
+        {
             self.text.push_str(text);
             host.event(RuntimeEvent::Text { text: text.into() })
                 .map_err(Fault::invalid)?;
@@ -454,7 +555,32 @@ impl Stream {
                     .filter(|i| *i < 128)
                     .ok_or_else(|| Fault::invalid("invalid tool delta index"))?
                     as usize;
-                let call = self.calls.entry(index).or_default();
+                let generation = self.generations.entry(index).or_default();
+                // Ollama can emit several complete calls with index=0 in one
+                // delta. A distinct full ID plus two complete argument objects
+                // establishes a new call, never a fragment of the old call.
+                let complete_object =
+                    |text: &str| serde_json::from_str::<Value>(text).is_ok_and(|v| v.is_object());
+                if let Some(previous) = self.calls.get(&(index, *generation)) {
+                    let new_id = delta["id"].as_str().unwrap_or("");
+                    if !new_id.is_empty()
+                        && !previous.id.is_empty()
+                        && new_id != previous.id
+                        && delta["function"]["name"]
+                            .as_str()
+                            .is_some_and(|s| !s.is_empty())
+                        && complete_object(&previous.arguments)
+                        && delta["function"]["arguments"]
+                            .as_str()
+                            .is_some_and(complete_object)
+                    {
+                        *generation += 1;
+                    }
+                }
+                if !self.calls.contains_key(&(index, *generation)) && self.calls.len() >= 128 {
+                    return Err(Fault::new("model_incomplete", "too many tool calls"));
+                }
+                let call = self.calls.entry((index, *generation)).or_default();
                 for (target, value) in [
                     (&mut call.id, &delta["id"]),
                     (&mut call.name, &delta["function"]["name"]),
@@ -479,18 +605,78 @@ async fn completion(
     deadline: Instant,
 ) -> Result<(Value, String)> {
     let work = async {
-        let mut response = call.send().await.map_err(|_| {
-            Fault::new(
-                "transport",
-                "model request failed; it will not be retried automatically",
-            )
-        })?;
-        if !response.status().is_success() {
-            return Err(Fault::new(
-                "model_error",
-                format!("model returned HTTP {}", response.status().as_u16()),
-            ));
+        let mut response = None;
+        for attempt in 1..=3u64 {
+            check(cancel, deadline)?;
+            let span = tracing::info_span!(
+                "runtime.provider.attempt",
+                attempt,
+                http.response.status_code = tracing::field::Empty,
+                otel.status_code = tracing::field::Empty
+            );
+            let result = async {
+                let mut operation = crate::telemetry::Operation::new("provider_request");
+                let sent = call
+                    .try_clone()
+                    .ok_or_else(|| Fault::invalid("model request is not replayable"))?
+                    .send()
+                    .await
+                    .map_err(|_| {
+                        Fault::new(
+                            "transport",
+                            "model request failed; ambiguous transport failures are not retried",
+                        )
+                    })?;
+                span.record("http.response.status_code", sent.status().as_u16());
+                if sent.status().is_success() {
+                    operation.success();
+                } else {
+                    span.record("otel.status_code", "ERROR");
+                }
+                Ok::<_, Fault>(sent)
+            };
+            let sent = tracing::Instrument::instrument(result, span.clone()).await?;
+            if sent.status().is_success() {
+                response = Some(sent);
+                break;
+            }
+            let status = sent.status().as_u16();
+            let retry_after = sent
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let request_id = sent
+                .headers()
+                .get("x-request-id")
+                .or_else(|| sent.headers().get("request-id"))
+                .and_then(|v| v.to_str().ok())
+                .map(safe_identifier)
+                .unwrap_or_default();
+            let (code, kind) = provider_error(sent).await;
+            span.in_scope(|| tracing::warn!(event.name="runtime.provider.error", http.response.status_code=status,
+                provider.error.code=%code, provider.error.kind=%kind, provider.request_id=%request_id,
+                retry_after=?retry_after, "provider rejected request"));
+            let delay = retry_delay(status, attempt, retry_after.as_deref());
+            if let Some(delay) = delay {
+                tracing::info!(
+                    event.name = "runtime.provider.backoff",
+                    attempt,
+                    delay_seconds = delay,
+                    "waiting before retry of rejected request"
+                );
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            } else {
+                return Err(Fault::new(
+                    "model_error",
+                    format!(
+                        "model returned HTTP {status}; code={code}; type={kind}; request_id={request_id}; attempts={attempt}"
+                    ),
+                ));
+            }
         }
+        let mut response =
+            response.ok_or_else(|| Fault::new("model_error", "model attempt budget exhausted"))?;
         if !response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -502,6 +688,9 @@ async fn completion(
                 "model endpoint must support chat-completions SSE",
             ));
         }
+        let mut operation = crate::telemetry::Operation::new("provider_stream");
+        let started = Instant::now();
+        let mut first_chunk = true;
         let mut stream = Stream::default();
         let mut buffer = vec![];
         let mut bytes = 0;
@@ -511,6 +700,14 @@ async fn completion(
             .map_err(|_| Fault::new("transport", "model stream interrupted"))?
         {
             check(cancel, deadline)?;
+            if first_chunk {
+                tracing::info!(
+                    event.name = "runtime.provider.first_chunk",
+                    duration_seconds = started.elapsed().as_secs_f64(),
+                    "first provider stream chunk"
+                );
+                first_chunk = false;
+            }
             bytes += chunk.len();
             if bytes > MAX_BYTES {
                 return Err(Fault::new("capacity", "model output exceeded byte limit"));
@@ -544,9 +741,13 @@ async fn completion(
             ));
         }
         let mut message = json!({"role":"assistant","content":stream.text});
+        for (field, text) in stream.reasoning {
+            message[&field] = json!(text);
+        }
         if !stream.calls.is_empty() {
             message["tool_calls"]=Value::Array(stream.calls.into_values().map(|c|json!({"type":"function","id":c.id,"function":{"name":c.name,"arguments":c.arguments}})).collect());
         }
+        operation.success();
         Ok((message, finish))
     };
     let interrupted = async {
@@ -558,9 +759,125 @@ async fn completion(
     tokio::select! { value=work=>value, value=interrupted=>value }
 }
 
+// Only explicit 429 rejections are replayed, never partial streams or tools.
+fn retry_delay(status: u16, attempt: u64, retry_after: Option<&str>) -> Option<u64> {
+    if status != 429 || attempt >= 3 {
+        return None;
+    }
+    match retry_after {
+        Some(value) => value.parse::<u64>().ok().filter(|seconds| *seconds <= 30),
+        None => Some(1 << (attempt - 1)),
+    }
+}
+fn safe_identifier(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .take(128)
+        .collect()
+}
+async fn provider_error(mut response: reqwest::Response) -> (String, String) {
+    let mut bytes = Vec::new();
+    while let Ok(Some(chunk)) = response.chunk().await {
+        if bytes.len() + chunk.len() > 16 * 1024 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let identifier = |field: &str| {
+        value["error"][field]
+            .as_str()
+            .map(safe_identifier)
+            .unwrap_or_default()
+    };
+    let kind = identifier("type");
+    let kind = if kind.is_empty() {
+        classify_provider_message(
+            value["error"]["message"]
+                .as_str()
+                .or_else(|| value["error"].as_str())
+                .unwrap_or(""),
+        )
+        .to_owned()
+    } else {
+        kind
+    };
+    (identifier("code"), kind)
+}
+fn classify_provider_message(message: &str) -> &'static str {
+    let text = message.to_ascii_lowercase();
+    if text.contains("quota") || text.contains("credit") || text.contains("billing") {
+        "quota_or_billing"
+    } else if text.contains("rate limit") || text.contains("too many requests") {
+        "rate_limit"
+    } else if text.contains("usage limit") {
+        "usage_limit"
+    } else {
+        "unclassified"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retry_policy_never_replays_ambiguous_or_long_delayed_requests() {
+        assert_eq!(
+            classify_provider_message("account quota exhausted"),
+            "quota_or_billing"
+        );
+        assert_eq!(
+            classify_provider_message("Rate limit reached"),
+            "rate_limit"
+        );
+        assert_eq!(
+            classify_provider_message("monthly usage limit"),
+            "usage_limit"
+        );
+
+        assert_eq!(retry_delay(429, 1, None), Some(1));
+        assert_eq!(retry_delay(429, 2, Some("0")), Some(0));
+        assert_eq!(retry_delay(429, 3, None), None);
+        assert_eq!(retry_delay(500, 1, None), None);
+        assert_eq!(retry_delay(429, 1, Some("31")), None);
+        assert_eq!(
+            retry_delay(429, 1, Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            None
+        );
+    }
+    #[tokio::test]
+    async fn rejected_requests_have_bounded_attempts_and_safe_diagnostics() {
+        use axum::{Router, routing::post};
+        use std::sync::{Arc, atomic::AtomicUsize};
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        let app = Router::new().route("/", post(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            async { (axum::http::StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", "0"), ("x-request-id", "provider-123")],
+                r#"{"error":{"code":"insufficient_quota","type":"quota_error","message":"SECRET must not leak"}}"#) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut host = Witness::default();
+        let error = completion(
+            reqwest::Client::new().post(url).json(&json!({})),
+            &mut host,
+            &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert!(error.message.contains("insufficient_quota"));
+        assert!(error.message.contains("provider-123"));
+        assert!(!error.message.contains("SECRET"));
+        assert!(host.events.is_empty());
+        assert_eq!(host.calls, 0);
+        server.abort();
+    }
     #[derive(Default)]
     struct Witness {
         events: Vec<RuntimeEvent>,
@@ -1197,6 +1514,49 @@ mod tests {
         );
         assert!(completed.output.unwrap().to_lowercase().contains("cedar"));
     }
+    #[test]
+    fn complete_calls_reusing_ollama_index_remain_separate() {
+        let mut stream = Stream::default();
+        let mut witness = Witness::default();
+        let delta = json!({"choices":[{"index":0,"delta":{"tool_calls":[
+            {"index":0,"id":"one","function":{"name":"memory_recall","arguments":"{\"query_symbols\":\"ledger\"}"}},
+            {"index":0,"id":"two","function":{"name":"monitoring_snapshot","arguments":"{}"}}
+        ]},"finish_reason":"tool_calls"}]});
+        stream
+            .line(format!("data: {delta}").as_bytes(), &mut witness)
+            .unwrap();
+        let calls = stream.calls.values().collect::<Vec<_>>();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            (calls[0].id.as_str(), calls[0].name.as_str()),
+            ("one", "memory_recall")
+        );
+        assert_eq!(
+            (
+                calls[1].id.as_str(),
+                calls[1].name.as_str(),
+                calls[1].arguments.as_str()
+            ),
+            ("two", "monitoring_snapshot", "{}")
+        );
+    }
+
+    #[test]
+    fn model_authentication_rejects_ambiguous_and_invalid_sources() {
+        let (mut profile, request) = fixture(
+            "https://example.com/v1/chat/completions",
+            std::path::Path::new("/tmp"),
+        );
+        profile.model_endpoint.as_mut().unwrap().token_env = Some("ROMAN_MODEL_KEY".into());
+        validate(&profile, &request).unwrap();
+        profile.model_endpoint.as_mut().unwrap().token_file = Some("/private/key".into());
+        assert!(validate(&profile, &request).is_err());
+        profile.model_endpoint.as_mut().unwrap().token_file = None;
+        for name in ["", "1KEY", "KEY=secret", "KEY\n"] {
+            profile.model_endpoint.as_mut().unwrap().token_env = Some(name.into());
+            assert!(validate(&profile, &request).is_err());
+        }
+    }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn streams_tools_and_resumes_the_exact_durable_conversation() {
         use axum::{Json, Router, routing::post};
@@ -1207,7 +1567,7 @@ mod tests {
             async move {
                 let mut requests=observed.lock().unwrap(); requests.push(body);
                 let chunks=if requests.len()==1 { vec![
-                    json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"native","function":{"name":"read","arguments":"{\"path\":"}}]},"finish_reason":null}]}),
+                    json!({"choices":[{"index":0,"delta":{"reasoning_content":"Check the source first.","tool_calls":[{"index":0,"id":"native","function":{"name":"read","arguments":"{\"path\":"}}]},"finish_reason":null}]}),
                     json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"file\"}"}}]},"finish_reason":"tool_calls"}]})
                 ] } else { vec![json!({"choices":[{"index":0,"delta":{"content":"Finished"},"finish_reason":"stop"}]})] };
                 let mut body=chunks.iter().map(|v|format!("data: {v}\n\n")).collect::<String>(); body.push_str("data: [DONE]\n\n");
@@ -1221,7 +1581,8 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let dir = tempfile::tempdir().unwrap();
-        let (profile, mut request) = fixture(&url, dir.path());
+        let (mut profile, mut request) = fixture(&url, dir.path());
+        profile.model_endpoint.as_mut().unwrap().reasoning_effort = Some("none".into());
         let store = Store::open(&dir.path().join("runtime.redb")).unwrap();
         tokio::task::spawn_blocking(move || {
             let cancel = AtomicBool::new(false);
@@ -1231,6 +1592,7 @@ mod tests {
                 "Finished"
             );
             assert_eq!(host.calls, 1);
+            assert!(host.events.iter().any(|e| matches!(e, RuntimeEvent::Reasoning { text } if text == "Check the source first.")));
             request.provider_session = host.events.iter().find_map(|e| {
                 if let RuntimeEvent::Bound {
                     provider_session, ..
@@ -1266,7 +1628,16 @@ mod tests {
         .unwrap();
         let requests = bodies.lock().unwrap();
         assert_eq!(requests.len(), 3);
+        assert!(
+            requests
+                .iter()
+                .all(|body| body["reasoning_effort"] == "none")
+        );
         assert_eq!(requests[1]["messages"][3]["tool_call_id"], "native");
+        assert_eq!(
+            requests[1]["messages"][2]["reasoning_content"],
+            "Check the source first."
+        );
         assert!(
             requests[2]["messages"]
                 .as_array()

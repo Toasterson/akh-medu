@@ -45,6 +45,8 @@ pub struct CorePrincipal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoreConfig {
+    #[serde(default)]
+    pub sqlite: bool,
     pub listen: SocketAddr,
     pub data_dir: PathBuf,
     pub principals: Vec<CorePrincipal>,
@@ -112,7 +114,11 @@ pub struct CoreApp {
 impl CoreApp {
     pub fn new(config: CoreConfig, backend: Arc<dyn CoreBackend>) -> Result<Self> {
         Ok(Self {
-            store: Store::open(&config.data_dir.join("core-operations.redb"))?,
+            store: if config.sqlite {
+                Store::open_sqlite(&config.data_dir.join("core-operations.sqlite3"))?
+            } else {
+                Store::open(&config.data_dir.join("core-operations.redb"))?
+            },
             config: Arc::new(config),
             backend,
         })
@@ -363,8 +369,8 @@ fn assemble_context(
             message
         })
         .collect();
-    let episode = EpisodeState::new(&request.akh, &request.input.text, engine)
-        .with_messages(Some(&inbound));
+    let episode =
+        EpisodeState::new(&request.akh, &request.input.text, engine).with_messages(Some(&inbound));
     let manager = SafetyEnforced::new(SelectingManager);
     let mut assembled = manager
         .assemble(&episode, &budget, &HeuristicTokenCounter)
@@ -650,7 +656,10 @@ mod tests {
         // Something was dropped, and what survives keeps the pinned rules and
         // the turn being answered.
         assert!(assembled.dropped_messages > 0, "{assembled:?}");
-        assert_eq!(assembled.messages.first().unwrap()["content"], "standing rules");
+        assert_eq!(
+            assembled.messages.first().unwrap()["content"],
+            "standing rules"
+        );
         assert_eq!(
             assembled.messages.last().unwrap()["content"],
             "the current question"
@@ -806,6 +815,7 @@ mod tests {
             std::fs::write(&token_file, "core-test-credential-long-enough").unwrap();
             let app = CoreApp::new(
                 CoreConfig {
+                    sqlite: false,
                     listen: "127.0.0.1:0".parse().unwrap(),
                     data_dir: dir.path().into(),
                     principals: vec![CorePrincipal {
@@ -966,6 +976,7 @@ mod tests {
         });
         let app = CoreApp::new(
             CoreConfig {
+                sqlite: false,
                 listen: "127.0.0.1:0".parse().unwrap(),
                 data_dir: dir.path().into(),
                 principals: vec![CorePrincipal {

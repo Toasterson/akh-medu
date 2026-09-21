@@ -102,8 +102,28 @@ impl Events {
             Ok(receipt)
         })
     }
+    fn coalesce_pending(&self) -> Result<()> {
+        self.store.transaction(|tx| {
+            let deliveries = tx.scan::<Delivery>("delivery/")?;
+            for route in self.config.routes.iter().filter(|r| r.coalesce_pending) {
+                let Some(latest) = deliveries.iter().filter(|d| d.route == route.id && (!d.terminal || d.admission.is_some()))
+                    .max_by_key(|d| (d.request.event.occurred_at, d.id.clone())) else { continue; };
+                for old in deliveries.iter().filter(|d| d.route == route.id && d.id != latest.id && !d.terminal && d.admission.is_none()) {
+                    // A transport failure may hide an admitted turn. Only
+                    // supersede never-attempted or explicitly refused work.
+                    if old.attempts != 0 && !old.error.as_ref().is_some_and(|e| e.code == "busy") { continue; }
+                    let mut old = old.clone();
+                    old.terminal = true;
+                    old.error = Some(Fault::new("superseded", format!("newer state notification {}; original event retained, no turn inferred", latest.id)));
+                    tx.put(&key("delivery", &[&old.id]), &old)?;
+                }
+            }
+            Ok(())
+        })
+    }
     pub async fn drain(&self) -> Result<()> {
         let _lock = self.lock.lock().await;
+        self.coalesce_pending()?;
         for mut delivery in self
             .store
             .scan::<Delivery>("delivery/")?
@@ -306,5 +326,59 @@ impl Events {
         // A crash before the cursor commit replays only already durable source IDs.
         self.store
             .transaction(|tx| tx.put(&cursor_key, &page.next_cursor))
+    }
+}
+
+#[cfg(test)]
+mod coalescing_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn coalescing_preserves_uncertain_admissions_and_delegations() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: Config = serde_json::from_value(json!({"service_id":"events","listen":"127.0.0.1:0","data_dir":dir.path(),"principals":[],"routes":[
+            {"id":"clock","source":"clock","event_type":"tick","automation":"vesta","coalesce_pending":true},
+            {"id":"inbox","source":"board","event_type":"delegation","automation":"vesta"}
+        ]})).unwrap();
+        let events = Events::new(
+            Arc::new(config),
+            Store::open(&dir.path().join("events.redb")).unwrap(),
+        )
+        .unwrap();
+        let mut ids = vec![];
+        for (source, kind, id, time) in [
+            ("clock", "tick", "old", 1),
+            ("clock", "tick", "uncertain", 2),
+            ("clock", "tick", "new", 3),
+            ("board", "delegation", "one", 1),
+            ("board", "delegation", "two", 2),
+        ] {
+            let event=serde_json::from_value(json!({"schema_version":1,"source":source,"type":kind,"id":id,"occurred_at":time,"data":{}})).unwrap();
+            ids.push(
+                events
+                    .ingest(&events.source_principal(source), event)
+                    .unwrap()
+                    .deliveries[0]
+                    .clone(),
+            );
+        }
+        events
+            .store
+            .transaction(|tx| {
+                let k = key("delivery", &[&ids[1]]);
+                let mut d: Delivery = tx.get(&k)?.unwrap();
+                d.attempts = 1;
+                d.error = Some(Fault::new("transport", "response lost"));
+                tx.put(&k, &d)
+            })
+            .unwrap();
+        events.coalesce_pending().unwrap();
+        for (index, id) in ids.iter().enumerate() {
+            let d: Delivery = events.store.get(&key("delivery", &[id])).unwrap().unwrap();
+            assert_eq!(d.terminal, index == 0);
+            if index == 0 {
+                assert_eq!(d.error.unwrap().code, "superseded");
+            }
+        }
     }
 }

@@ -405,6 +405,7 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, routes).await.unwrap() });
         let endpoint = Endpoint {
+            token_env: None,
             url,
             token_file: token,
             ca_file: None,

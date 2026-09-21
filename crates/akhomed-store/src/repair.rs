@@ -298,7 +298,7 @@ macro_rules! delete_akh_rows {
 
 macro_rules! insert_chunks {
     ($entity:ident, $txn:expr, $rows:expr, [$($column:expr),+ $(,)?]) => {{
-        for chunk in $rows.chunks(ROWS_PER_CHUNK) {
+        for chunk in $rows.chunks(if ($txn).get_database_backend() == sea_orm::DatabaseBackend::Sqlite { 500 } else { ROWS_PER_CHUNK }) {
             if !chunk.is_empty() {
                 $entity::Entity::insert_many(
                     chunk.iter().cloned().map(IntoActiveModel::into_active_model),

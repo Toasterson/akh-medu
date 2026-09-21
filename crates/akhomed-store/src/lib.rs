@@ -1,4 +1,4 @@
-//! `akhomed-store` — the Postgres-backed durable store for relocatable Akhs.
+//! `akhomed-store` — the SeaORM durable store for PostgreSQL and local SQLite.
 //!
 //! Phase 38 restructures `akhomed` so the truth of an Akh's state lives in
 //! Postgres while the daemon keeps an in-process cache for hot-path reasoning.
@@ -23,6 +23,7 @@ mod pool;
 pub mod repair;
 pub mod schema_registry;
 pub mod snapshots;
+mod sqlite;
 
 pub use error::{StoreError, StoreResult};
 pub use memberships::{
@@ -91,13 +92,17 @@ const MIGRATION_LOCK_KEY: i64 = 0x414B_4D44_4D49_4752_u64 as i64;
 /// `Migrator::up` issues reuses the one connection that holds the lock, and the
 /// session lock auto-releases when that connection closes — on success or error.
 /// Other migrators block on the lock until the first finishes, then observe the
-/// migrations already applied and no-op. On non-Postgres backends there is
-/// nothing to serialize and this behaves like [`run_migrations`].
+/// migrations already applied and no-op. SQLite migrations use a local OS file lock held across all migration steps.
 pub async fn run_migrations_locked(opts: &PoolOptions) -> StoreResult<()> {
     // Dedicated single connection so the advisory lock and every migration
     // statement share one backend session.
     let mut single = opts.clone();
     single.max_connections = 1;
+    let _sqlite_guard = if opts.url.starts_with("sqlite:") {
+        Some(sqlite::migration_guard(opts).await?)
+    } else {
+        None
+    };
     let db = connect(&single).await?;
 
     let backend = db.get_database_backend();

@@ -403,7 +403,8 @@ pub struct ContextBudget {
 impl ContextBudget {
     /// Tokens available for the prompt.
     pub fn available(&self) -> usize {
-        self.window_tokens.saturating_sub(self.reserved_output_tokens)
+        self.window_tokens
+            .saturating_sub(self.reserved_output_tokens)
     }
 }
 
@@ -531,6 +532,9 @@ pub enum RuntimeEvent {
         model: Option<String>,
     },
     Text {
+        text: String,
+    },
+    Reasoning {
         text: String,
     },
     ToolStarted {
@@ -792,7 +796,10 @@ mod tests {
             assembled: None,
         };
         let json = serde_json::to_value(&response).unwrap();
-        assert!(!json.as_object().unwrap().contains_key("assembled"), "{json}");
+        assert!(
+            !json.as_object().unwrap().contains_key("assembled"),
+            "{json}"
+        );
         assert_eq!(
             serde_json::from_value::<ContextResponse>(json).unwrap(),
             response
@@ -922,10 +929,16 @@ pub struct ModelEndpoint {
     /// Complete OpenAI-compatible chat-completions URL, including its path.
     pub url: String,
     pub token_file: Option<std::path::PathBuf>,
+    /// Daemon environment variable holding the credential. Never passed to tools.
+    #[serde(default)]
+    pub token_env: Option<String>,
     #[serde(default)]
     pub allow_insecure_http: bool,
     pub max_iterations: u32,
     pub max_output_tokens: u32,
+    /// Optional provider-supported reasoning budget; omitted preserves provider defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// Explicit local inference configuration. No device or model discovery/fallback.

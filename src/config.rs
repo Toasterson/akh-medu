@@ -86,9 +86,11 @@ pub struct AkhomedConfig {
     #[serde(default)]
     pub acp: AcpSection,
 
-    /// Phase 38: Postgres backing store. When absent, the daemon runs in legacy
+    /// SeaORM backing store: `[database]` accepts PostgreSQL or an absolute SQLite URL.
+    /// `[postgres]` remains a backwards-compatible section name. When absent, the daemon runs in legacy
     /// local-only mode (oxigraph + redb on disk, no WAL / relocation).
     #[serde(default)]
+    #[serde(alias = "database")]
     pub postgres: Option<PostgresConfig>,
 
     /// Heka long-term-memory store (separate Postgres database). `None`

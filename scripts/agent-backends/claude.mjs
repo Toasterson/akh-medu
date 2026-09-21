@@ -51,6 +51,7 @@ export async function run(start, sdk, z, send, request, abortController) {
     ...(start.resume ? { resume: start.resume } : {}),
   };
   let hadDeltas = false;
+  let hadReasoningDeltas = false;
   let completed = false;
   // Streaming input is required for in-process MCP tools in the Agent SDK.
   let releaseInput;
@@ -67,9 +68,13 @@ export async function run(start, sdk, z, send, request, abortController) {
       } else if (message.type === "stream_event" && message.event?.delta?.type === "text_delta") {
         send({ type: "text", text: message.event.delta.text });
         hadDeltas = true;
+      } else if (message.type === "stream_event" && message.event?.delta?.type === "thinking_delta") {
+        send({ type: "reasoning", text: message.event.delta.thinking });
+        hadReasoningDeltas = true;
       } else if (message.type === "assistant") {
         for (const block of message.message.content) {
           if (block.type === "text" && !hadDeltas) send({ type: "text", text: block.text });
+          if (block.type === "thinking" && !hadReasoningDeltas) send({ type: "reasoning", text: block.thinking });
           if (block.type === "tool_use") send({ type: "tool_started", id: block.id, name: block.name });
         }
       } else if (message.type === "user" && Array.isArray(message.message.content)) {
@@ -78,6 +83,7 @@ export async function run(start, sdk, z, send, request, abortController) {
         }
       } else if (message.type === "result") {
         completed = true;
+        if (message.usage) send({ type: "usage", usage: message.usage });
         send({ type: "done", success: message.subtype === "success" && !message.is_error,
           text: message.result ?? "", error: message.errors?.join("; ") ?? message.subtype });
         break;

@@ -139,19 +139,28 @@ async fn websocket_preserves_prompt_order_permissions_and_replays_before_load_re
             provider_session: Some("provider".into()),
             output: Some("world".into()),
             error: None,
-            events: vec![RuntimeEvent::Text {
-                text: "world".into(),
-            }],
+            events: vec![
+                RuntimeEvent::Reasoning {
+                    text: "checking evidence".into(),
+                },
+                RuntimeEvent::Text {
+                    text: "world".into(),
+                },
+            ],
         })
         .unwrap();
     let mut saw_text = false;
+    let mut saw_reasoning = false;
     loop {
         let frame = read(&mut socket).await;
         if frame["params"]["update"]["content"]["text"] == "world" {
             saw_text = true;
         }
+        if frame["params"]["update"]["sessionUpdate"] == "agent_thought_chunk" {
+            saw_reasoning = frame["params"]["update"]["content"]["text"] == "checking evidence";
+        }
         if frame["id"] == 3 {
-            assert!(saw_text);
+            assert!(saw_text && saw_reasoning);
             assert_eq!(frame["result"]["stopReason"], "end_turn");
             break;
         }

@@ -18,6 +18,23 @@ use std::time::Instant;
 #[path = "sessions_native_gate.rs"]
 mod native_gate;
 
+// Fresh wakes must not jump ahead of older turns backing off on the same
+// single-worker runtime. Only capacity waiters participate: a bad credential
+// or unavailable profile must not become a permanent head-of-line blocker.
+fn capacity_waiter_precedes(
+    runtime: &str,
+    turn: &TurnRecord,
+    other_runtime: &str,
+    other: &TurnRecord,
+    error: Option<&Fault>,
+) -> bool {
+    runtime == other_runtime
+        && other.status == TurnStatus::Dispatching
+        && !other.cancel_requested
+        && error.is_some_and(|error| error.code == "busy")
+        && (other.created_at, &other.id) < (turn.created_at, &turn.id)
+}
+
 /// Deterministic core of the dispatch retry backoff: delay doubles with each
 /// consecutive failure and is capped, so a permanently broken downstream
 /// (an unreachable cross-cluster runtime, say) cannot turn into a fixed
@@ -53,6 +70,77 @@ fn jittered_backoff(consecutive_failures: u32, session_id: &str) -> Duration {
 #[cfg(test)]
 mod backoff_tests {
     use super::*;
+
+    #[test]
+    fn capacity_waiters_are_fifo_without_blocking_on_unrelated_failures() {
+        let turn = |id: &str, at| TurnRecord {
+            id: id.into(),
+            request_id: id.into(),
+            input: TurnInput {
+                origin: InputOrigin::Human {
+                    principal: "test".into(),
+                },
+                text: String::new(),
+                data: None,
+                artifacts: vec![],
+            },
+            status: TurnStatus::Dispatching,
+            generation: 1,
+            runtime_job_id: id.into(),
+            cancel_requested: false,
+            output: None,
+            error: None,
+            created_at: at,
+        };
+        let newer = turn("new", 2);
+        let mut older = turn("old", 1);
+        let busy = Fault::new("busy", "occupied");
+        assert!(capacity_waiter_precedes(
+            "r",
+            &newer,
+            "r",
+            &older,
+            Some(&busy)
+        ));
+        assert!(!capacity_waiter_precedes(
+            "r",
+            &older,
+            "r",
+            &newer,
+            Some(&busy)
+        ));
+        assert!(!capacity_waiter_precedes(
+            "r",
+            &newer,
+            "other",
+            &older,
+            Some(&busy)
+        ));
+        assert!(!capacity_waiter_precedes(
+            "r",
+            &newer,
+            "r",
+            &older,
+            Some(&Fault::new("forbidden", "bad credential"))
+        ));
+        older.status = TurnStatus::Running;
+        assert!(!capacity_waiter_precedes(
+            "r",
+            &newer,
+            "r",
+            &older,
+            Some(&busy)
+        ));
+        older.status = TurnStatus::Dispatching;
+        older.cancel_requested = true;
+        assert!(!capacity_waiter_precedes(
+            "r",
+            &newer,
+            "r",
+            &older,
+            Some(&busy)
+        ));
+    }
 
     #[test]
     fn backoff_grows_and_saturates() {
@@ -473,7 +561,15 @@ impl SessionApp {
             .store
             .transaction(|tx| tx.put(&k, &now_ms()))?;
         let mut retiring = session.retirement.is_some();
+        let waiting_for_capacity = session.turns.iter().any(|t| {
+            !t.cancel_requested && matches!(t.status, TurnStatus::Queued | TurnStatus::Dispatching)
+        }) && self
+            .sessions
+            .store
+            .get::<Fault>(&key("dispatch_error", &[&session.id]))?
+            .is_some_and(|e| e.code == "busy");
         if !retiring
+            && !waiting_for_capacity
             && crate::session::is_stalled(
                 session.last_progress_at,
                 now_ms(),
@@ -820,8 +916,41 @@ impl SessionApp {
             Ok(job) => job,
             Err(error)
                 if error.code == "not_found"
+                    && turn.cancel_requested
                     && matches!(turn.status, TurnStatus::Queued | TurnStatus::Dispatching) =>
             {
+                self.client
+                    .post(runtime, "/v1/jobs/cancel-unsubmitted", &request)
+                    .await?
+            }
+            Err(error)
+                if error.code == "not_found"
+                    && matches!(turn.status, TurnStatus::Queued | TurnStatus::Dispatching) =>
+            {
+                for waiting in self.sessions.store.scan::<SessionRecord>("session/")? {
+                    if waiting.closed_at.is_some() || waiting.workspace.is_none() {
+                        continue;
+                    }
+                    let Some(other) = waiting.turns.iter().find(|t| !t.status.terminal()) else {
+                        continue;
+                    };
+                    let error = self
+                        .sessions
+                        .store
+                        .get::<Fault>(&key("dispatch_error", &[&waiting.id]))?;
+                    if capacity_waiter_precedes(
+                        runtime,
+                        turn,
+                        &waiting.runtime.runtime,
+                        other,
+                        error.as_ref(),
+                    ) {
+                        return Err(Fault::new(
+                            "busy",
+                            "older turn is waiting for this runtime's capacity",
+                        ));
+                    }
+                }
                 // Repeating this request is safe only because the runtime persists exact request identity.
                 self.client.post(runtime, "/v1/jobs", &request).await?
             }
@@ -1075,12 +1204,25 @@ async fn get_session(
 ) -> Api<SessionRecord> {
     Ok(Json(app.sessions.get(&p, &id)?))
 }
+#[derive(Deserialize, Default)]
+struct ListSessionsQuery {
+    #[serde(default)]
+    compact: bool,
+}
 async fn list_sessions(
     State(app): State<SessionApp>,
     Extension(p): Extension<Principal>,
-) -> Api<Vec<SessionRecord>> {
+    Query(query): Query<ListSessionsQuery>,
+) -> Api<Value> {
     http::role(&p, "client")?;
-    Ok(Json(app.sessions.list(&p)?))
+    let sessions = app.sessions.list(&p)?;
+    Ok(Json(if query.compact {
+        Value::Array(sessions.iter().map(|s| json!({"id":s.id,"akh":s.akh,"principal":s.principal,
+            "created_at":s.created_at,"last_progress_at":s.last_progress_at,"closed_at":s.closed_at,
+            "turns":s.turns.iter().map(|t|json!({"id":t.id,"status":t.status})).collect::<Vec<_>>() })).collect())
+    } else {
+        json!(sessions)
+    }))
 }
 pub fn controller(
     app: &SessionApp,
@@ -1981,6 +2123,7 @@ mod lifecycle_tests {
         std::fs::write(&runtime_token, runtime_secret).unwrap();
         let core = CoreApp::new(
             CoreConfig {
+                sqlite: false,
                 listen: "127.0.0.1:0".parse().unwrap(),
                 data_dir: dir.path().join("core"),
                 principals: vec![CorePrincipal {

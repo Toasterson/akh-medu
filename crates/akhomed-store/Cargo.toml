@@ -12,13 +12,14 @@ repository = "https://github.com/Toasterson/akh-medu"
 # workspace lock.
 sea-orm = { version = "1", features = [
     "sqlx-postgres",
+    "sqlx-sqlite",
     "runtime-tokio-rustls",
     "macros",
     "with-uuid",
     "with-chrono",
     "with-json",
 ] }
-sea-orm-migration = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+sea-orm-migration = { version = "1", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -43,3 +44,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [[bin]]
 name = "akhomed-migrate"
 path = "src/bin/akhomed-migrate.rs"
+
+[dev-dependencies]
+tempfile = "3"

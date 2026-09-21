@@ -424,6 +424,9 @@ impl Connection {
                         json!({"sessionUpdate":"user_message_chunk","content":{"type":"text","text":event.data["text"]},"_meta":{"origin":event.data["origin"]}}),
                     ),
                     "runtime" => match event.data["kind"].as_str() {
+                        Some("reasoning") => Some(
+                            json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":event.data["text"]}}),
+                        ),
                         Some("text") => Some(
                             json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":event.data["text"]}}),
                         ),
