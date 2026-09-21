@@ -18,6 +18,13 @@ from provider_failure import classify_provider_error
 APP='/Applications/T3 Code (Alpha).app/Contents'
 MODEL={'instanceId':'codex','model':'gpt-6-astra','options':[{'id':'reasoningEffort','value':'high'}]}
 def now():return datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')
+def completion_after_error(session,turn):
+    if not session.get('lastError'):return True
+    try:
+        completed=datetime.datetime.fromisoformat(turn['completedAt'].replace('Z','+00:00'))
+        updated=datetime.datetime.fromisoformat(session['updatedAt'].replace('Z','+00:00'))
+        return completed>=updated
+    except (KeyError,TypeError,ValueError,AttributeError):return False
 def field(value,name,limit):
     if not isinstance(value,str) or not value.strip() or len(value)>limit:raise ValueError('Invalid '+name)
     return value.strip()
@@ -98,7 +105,7 @@ class Broker:
                 # A later active turn wins over an old retained provider error.
                 if session.get('activeTurnId') or session.get('status') in ('running','connecting') or turn.get('state')=='running':
                     result.update(state='running',next='This thread owns the incident; do not start another worker.')
-                elif turn.get('state')=='completed':
+                elif turn.get('state')=='completed' and completion_after_error(session,turn):
                     result.update(state='turn_completed',next='Read the response and verify the requested action; turn completion is not incident resolution.')
                 elif turn.get('state') in ('error','failed') or session.get('lastError') or session.get('status')=='error':
                     failure=classify_provider_error(session.get('lastError'))

@@ -53,8 +53,14 @@ class Tests(unittest.TestCase):
   from unittest.mock import patch
   thread=self.b.submit(self.args)['thread_id'];self.b.drain();self.b.drain()
   for turn,expected in [('running','running'),('completed','turn_completed')]:
-   snapshot={'threads':[{'id':thread,'session':{'status':'ready','lastError':'usage limit'},'latestTurn':{'state':turn}}]}
+   snapshot={'threads':[{'id':thread,'session':{'status':'ready','lastError':'usage limit','updatedAt':'2026-09-21T10:00:00Z'},'latestTurn':{'state':turn,'completedAt':'2026-09-21T10:01:00Z'}}]}
    with patch.object(self.fake,'call',return_value=snapshot):self.assertEqual(self.b.status(self.args['incident_key'])['state'],expected)
+
+ def test_new_error_is_not_hidden_by_an_older_completed_turn(self):
+  from unittest.mock import patch
+  thread=self.b.submit(self.args)['thread_id'];self.b.drain();self.b.drain()
+  snapshot={'threads':[{'id':thread,'session':{'status':'error','lastError':'usage limit','updatedAt':'2026-09-21T10:01:00Z'},'latestTurn':{'state':'completed','completedAt':'2026-09-21T10:00:00Z'}}]}
+  with patch.object(self.fake,'call',return_value=snapshot):self.assertEqual(self.b.status(self.args['incident_key'])['state'],'blocked_quota')
 
  def test_status_outage_retains_receipt_without_redelivery(self):
   from unittest.mock import patch
