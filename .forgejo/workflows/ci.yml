@@ -55,6 +55,8 @@ jobs:
           # pulls objc2 (Apple-only) and `hip`/`vulkan` need driver SDKs, none
           # of which exist on the Linux runner, so `--all-features` cannot build here.
           sh .forgejo/scripts/run-logged.sh platform-tests cargo test --quiet --locked -p akh-session-services --features session,runtime,candle-runtime,core-integration-tests,executor,sandbox,events,helpers,client,admin,profiling,trigger,kagent -p akh-runtime -p akh-session-types -p akh-service-store
+      - name: Verify Roman observer and escalation recovery
+        run: python3 -m unittest discover -s deploy/roman-mini -p 'test_*.py'
 
   # Sokar artifact daemon (Phase 52, ADR 108): unit + integration tests on the
   # OpenDAL memory/fs services. Postgres and MinIO contract tests skip or are

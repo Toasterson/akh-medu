@@ -1,5 +1,40 @@
 # Roman mini teammates
 
+## Provider failure recovery
+
+The Janus escalation outbox distinguishes command delivery from execution.
+`astra_escalation_status` reports `running`, `turn_completed`,
+`blocked_authentication`, `blocked_quota`, `blocked_rate_limit`, `failed`, or
+`status_unavailable`. A completed turn still requires reading and verifying the
+result. A live turn takes precedence over a retained older provider error.
+Provider failures retain the incident key and thread; the operator repairs
+access or waits for the usage reset, then resumes that same thread after
+checking live ownership and partial work. The broker never automatically
+replays an agent turn or changes provider/model.
+
+The manager observer records provider failures separately for Janus, Minerva,
+and Vesta. HTTP 429 means rate limiting unless the provider explicitly reports
+exhausted quota. Consecutive provider failures defer scheduled wakes and
+unsubmitted events for 30 minutes, 1 hour, 2 hours, then at most 4 hours.
+After cooldown, the existing scheduler can admit a fresh bounded wake to
+re-read current work. It does not replay failed actions. Already admitted
+deliveries and running turns keep their ownership. Pending event identities
+and coalesced changes are retained across restarts.
+
+Authentication failures require operator repair and a later successful turn;
+they do not expire on a timer. A successful turn clears only that manager's
+block. Replayed or older receipts cannot extend cooldowns or override a newer
+success. Inspect `provider_availability` through `monitoring_snapshot` for the
+failure class, retry time, and next owner. These controls cover observer-owned
+scheduled admission; direct user turns and already accepted events remain
+under the session service's existing admission rules. Provider-specified reset
+times are not currently exposed in manager error receipts, so cooldowns use a
+bounded local policy rather than claiming to know an account's reset time.
+
+Install `provider_failure.py` alongside both `observer.py` and
+`janus_escalation.py`; the activation/configuration scripts copy it. Preserve
+installed runtime monitoring customizations when applying a focused update.
+
 Janus owns project execution, Minerva product clarity, and Vesta incident
 coordination. They share a dedicated provider runtime and cognitive core.
 
