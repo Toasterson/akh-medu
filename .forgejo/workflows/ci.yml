@@ -52,6 +52,8 @@ jobs:
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
           sh .forgejo/scripts/run-logged.sh daemon-profiles python3 scripts/session-platform/check-profiles.py
           sh .forgejo/scripts/run-logged.sh platform-tests cargo test --quiet --locked -p akh-session-services --all-features -p akh-runtime -p akh-session-types -p akh-service-store
+      - name: Verify Roman observer and escalation recovery
+        run: python3 -m unittest discover -s deploy/roman-mini -p 'test_*.py'
 
   # Sokar artifact daemon (Phase 52, ADR 108): unit + integration tests on the
   # OpenDAL memory/fs services. Postgres and MinIO contract tests skip or are

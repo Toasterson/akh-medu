@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+from provider_failure import classify_provider_error
 
 APP='/Applications/T3 Code (Alpha).app/Contents'
 MODEL={'instanceId':'codex','model':'gpt-6-astra','options':[{'id':'reasoningEffort','value':'high'}]}
@@ -84,11 +85,28 @@ class Broker:
         if not row:raise ValueError('Unknown incident key')
         thread,delivered,error=row;result={'incident_key':key,'thread_id':thread,'state':'submitted' if delivered==2 else 'queued','last_delivery_error':error}
         if delivered==2:
-            snapshot=self.client.call('/api/orchestration/snapshot')
+            try:snapshot=self.client.call('/api/orchestration/snapshot')
+            except Exception as error:
+                result.update(state='status_unavailable',last_status_error=type(error).__name__,
+                              next='Keep this incident and thread; restore T3 access before deciding whether to resume.')
+                return result
             current=next((t for t in snapshot['threads'] if t['id']==thread),None)
             if current:
                 result['session']=current.get('session');result['latest_turn']=current.get('latestTurn')
                 result['responses']=[{'text':m.get('text','')[-16000:],'createdAt':m.get('createdAt')} for m in current.get('messages',[]) if m.get('role')=='assistant'][-3:]
+                session=current.get('session') or {};turn=current.get('latestTurn') or {}
+                # A later active turn wins over an old retained provider error.
+                if session.get('activeTurnId') or session.get('status') in ('running','connecting') or turn.get('state')=='running':
+                    result.update(state='running',next='This thread owns the incident; do not start another worker.')
+                elif turn.get('state')=='completed':
+                    result.update(state='turn_completed',next='Read the response and verify the requested action; turn completion is not incident resolution.')
+                elif turn.get('state') in ('error','failed') or session.get('lastError') or session.get('status')=='error':
+                    failure=classify_provider_error(session.get('lastError'))
+                    result.update(state='blocked_'+failure if failure else 'failed',failure_class=failure,
+                                  next_owner='Toasty/operator',
+                                  next='Retain this incident and thread. Repair provider access or wait for the usage reset, then resume this same thread after checking ownership and partial work. Do not resubmit or infer resolution.')
+                else:
+                    result.update(state='awaiting_execution',next='Start was submitted but execution is not proven. Inspect this thread; do not create a duplicate.')
             else:result['state']='thread_missing'
         return result
 

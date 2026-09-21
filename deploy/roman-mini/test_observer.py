@@ -69,8 +69,8 @@ class DurableEvents(unittest.TestCase):
         self.assertEqual(self.o.db.execute('select count(*) from outbox').fetchone()[0],1)
 
     def test_archiving_completed_sessions_does_not_restart_rest(self):
-        session={'akh':'vesta','closed_at':None,'last_progress_at':100000,'turns':[{'id':'turn-one','status':'completed'}]}
-        with patch.object(m,'fetch',side_effect=[[],[session]]):self.o.refresh_activity()
+        session={'id':'session-one','akh':'vesta','closed_at':None,'last_progress_at':100000,'turns':[{'id':'turn-one','status':'completed','created_at':1}]}
+        with patch.object(m,'fetch',side_effect=[[],[session],session]):self.o.refresh_activity()
         session.update(closed_at=200000,last_progress_at=200000)
         with patch.object(m,'fetch',side_effect=[[],[session]]):self.o.refresh_activity()
         self.assertEqual(self.o.get('role_activity')['roles']['vesta']['last_finished'],100)
@@ -93,6 +93,82 @@ class DurableEvents(unittest.TestCase):
         with patch.object(m,'fetch',return_value={'deliveries':[]}):
             with self.assertRaises(RuntimeError):self.o.flush()
         self.assertEqual(self.o.db.execute('select accepted from outbox').fetchone()[0],0)
+
+    def outcome(self,order=1000,role='janus',status='failed',error='model returned HTTP 429',finished=100):
+        return {'akh':role,'turn_id':'turn-'+str(order),'created_at':order,'finished_at':finished,
+                'status':status,'error':{'code':'model_incomplete','message':error}}
+
+    def test_provider_cooldown_survives_restart_and_allows_fresh_wake(self):
+        with self.o.db:self.o.record_provider_outcome(self.outcome())
+        with patch.object(m.time,'time',return_value=101):self.assertFalse(self.o.role_ready('janus'))
+        self.o.db.close();self.o=m.Observer(self.root)
+        with patch.object(m.time,'time',return_value=1899):self.assertFalse(self.o.role_ready('janus'))
+        with patch.object(m.time,'time',return_value=1900):self.assertTrue(self.o.role_ready('janus'))
+        self.assertEqual(self.o.db.execute('select count(*) from outbox').fetchone()[0],0)
+
+    def test_repeated_failures_back_off_but_replayed_receipts_do_not(self):
+        with self.o.db:
+            self.o.record_provider_outcome(self.outcome())
+            self.o.record_provider_outcome(self.outcome(finished=99999))
+        self.assertEqual(self.o.get('provider_availability')['janus']['retry_at'],1900)
+        with self.o.db:self.o.record_provider_outcome(self.outcome(order=2000,finished=2000))
+        self.assertEqual(self.o.get('provider_availability')['janus']['retry_at'],5600)
+
+    def test_success_clears_only_own_block_and_stale_failure_cannot_restore_it(self):
+        with self.o.db:
+            self.o.record_provider_outcome(self.outcome())
+            self.o.record_provider_outcome(self.outcome(role='minerva'))
+            self.o.record_provider_outcome(self.outcome(order=2000,status='completed'))
+            self.o.record_provider_outcome(self.outcome(order=1500,finished=999999))
+        with patch.object(m.time,'time',return_value=101):
+            self.assertFalse(self.o.provider_blocked('janus'));self.assertTrue(self.o.provider_blocked('minerva'))
+
+    def test_pending_event_retained_until_cooldown_without_changing_identity(self):
+        with self.o.db:
+            self.o.record_provider_outcome(self.outcome())
+            self.o.event('roman-clock','schedule.janus',{'check':1},'retained')
+        before=self.o.db.execute('select id,event from outbox').fetchone()
+        with patch.object(m.time,'time',return_value=101),patch.object(m,'fetch') as send:
+            self.o.flush();send.assert_not_called()
+        with patch.object(m.time,'time',return_value=1900),patch.object(m,'fetch',return_value={'deliveries':['one']}) as send:
+            self.o.flush();self.assertEqual(send.call_args.args[2],json.loads(before[1]))
+
+    def test_auth_failure_requires_repair_and_never_expires_on_a_timer(self):
+        with self.o.db:self.o.record_provider_outcome(self.outcome(error='authentication_error'))
+        with patch.object(m.time,'time',return_value=999999999):self.assertTrue(self.o.provider_blocked('janus'))
+        with self.o.db:self.o.record_provider_outcome(self.outcome(order=2000,status='completed'))
+        self.assertFalse(self.o.provider_blocked('janus'))
+
+    def test_task_failure_is_not_provider_quota(self):
+        with self.o.db:self.o.record_provider_outcome(self.outcome(error='test suite failed'))
+        self.assertFalse(self.o.provider_blocked('janus'))
+
+    def test_manual_success_can_clear_auth_block_without_an_observer_delivery(self):
+        with self.o.db:self.o.record_provider_outcome(self.outcome(error='authentication_error'))
+        session={'id':'manual','akh':'janus','closed_at':None,'last_progress_at':200000,
+                 'turns':[{'id':'success','status':'completed','created_at':2000}]}
+        with patch.object(m,'fetch',side_effect=[[],[session],session]):self.o.refresh_activity()
+        self.assertFalse(self.o.provider_blocked('janus'))
+
+    def test_delivery_failure_defers_the_next_schedule_in_same_tick(self):
+        now=1800000000
+        with self.o.db:self.o.db.execute('insert into deliveries values (?,?,?)',('delivery','pending',None))
+        delivery={'admission':{'session_id':'s','turn_id':'t'}}
+        session={'id':'s','akh':'janus','last_progress_at':now*1000,
+                 'turns':[{'id':'t','status':'failed','created_at':now*1000-1,'error':{'message':'HTTP 429'}}]}
+        with patch.object(m.time,'time',return_value=now),patch.object(m,'fetch',side_effect=[delivery,session]):
+            self.o.watch_deliveries();self.o.schedules()
+        events=[json.loads(row[0]) for row in self.o.db.execute('select event from outbox')]
+        self.assertNotIn('schedule.janus',[e['type'] for e in events])
+
+    def test_blocked_backlog_does_not_starve_another_role(self):
+        with self.o.db:
+            self.o.record_provider_outcome(self.outcome())
+            for i in range(32):self.o.event('roman-clock','schedule.janus',{},'blocked-'+str(i))
+            self.o.event('roman-clock','schedule.minerva',{},'eligible')
+        with patch.object(m.time,'time',return_value=101),patch.object(m,'fetch',return_value={'deliveries':['one']}) as send:
+            self.o.flush();send.assert_called_once()
+        self.assertEqual(self.o.db.execute('select id from outbox where accepted=1').fetchall(),[('eligible',)])
 
     def paged_inventory(self, count=205):
         calls=[]

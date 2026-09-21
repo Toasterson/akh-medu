@@ -79,7 +79,7 @@ for role in roles:
     for src,typ in [('roman-clock','schedule.'+role),('roman-inbox-'+role,'djehuty.inbox')]+([('roman-anima','anima.'+role+'.changed')] if role!='vesta' else [('roman-alerts','monitoring.changed')]):
         events['routes'].append({'id':role+'-'+typ,'source':src,'event_type':typ,'automation':role,'coalesce_pending':src in ('roman-clock','roman-alerts')})
 (root/'state/events').mkdir(exist_ok=True,mode=0o700);save(root/'config/events.json',events)
-for file in ('observer.py','daemon_credentials.py'):shutil.copy2(source/file,root/'bin'/file)
+for file in ('observer.py','provider_failure.py','daemon_credentials.py'):shutil.copy2(source/file,root/'bin'/file)
 plist('events',['/usr/bin/python3',str(root/'bin/daemon_credentials.py'),'events',str(root)])
 plist('observer',['/usr/bin/python3',str(root/'bin/observer.py'),str(root)],user=True)
 for name,service,ports in [('metrics-tunnel','vmsingle','18440:8428')]:

@@ -22,6 +22,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from provider_failure import classify_provider_error
 
 ROLES = ('janus', 'minerva', 'vesta')
 INTERVALS = {'janus': 1800, 'minerva': 3600, 'vesta': 3600}
@@ -103,8 +104,24 @@ class Observer:
         with self.db:
             self.put('terminal_seen',terminal_seen)
             self.put('role_activity',{'ok':True,'at':int(time.time()),'roles':roles})
+        # Also see operator-initiated recovery turns: they are not entries in
+        # the observer's delivery outbox. Read at most one changed session per
+        # role; the outcome watermark rejects late archival observations.
+        for role in ROLES:
+            completed=[s for s in sessions if s['akh']==role and any(t['status']=='completed' for t in s['turns'])]
+            if not completed:continue
+            candidate=max(completed,key=lambda s:s['last_progress_at'])
+            marker=[candidate['id'],[t['id'] for t in candidate['turns'] if t['status']=='completed']]
+            if self.get('provider_success_seen:'+role)==marker:continue
+            full=fetch('http://127.0.0.1:18431/v1/sessions/'+candidate['id'],headers)
+            with self.db:
+                for turn in full['turns']:
+                    if turn['status']=='completed':self.record_provider_outcome({'akh':role,'status':'completed',
+                        'turn_id':turn['id'],'created_at':turn.get('created_at')})
+                self.put('provider_success_seen:'+role,marker)
 
     def role_ready(self,role,rest=300):
+        if self.provider_blocked(role):return False
         activity=self.get('role_activity',{})
         if not activity.get('ok'):return False
         state=activity.get('roles',{}).get(role,{})
@@ -113,6 +130,30 @@ class Observer:
             typ=json.loads(raw)['type']
             if typ in ('schedule.'+role,'anima.'+role+'.changed') or (role=='vesta' and typ=='monitoring.changed'):return False
         return True
+
+    def provider_blocked(self,role):
+        block=self.get('provider_availability',{}).get(role,{})
+        return block.get('failure_class')=='authentication' or time.time()<block.get('retry_at',0)
+
+    def record_provider_outcome(self,detail):
+        role=detail.get('akh');order=detail.get('created_at')
+        if role not in ROLES or order is None:return
+        states=self.get('provider_availability',{});old=states.get(role,{})
+        # Replayed and late historical receipts must not extend a cooldown or
+        # overwrite a newer success. This watermark survives observer restarts.
+        if order<=old.get('created_at',-1):return
+        failure=classify_provider_error(detail.get('error')) if detail['status']=='failed' else None
+        if detail['status'] not in ('failed','completed'):return
+        state={'turn_id':detail['turn_id'],'created_at':order,'failure_class':failure}
+        if failure:
+            count=old.get('consecutive_failures',0)+1
+            delay=min(14400,1800*2**min(count-1,3))
+            state.update(consecutive_failures=count,
+                         retry_at=None if failure=='authentication' else detail['finished_at']+delay,
+                         next_owner='Toasty/operator' if failure=='authentication' else 'normal manager scheduler',
+                         next='Repair authentication; a later successful turn clears this block.' if failure=='authentication' else 'After cooldown, admit a normal bounded wake; re-read current work, never replay failed actions.')
+        states[role]=state
+        self.put('provider_availability',states)
 
     def event(self, source, kind, data, event_id=None):
         event_id = event_id or str(uuid.uuid4())
@@ -123,9 +164,15 @@ class Observer:
         return event_id
 
     def flush(self):
-        for ident, raw in self.db.execute('select id,event from outbox where accepted=0 order by rowid limit 32').fetchall():
+        submitted=0
+        for ident, raw in self.db.execute('select id,event from outbox where accepted=0 order by rowid'):
+            event=json.loads(raw);kind=event['type']
+            role=next((r for r in ROLES if kind in ('schedule.'+r,'anima.'+r+'.changed') or (r=='vesta' and kind=='monitoring.changed')),None)
+            if role and self.provider_blocked(role):continue
+            if submitted>=32:break
+            submitted+=1
             result = fetch('http://127.0.0.1:18435/v1/events',
-                           {'Authorization': 'Bearer '+self.event_token, 'Content-Type': 'application/json'}, json.loads(raw))
+                           {'Authorization': 'Bearer '+self.event_token, 'Content-Type': 'application/json'}, event)
             if not result.get('deliveries'):
                 raise RuntimeError('event has no route')
             with self.db:
@@ -146,12 +193,15 @@ class Observer:
                 if status not in ('completed','failed','cancelled','unknown'):
                     status='running'
                 detail={'akh':session['akh'],'session_id':session['id'],'turn_id':turn['id'],
-                        'status':status,'error':turn.get('error'),'output':turn.get('output')}
+                        'status':status,'error':turn.get('error'),'output':turn.get('output'),
+                        'created_at':turn.get('created_at'),
+                        'finished_at':self.get('terminal_seen',{}).get(turn['id'],session['last_progress_at']//1000)}
             elif delivery['terminal']:
                 status='superseded' if (delivery.get('error') or {}).get('code')=='superseded' else 'rejected';detail={'error':delivery.get('error'),'automation':delivery['automation']}
             else:continue
             with self.db:
                 self.db.execute('update deliveries set state=?,detail=? where id=?',(status,encoded(detail),ident))
+                self.record_provider_outcome(detail)
                 if status == 'completed' and (self.get('workflow_failure') or {}).get('akh') == detail.get('akh'):
                     self.put('workflow_failure',None)
                 if status in ('failed','unknown','rejected') and state != status:
@@ -326,11 +376,12 @@ class Observer:
                 'metrics_available':monitor.get('victoriametrics',{}).get('available'),
                 'anima_available':self.get('anima_status',{}).get('ok'),
                 'activity_available':self.get('role_activity',{}).get('ok'),
-                'latest_workflow_failure':failure}
+                'latest_workflow_failure':failure,
+                'provider_availability':{r:s for r,s in self.get('provider_availability',{}).items() if s.get('failure_class')}}
         if signal!=self.get('watchdog_signal'):
             notice=self.get('watchdog_notice')
             if notice is None:
-                degraded=any(v!='up' for v in (signal['local_services'] or {}).values()) or any(signal[k] is False for k in ('grafana_available','metrics_available','anima_available','activity_available')) or failure is not None
+                degraded=any(v!='up' for v in (signal['local_services'] or {}).values()) or any(signal[k] is False for k in ('grafana_available','metrics_available','anima_available','activity_available')) or failure is not None or bool(signal['provider_availability'])
                 notice={'message_type':'coordination/status@v1','payload':{'state':'blocked' if degraded else 'complete',
                         'detail':'Deterministic Roman watchdog evidence (does not imply model task completion): '+encoded(signal)},
                         'summary':'Roman workflow and monitoring availability changed',
@@ -348,6 +399,12 @@ class Observer:
         try:self.refresh_activity()
         except Exception as error:
             with self.db:self.put('role_activity',{'ok':False,'at':int(time.time()),'error':type(error).__name__})
+        # Observe completed provider failures before producing or flushing wakes.
+        try:
+            self.watch_deliveries()
+            with self.db:self.put('delivery_watch_status',{'ok':True,'at':int(time.time())})
+        except Exception as error:
+            with self.db:self.put('delivery_watch_status',{'ok':False,'at':int(time.time()),'error':type(error).__name__})
         self.monitoring()
         try:self.scan_anima()
         except Exception as error:
@@ -357,7 +414,7 @@ class Observer:
                 self.put('anima_status',{'ok':False,'at':int(time.time()),'error':type(error).__name__})
                 if old.get('ok') is not False:self.event('roman-alerts','monitoring.changed',{'source':'anima-observer','available':False,'error':type(error).__name__})
         self.schedules()
-        for name, action in [('ingress',self.flush),('delivery_watch',self.watch_deliveries),('board_watchdog',self.notify_watchdog)]:
+        for name, action in [('ingress',self.flush),('board_watchdog',self.notify_watchdog)]:
             try:
                 action()
                 with self.db:self.put(name+'_status',{'ok':True,'at':int(time.time())})
@@ -388,7 +445,7 @@ def serve(root):
                 elif method=='tools/list':result={'tools':[{'name':'monitoring_snapshot','description':'Read latest alert, daemon-health, Anima-observer and coverage evidence, including observation times. Unavailable feeds mean unknown state. No filesystem access.','inputSchema':{'type':'object','properties':{},'additionalProperties':False},'annotations':{'readOnlyHint':True}}]}
                 elif method=='tools/call' and q['params']['name']=='monitoring_snapshot' and q['params'].get('arguments',{})=={}:
                     c=sqlite3.connect('file:'+str(root/'state/observer.sqlite3')+'?mode=ro',uri=True)
-                    data={k:json.loads(v) for k,v in c.execute("select key,value from state where key in ('monitoring','monitoring_at','anima_status','coverage','heartbeat','workflow_counts','role_activity','workflow_failure','ingress_status','delivery_watch_status','board_watchdog_status')")};c.close()
+                    data={k:json.loads(v) for k,v in c.execute("select key,value from state where key in ('monitoring','monitoring_at','anima_status','coverage','heartbeat','workflow_counts','role_activity','workflow_failure','provider_availability','ingress_status','delivery_watch_status','board_watchdog_status')")};c.close()
                     data['read_at']=int(time.time());data['read_at_utc']=datetime.now(timezone.utc).isoformat();result={'content':[{'type':'text','text':json.dumps(data)}]}
                 else:return self.reply(200,{'jsonrpc':'2.0','id':ident,'error':{'code':-32601,'message':'Unsupported read-only observer request'}})
                 self.reply(200,{'jsonrpc':'2.0','id':ident,'result':result})

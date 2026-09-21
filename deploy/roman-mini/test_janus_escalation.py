@@ -25,7 +25,7 @@ class Tests(unittest.TestCase):
  def test_lost_reply_and_restart_reuse_exact_commands(self):
   a=self.b.submit(self.args);self.b.drain();saved=dict(self.fake.receipts)
   b=Broker(self.root,self.fake);self.assertTrue(b.submit(self.args)['duplicate']);b.drain()
-  self.assertEqual(self.fake.turns,1);self.assertEqual(saved,self.fake.receipts);self.assertEqual(b.status(self.args['incident_key'])['state'],'submitted');self.assertEqual(a['thread_id'],b.status(self.args['incident_key'])['thread_id']);self.assertEqual(b.status(self.args['incident_key'])['responses'][0]['text'],'Verified repair')
+  self.assertEqual(self.fake.turns,1);self.assertEqual(saved,self.fake.receipts);self.assertEqual(b.status(self.args['incident_key'])['state'],'awaiting_execution');self.assertEqual(a['thread_id'],b.status(self.args['incident_key'])['thread_id']);self.assertEqual(b.status(self.args['incident_key'])['responses'][0]['text'],'Verified repair')
  def test_validation_and_storm_limit(self):
   with self.assertRaises(ValueError):self.b.submit(dict(self.args,project='/etc'))
   with self.assertRaises(ValueError):self.b.submit(dict(self.args,incident_key='bad key'))
@@ -35,5 +35,33 @@ class Tests(unittest.TestCase):
  def test_offline_admission_does_not_need_t3(self):
   self.b.submit(self.args)
   self.assertEqual(self.b.status(self.args['incident_key'])['state'],'queued');self.assertEqual(self.fake.receipts,{})
+
+ def test_provider_block_is_not_successful_submission_and_never_restarts(self):
+  from unittest.mock import patch
+  thread=self.b.submit(self.args)['thread_id'];self.b.drain();self.b.drain()
+  for error,state in [('Your usage limit was reached','blocked_quota'),
+                      ('Your refresh token was revoked','blocked_authentication'),
+                      ('HTTP 429','blocked_rate_limit'),('connection lost','failed')]:
+   snapshot={'threads':[{'id':thread,'session':{'status':'stopped','lastError':error},'latestTurn':{'state':'error'}}]}
+   with patch.object(self.fake,'call',return_value=snapshot) as call:
+    result=self.b.status(self.args['incident_key'])
+    self.assertEqual(result['state'],state);self.assertEqual(result['next_owner'],'Toasty/operator')
+    call.assert_called_once_with('/api/orchestration/snapshot')
+  self.assertEqual(self.fake.turns,1)
+
+ def test_new_running_or_completed_turn_wins_over_retained_error(self):
+  from unittest.mock import patch
+  thread=self.b.submit(self.args)['thread_id'];self.b.drain();self.b.drain()
+  for turn,expected in [('running','running'),('completed','turn_completed')]:
+   snapshot={'threads':[{'id':thread,'session':{'status':'ready','lastError':'usage limit'},'latestTurn':{'state':turn}}]}
+   with patch.object(self.fake,'call',return_value=snapshot):self.assertEqual(self.b.status(self.args['incident_key'])['state'],expected)
+
+ def test_status_outage_retains_receipt_without_redelivery(self):
+  from unittest.mock import patch
+  thread=self.b.submit(self.args)['thread_id'];self.b.drain();self.b.drain()
+  with patch.object(self.fake,'call',side_effect=TimeoutError('offline')):
+   result=self.b.status(self.args['incident_key'])
+  self.assertEqual(result['state'],'status_unavailable');self.assertEqual(result['thread_id'],thread)
+  self.assertEqual(self.fake.turns,1)
 
 if __name__=='__main__':unittest.main()
