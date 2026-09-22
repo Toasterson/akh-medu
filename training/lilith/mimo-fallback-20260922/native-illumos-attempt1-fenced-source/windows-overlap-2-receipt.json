@@ -1,0 +1,42 @@
+{
+  "schema": "lilith/native-execution@1",
+  "run_id": "b1ad043bbad940f5a3dc0c510780894f",
+  "guest": {
+    "host": "127.0.0.1",
+    "port": 10115,
+    "user": "akh-exec"
+  },
+  "target": "solution.py",
+  "command": [
+    "python3",
+    "-m",
+    "unittest",
+    "-q"
+  ],
+  "timeout_s": 60,
+  "timed_out": false,
+  "supervisor_status": "exit",
+  "exit_code": 1,
+  "passed": false,
+  "duration_ms": 1842,
+  "copy_in": {
+    "snapshot_sha256": "ba680ecd3f303a95f8c2fe5b24fe84ed8367cfa5a76c17e2eab438251484e391",
+    "snapshot_bytes": 10240,
+    "snapshot_entries": 2,
+    "content_sha256": "7d39ec6dd241f34b48570353c53c22bae974944293d513642a53b4242738b637",
+    "content_bytes": 205
+  },
+  "stdout": "",
+  "stderr": "======================================================================\nERROR: test_solution (unittest.loader._FailedTest)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_solution\nTraceback (most recent call last):\n  File \"/usr/lib/python3.9/unittest/loader.py\", line 436, in _find_test_path\n    module = self._get_module_from_name(name)\n  File \"/usr/lib/python3.9/unittest/loader.py\", line 377, in _get_module_from_name\n    __import__(name)\n  File \"/var/tmp/lilith-native/b1ad043bbad940f5a3dc0c510780894f/test_solution.py\", line 2, in <module>\n    from solution import f\n  File \"/var/tmp/lilith-native/b1ad043bbad940f5a3dc0c510780894f/solution.py\", line 1\n    ```python\n    ^\nSyntaxError: invalid syntax\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "8cec6cff0007b41eb2885e6d4c5626233fc4fb382e8be322014921cb83278b2a",
+  "stdout_truncated": false,
+  "stderr_truncated": false,
+  "remote_cleanup_succeeded": true,
+  "task_id": "windows-overlap/2",
+  "source_sha256": "7d39ec6dd241f34b48570353c53c22bae974944293d513642a53b4242738b637",
+  "test_source_sha256": "7b78637d9289b896d610d1c3e098bef06a0d473cdf20fdd9df2050a89761d47b",
+  "frozen_interpreter_passed": true,
+  "frozen_interpreter_category": "passed",
+  "frozen_cases": 121
+}

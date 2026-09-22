@@ -1,0 +1,6 @@
+{
+  "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+  "user_prompt_tokens": 513,
+  "output_budget": 768,
+  "scope": "User prompt count only; runtime adds profile/template tokens."
+}

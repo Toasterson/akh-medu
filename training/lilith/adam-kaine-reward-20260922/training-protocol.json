@@ -1,0 +1,64 @@
+{
+  "arms": [
+    {
+      "id": "base",
+      "update": "none"
+    },
+    {
+      "id": "sft_distill",
+      "update": "immutable corrected-sibling weighted SFT control"
+    },
+    {
+      "id": "klpo_online",
+      "update": "three sequential real KLPO policy updates; fresh on-policy bank per step"
+    },
+    {
+      "id": "sft_then_klpo_breed",
+      "update": "SFT adapter state then three fresh KLPO updates from that policy"
+    }
+  ],
+  "curriculum_manifest_sha256": "a491b9bd86fd52b1f4ca5dd756e218bd31e9b6e4ff5baae5c9f7961d917a2734",
+  "development_task_ids": [
+    "adam-observe-config/1",
+    "adam-instrument-cache/1",
+    "kaine-observe-retraction/1",
+    "kaine-instrument-handoff/1"
+  ],
+  "online_rl": {
+    "bank_rule": "one use only; no replay; new policy version and fresh independent auxiliary draws each step",
+    "failure_rule": "incomplete/invalid/unverified trajectory reward is zero and remains recorded",
+    "probability_contract": "actual sampled token ids and collection-policy q log-probabilities",
+    "reward_field": "klpo_reward",
+    "steps": 3
+  },
+  "parent_rule": "all trainable arms begin from the same frozen parent and rank-2 last-q adapter geometry",
+  "protocol_sha256": "207026d54229f5e7c4a8fe5921a04e5428837b8a0aac6c134f8cd08bc38d85e8",
+  "recipient": "Lilith Gemma-4-12B",
+  "release": {
+    "claim_limit": "mechanism transfer into Gemma; not ADAM or Kaine sovereign-model training",
+    "open_once": [
+      "adam-eval-observe-version/1",
+      "adam-eval-instrument-order/1",
+      "kaine-eval-observe-authority/1",
+      "kaine-eval-instrument-board/1"
+    ],
+    "required": [
+      "per-family effect/validity/provenance/disposition/budget",
+      "prior coding retention",
+      "format retention",
+      "cold reload"
+    ]
+  },
+  "schema": "lilith/adam-kaine-training-protocol@1",
+  "sealed_independent_eval_task_ids": [
+    "adam-eval-observe-version/1",
+    "adam-eval-instrument-order/1",
+    "kaine-eval-observe-authority/1",
+    "kaine-eval-instrument-board/1"
+  ],
+  "selection": {
+    "allowed": "development tasks plus frozen pre-existing canaries",
+    "breed_rule": "freeze every candidate before opening independent eval; never merge/select on eval",
+    "forbidden": "independent_eval tasks, eval transcript sessions, or eval family markers"
+  }
+}

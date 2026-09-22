@@ -1,0 +1,43 @@
+[
+    {
+        "backing-filename-format": "qcow2",
+        "virtual-size": 32161923072,
+        "filename": "/home/toasty/.local/share/akh-medu/lilith-illumos-20260922/overlay.qcow2",
+        "cluster-size": 65536,
+        "format": "qcow2",
+        "actual-size": 17408,
+        "format-specific": {
+            "type": "qcow2",
+            "data": {
+                "compat": "1.1",
+                "compression-type": "zlib",
+                "lazy-refcounts": false,
+                "refcount-bits": 16,
+                "corrupt": false,
+                "extended-l2": false
+            }
+        },
+        "full-backing-filename": "/home/toasty/.local/share/akh-medu/lilith-illumos-20260922/golden.qcow2",
+        "backing-filename": "/home/toasty/.local/share/akh-medu/lilith-illumos-20260922/golden.qcow2",
+        "dirty-flag": false
+    },
+    {
+        "virtual-size": 32161923072,
+        "filename": "/home/toasty/.local/share/akh-medu/lilith-illumos-20260922/golden.qcow2",
+        "cluster-size": 65536,
+        "format": "qcow2",
+        "actual-size": 24791200768,
+        "format-specific": {
+            "type": "qcow2",
+            "data": {
+                "compat": "1.1",
+                "compression-type": "zlib",
+                "lazy-refcounts": true,
+                "refcount-bits": 16,
+                "corrupt": false,
+                "extended-l2": false
+            }
+        },
+        "dirty-flag": false
+    }
+]

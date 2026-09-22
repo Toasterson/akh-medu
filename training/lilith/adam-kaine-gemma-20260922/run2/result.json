@@ -1,0 +1,12 @@
+{
+  "schema": "lilith/rl-probe@1",
+  "status": "failed",
+  "pid": 93644,
+  "deployed_weights_changed": false,
+  "quality_claim": false,
+  "source_sha256": "455e1356089b5eb7cff3c1f229cb8e84d8e8d75219fb78887599cdef899253fa",
+  "training_protocol_sha256": "4a1f7dd5eeb6e985c2d59f41ac0cce676829cf3b5445c812bfbe3112ac5c56f3",
+  "error": "TypeError: Object of type bytes is not JSON serializable",
+  "phase": "failed",
+  "elapsed_seconds": 3.3502864989968657
+}

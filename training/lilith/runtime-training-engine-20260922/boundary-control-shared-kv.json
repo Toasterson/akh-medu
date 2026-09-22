@@ -1,0 +1,58 @@
+{
+  "cache_tensors_checked": 96,
+  "control_script_sha256": "a26b821b329156b3201c2407a454c4e54d23dda08a01cf046f19359e6d87c3fd",
+  "elapsed_seconds": 691.7362069320006,
+  "engine_source_sha256": "f1b67264da6b8d9baf644104c529f807e9e30d39b07e055033841537578e0cdc",
+  "gradient_differences": {
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": {
+      "cached_norm": 0.0,
+      "full_norm": 0.0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0
+    },
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": {
+      "cached_norm": 0.07163406908512115,
+      "full_norm": 3.6871814727783203,
+      "max_abs": 1.2073962688446045,
+      "mean_abs": 0.013615263625979424
+    }
+  },
+  "logit_differences": {
+    "1023": {
+      "max_abs": 47.0,
+      "mean_abs": 15.268052101135254
+    },
+    "1024": {
+      "max_abs": 40.5,
+      "mean_abs": 18.78714370727539
+    },
+    "1025": {
+      "max_abs": 41.9375,
+      "mean_abs": 17.804529190063477
+    }
+  },
+  "losses": {
+    "abs": 5.043119430541992,
+    "cached": 20.398120880126953,
+    "full": 25.441240310668945
+  },
+  "peak_gpu_bytes": 24328010752,
+  "positions": [
+    1023,
+    1024,
+    1025
+  ],
+  "prefill_chunk_tokens": 1,
+  "schema": "lilith/training-engine-boundary-control@2",
+  "shared_kv_persisted": false,
+  "shared_kv_persisted_label_correction": {
+    "actual_engine_behavior": false,
+    "original_value": true,
+    "reason": "control script initialized a stale descriptive field; engine _forward rebuilds shared_kv_states per call"
+  },
+  "status": "failed_equivalence",
+  "tolerances": {
+    "gradient_max_abs": 0.0001,
+    "logit_max_abs": 0.0001
+  }
+}

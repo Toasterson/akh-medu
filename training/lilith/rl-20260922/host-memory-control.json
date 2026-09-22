@@ -1,0 +1,12 @@
+{
+  "path": "/sys/module/zfs/parameters/zfs_arc_max",
+  "previous": "0",
+  "temporary": "4294967296",
+  "reason": "bound filesystem cache during HF parent load after VM image cloning",
+  "started": 1790081548.5044208,
+  "previous_effective_max": 16801425408,
+  "restored_parameter": "0",
+  "restored_at": 1790081680.3117852,
+  "status": "restored",
+  "restored_effective_max": 16801425408
+}

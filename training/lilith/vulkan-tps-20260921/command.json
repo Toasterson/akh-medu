@@ -1,0 +1,15 @@
+[
+  "target/release/examples/candle_session_probe",
+  "--model",
+  "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+  "--tokenizer",
+  "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+  "--device",
+  "vulkan",
+  "--tokens",
+  "128",
+  "--prompt-file",
+  "training/lilith/vulkan-tps-20260921/prompt.txt",
+  "--hidden-dump",
+  "training/lilith/vulkan-tps-20260921/baseline.f32"
+]

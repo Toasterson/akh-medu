@@ -1,0 +1,13 @@
+{
+  "schema": "lilith/coordination-test-receipt@v1",
+  "date": "2026-09-22",
+  "command": "cd scripts/session-platform && python3 -m unittest -v test_lilith_repository_coordination.py test_lilith_coordination.py",
+  "tests": 44,
+  "repository_task_tests": 16,
+  "passed": true,
+  "elapsed_seconds": 1.939,
+  "execution": "bounded_local_cpu_fixture_and_synthetic_session_api",
+  "model_stack_validated": false,
+  "gpu_used": false,
+  "illumos_vm_validated": false
+}

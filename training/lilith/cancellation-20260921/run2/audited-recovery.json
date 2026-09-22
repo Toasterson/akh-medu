@@ -1,0 +1,17 @@
+{
+  "resolution": {
+    "request_id": "lilith-cancel-run2-audited-recovery",
+    "expected_request_sha256": "82f55ce3d7b7e36cfd54c843032026e15461dadc83865b68250d31b3e751246d",
+    "status": "cancelled",
+    "quiescent": true,
+    "evidence": [
+      "Owned run2 runtime process has exited; result.json records service cleanup.",
+      "Runtime log records cancellation after 0.997s, before Ptah model load or inference.",
+      "Exact job has no tool grants and reports cancelled: internal runtime cancelled.",
+      "This is one audited recovery, not automatic reconciliation of unknown jobs."
+    ],
+    "output": null,
+    "result": null
+  },
+  "status": "cancelled"
+}

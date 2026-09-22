@@ -1,0 +1,18 @@
+{
+  "akhexecd": {
+    "exit_code": 0,
+    "output": "akhexecd: configuration valid\n"
+  },
+  "akhsbxd": {
+    "exit_code": 0,
+    "output": "akhsbxd: configuration valid\n"
+  },
+  "akhrtd": {
+    "exit_code": 0,
+    "output": "akhrtd: configuration valid\n"
+  },
+  "akhsessd": {
+    "exit_code": 0,
+    "output": "akhsessd: configuration valid\n"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "kind": "local_model_switch_and_review_integration",
+  "status": "failed",
+  "phases": [
+    {
+      "phase": "stack_ready",
+      "runtime_pid": 231874,
+      "devices": {
+        "lilith": {
+          "kind": "vulkan",
+          "ordinal": 0
+        },
+        "ptah": {
+          "kind": "hip",
+          "ordinal": 0
+        }
+      }
+    }
+  ],
+  "error": "akhrtd exited during lilith-write",
+  "services_stopped": true
+}

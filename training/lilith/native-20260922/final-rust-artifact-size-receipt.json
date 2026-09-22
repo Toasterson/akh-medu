@@ -1,0 +1,35 @@
+{
+  "command": [
+    "sh",
+    "-c",
+    "rustc -Dwarnings check.rs -o check-rs && wc -c check-rs"
+  ],
+  "copy_in": {
+    "content_bytes": 269,
+    "content_sha256": "ea999eaf134b3fb451a288523fabe0bbaaf383b030a123ac7be76e54cd9d3a55",
+    "snapshot_bytes": 10240,
+    "snapshot_entries": 3,
+    "snapshot_sha256": "6f6ad1cb442722079321a56649a8db01c78aeda3952f75ad9c98954ca06f8394"
+  },
+  "duration_ms": 1854,
+  "exit_code": 0,
+  "guest": {
+    "host": "127.0.0.1",
+    "port": 10115,
+    "user": "akh-exec"
+  },
+  "passed": true,
+  "remote_cleanup_succeeded": true,
+  "run_id": "c9235fdff2124a7da35b5cb650d6cb16",
+  "schema": "lilith/native-execution@1",
+  "stderr": "",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_truncated": false,
+  "stdout": " 1538056 check-rs\n",
+  "stdout_sha256": "f61ac005858a775301c8c6f2f913ab0001c5d328d382447694105d0af57e500c",
+  "stdout_truncated": false,
+  "supervisor_status": "exit",
+  "target": "check.rs",
+  "timed_out": false,
+  "timeout_s": 30
+}

@@ -1,0 +1,10 @@
+{
+  "status": "passed",
+  "kind": "durable_cancellation_api_probe",
+  "seconds": 2.067247095001221,
+  "assignment_id": "fd3af0276a0f465881b1301517c242be",
+  "child_turn_status": "cancelled",
+  "parent_turns_unchanged": true,
+  "controller_reopened": true,
+  "services_stopped": true
+}

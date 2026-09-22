@@ -182,7 +182,8 @@ fn acquire_model(
     deadline: Instant,
 ) -> Result<MutexGuard<'static, Option<(ResidentIdentity, CandleBackend)>>> {
     loop {
-        check(cancel, deadline)?;
+        // No broker callback has begun while waiting for native admission.
+        check(cancel, deadline).map_err(model_boundary)?;
         match MODEL.try_lock() {
             Ok(guard) => return Ok(guard),
             Err(TryLockError::Poisoned(_)) => {
@@ -247,7 +248,8 @@ pub(super) fn completion(
         .map_err(|e| Fault::new("model_load", e.to_string()))?;
         *resident = Some((identity, backend));
     }
-    check(cancel, deadline)?;
+    // Model preparation has no outstanding callback or generated tool plan.
+    check(cancel, deadline).map_err(model_boundary)?;
     let backend = &mut resident.as_mut().unwrap().1;
     // Always install the current cap, including cache hits. A rejected limit
     // must stop this call before prefill, never reuse the prior call's budget.
@@ -544,7 +546,8 @@ fn verify_artifact(
     let mut hash = Sha256::new();
     let mut bytes = [0u8; 65536];
     loop {
-        check(cancel, deadline)?;
+        // Hashing is a model boundary: no broker work has been submitted.
+        check(cancel, deadline).map_err(model_boundary)?;
         let count = file
             .read(&mut bytes)
             .map_err(|_| Fault::new("model_load", "cannot hash pinned native model artifact"))?;
@@ -1201,6 +1204,15 @@ mod tests {
         );
     }
     #[test]
+    fn cancelled_native_admission_is_a_confirmed_model_boundary() {
+        let cancel = AtomicBool::new(true);
+        let error = match acquire_model(&cancel, Instant::now() + Duration::from_secs(1)) {
+            Err(error) => error,
+            Ok(_) => panic!("cancelled admission acquired the model"),
+        };
+        assert_eq!(error.code, "model_cancelled");
+    }
+    #[test]
     fn artifact_pins_reject_mismatch_and_unreadable_paths() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("artifact");
@@ -1230,7 +1242,7 @@ mod tests {
             verify_artifact(&path, &crate::digest(b"abc"), &cancel, deadline)
                 .unwrap_err()
                 .code,
-            "cancelled"
+            "model_cancelled"
         );
     }
     #[test]
@@ -1262,10 +1274,10 @@ mod tests {
         let fault = acquire_model(&cancel, Instant::now() + Duration::from_secs(1))
             .err()
             .unwrap();
-        assert_eq!(fault.code, "cancelled");
+        assert_eq!(fault.code, "model_cancelled");
         cancel.store(false, Ordering::SeqCst);
         let fault = acquire_model(&cancel, Instant::now()).err().unwrap();
-        assert_eq!(fault.code, "timeout");
+        assert_eq!(fault.code, "model_incomplete");
     }
     #[test]
     fn tool_output_is_all_or_nothing() {

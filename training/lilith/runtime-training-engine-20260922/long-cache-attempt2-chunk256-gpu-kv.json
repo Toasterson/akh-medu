@@ -1,0 +1,10 @@
+{
+  "schema": "lilith/training-engine-control-attempt@1",
+  "status": "oom",
+  "tokens_requested": 8192,
+  "prefill": "256-token chunks with GPU-resident DynamicCache",
+  "optimizer_steps": 0,
+  "error": "torch.OutOfMemoryError: HIP out of memory; tried to allocate 26.00 MiB",
+  "memory": {"gpu_total_gib": 23.98, "free_mib_at_failure": 26, "pytorch_allocated_gib": 23.41, "pytorch_reserved_unallocated_mib": 257.22},
+  "finding": "chunking bounds activations but GPU-resident long KV still exceeds available VRAM"
+}

@@ -1,0 +1,19 @@
+{
+  "schema": "lilith/report-capsule@1",
+  "objective": "Implement range_within_u64(start, length, limit). Inputs are arbitrary integers. Return false if any input is outside 0..18446744073709551615. Otherwise return whether [start,start+length) fits within [0,limit). An empty range at start==limit is valid; reject start>limit and use length <= limit-start after checking start <= limit.",
+  "target": "solution.py",
+  "command": [
+    "python3",
+    "-m",
+    "unittest",
+    "-q"
+  ],
+  "passed": true,
+  "exit_code": 0,
+  "timed_out": false,
+  "cleanup": true,
+  "guest": "OpenIndiana illumos-c4b084c090; akh-exec@127.0.0.1:10115",
+  "original_modified": false,
+  "review": "No defect found.\n\nThe implementation correctly handles the specified edge cases:\n1.  **Input Validation**: It checks if `start`, `length`, and `limit` are within the 64-bit unsigned integer range ($0 \\le x \\le 2^{64}-1$).\n2.  **Range Containment**: It correctly rejects `start > limit`.\n3.  **Empty Range**: It explicitly handles the case where `start == limit` and `length == 0` as valid.\n4.  **Overflow Safety**: By checking `length <= (limit - start)` instead of `start + length <= limit`, it avoids potential overflow issues in languages with fixed-width integers (though Python integers are arbitrary precision, this logic is robust and matches the requirement to use subtraction after checking `start <= limit`).\n5.  **Verification**: The provided verification receipt shows `exit_code: 0` and `passed: true` for the unittest suite, confirming the logic passes the available tests.\n\nThe code aligns with the objective: \"Return false if any input is outside 0..18446744073709551615. Otherwise return whether [start,start+length) fits within [0,limit). An empty range at start==limit is valid; reject start>limit and use length <= limit-start after checking start <= limit.\"",
+  "artifacts": "./evidence.json"
+}

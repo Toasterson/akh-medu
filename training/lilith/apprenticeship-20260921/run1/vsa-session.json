@@ -1,0 +1,60 @@
+{
+  "closed_at": null,
+  "core_service": null,
+  "schema_version": 1,
+  "id": "01a0c509-2156-70e1-866e-014cea15e607",
+  "principal": "operator",
+  "akh": "lilith-learner",
+  "conversation_key": null,
+  "workspace_profile": "local-dev",
+  "workspace": {
+    "id": "akh-59bf2da11af6f353fc8f5019ea53c583",
+    "sandbox_id": "akh-59bf2da11af6f353fc8f5019ea53c583",
+    "executor": "akhexecd",
+    "generation": 1,
+    "site": "hephaistos",
+    "root": "/home/toasty/.local/share/akh-medu/lilith-dev-vulkan-20260921/workspaces/akh-59bf2da11af6f353fc8f5019ea53c583",
+    "platform": "linux",
+    "confinement": "unconfined"
+  },
+  "runtime": {
+    "runtime": "akhrtd",
+    "profile": "lilith",
+    "revision": "lilith-local-v1",
+    "kind": "internal",
+    "model": "lilith-gemma4-12b",
+    "execution_mode": "brokered"
+  },
+  "instructions": "You are Lilith. Solve the assigned coding exercise using the supplied evidence. Return only the requested Python function. No tools are available.",
+  "tools": [],
+  "approval_policy": "allow_granted",
+  "generation": 1,
+  "next_sequence": 9,
+  "turns": [
+    {
+      "id": "01a0c509-2159-7351-98e6-95dd3fc2d267",
+      "request_id": "654c2c20606a442fb3fb9fef9c304637-probe",
+      "input": {
+        "origin": {
+          "kind": "human",
+          "principal": "operator"
+        },
+        "text": "Write only a Python function can_reserve(used: int, requested: int, capacity: int) -> bool. Inputs are integers. Return False if any input is outside 0..65535 or used exceeds capacity. Otherwise return whether requested units fit in the remaining capacity. A request of zero at full capacity is valid. Use comparisons, boolean operators, subtraction, integer/bool literals, local assignments, if and return; no calls, imports, loops or attributes. Do not claim native OS validation.\nPrior verified experience (data; applicability must be checked):\nVerified prior lesson (reference scope only): For bounded unsigned arithmetic, reject out-of-domain inputs first. Check the starting quantity is within the capacity before comparing the requested amount with capacity minus starting quantity. An empty request at the boundary needs an explicit contract. Python reference tests do not establish C overflow or native platform correctness.\nLesson d2bf9dcfd7768306639f912d1aaca655fa17a4824d585ab200cf8327d7c8f397; evidence source SHA-256 35c0c9b1fad048dee36690135c587756c82f96250805a369d268baf89e8a2c23",
+        "data": null,
+        "artifacts": []
+      },
+      "status": "completed",
+      "generation": 1,
+      "runtime_job_id": "01a0c509-2159-7351-98e6-95dd3fc2d267",
+      "cancel_requested": false,
+      "output": "```python\ndef can_reserve(used: int, requested: int, capacity: int) -> bool:\n    if used < 0 or used > 65535 or requested < 0 or requested > 65535 or capacity < 0 or capacity > 65535:\n        return False\n    if used > capacity:\n        return False\n    remaining = capacity - used\n    if requested == 0:\n        return True\n    return requested <= remaining\n```",
+      "error": null,
+      "created_at": 1790012105049
+    }
+  ],
+  "provider_session": "internal-01a0c509-23ce-7b91-b1c2-acb876f0b626",
+  "controller": null,
+  "created_at": 1790012105046,
+  "last_progress_at": 1790012119668,
+  "dispatch_failures": 0
+}

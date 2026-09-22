@@ -1,0 +1,9 @@
+{
+  "python": "3.10.12",
+  "torch": "2.7.1+rocm6.3",
+  "transformers": "5.10.1",
+  "device": "AMD Radeon Graphics",
+  "load_seconds": 77.4311937780003,
+  "allocated_bytes": 18819708416,
+  "reserved_bytes": 18836619264
+}

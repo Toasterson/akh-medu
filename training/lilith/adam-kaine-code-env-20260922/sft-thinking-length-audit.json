@@ -1,0 +1,12 @@
+{
+  "schema": "lilith/sft-thinking-length-audit@1",
+  "template_enable_thinking": true,
+  "records": 16,
+  "splits": {"train": 8, "validation": 8},
+  "minimum_total_tokens": 41,
+  "maximum_total_tokens": 502,
+  "limit_total_tokens": 512,
+  "truncated": 0,
+  "target_kind": "harvested final assistant answers without verified reasoning traces",
+  "passed": true
+}

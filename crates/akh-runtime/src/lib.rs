@@ -11,7 +11,11 @@ use akh_session_types::{
     neural_spans::{SpanCapture, SpanHit, SpanSpace},
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
+    collections::HashSet,
+    fs::File,
+    io::Read,
     path::PathBuf,
     process::Command,
     sync::atomic::{AtomicBool, Ordering},
@@ -56,6 +60,253 @@ pub trait Host {
         _reserved_output_tokens: usize,
     ) -> Result<Option<AssembledContext>, String> {
         Ok(None)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrainingWorkerError {
+    /// No host callback may have taken effect; retry policy remains with akhrtd.
+    Boundary(String),
+    /// A host tool callback occurred and the worker did not finish durably.
+    UnknownOutcome(String),
+    /// The daemon explicitly cancelled the managed process.
+    Cancelled(String),
+}
+
+impl std::fmt::Display for TrainingWorkerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Boundary(message) | Self::UnknownOutcome(message) | Self::Cancelled(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+fn artifact_sha256(path: &std::path::Path) -> Result<String, String> {
+    let mut file =
+        File::open(path).map_err(|e| format!("cannot open pinned training artifact: {e}"))?;
+    let mut hash = Sha256::new();
+    let mut bytes = [0u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut bytes)
+            .map_err(|e| format!("cannot hash pinned training artifact: {e}"))?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&bytes[..count]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+/// Run a pinned provider-owned training worker while retaining all tool
+/// authority in the daemon Host. The child receives no workspace credential.
+pub fn run_training_worker(
+    config: &ProviderConfig,
+    request: &RuntimeJobRequest,
+    host: &mut dyn Host,
+    cancel: &AtomicBool,
+) -> Result<String, TrainingWorkerError> {
+    let fail = TrainingWorkerError::Boundary;
+    if config.kind != RuntimeKind::Internal
+        || request.binding.kind != RuntimeKind::Internal
+        || config.revision != request.binding.revision
+        || config.execution_mode != ExecutionMode::Brokered
+        || request.binding.execution_mode != ExecutionMode::Brokered
+        || config.timeout_secs == 0
+        || !config.working_dir.is_absolute()
+        || !config.working_dir.is_dir()
+    {
+        return Err(fail(
+            "training worker requires a matching brokered internal runtime binding".into(),
+        ));
+    }
+    let worker = config
+        .training_worker
+        .as_ref()
+        .ok_or_else(|| fail("training worker missing".into()))?;
+    if config.isolation.is_none() {
+        return Err(fail(
+            "training worker requires an isolated provider environment".into(),
+        ));
+    }
+    for (path, expected) in [
+        (&worker.executable, &worker.executable_sha256),
+        (&worker.worker_config_path, &worker.worker_config_sha256),
+    ] {
+        if !path.is_absolute()
+            || !path.is_file()
+            || artifact_sha256(path).map_err(&fail)? != *expected
+        {
+            return Err(fail("pinned training artifact is absent or changed".into()));
+        }
+    }
+    match (&worker.script, &worker.script_sha256) {
+        (Some(path), Some(expected))
+            if path.is_absolute()
+                && path.is_file()
+                && artifact_sha256(path).map_err(&fail)? == *expected => {}
+        (None, None) => {}
+        _ => {
+            return Err(fail(
+                "training script path and SHA256 pin must match".into(),
+            ));
+        }
+    }
+    if request.binding.model.as_deref() != Some(worker.model.as_str()) {
+        return Err(fail(
+            "training worker model does not match runtime binding".into(),
+        ));
+    }
+
+    let tools = request.tools.iter().map(|tool| json!({"function":{"name":tool.name,"description":tool.description,"parameters":tool.input_schema}})).collect();
+    let mut turn = Turn {
+        config,
+        request,
+        host,
+        cancel,
+        cwd: config.working_dir.clone(),
+        tools,
+        instructions: request.instructions.clone(),
+        prompt: request.input.provider_prompt(),
+        session: request.provider_session.clone(),
+    };
+    let mut command = turn.command(&worker.executable).map_err(&fail)?;
+    if let Some(script) = &worker.script {
+        command.arg(script);
+    }
+    let mut process = process::Process::spawn(command, config.timeout_secs).map_err(&fail)?;
+    process
+        .send(&json!({"type":"start","request":request,
+        "config_path":worker.worker_config_path,"config_sha256":worker.worker_config_sha256}))
+        .map_err(TrainingWorkerError::UnknownOutcome)?;
+
+    let mut ids = HashSet::new();
+    let mut tool_calls = 0u32;
+    let mut progress = 0u32;
+    loop {
+        let frame = process.recv(cancel).map_err(|message| {
+            if cancel.load(Ordering::Relaxed) {
+                TrainingWorkerError::Cancelled(message)
+            } else {
+                TrainingWorkerError::UnknownOutcome(message)
+            }
+        })?;
+        let uncertain = TrainingWorkerError::UnknownOutcome;
+        let kind = frame
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| uncertain("training worker frame has no type".into()))?;
+        let exact_keys = |allowed: &[&str]| {
+            frame.as_object().is_some_and(|object| {
+                object.len() == allowed.len()
+                    && object.keys().all(|key| allowed.contains(&key.as_str()))
+            })
+        };
+        match kind {
+            "progress" => {
+                if !exact_keys(&["type", "phase"]) && !exact_keys(&["type", "phase", "usage"]) {
+                    return Err(uncertain(
+                        "training progress frame has unexpected fields".into(),
+                    ));
+                }
+                progress = progress
+                    .checked_add(1)
+                    .ok_or_else(|| uncertain("training progress overflow".into()))?;
+                if progress > 100_000 {
+                    return Err(uncertain("training progress event limit exceeded".into()));
+                }
+                let phase = frame
+                    .get("phase")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty() && v.len() <= 128)
+                    .ok_or_else(|| uncertain("training progress phase is invalid".into()))?;
+                let usage = frame.get("usage").cloned().unwrap_or_else(|| json!({}));
+                if !usage.is_object() {
+                    return Err(uncertain(
+                        "training progress usage must be an object".into(),
+                    ));
+                }
+                turn.host
+                    .usage(&json!({"training":{"phase":phase,"usage":usage}}));
+            }
+            "tool_call" => {
+                if !exact_keys(&["type", "id", "name", "arguments"]) {
+                    return Err(uncertain(
+                        "training tool frame has unexpected fields".into(),
+                    ));
+                }
+                tool_calls = tool_calls
+                    .checked_add(1)
+                    .ok_or_else(|| uncertain("training tool count overflow".into()))?;
+                if tool_calls > worker.max_tool_calls {
+                    return Err(uncertain("training worker tool limit exceeded".into()));
+                }
+                let id = frame
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty() && v.len() <= 512)
+                    .ok_or_else(|| uncertain("training tool call ID is invalid".into()))?;
+                if !ids.insert(id.to_owned()) {
+                    return Err(uncertain("duplicate training tool call ID".into()));
+                }
+                let name = frame
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| uncertain("training tool name is invalid".into()))?;
+                if !request.tools.iter().any(|tool| tool.name == name) {
+                    return Err(uncertain(
+                        "training worker selected a tool outside the request catalog".into(),
+                    ));
+                }
+                let arguments = frame
+                    .get("arguments")
+                    .cloned()
+                    .filter(Value::is_object)
+                    .ok_or_else(|| uncertain("training tool arguments must be an object".into()))?;
+                let result = turn
+                    .tool(id, name, arguments)
+                    .map_err(TrainingWorkerError::UnknownOutcome)?;
+                process
+                    .send(&json!({"type":"tool_result","id":id,"result":result}))
+                    .map_err(TrainingWorkerError::UnknownOutcome)?;
+            }
+            "completed" => {
+                if !exact_keys(&["type", "output"]) {
+                    return Err(uncertain(
+                        "training completion frame has unexpected fields".into(),
+                    ));
+                }
+                let output = frame
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty() && text.len() <= 4 * 1024 * 1024)
+                    .ok_or_else(|| {
+                        uncertain("training worker completion output is invalid".into())
+                    })?;
+                return Ok(output.to_owned());
+            }
+            "error" => {
+                if !exact_keys(&["type", "message"]) {
+                    return Err(uncertain(
+                        "training error frame has unexpected fields".into(),
+                    ));
+                }
+                let message = frame
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty() && text.len() <= 4096)
+                    .unwrap_or("training worker reported an invalid error");
+                return Err(TrainingWorkerError::UnknownOutcome(message.into()));
+            }
+            _ => {
+                return Err(uncertain(
+                    "training worker emitted an unsupported frame".into(),
+                ));
+            }
+        }
     }
 }
 

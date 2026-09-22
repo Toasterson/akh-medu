@@ -1,0 +1,5 @@
+{
+  "status": "failed_before_services",
+  "error": "argument variable shadowed by port mapping loop",
+  "source_sha256": "23311118971324438e9b5cd2fc2060c982916e518caf1870a79fa4162817a322"
+}

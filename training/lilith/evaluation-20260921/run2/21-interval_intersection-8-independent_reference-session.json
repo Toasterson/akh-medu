@@ -1,0 +1,60 @@
+{
+  "closed_at": null,
+  "core_service": null,
+  "schema_version": 1,
+  "id": "01a0c529-716a-7071-b399-766dfb640e50",
+  "principal": "operator",
+  "akh": "ptah-eval",
+  "conversation_key": null,
+  "workspace_profile": "local-dev",
+  "workspace": {
+    "id": "akh-a1fc2e7ff0738d3655a9ef5d06f0faa0",
+    "sandbox_id": "akh-a1fc2e7ff0738d3655a9ef5d06f0faa0",
+    "executor": "akhexecd",
+    "generation": 1,
+    "site": "hephaistos",
+    "root": "/home/toasty/.local/share/akh-medu/lilith-evaluation-ab00aaa8ea134e0eb44d3e80ddc7a571/workspaces/akh-a1fc2e7ff0738d3655a9ef5d06f0faa0",
+    "platform": "linux",
+    "confinement": "unconfined"
+  },
+  "runtime": {
+    "runtime": "akhrtd",
+    "profile": "ptah",
+    "revision": "lilith-local-v1",
+    "kind": "internal",
+    "model": "ptah-qwen38",
+    "execution_mode": "brokered"
+  },
+  "instructions": "Solve the assigned coding exercise. Return only the requested Python function. No tools are available.",
+  "tools": [],
+  "approval_policy": "allow_granted",
+  "generation": 1,
+  "next_sequence": 9,
+  "turns": [
+    {
+      "id": "01a0c529-7176-7c80-b10d-ba663831c589",
+      "request_id": "8c29a60d39a44efcbce2a3ba8fff9b5c-input",
+      "input": {
+        "origin": {
+          "kind": "human",
+          "principal": "operator"
+        },
+        "text": "Return only one Python function, with no Markdown fences or explanatory prose. Use integer/bool literals, local assignment, if/else, return, comparisons, and/or/not, conditional expressions, +, -, *, //, %, and bitwise & only. No calls (including min/max), imports, loops, shifts, exponentiation, decorators, helper functions, containers or strings. Keep the source under 4096 bytes. These are local Python reference tasks, not native OS validation.\n\nInputs are integers. Reject any input outside 0..255 by returning -1. Write overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int. Reject an end smaller than its start. Return the number of integer positions in the intersection of half-open intervals [a_start,a_end) and [b_start,b_end). Empty intervals and touching endpoints have zero overlap.",
+        "data": null,
+        "artifacts": []
+      },
+      "status": "completed",
+      "generation": 1,
+      "runtime_job_id": "01a0c529-7176-7c80-b10d-ba663831c589",
+      "cancel_requested": false,
+      "output": "def overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int:\n    if a_start < 0 or a_start > 255 or a_end < 0 or a_end > 255 or b_start < 0 or b_start > 255 or b_end < 0 or b_end > 255:\n        return -1\n    if a_end < a_start or b_end < b_start:\n        return -1\n    lo = a_start if a_start > b_start else b_start\n    hi = a_end if a_end < b_end else b_end\n    if hi > lo:\n        return hi - lo\n    return 0",
+      "error": null,
+      "created_at": 1790014222710
+    }
+  ],
+  "provider_session": "internal-01a0c529-72b4-75f3-af98-40e46348b42d",
+  "controller": null,
+  "created_at": 1790014222698,
+  "last_progress_at": 1790014255014,
+  "dispatch_failures": 0
+}

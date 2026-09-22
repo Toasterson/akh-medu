@@ -1,0 +1,636 @@
+{
+  "schema": "lilith/rl-independent-replay@1",
+  "runner_status": "passed",
+  "quality_improvement_established": false,
+  "native_illumos": false,
+  "arms": {
+    "base": {
+      "train": {
+        "observed": 4,
+        "expected": 4,
+        "passed": 1,
+        "completed": 4,
+        "generated_tokens": 203,
+        "failures": {
+          "syntax": 3
+        }
+      },
+      "development_holdout": {
+        "observed": 4,
+        "expected": 4,
+        "passed": 0,
+        "completed": 4,
+        "generated_tokens": 178,
+        "failures": {
+          "syntax": 4
+        }
+      }
+    },
+    "sft": {
+      "train": {
+        "observed": 4,
+        "expected": 4,
+        "passed": 1,
+        "completed": 4,
+        "generated_tokens": 203,
+        "failures": {
+          "syntax": 3
+        }
+      },
+      "development_holdout": {
+        "observed": 4,
+        "expected": 4,
+        "passed": 0,
+        "completed": 4,
+        "generated_tokens": 178,
+        "failures": {
+          "syntax": 4
+        }
+      }
+    },
+    "klpo": {
+      "train": {
+        "observed": 4,
+        "expected": 4,
+        "passed": 1,
+        "completed": 4,
+        "generated_tokens": 203,
+        "failures": {
+          "syntax": 3
+        }
+      },
+      "development_holdout": {
+        "observed": 4,
+        "expected": 4,
+        "passed": 0,
+        "completed": 4,
+        "generated_tokens": 178,
+        "failures": {
+          "syntax": 4
+        }
+      }
+    }
+  },
+  "outcomes": [
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "e9241ff70af8ab6beb9f5370007de2d48fa90bb387418c319218df1120265c9f",
+        "artifact_sha256": "5e7a2ce8673a035ea6ee4e1686d44def45d5bbe243e9a37dc066cd80cd679cfb",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 225,
+          "total_cases": 225,
+          "source_sha256": "5e7a2ce8673a035ea6ee4e1686d44def45d5bbe243e9a37dc066cd80cd679cfb"
+        }
+      },
+      "arm": "base",
+      "task": "mask-intersection-u8/1",
+      "split": "train",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 62,
+      "record_sha256": "bfcf2e5813dabb34a5369f6926016664f75a63d2f46e3a786c5d552710ecbb2f"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "c6fdd119840fb902f46973801ee9f4961de42fd973beadc8fe631a3ac6883cfa",
+        "artifact_sha256": "129e64f566c4d807bdb9bad8eb4ba4b5912181f6fe158c643eb5445de4ed1806",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 1024,
+          "total_cases": 1024,
+          "source_sha256": "129e64f566c4d807bdb9bad8eb4ba4b5912181f6fe158c643eb5445de4ed1806"
+        }
+      },
+      "arm": "base",
+      "task": "required-flags-u8/1",
+      "split": "train",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 30,
+      "record_sha256": "a2f2f302367f3ffd2ef0a275a6e9ecbf0f03ccd8eb51772d3d8dda385ce49c7d"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "89f90ab0eecd504f4da2100f3d5dc4ce09dc70889253d74f7615eccecef8a03b",
+        "artifact_sha256": "f41d439613adb7b28ba1f1a6ee9d086b9bb58a81bac3b3ac62ee2d06682fd891",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 225,
+          "total_cases": 225,
+          "source_sha256": "f41d439613adb7b28ba1f1a6ee9d086b9bb58a81bac3b3ac62ee2d06682fd891"
+        }
+      },
+      "arm": "base",
+      "task": "compose-le16/1",
+      "split": "train",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 63,
+      "record_sha256": "c032925dd4f6b252797838666c788bede0cc29112af4f764070d82e1262fbb0b"
+    },
+    {
+      "wrapper_diagnostic": null,
+      "arm": "base",
+      "task": "select-le16-byte/1",
+      "split": "train",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "generated_tokens": 48,
+      "record_sha256": "30a1d5490159f9867c68c664ceee6d04565fd531e97cf0c4e99d6906a9d311b1"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "e3342e21d8b0433b859e351b76d71f976dc0afa41bcccbaa8ba87b1da919400d",
+        "artifact_sha256": "9fa8fdad2aee138ef93af0e2e363b0c1015bd84b4a817396fe89c61d4ea8b059",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 225,
+          "total_cases": 225,
+          "source_sha256": "9fa8fdad2aee138ef93af0e2e363b0c1015bd84b4a817396fe89c61d4ea8b059"
+        }
+      },
+      "arm": "base",
+      "task": "table-slot-offset/1",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 56,
+      "record_sha256": "285515d48d2afdb5a9e582d1ff83cd6c4b08225483d673663aad1e79d2728ea9"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "73a9ba5a939833258aa2528942d91c5846991c1215bead20e655cd59810f7807",
+        "artifact_sha256": "2885daf9b569993f1cf2da23527e6f8a1d85cb0ea01b889fa06bc252025966af",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 1024,
+          "total_cases": 1024,
+          "source_sha256": "2885daf9b569993f1cf2da23527e6f8a1d85cb0ea01b889fa06bc252025966af"
+        }
+      },
+      "arm": "base",
+      "task": "table-slot-valid/1",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 43,
+      "record_sha256": "7a63358b3eb154f22ca244d0577327f9c2b36da1b7bbf9b26636553f55b73e41"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "ce2bbbb240e7c8f88a125ab664dd3f412d66b03db96f57f96b9a3050d457d385",
+        "artifact_sha256": "b743dcd8fedad3fdf911ca729886a61a29e09cfe8b334e440ffe4a53ce04833d",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 700,
+          "total_cases": 700,
+          "source_sha256": "b743dcd8fedad3fdf911ca729886a61a29e09cfe8b334e440ffe4a53ce04833d"
+        }
+      },
+      "arm": "base",
+      "task": "resource-unit-bytes/1",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 53,
+      "record_sha256": "52a38adae04f0bfa887e65878a0e24645b8ee803251020de40b63cdb990c4c04"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "fd782e70e023a437bffe27ecf88ffadb14af5e0277f4e4bc27934e19a58f13a8",
+        "artifact_sha256": "6bf89aa3da668f910fcd96ff1f30e634da14dac10e12dc582e3e555ec80a828a",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 4096,
+          "total_cases": 4096,
+          "source_sha256": "6bf89aa3da668f910fcd96ff1f30e634da14dac10e12dc582e3e555ec80a828a"
+        }
+      },
+      "arm": "base",
+      "task": "complete-resource-units/1",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 26,
+      "record_sha256": "720a70416ea2134aa165cac6b9f06bbbb49747dbca045e20a4c9843feacee56a"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "e9241ff70af8ab6beb9f5370007de2d48fa90bb387418c319218df1120265c9f",
+        "artifact_sha256": "5e7a2ce8673a035ea6ee4e1686d44def45d5bbe243e9a37dc066cd80cd679cfb",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 225,
+          "total_cases": 225,
+          "source_sha256": "5e7a2ce8673a035ea6ee4e1686d44def45d5bbe243e9a37dc066cd80cd679cfb"
+        }
+      },
+      "arm": "sft",
+      "task": "mask-intersection-u8/1",
+      "split": "train",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 62,
+      "record_sha256": "73cf5dd4bbf929930e0470e995fbe91b617868fa9ad08e4891d53db03973fc87"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "c6fdd119840fb902f46973801ee9f4961de42fd973beadc8fe631a3ac6883cfa",
+        "artifact_sha256": "129e64f566c4d807bdb9bad8eb4ba4b5912181f6fe158c643eb5445de4ed1806",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 1024,
+          "total_cases": 1024,
+          "source_sha256": "129e64f566c4d807bdb9bad8eb4ba4b5912181f6fe158c643eb5445de4ed1806"
+        }
+      },
+      "arm": "sft",
+      "task": "required-flags-u8/1",
+      "split": "train",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 30,
+      "record_sha256": "716faa4b84fb9c03f5c026ea3c30db10bd09baae9a15b35695bcef39c40447c9"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "89f90ab0eecd504f4da2100f3d5dc4ce09dc70889253d74f7615eccecef8a03b",
+        "artifact_sha256": "f41d439613adb7b28ba1f1a6ee9d086b9bb58a81bac3b3ac62ee2d06682fd891",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 225,
+          "total_cases": 225,
+          "source_sha256": "f41d439613adb7b28ba1f1a6ee9d086b9bb58a81bac3b3ac62ee2d06682fd891"
+        }
+      },
+      "arm": "sft",
+      "task": "compose-le16/1",
+      "split": "train",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 63,
+      "record_sha256": "c4381bedb33d26d2179529af0bd58ca42966bd6fa288564d770a8805b9c93900"
+    },
+    {
+      "wrapper_diagnostic": null,
+      "arm": "sft",
+      "task": "select-le16-byte/1",
+      "split": "train",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "generated_tokens": 48,
+      "record_sha256": "09e576bde14dad4e40a291d2340fa1286929c174f0d989221d379048bcf49b36"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "e3342e21d8b0433b859e351b76d71f976dc0afa41bcccbaa8ba87b1da919400d",
+        "artifact_sha256": "9fa8fdad2aee138ef93af0e2e363b0c1015bd84b4a817396fe89c61d4ea8b059",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 225,
+          "total_cases": 225,
+          "source_sha256": "9fa8fdad2aee138ef93af0e2e363b0c1015bd84b4a817396fe89c61d4ea8b059"
+        }
+      },
+      "arm": "sft",
+      "task": "table-slot-offset/1",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 56,
+      "record_sha256": "248416c216f46c71e482646c23fcde6dc14c1263179fea5faec30af3a0b7565b"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "73a9ba5a939833258aa2528942d91c5846991c1215bead20e655cd59810f7807",
+        "artifact_sha256": "2885daf9b569993f1cf2da23527e6f8a1d85cb0ea01b889fa06bc252025966af",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 1024,
+          "total_cases": 1024,
+          "source_sha256": "2885daf9b569993f1cf2da23527e6f8a1d85cb0ea01b889fa06bc252025966af"
+        }
+      },
+      "arm": "sft",
+      "task": "table-slot-valid/1",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 43,
+      "record_sha256": "777cb6b43498e7c9f0635611e1caf547264142f61b352b237eca97989f129734"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "ce2bbbb240e7c8f88a125ab664dd3f412d66b03db96f57f96b9a3050d457d385",
+        "artifact_sha256": "b743dcd8fedad3fdf911ca729886a61a29e09cfe8b334e440ffe4a53ce04833d",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 700,
+          "total_cases": 700,
+          "source_sha256": "b743dcd8fedad3fdf911ca729886a61a29e09cfe8b334e440ffe4a53ce04833d"
+        }
+      },
+      "arm": "sft",
+      "task": "resource-unit-bytes/1",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 53,
+      "record_sha256": "85947aeed2aa4e730d249159e21a91371a80c61325fc5f17ef9ca74874f72abf"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "fd782e70e023a437bffe27ecf88ffadb14af5e0277f4e4bc27934e19a58f13a8",
+        "artifact_sha256": "6bf89aa3da668f910fcd96ff1f30e634da14dac10e12dc582e3e555ec80a828a",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 4096,
+          "total_cases": 4096,
+          "source_sha256": "6bf89aa3da668f910fcd96ff1f30e634da14dac10e12dc582e3e555ec80a828a"
+        }
+      },
+      "arm": "sft",
+      "task": "complete-resource-units/1",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 26,
+      "record_sha256": "3c0fb851d2dc37315e5de81cd30999494d194bc33712f46c9a41c7dc8ed04e2d"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "e9241ff70af8ab6beb9f5370007de2d48fa90bb387418c319218df1120265c9f",
+        "artifact_sha256": "5e7a2ce8673a035ea6ee4e1686d44def45d5bbe243e9a37dc066cd80cd679cfb",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 225,
+          "total_cases": 225,
+          "source_sha256": "5e7a2ce8673a035ea6ee4e1686d44def45d5bbe243e9a37dc066cd80cd679cfb"
+        }
+      },
+      "arm": "klpo",
+      "task": "mask-intersection-u8/1",
+      "split": "train",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 62,
+      "record_sha256": "2c05f938d6e7b4eb07923740e36308c0b67a151100f7eeb1c3100edd30b466cc"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "c6fdd119840fb902f46973801ee9f4961de42fd973beadc8fe631a3ac6883cfa",
+        "artifact_sha256": "129e64f566c4d807bdb9bad8eb4ba4b5912181f6fe158c643eb5445de4ed1806",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 1024,
+          "total_cases": 1024,
+          "source_sha256": "129e64f566c4d807bdb9bad8eb4ba4b5912181f6fe158c643eb5445de4ed1806"
+        }
+      },
+      "arm": "klpo",
+      "task": "required-flags-u8/1",
+      "split": "train",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 30,
+      "record_sha256": "d93796a4c56270eb0543ca94464ae8e0382a1621e23a6d12f31fedba3723eedd"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "89f90ab0eecd504f4da2100f3d5dc4ce09dc70889253d74f7615eccecef8a03b",
+        "artifact_sha256": "f41d439613adb7b28ba1f1a6ee9d086b9bb58a81bac3b3ac62ee2d06682fd891",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 225,
+          "total_cases": 225,
+          "source_sha256": "f41d439613adb7b28ba1f1a6ee9d086b9bb58a81bac3b3ac62ee2d06682fd891"
+        }
+      },
+      "arm": "klpo",
+      "task": "compose-le16/1",
+      "split": "train",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 63,
+      "record_sha256": "cc8390a6182c195e51b17d14c697b783a57b6121e7b064c4e787cc5bf466ce27"
+    },
+    {
+      "wrapper_diagnostic": null,
+      "arm": "klpo",
+      "task": "select-le16-byte/1",
+      "split": "train",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "generated_tokens": 48,
+      "record_sha256": "e26f15a4599b28c5bdea98be260bbb4851281bf0a1675fca896614eb624c4cbf"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "e3342e21d8b0433b859e351b76d71f976dc0afa41bcccbaa8ba87b1da919400d",
+        "artifact_sha256": "9fa8fdad2aee138ef93af0e2e363b0c1015bd84b4a817396fe89c61d4ea8b059",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 225,
+          "total_cases": 225,
+          "source_sha256": "9fa8fdad2aee138ef93af0e2e363b0c1015bd84b4a817396fe89c61d4ea8b059"
+        }
+      },
+      "arm": "klpo",
+      "task": "table-slot-offset/1",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 56,
+      "record_sha256": "f38a3ee388da5a51b7433074db23c88ae2f960457e23624542e4265ae2466908"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "73a9ba5a939833258aa2528942d91c5846991c1215bead20e655cd59810f7807",
+        "artifact_sha256": "2885daf9b569993f1cf2da23527e6f8a1d85cb0ea01b889fa06bc252025966af",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 1024,
+          "total_cases": 1024,
+          "source_sha256": "2885daf9b569993f1cf2da23527e6f8a1d85cb0ea01b889fa06bc252025966af"
+        }
+      },
+      "arm": "klpo",
+      "task": "table-slot-valid/1",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 43,
+      "record_sha256": "488278f22b3e4c2f0c23559581059e89bbfe2e36866c149b6ff45a087d899850"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "ce2bbbb240e7c8f88a125ab664dd3f412d66b03db96f57f96b9a3050d457d385",
+        "artifact_sha256": "b743dcd8fedad3fdf911ca729886a61a29e09cfe8b334e440ffe4a53ce04833d",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 700,
+          "total_cases": 700,
+          "source_sha256": "b743dcd8fedad3fdf911ca729886a61a29e09cfe8b334e440ffe4a53ce04833d"
+        }
+      },
+      "arm": "klpo",
+      "task": "resource-unit-bytes/1",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 53,
+      "record_sha256": "703542c810af7ef823296e911077b0a75508817c9f12db4306340a7771f41c77"
+    },
+    {
+      "wrapper_diagnostic": {
+        "scored": false,
+        "transformation": "remove one enclosing Markdown code fence",
+        "raw_sha256": "fd782e70e023a437bffe27ecf88ffadb14af5e0277f4e4bc27934e19a58f13a8",
+        "artifact_sha256": "6bf89aa3da668f910fcd96ff1f30e634da14dac10e12dc582e3e555ec80a828a",
+        "verification": {
+          "passed": true,
+          "category": "passed",
+          "counterexample": null,
+          "cases": 4096,
+          "total_cases": 4096,
+          "source_sha256": "6bf89aa3da668f910fcd96ff1f30e634da14dac10e12dc582e3e555ec80a828a"
+        }
+      },
+      "arm": "klpo",
+      "task": "complete-resource-units/1",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "generated_tokens": 26,
+      "record_sha256": "9a870a3b7031c7b0893bd0667ca624eb2821320918d09789998da175649b80b4"
+    }
+  ],
+  "complete": true,
+  "updates": {
+    "sft": {
+      "optimizer_steps": 1,
+      "sequence_sum_nll_mean": 43.07304450629145,
+      "supervised_tokens": 135,
+      "supervision": "canonical verified task references, not on-policy solutions"
+    },
+    "klpo": {
+      "optimizer_steps": 1,
+      "status": "updated",
+      "eligible_complete_records": 4,
+      "rewards": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "loss": 1.3046875016880222,
+      "normalization": "mean complete responses of summed token objective"
+    }
+  },
+  "interpretation": "One public development task pack and paired RNG seeds; descriptive only. Supervised references and RL outcome rewards supply different information. Incomplete trajectories remain evaluation failures and cannot update."
+}

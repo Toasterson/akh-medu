@@ -1,0 +1,314 @@
+{
+  "id": "unsloth/gemma-4-12b-it-GGUF",
+  "sha": "3f09de26549e6d7ea54f1b83755149f840fcd333",
+  "cardData": {
+    "license": "apache-2.0",
+    "license_link": "https://ai.google.dev/gemma/docs/gemma_4_license",
+    "pipeline_tag": "image-text-to-text",
+    "base_model": "google/gemma-4-12B-it",
+    "tags": [
+      "gemma4",
+      "unsloth",
+      "gemma",
+      "google",
+      "gemma4_unified"
+    ]
+  },
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "da43d0ac341abd41868388ac115473302e9035ea",
+      "size": 3287
+    },
+    {
+      "rfilename": "MTP/README.md",
+      "blobId": "97247d06d3bfdd0dd1b3495a9349cbf1437b38e5",
+      "size": 1574
+    },
+    {
+      "rfilename": "MTP/gemma-4-12B-it-MTP-BF16.gguf",
+      "blobId": "c892469b418e843ae6165ceec9d63e91d003c876",
+      "size": 861520128,
+      "lfs": {
+        "sha256": "20b0e5caf9152e816a56f92c702528bffc7a7c930f20c33cf6616ac216998037",
+        "size": 861520128,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "MTP/gemma-4-12B-it-MTP-F16.gguf",
+      "blobId": "cd72865030c48912c010cf22b4f38709d1f95784",
+      "size": 861520128,
+      "lfs": {
+        "sha256": "ee0987dd6c29dae4c183713f5614814808f284c28f11c739d3ba075e73332ccf",
+        "size": 861520128,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "MTP/gemma-4-12B-it-MTP-Q8_0.gguf",
+      "blobId": "354fa6ecd29b6348269c6e685c632e70deefb2a9",
+      "size": 465109248,
+      "lfs": {
+        "sha256": "145db9094bc0f85f1701e255a2ed216dcc9800fc8bc8631ad00905b456bd451b",
+        "size": 465109248,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "6f5bdf6d007f7edd2afb91aeca345b954f1ce7bd",
+      "size": 31529
+    },
+    {
+      "rfilename": "gemma-4-12b-it-BF16.gguf",
+      "blobId": "595bf755c29b92f36527ac27803cec0d0866fdf2",
+      "size": 23832065184,
+      "lfs": {
+        "sha256": "5021bdd970b8557f6c4cb927bf676b1fd14554bca3c14961ea7814e4731e9662",
+        "size": 23832065184,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-IQ4_NL.gguf",
+      "blobId": "e6f4a8b7b3b8c8302a5d6bfa8d649c7c7a892807",
+      "size": 6716356000,
+      "lfs": {
+        "sha256": "692b9b5d47661ed8a33077fbeab18e2b6782652160b955bf01f3d0aeb6b40773",
+        "size": 6716356000,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-IQ4_XS.gguf",
+      "blobId": "43fec3fd2c378da5744abc0c38993cf98c346a9b",
+      "size": 6375732640,
+      "lfs": {
+        "sha256": "3d927b9611062f5bd374ac7db0cbd7cfe4a840be8ab659cba966acce4e5dfe08",
+        "size": 6375732640,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q3_K_M.gguf",
+      "blobId": "11d5ef1ff6e8acc5ec86543728432aea4f2c9aa0",
+      "size": 5693871520,
+      "lfs": {
+        "sha256": "abb9ab6b27d577fab0c93b46c8d5e01b77559b5521fc965ca55f17e4322b155b",
+        "size": 5693871520,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q3_K_S.gguf",
+      "blobId": "2facbd2f8e27e2a4371022098564719188037d8e",
+      "size": 5135013280,
+      "lfs": {
+        "sha256": "38d97d18b2a0dca2c3538d4ff2c74df2c6d0e5bc783236ce5a894cc5a6e2c7ff",
+        "size": 5135013280,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q4_0.gguf",
+      "blobId": "841dff83a199bec1a2a82a6488943cc6e59f8de1",
+      "size": 6738474400,
+      "lfs": {
+        "sha256": "aeed6b96868ad9a56f20975f8af6038615cf804b080b223f327ded3c3a21edbd",
+        "size": 6738474400,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q4_1.gguf",
+      "blobId": "a158fcba3ec151fd5b2d1509f7e36e3f140084bb",
+      "size": 7397602720,
+      "lfs": {
+        "sha256": "84bfa3b121db5e963c36f5c79f05008250f567941936b5c451b5ef1885869af0",
+        "size": 7397602720,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q4_K_M.gguf",
+      "blobId": "b9a3a6ce9f1da35641808fad66f5544dfbbfd4e3",
+      "size": 7121860000,
+      "lfs": {
+        "sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+        "size": 7121860000,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q4_K_S.gguf",
+      "blobId": "008df1612674dd2d659139ccb866a6e8a91ba108",
+      "size": 6764524960,
+      "lfs": {
+        "sha256": "6f4f90dfd0ce185c1600cb229261ff6bb0131019bc04891ec523846f38b18c25",
+        "size": 6764524960,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q5_K_M.gguf",
+      "blobId": "1302c3c8579cf0864daa12f5e18ccab1b9a2b45b",
+      "size": 8413574560,
+      "lfs": {
+        "sha256": "1bc633ec98817858bec10f73fa026481c9662449aae4b80a05dfb28ef784c278",
+        "size": 8413574560,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q5_K_S.gguf",
+      "blobId": "8190ddf8163f4ee407a6bfec6373330355ca4d60",
+      "size": 8204678560,
+      "lfs": {
+        "sha256": "2a007b386f105822a62527a668a4d4ea2c2e4ebb6b2f23ab35462ff57e7bc52e",
+        "size": 8204678560,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q6_K.gguf",
+      "blobId": "22e5e149b5fb5bc7606716eb96009ce933b48ec5",
+      "size": 9786021280,
+      "lfs": {
+        "sha256": "e1602ddc224c159584eb4c7d6a6c8d682fc6afb2efb8f76c10bfd63ba71436a2",
+        "size": 9786021280,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q8_0.gguf",
+      "blobId": "5032601d468cac24fadd3280d68a7ac436a10419",
+      "size": 12669646240,
+      "lfs": {
+        "sha256": "74d2d4f0b5b08ca8589d1a5f50e689c0984469f3cedbdc7d67458c6e9e35496a",
+        "size": 12669646240,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-IQ2_M.gguf",
+      "blobId": "c9941429271de2964d702a15c46af1a421f74505",
+      "size": 4213351840,
+      "lfs": {
+        "sha256": "bfbcd622a4b4d3025aaea643a41e4e642f40087b6991f564e3e2b8e17f44bd77",
+        "size": 4213351840,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-IQ3_XXS.gguf",
+      "blobId": "8f2aadac2405ee39ffe1cb0d9613366295889e96",
+      "size": 4639714720,
+      "lfs": {
+        "sha256": "1eb42ae04731500a614acaf658c707c07af5a320822eabc50040852442fa6a4c",
+        "size": 4639714720,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-Q2_K_XL.gguf",
+      "blobId": "133f390dc880dc83cd5727e7f1828be5a75c2862",
+      "size": 4661418400,
+      "lfs": {
+        "sha256": "19ab0f2dbe76aa2dae227054c9d777dc96f11688282d705738cb9c4c70bed489",
+        "size": 4661418400,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-Q3_K_XL.gguf",
+      "blobId": "1e46498a1cb2c957ae2d0417870ef1edaf288102",
+      "size": 6022683040,
+      "lfs": {
+        "sha256": "60ae891e5d59041ee15fd9cc599ae8d2cfe8549f74d1e190a14e3076b66eaaf1",
+        "size": 6022683040,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-Q4_K_XL.gguf",
+      "blobId": "3d05d57ee0198ee9bd8d4f50fbcf9dde8fdf0c43",
+      "size": 7366421920,
+      "lfs": {
+        "sha256": "ee33ab5be8e07aca1c269fc645eaed5f3298e089d52db29415839d8f29957020",
+        "size": 7366421920,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-Q5_K_XL.gguf",
+      "blobId": "fd0668a21352eb0f66814aae1f2d03f134e56415",
+      "size": 8606020000,
+      "lfs": {
+        "sha256": "000d0cc131f9dd932b4c23c18a6949daf983df762b5d89093df8553fabbedde9",
+        "size": 8606020000,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-Q6_K_XL.gguf",
+      "blobId": "d55d1aa238673670a65ba2f02c2860603b2f1c00",
+      "size": 10685011360,
+      "lfs": {
+        "sha256": "eb0f252863d14f7782122a4ac7e8744ed6e4a9fc132584d94686a9441f7c5d35",
+        "size": 10685011360,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-Q8_K_XL.gguf",
+      "blobId": "66363c658b91693f812f2770d493c0c6e87367c3",
+      "size": 13637326240,
+      "lfs": {
+        "sha256": "a54c44fe1ff8b12de9c9d5d65fd5f32410203e09df620f4fc74a2a4ebc9d46d9",
+        "size": 13637326240,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "imatrix_unsloth.gguf_file",
+      "blobId": "f0646ff3e8e36a16dddd5105f5754e4ffba846fa",
+      "size": 7480640,
+      "lfs": {
+        "sha256": "1d5c0a0d890fb1dec63ae7ace1d315a8ccef0788395ed4914a14f768fcb2911b",
+        "size": 7480640,
+        "pointerSize": 132
+      }
+    },
+    {
+      "rfilename": "mmproj-BF16.gguf",
+      "blobId": "4952ac7d3fe2c338bf1501f4644c5cc1b44eaa98",
+      "size": 175115840,
+      "lfs": {
+        "sha256": "2e269f906eb15169ee9ce880ea649bd6d42d4964c21f8ede10d0d0efc738bcbb",
+        "size": 175115840,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "mmproj-F16.gguf",
+      "blobId": "f9b5d2adf5d00cfcaed5e2a4a265905b606fd6d2",
+      "size": 175115840,
+      "lfs": {
+        "sha256": "91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e",
+        "size": 175115840,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "mmproj-F32.gguf",
+      "blobId": "e1a9b0b5f49ea5e644fa7807ced368007ab156d3",
+      "size": 209522240,
+      "lfs": {
+        "sha256": "630307d3d5e036d40d16e7c6252a2095efdf396d4168ad0cc85a752e0c21ce6e",
+        "size": 209522240,
+        "pointerSize": 134
+      }
+    }
+  ]
+}

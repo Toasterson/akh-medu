@@ -1,0 +1,12 @@
+{
+  "mode": "vsa",
+  "hits": [],
+  "context": "",
+  "space": {
+    "dimensions": 8192,
+    "encoder": "lilith-symbolic-lesson/1:sha256-counter-le:roles",
+    "encoding": "bipolar-xor-majority",
+    "scope": "local symbolic features; no neural hidden-state alignment"
+  },
+  "reason": "top candidate is outside symbolic applicability"
+}

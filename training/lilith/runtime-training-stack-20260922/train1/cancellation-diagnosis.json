@@ -1,0 +1,16 @@
+{
+  "cause": "akhsessd system retirement under reconciliation stall policy",
+  "retirement": {
+    "at": 1790101844317,
+    "principal": "system",
+    "request": {
+      "reason": "no progress observed within the reconciliation stall threshold",
+      "request_id": "system-retire-01a0ca62-715d-7b30-9c75-5c6bf88dd251"
+    }
+  },
+  "worker_timeout_seconds": 259200,
+  "optimizer_steps": 0,
+  "adapter_produced": false,
+  "progress_limitation": "training progress uses Host.usage telemetry; it does not append durable session events",
+  "resolution": "dedicated training session stall deadline must cover runtime deadline; preserve events before cleanup"
+}

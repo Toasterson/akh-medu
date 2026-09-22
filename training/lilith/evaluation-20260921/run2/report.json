@@ -1,0 +1,285 @@
+{
+  "schema": "lilith/evaluation-report@2",
+  "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+  "complete": true,
+  "budget_usage_complete": false,
+  "arms": {
+    "none": {
+      "observed": 6,
+      "expected": 6,
+      "passed": 5,
+      "failures": {
+        "unsupported_syntax": 1
+      }
+    },
+    "text": {
+      "observed": 6,
+      "expected": 6,
+      "passed": 5,
+      "failures": {
+        "unsupported_syntax": 1
+      }
+    },
+    "vsa": {
+      "observed": 6,
+      "expected": 6,
+      "passed": 5,
+      "failures": {
+        "unsupported_syntax": 1
+      }
+    },
+    "independent_reference": {
+      "observed": 6,
+      "expected": 6,
+      "passed": 4,
+      "failures": {
+        "boundary_semantics": 1,
+        "unsupported_syntax": 1
+      }
+    }
+  },
+  "paired_against_none": {
+    "text": {
+      "both_pass": 5,
+      "both_fail": 1
+    },
+    "vsa": {
+      "both_pass": 5,
+      "both_fail": 1
+    },
+    "independent_reference": {
+      "baseline_only_pass": 2,
+      "both_pass": 3,
+      "arm_only_pass": 1
+    }
+  },
+  "outcomes": [
+    {
+      "task": "alignment-16",
+      "seed": 0,
+      "arm": "independent_reference",
+      "passed": false,
+      "category": "unsupported_syntax",
+      "detail": "unsupported syntax or AST size",
+      "cases": 0
+    },
+    {
+      "task": "alignment-16",
+      "seed": 0,
+      "arm": "none",
+      "passed": true,
+      "category": "passed",
+      "cases": 169,
+      "source_sha256": "c25982e29653603009b42a97b0f5ac50b93e49a533ec9a9595e76a5b5059f7f8"
+    },
+    {
+      "task": "alignment-16",
+      "seed": 0,
+      "arm": "text",
+      "passed": true,
+      "category": "passed",
+      "cases": 169,
+      "source_sha256": "c25982e29653603009b42a97b0f5ac50b93e49a533ec9a9595e76a5b5059f7f8"
+    },
+    {
+      "task": "alignment-16",
+      "seed": 0,
+      "arm": "vsa",
+      "passed": true,
+      "category": "passed",
+      "cases": 169,
+      "source_sha256": "c25982e29653603009b42a97b0f5ac50b93e49a533ec9a9595e76a5b5059f7f8"
+    },
+    {
+      "task": "alignment-8",
+      "seed": 0,
+      "arm": "independent_reference",
+      "passed": false,
+      "category": "boundary_semantics",
+      "input": [
+        0,
+        2
+      ],
+      "expected": 0,
+      "actual": 1,
+      "cases": 17
+    },
+    {
+      "task": "alignment-8",
+      "seed": 0,
+      "arm": "none",
+      "passed": true,
+      "category": "passed",
+      "cases": 169,
+      "source_sha256": "4dca455c54d585e6a1170f082f9e7abb6ec5d1afc9e22e79376823b790117a85"
+    },
+    {
+      "task": "alignment-8",
+      "seed": 0,
+      "arm": "text",
+      "passed": true,
+      "category": "passed",
+      "cases": 169,
+      "source_sha256": "4dca455c54d585e6a1170f082f9e7abb6ec5d1afc9e22e79376823b790117a85"
+    },
+    {
+      "task": "alignment-8",
+      "seed": 0,
+      "arm": "vsa",
+      "passed": true,
+      "category": "passed",
+      "cases": 169,
+      "source_sha256": "4dca455c54d585e6a1170f082f9e7abb6ec5d1afc9e22e79376823b790117a85"
+    },
+    {
+      "task": "interval_intersection-16",
+      "seed": 0,
+      "arm": "independent_reference",
+      "passed": true,
+      "category": "passed",
+      "cases": 28561,
+      "source_sha256": "d27a2074355b16c528b3a29ed3ce54c919b4ca6cc4938fdd1f2883eab5fed77e"
+    },
+    {
+      "task": "interval_intersection-16",
+      "seed": 0,
+      "arm": "none",
+      "passed": true,
+      "category": "passed",
+      "cases": 28561,
+      "source_sha256": "500fdfe99098f75c6fb8c3ef909d010e4e42e40985e2a312029cebfdf8bb4117"
+    },
+    {
+      "task": "interval_intersection-16",
+      "seed": 0,
+      "arm": "text",
+      "passed": true,
+      "category": "passed",
+      "cases": 28561,
+      "source_sha256": "500fdfe99098f75c6fb8c3ef909d010e4e42e40985e2a312029cebfdf8bb4117"
+    },
+    {
+      "task": "interval_intersection-16",
+      "seed": 0,
+      "arm": "vsa",
+      "passed": true,
+      "category": "passed",
+      "cases": 28561,
+      "source_sha256": "500fdfe99098f75c6fb8c3ef909d010e4e42e40985e2a312029cebfdf8bb4117"
+    },
+    {
+      "task": "interval_intersection-8",
+      "seed": 0,
+      "arm": "independent_reference",
+      "passed": true,
+      "category": "passed",
+      "cases": 28561,
+      "source_sha256": "3e80d4cb304ae4fb2b56e3483c48f9a99bfc1715d4f8435f3c861b0a60476231"
+    },
+    {
+      "task": "interval_intersection-8",
+      "seed": 0,
+      "arm": "none",
+      "passed": true,
+      "category": "passed",
+      "cases": 28561,
+      "source_sha256": "70f5ce1504c8ceb505b71dd6e56e2af80c9518c79ff045f9b038191799035d6f"
+    },
+    {
+      "task": "interval_intersection-8",
+      "seed": 0,
+      "arm": "text",
+      "passed": true,
+      "category": "passed",
+      "cases": 28561,
+      "source_sha256": "70f5ce1504c8ceb505b71dd6e56e2af80c9518c79ff045f9b038191799035d6f"
+    },
+    {
+      "task": "interval_intersection-8",
+      "seed": 0,
+      "arm": "vsa",
+      "passed": true,
+      "category": "passed",
+      "cases": 28561,
+      "source_sha256": "70f5ce1504c8ceb505b71dd6e56e2af80c9518c79ff045f9b038191799035d6f"
+    },
+    {
+      "task": "modular_sequence_order-16",
+      "seed": 0,
+      "arm": "independent_reference",
+      "passed": true,
+      "category": "passed",
+      "cases": 2197,
+      "source_sha256": "4ccab15fbba9e894b9909f1de2ca9427f44d36d9a5bf8d76f04ab4aec096ca1b"
+    },
+    {
+      "task": "modular_sequence_order-16",
+      "seed": 0,
+      "arm": "none",
+      "passed": true,
+      "category": "passed",
+      "cases": 2197,
+      "source_sha256": "c4a6b4abe01204edaf589efd6448ab894e4ba19312b798c43564f791378e2cc8"
+    },
+    {
+      "task": "modular_sequence_order-16",
+      "seed": 0,
+      "arm": "text",
+      "passed": true,
+      "category": "passed",
+      "cases": 2197,
+      "source_sha256": "c4a6b4abe01204edaf589efd6448ab894e4ba19312b798c43564f791378e2cc8"
+    },
+    {
+      "task": "modular_sequence_order-16",
+      "seed": 0,
+      "arm": "vsa",
+      "passed": true,
+      "category": "passed",
+      "cases": 2197,
+      "source_sha256": "c4a6b4abe01204edaf589efd6448ab894e4ba19312b798c43564f791378e2cc8"
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "seed": 0,
+      "arm": "independent_reference",
+      "passed": true,
+      "category": "passed",
+      "cases": 2197,
+      "source_sha256": "8cdfab0b661473a0c9c04d818ff663e51910ae60fc13bd5947d4886376d2828a"
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "seed": 0,
+      "arm": "none",
+      "passed": false,
+      "category": "unsupported_syntax",
+      "detail": "one function required",
+      "cases": 0
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "seed": 0,
+      "arm": "text",
+      "passed": false,
+      "category": "unsupported_syntax",
+      "detail": "one function required",
+      "cases": 0
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "seed": 0,
+      "arm": "vsa",
+      "passed": false,
+      "category": "unsupported_syntax",
+      "detail": "one function required",
+      "cases": 0
+    }
+  ],
+  "claims": {
+    "statistical_superiority": false,
+    "qwen_parity": false,
+    "native_illumos": false
+  },
+  "interpretation": "Descriptive development results only; seeds are repeated observations, not independent task families."
+}

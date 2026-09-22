@@ -1,0 +1,7 @@
+{
+  "status": "interrupted",
+  "original_unknown_turn_resolved": false,
+  "truth_review": "pending",
+  "error": "RuntimeError: Report did not complete",
+  "services_stopped": true
+}

@@ -1,0 +1,89 @@
+{
+  "train_tasks": 4,
+  "holdout_tasks": 4,
+  "max_new_tokens": 128,
+  "max_context_tokens": 384,
+  "mc_samples": 8,
+  "temperature": 1.0,
+  "scoring_chunk": 8,
+  "drift_chunk_fallback_threshold": 0.0001,
+  "beta": 0.1,
+  "learning_rate": 0.0001,
+  "optimizer_steps_per_arm": 1,
+  "eos_ids": [
+    1,
+    106
+  ],
+  "chat_template_sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0",
+  "task_module_sha256": "ca7d125daf1448b0890b8d6f97f2c85773c1400edd51659769a0578d51c9664c",
+  "trajectory_module_sha256": "da7fa533df75e59522b0523f6ae8f552c8d70485c347960b851615e8e6ebe5fa",
+  "prompt_lengths": {
+    "signed-clamp/2": 144,
+    "bounded-add/2": 151,
+    "align-up-power2/2": 168,
+    "aligned-offset-valid/2": 162,
+    "signed-field-extract/2": 165,
+    "field-fits-unsigned/2": 141,
+    "window-end/2": 173,
+    "windows-overlap/2": 152
+  },
+  "canonical_train_token_lengths": {
+    "signed-clamp/2": 56,
+    "bounded-add/2": 86,
+    "align-up-power2/2": 66,
+    "aligned-offset-valid/2": 51
+  },
+  "sampler": "full-support FP64 CPU categorical from actual logits; trainer FP32; MC8 IID replacement separate generator",
+  "uninformative_reward_rule": "skip KLPO if fewer than two distinct eligible complete rewards",
+  "authoritative_tasks": {
+    "signed-clamp/2": {
+      "id": "signed-clamp/2",
+      "family": "bounded_normalization",
+      "split": "train",
+      "prompt_sha256": "c15b7f71c80b11457757e6e5031d179a233d18b36b9d3f4abeec57f574f7da51"
+    },
+    "bounded-add/2": {
+      "id": "bounded-add/2",
+      "family": "bounded_normalization",
+      "split": "train",
+      "prompt_sha256": "e4f0e1010bc53e49d8d8a22494bc0d05f9503ca86ae7f971081b30672ec6df08"
+    },
+    "align-up-power2/2": {
+      "id": "align-up-power2/2",
+      "family": "alignment",
+      "split": "train",
+      "prompt_sha256": "ee426b1f2988ded7dc8141816f53c57818a13ac8cdff1103256017846fa6c8c4"
+    },
+    "aligned-offset-valid/2": {
+      "id": "aligned-offset-valid/2",
+      "family": "alignment",
+      "split": "train",
+      "prompt_sha256": "0b05fe6a01ea42c9daf3f4addf61a15f3b580cda71b7e84fcadfe07d78ad23e7"
+    },
+    "signed-field-extract/2": {
+      "id": "signed-field-extract/2",
+      "family": "packed_fields",
+      "split": "development_holdout",
+      "prompt_sha256": "d0129b6d8432fff1eee054d230e6871fa6c490083a33a41fa12257f765d18956"
+    },
+    "field-fits-unsigned/2": {
+      "id": "field-fits-unsigned/2",
+      "family": "packed_fields",
+      "split": "development_holdout",
+      "prompt_sha256": "58b5666dfd62c3dd48bb534daad77260e05b6c7cc6d8f208e2e372a7df851a0c"
+    },
+    "window-end/2": {
+      "id": "window-end/2",
+      "family": "range_windows",
+      "split": "development_holdout",
+      "prompt_sha256": "7e273c593c613916fa0d77453c5643c50dbaf170d1e78d98da08a5f9fc1ada9f"
+    },
+    "windows-overlap/2": {
+      "id": "windows-overlap/2",
+      "family": "range_windows",
+      "split": "development_holdout",
+      "prompt_sha256": "84090311197c900ff8ee3f12ef36b85068cb5526bca8de3dfd6aa21ea89d341c"
+    }
+  },
+  "task_manifest_sha256": "f4f0e5918ef4fffdcd18a5193a2c54b4cf960c655bf1171b4b0672614af9c437"
+}

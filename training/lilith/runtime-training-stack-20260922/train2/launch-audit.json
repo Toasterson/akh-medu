@@ -1,0 +1,10 @@
+{
+  "status": "passed",
+  "config_sha256": "62255a9d877df5d57040cd3691980b00cea68f09331fb329445ba1f3d99f0c02",
+  "source_pins_match": true,
+  "session_stall_threshold_ms": 259320000,
+  "runtime_timeout_seconds": 259200,
+  "fixture": "fixture6",
+  "test_count": 20,
+  "scope": "launch configuration and real broker create/reset; not completed training"
+}

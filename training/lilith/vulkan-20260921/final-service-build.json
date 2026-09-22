@@ -1,0 +1,10 @@
+{
+  "command": "cargo build --release --locked -p akh-session-services --no-default-features --features session,executor,sandbox,hip,vulkan --bin akhsessd --bin akhsbxd --bin akhexecd --bin akhrtd",
+  "sha256": {
+    "target/release/akhsessd": "2994f0b42f390aa1ae090b4ce829c8926e5d1f459d0969dcc3637af0b945b3ef",
+    "target/release/akhrtd": "aca4a2a17894ef5c84aab009e67e77d854db80afb737ffffde257e6cf4148339",
+    "target/release/akhsbxd": "3a6e24432bce8a55cdf7e33b91026015ebd0136ebd270f6ec7ce94be473b573f",
+    "target/release/akhexecd": "1d8c4a4a9f6d40e3280d57d67f824d3638e6f8d7e2cbaec1a700dd2f58a7ae92"
+  },
+  "build_log": "service-build.log"
+}

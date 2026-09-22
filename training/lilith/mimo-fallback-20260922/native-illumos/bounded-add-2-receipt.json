@@ -1,0 +1,44 @@
+{
+  "schema": "lilith/native-execution@1",
+  "run_id": "e9287be540a64770a2f0de1421598248",
+  "guest": {
+    "host": "127.0.0.1",
+    "port": 10115,
+    "user": "akh-exec"
+  },
+  "target": "solution.py",
+  "command": [
+    "python3",
+    "-m",
+    "unittest",
+    "-q"
+  ],
+  "timeout_s": 60,
+  "timed_out": false,
+  "supervisor_status": "exit",
+  "exit_code": 0,
+  "passed": true,
+  "duration_ms": 1970,
+  "copy_in": {
+    "snapshot_sha256": "1e7d5b2abf3ec5c813ae092f646e0dda579d48461ec8781e2b22b0f9339ad0e8",
+    "snapshot_bytes": 20480,
+    "snapshot_entries": 2,
+    "content_sha256": "a800e7d1a51a428679e0b866c7f3e3b457c12c431fdc8eea24dcbccd49e923da",
+    "content_bytes": 197
+  },
+  "stdout": "",
+  "stderr": "----------------------------------------------------------------------\nRan 1 test in 0.028s\n\nOK\n",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "4de6d43185a22e7208f2df727bc39bfeb1658f646929c82c618c9dbaec36e998",
+  "stdout_truncated": false,
+  "stderr_truncated": false,
+  "remote_cleanup_succeeded": true,
+  "task_id": "bounded-add/2",
+  "raw_output_sha256": "2382c6f445e7bbfc67894efc0735f12f175c5a777575debe641f9b217d64e465",
+  "artifact_sha256": "a800e7d1a51a428679e0b866c7f3e3b457c12c431fdc8eea24dcbccd49e923da",
+  "presentation": "single_markdown_fence",
+  "test_source_sha256": "d33016dcb67fdac1e43a4553044236c7b7f38fa04c1c787a1628969903f64504",
+  "frozen_interpreter_passed": true,
+  "frozen_interpreter_category": "passed",
+  "frozen_cases": 961
+}

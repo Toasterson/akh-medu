@@ -1,0 +1,28 @@
+{
+  "kind": "startup_inventory_not_benchmark",
+  "timestamp": "2026-09-21T13:34:35.524808+00:00",
+  "host": "hephaistos",
+  "platform": "Linux-6.8.0-47-generic-x86_64-with-glibc2.35",
+  "repo_head": "329ebff421d2eff75ef12f29001baac20ff01ef3",
+  "artifacts": [
+    {
+      "path": "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+      "bytes": 7121860000,
+      "sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6"
+    },
+    {
+      "path": "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+      "bytes": 32169626,
+      "sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
+    },
+    {
+      "path": "target/release/examples/candle_bench",
+      "bytes": 14843200,
+      "sha256": "a2f9b29f5671fc578c7fab07ff7e0d9076f37774130e3a2e6e58c2168b34596a"
+    }
+  ],
+  "binary_build_revision": "unknown; existing binary, hash recorded",
+  "anima": "blocked: helper reports no PAT stored",
+  "qwen_3_8_27b": "GGUF not found in Akh model directory; endpoint/revision unresolved",
+  "illumos": "no domains listed by default virsh connection; native target unresolved"
+}

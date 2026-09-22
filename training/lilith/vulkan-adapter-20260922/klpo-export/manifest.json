@@ -1,0 +1,15 @@
+{
+  "schema": "lilith/vulkan-query-adapter@1",
+  "candidate_only": true,
+  "quality_certified": false,
+  "base_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+  "training_parent_sha256": "5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d",
+  "source_adapter_sha256": "80be5b0fbeb264292f84f0e757adf84259a213c4c3654dc87bd3c448fb1ff808",
+  "config_sha256": "18d580c8ebed3f02de1eaef8e2f9a6b2ddfb193e7f478ec10b7ad4dd3d289f18",
+  "adapter_sha256": "185eb838b6a552fceba504eac94eb3cd71a232f122fdf4ac3bb80c819b98b920",
+  "target": "model.language_model.layers.47.self_attn.q_proj",
+  "scale": 1.0,
+  "export_dtype": "F32",
+  "exact_tensor_roundtrip": true,
+  "limitation": "Trained on BF16 parent; quantized-base transfer requires separate quality evaluation."
+}

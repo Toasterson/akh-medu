@@ -1,0 +1,48 @@
+{
+  "schema": "lilith/mimo-coding-trial@1",
+  "repo_id": "XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B",
+  "revision": "2367e865d009c13ac81713a2878291d33ab28177",
+  "files_sha256": {
+    "model-00001-of-00004.safetensors": "aab052180118aee34abc3029b54eaa49096aac606b97d703866b420dceb703c3",
+    "model-00002-of-00004.safetensors": "7a0486565f06d25ac4628e9dba470dc3f604353471d240d5a0bf7128f64df396",
+    "model-00003-of-00004.safetensors": "6c73207563d1879bfd6c143a028cc70be68edff56280458c71a43df4240300f4",
+    "model-00004-of-00004.safetensors": "1379a7cf8c0b8555a39ab65a47e830e0eb45e776b46045734da3afd73c09eea2",
+    "config.json": "407c46388b8fa2ae9bf69fe27d40af236d373e86a6b48f5284c86df5cd183633",
+    "generation_config.json": "aaed5b26f1cae55c1ceb58fc483c3cd65ee8d386b61daec3d7a9df82432d9205",
+    "chat_template.jinja": "59a64ebb4df6d1489d09a91267cf3ceb106162d4a893c4f84833cfb8c897ff63",
+    "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+    "tokenizer_config.json": "792fa3f0cb88b111e54ef3134c873531008c4df471d108da17903426e308aa7b",
+    "processor_config.json": "d89ef49ce9cd37fbf510158e13c1ef063d9286411c1ec9049932dbe0487143b1",
+    "model.safetensors.index.json": "4a24d25e902169c0393a2ca58b697c03b27efc40dcddbc2b59c42e5e1e2b1d90"
+  },
+  "manifest": "/home/toasty/ws/agi/akh-medu/training/lilith/rl-20260922/tasks.json",
+  "manifest_sha256": "f4f0e5918ef4fffdcd18a5193a2c54b4cf960c655bf1171b4b0672614af9c437",
+  "verifier_sha256": "ca7d125daf1448b0890b8d6f97f2c85773c1400edd51659769a0578d51c9664c",
+  "interpreter_sha256": "e038d465c0d4d9d04e97b1b01abea0916ad99ab48d2ac86f11f48ac21bf94a0f",
+  "driver_sha256": "ee557bfc827cf5c85126a9ea8e5bd1c54535e9da2976bc309365ed7a60dd0511",
+  "template": "exact checkpoint chat_template.jinja",
+  "enable_thinking": true,
+  "reasoning_split": "last literal </think> marker",
+  "generation": {
+    "do_sample": true,
+    "temperature": 0.6,
+    "top_k": 20,
+    "top_p": 0.95,
+    "max_new_tokens": 512,
+    "seed": 20260922
+  },
+  "selected_tasks": [
+    "signed-clamp/2"
+  ],
+  "comparison": {
+    "task_pack": "same frozen eight v2 tasks as Gemma/Ptah deployment comparison",
+    "output_cap_equal": true,
+    "backend_precision_equal": false,
+    "prompt_template_equal": false,
+    "notes": [
+      "MiMo uses its required template/reasoning contract; Gemma/Ptah used session-service rendering.",
+      "MiMo is official BF16 Transformers on HIP; Gemma was quantized Vulkan and Ptah quantized HIP.",
+      "One sampled observation per public development task is not a promotion gate."
+    ]
+  }
+}

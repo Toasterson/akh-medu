@@ -2,11 +2,11 @@
 //! Run with `--features hip` and explicit model/tokenizer and AMD sysfs device paths.
 //! Keeps the model alive throughout idle measurement; exits nonzero on regression.
 #[cfg(feature = "candle-backend")]
-#[path = "support/gpu_idle.rs"]
-mod gpu_idle;
-#[cfg(feature = "candle-backend")]
 #[path = "support/continuation.rs"]
 mod continuation;
+#[cfg(feature = "candle-backend")]
+#[path = "support/gpu_idle.rs"]
+mod gpu_idle;
 #[cfg(feature = "candle-backend")]
 #[path = "support/keyed_bench.rs"]
 mod keyed_bench;
@@ -158,6 +158,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "decode_steps_including_eos":reply.decode_steps,
                 "decode_steps_per_second":if reply.decode_steps > 0 {Some(reply.decode_steps as f64 / reply.decode_time.as_secs_f64())} else {None}})
         );
+        #[cfg(feature = "vulkan")]
+        if let Some(s) = backend.vulkan_pipeline_cache_stats() {
+            println!(
+                "{}",
+                serde_json::json!({"phase":"vulkan_pipeline_cache","round":round,
+                "hits":s.hits,"misses":s.misses,"evictions":s.evictions,"entries":s.entries,
+                "source_bytes":s.source_bytes,"bypassed":s.bypassed,"compile_failures":s.compile_failures})
+            );
+        }
     }
     // Live compressed-KV occupancy, absent unless compression is configured and
     // something has aged out of the exact window.

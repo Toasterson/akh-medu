@@ -1,0 +1,5 @@
+{
+  "text": "Return only one Python function, with no Markdown fences or explanatory prose. Use integer/bool literals, local assignment, if/else, return, comparisons, and/or/not, conditional expressions, +, -, *, //, %, and bitwise & only. No calls (including min/max), imports, loops, shifts, exponentiation, decorators, helper functions, containers or strings. Keep the source under 4096 bytes. These are local Python reference tasks, not native OS validation.\n\nInputs are integers. Reject any input outside 0..65535 by returning -1. Write align_up(value: int, alignment: int) -> int. Also reject alignment zero or alignment not a power of two. Return the smallest multiple of alignment at least value, or -1 if the result exceeds 65535.",
+  "session_id": "01a0c523-b01b-7751-b803-192c709eb8a5",
+  "turn_id": "01a0c523-b01d-71c1-95db-591b7cfd3976"
+}

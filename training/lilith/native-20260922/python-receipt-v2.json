@@ -1,0 +1,33 @@
+{
+  "command": [
+    "python3",
+    "check.py"
+  ],
+  "copy_in": {
+    "content_bytes": 177,
+    "content_sha256": "e12bd4b6df7095c31b0892c2a6ae2dd0d636fdace8d781499f6a1e199f930f67",
+    "snapshot_bytes": 10240,
+    "snapshot_entries": 3,
+    "snapshot_sha256": "f8248fbf8d13fdcd8ad661143312a4ce83af2ca658cd611fd51bddb172f1fb2f"
+  },
+  "duration_ms": 1539,
+  "exit_code": 0,
+  "guest": {
+    "host": "127.0.0.1",
+    "port": 10115,
+    "user": "akh-exec"
+  },
+  "passed": true,
+  "remote_cleanup_succeeded": true,
+  "run_id": "51785ffa2ac749cea806714642d943c5",
+  "schema": "lilith/native-execution@1",
+  "stderr": "",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_truncated": false,
+  "stdout": "python-native-smoke: ok\n",
+  "stdout_sha256": "236a6e22d5f089edb64d6c00a70accaf07d3bb77afe07f1d5317261488a2dcff",
+  "stdout_truncated": false,
+  "target": "check.py",
+  "timed_out": false,
+  "timeout_s": 30
+}

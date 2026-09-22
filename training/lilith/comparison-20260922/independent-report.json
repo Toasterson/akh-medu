@@ -1,0 +1,139 @@
+{
+  "schema": "lilith/deployment-replay@1",
+  "complete": true,
+  "scores": {
+    "lilith": {
+      "passed": 4,
+      "observed": 8,
+      "failures": {
+        "grammar": 2,
+        "division_by_zero": 1,
+        "contract_mismatch": 1
+      },
+      "tasks": [
+        {
+          "id": "signed-clamp/2",
+          "passed": false,
+          "category": "grammar",
+          "counterexample": null
+        },
+        {
+          "id": "bounded-add/2",
+          "passed": true,
+          "category": "passed",
+          "counterexample": null
+        },
+        {
+          "id": "align-up-power2/2",
+          "passed": false,
+          "category": "grammar",
+          "counterexample": null
+        },
+        {
+          "id": "aligned-offset-valid/2",
+          "passed": false,
+          "category": "division_by_zero",
+          "counterexample": {
+            "inputs": [
+              -1025,
+              0
+            ],
+            "expected": false
+          }
+        },
+        {
+          "id": "signed-field-extract/2",
+          "passed": true,
+          "category": "passed",
+          "counterexample": null
+        },
+        {
+          "id": "field-fits-unsigned/2",
+          "passed": false,
+          "category": "contract_mismatch",
+          "counterexample": {
+            "inputs": [
+              0,
+              0
+            ],
+            "expected": false,
+            "actual": true
+          }
+        },
+        {
+          "id": "window-end/2",
+          "passed": true,
+          "category": "passed",
+          "counterexample": null
+        },
+        {
+          "id": "windows-overlap/2",
+          "passed": true,
+          "category": "passed",
+          "counterexample": null
+        }
+      ]
+    },
+    "ptah": {
+      "passed": 6,
+      "observed": 8,
+      "failures": {
+        "grammar": 2
+      },
+      "tasks": [
+        {
+          "id": "signed-clamp/2",
+          "passed": true,
+          "category": "passed",
+          "counterexample": null
+        },
+        {
+          "id": "bounded-add/2",
+          "passed": true,
+          "category": "passed",
+          "counterexample": null
+        },
+        {
+          "id": "align-up-power2/2",
+          "passed": false,
+          "category": "grammar",
+          "counterexample": null
+        },
+        {
+          "id": "aligned-offset-valid/2",
+          "passed": false,
+          "category": "grammar",
+          "counterexample": null
+        },
+        {
+          "id": "signed-field-extract/2",
+          "passed": true,
+          "category": "passed",
+          "counterexample": null
+        },
+        {
+          "id": "field-fits-unsigned/2",
+          "passed": true,
+          "category": "passed",
+          "counterexample": null
+        },
+        {
+          "id": "window-end/2",
+          "passed": true,
+          "category": "passed",
+          "counterexample": null
+        },
+        {
+          "id": "windows-overlap/2",
+          "passed": true,
+          "category": "passed",
+          "counterexample": null
+        }
+      ]
+    }
+  },
+  "public_single_sample": true,
+  "release_parity_established": false,
+  "reference_identity": "JonathanColetti/Qwen3.8-27B-Uncensored",
+  "limitation": "Artifact contract includes syntax limits; grammar rejection does not establish algorithmic error."
+}

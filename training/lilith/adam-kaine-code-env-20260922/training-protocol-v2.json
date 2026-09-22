@@ -1,0 +1,97 @@
+{
+  "arms": [
+    "base",
+    "sft_distill",
+    "klpo_online_3_fresh_banks",
+    "adapter_blend_0p5"
+  ],
+  "blend": {
+    "alpha_left": 0.5,
+    "claims_excluded": [
+      "mathematical delta averaging",
+      "guaranteed benefit"
+    ],
+    "compatibility": [
+      "same parent hash",
+      "same rank=2",
+      "same target module",
+      "same PEFT config"
+    ],
+    "kind": "adapter_coordinate_interpolation",
+    "left": "sft_distill",
+    "right": "klpo_online_3_fresh_banks"
+  },
+  "environment": {
+    "finite_cases": 4877,
+    "manifest_semantic_sha256": "e0e80b64281322320f784d435ceccdf365c69b32fc036e4bef21cc51ca956fce",
+    "online_reward": "0.95 * externally measured correct-case fraction + 0.05 * bounded grammar admission",
+    "rl_tasks_sha256": "c0491f56454ae407a659c1bf73fb56ad754985d22154c19f13781c5bd0b1dc3a",
+    "splits": {
+      "development_holdout": 4,
+      "independent_eval": 4,
+      "train": 4
+    },
+    "verifier_identity": "db809ecfb4a7fe1663be3306d9c81ba7bc36c9e6952661f8e13351b00f150066"
+  },
+  "frozen_before_gpu_training": true,
+  "mechanism_scope": "ADAM/Kaine real coding effects; no sovereign ADAM/Kaine weight training",
+  "reasoning_budget": {
+    "frozen_escalation": {
+      "evidence_files": [
+        "base-train-512-trajectories.json",
+        "base-train-1024-trajectories.json"
+      ],
+      "maximum_new_tokens": 800,
+      "memory_gradient_probe_tokens": 1024,
+      "total_context_tokens": 1024,
+      "trigger": "exactly four expected base train records and every completion.status is truncated; any failed/mixed no-completion bank stops"
+    },
+    "initial": {
+      "maximum_new_tokens": 320,
+      "total_context_tokens": 512
+    },
+    "interpretation": "truncation or OOM is resource limitation, not coding inability",
+    "policy_objective_view": "full sampled reasoning plus answer",
+    "template_enable_thinking": true,
+    "verifier_view": "bare answer accepted if no channel tokens; otherwise exactly one leading complete Gemma <|channel>thought ... <channel|> frame required; malformed/multiple/nested/stray rejected"
+  },
+  "recipient": "Gemma 4 Lilith LoRA rank 2 last-query projection",
+  "release": {
+    "automatic": false,
+    "requires": "independent results and cold-process exact adapter reload"
+  },
+  "retention": {
+    "compare": "selected candidate versus unchanged base",
+    "metric": "mean token NLL on eight frozen transcript validation records"
+  },
+  "runner": {
+    "path": "scripts/session-platform/adam_kaine_gemma_train.py",
+    "sha256": "141b407698d8e5462be5d5ec076b5b9c0fc0a9425a3aec3aa0128d5f9bf037d7"
+  },
+  "schema": "lilith/adam-kaine-gemma-training-protocol@2",
+  "selection": {
+    "baseline_sealed_access": "none",
+    "development": "four development_holdout tasks, disjoint from policy-update train tasks",
+    "paired_rng": "independent-eval-pair-v1",
+    "rule": "max development passes; ties blend > KLPO > SFT",
+    "sealed": "after decision is durably frozen, selected and unchanged base each evaluate four independent_eval tasks once with shared per-task RNG namespaces"
+  },
+  "transcript_sft": {
+    "max_total_tokens": 512,
+    "private_subset_sha256": "e662d28289165d8cc419a4b65bba63d7eb88b414e5f7ce63aff62c7a3028dd94",
+    "public_manifest_sha256": "4c3c2f63986b047cedb2f815e988aa751f23e9c84cd762eb3a193ca175bc9f19",
+    "rl_eligible_records": 0,
+    "thinking_render_length_audit": {
+      "artifact_sha256": "a7c9cc917a13cc81096aa9ea9bd58e0caec458880b607f8052b40872993863cb",
+      "limit": 512,
+      "max_total_tokens": 502,
+      "min_total_tokens": 41,
+      "records": 16,
+      "target_kind": "harvested final answers; no verified reasoning traces",
+      "truncation": 0
+    },
+    "train_records": 8,
+    "truncation": "forbidden",
+    "validation_records": 8
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "kind": "local_model_switch_and_review_integration",
+  "status": "passed",
+  "phases": [
+    {
+      "phase": "stack_ready",
+      "runtime_pid": 237149,
+      "devices": {
+        "lilith": {
+          "kind": "vulkan",
+          "ordinal": 0
+        },
+        "ptah": {
+          "kind": "hip",
+          "ordinal": 0
+        }
+      }
+    },
+    {
+      "phase": "lilith-write",
+      "seconds": 94.89562290300091,
+      "output": "The file clamp_u8.py has been created successfully. cedar"
+    },
+    {
+      "phase": "artifact_verified",
+      "passed": true,
+      "cases": 2051,
+      "source_sha256": "bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6",
+      "scope": "integer clamp fixture only; not general code execution or illumos validation"
+    },
+    {
+      "phase": "ptah-ready",
+      "seconds": 110.1011073539994,
+      "output": "READY"
+    },
+    {
+      "phase": "explicit_review_handoff",
+      "source_sha256": "bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6"
+    },
+    {
+      "phase": "ptah-review",
+      "seconds": 42.20684678900216,
+      "output": "**No defect found** in `clamp_u8.py` against the stated contract.\n\nThe implementation:\n- `value < 0` \u2192 returns `0` \u2713\n- `value > 255` \u2192 returns `255` \u2713\n- otherwise \u2192 returns `value` unchanged \u2713\n\nBoundary values (0, 255) are correctly passed through.\n\n**Verification evidence:** `verification.json` reports `passed: true`, 2051 cases, and its `source_sha256` (`bd3e50a7\u2026`) matches the artifact's revision hash, so the evidence corresponds to this exact source. Scope is limited to the integer clamp fixture.\n\n**Minor observations (not contract defects):**\n- No type guard: non-int inputs (e.g., `None`, floats, strings) would raise `TypeError` on comparison rather than being clamped. Acceptable if the contract guarantees `int` input.\n- No handling of non-integer numerics (e.g., `1.5` returns `1.5` unchanged). Fine under an `int`-only contract."
+    },
+    {
+      "phase": "lilith-return",
+      "seconds": 77.97480098800224,
+      "output": "cedar"
+    },
+    {
+      "phase": "same_process_model_roundtrip_verified",
+      "runtime_pid": 237149
+    }
+  ],
+  "services_stopped": true
+}

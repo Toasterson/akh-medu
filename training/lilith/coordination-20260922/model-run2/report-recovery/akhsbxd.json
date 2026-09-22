@@ -1,0 +1,50 @@
+{
+  "service_id": "akhsbxd",
+  "listen": "127.0.0.1:18422",
+  "data_dir": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/state/akhsbxd",
+  "principals": [
+    {
+      "id": "operator",
+      "token_file": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/credentials/operator.sha256",
+      "token_sha256": true,
+      "roles": [
+        "admin"
+      ],
+      "akhs": [
+        "lilith-coordinator",
+        "khnum-inline-patcher",
+        "ptah-inline-reviewer"
+      ]
+    },
+    {
+      "id": "akhsessd",
+      "token_file": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/credentials/akhsessd.sha256",
+      "token_sha256": true,
+      "roles": [
+        "session"
+      ],
+      "akhs": [
+        "lilith-coordinator",
+        "khnum-inline-patcher",
+        "ptah-inline-reviewer"
+      ]
+    }
+  ],
+  "endpoints": {
+    "akhexecd": {
+      "url": "http://127.0.0.1:18423",
+      "token_file": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/credentials/akhsbxd.token"
+    }
+  },
+  "workspaces": {
+    "local-dev": {
+      "revision": "lilith-local-v1",
+      "site": "hephaistos",
+      "provisioner": {
+        "kind": "existing",
+        "executor": "akhexecd",
+        "root": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/workspaces"
+      }
+    }
+  }
+}

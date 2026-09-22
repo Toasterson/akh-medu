@@ -1,0 +1,6 @@
+# Install torch from its explicit ROCm index before these PyPI dependencies.
+torch==2.7.1+rocm6.3
+transformers==5.10.1
+peft==0.18.1
+accelerate==1.10.1
+safetensors==0.6.2

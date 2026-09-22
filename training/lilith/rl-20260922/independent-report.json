@@ -1,0 +1,354 @@
+{
+  "schema": "lilith/rl-independent-replay@2",
+  "runner_status": "passed",
+  "arms": {
+    "base": {
+      "train": {
+        "observed": 4,
+        "expected": 4,
+        "passed": 2,
+        "completed": 4,
+        "failures": {
+          "grammar": 1,
+          "division_by_zero": 1
+        },
+        "presentation": {
+          "single_markdown_fence": 4
+        }
+      },
+      "development_holdout": {
+        "observed": 4,
+        "expected": 4,
+        "passed": 2,
+        "completed": 3,
+        "failures": {
+          "contract_mismatch": 1,
+          "truncated": 1
+        },
+        "presentation": {
+          "single_markdown_fence": 3,
+          "raw_source": 1
+        }
+      }
+    },
+    "sft": {
+      "train": {
+        "observed": 4,
+        "expected": 4,
+        "passed": 2,
+        "completed": 4,
+        "failures": {
+          "grammar": 1,
+          "division_by_zero": 1
+        },
+        "presentation": {
+          "single_markdown_fence": 4
+        }
+      },
+      "development_holdout": {
+        "observed": 4,
+        "expected": 4,
+        "passed": 2,
+        "completed": 3,
+        "failures": {
+          "contract_mismatch": 1,
+          "truncated": 1
+        },
+        "presentation": {
+          "single_markdown_fence": 3,
+          "raw_source": 1
+        }
+      }
+    },
+    "klpo": {
+      "train": {
+        "observed": 4,
+        "expected": 4,
+        "passed": 2,
+        "completed": 4,
+        "failures": {
+          "grammar": 1,
+          "division_by_zero": 1
+        },
+        "presentation": {
+          "single_markdown_fence": 4
+        }
+      },
+      "development_holdout": {
+        "observed": 4,
+        "expected": 4,
+        "passed": 2,
+        "completed": 3,
+        "failures": {
+          "contract_mismatch": 1,
+          "truncated": 1
+        },
+        "presentation": {
+          "single_markdown_fence": 3,
+          "raw_source": 1
+        }
+      }
+    }
+  },
+  "outcomes": [
+    {
+      "arm": "base",
+      "task": "signed-clamp/2",
+      "split": "train",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "record_sha256": "1aeffe3f27a69659faf7bad4263f3c90ca13c185fc3e010b0c4e1d135f4b14fc"
+    },
+    {
+      "arm": "base",
+      "task": "bounded-add/2",
+      "split": "train",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "record_sha256": "e4cc4b2bbae57b1c7a29ab30b490b33203c9e9fa2e126a384c72def1956e1f56"
+    },
+    {
+      "arm": "base",
+      "task": "align-up-power2/2",
+      "split": "train",
+      "passed": false,
+      "category": "grammar",
+      "counterexample": null,
+      "record_sha256": "2a5b9f8b3ad76d663eff87a68d8d45b86bf8eae28e00d4656347c70ba8dff349"
+    },
+    {
+      "arm": "base",
+      "task": "aligned-offset-valid/2",
+      "split": "train",
+      "passed": false,
+      "category": "division_by_zero",
+      "counterexample": {
+        "inputs": [
+          -1025,
+          0
+        ],
+        "expected": false
+      },
+      "record_sha256": "c20c2e5492c5adcd576870a0973618c9991ad897c8c374144b83fd40e12f0e42"
+    },
+    {
+      "arm": "base",
+      "task": "signed-field-extract/2",
+      "split": "development_holdout",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "record_sha256": "4bd8daed8429719eea60b2c10afb42d2cd0942ab9c51d48f871d1ea8ff5c51f8"
+    },
+    {
+      "arm": "base",
+      "task": "field-fits-unsigned/2",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "contract_mismatch",
+      "counterexample": {
+        "inputs": [
+          0,
+          0
+        ],
+        "expected": false,
+        "actual": true
+      },
+      "record_sha256": "a123924ad938e25f93ea8d9054eab6497cee5a7c9cab1134ed2e68006997b145"
+    },
+    {
+      "arm": "base",
+      "task": "window-end/2",
+      "split": "development_holdout",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "record_sha256": "aa321ebf229a9c1d5c27177d14a13475b119afd453729423340c032f0065cfd8"
+    },
+    {
+      "arm": "base",
+      "task": "windows-overlap/2",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "truncated",
+      "counterexample": null,
+      "record_sha256": "bc47c2617c4f01df43182b0db1efc70c4c929f18e8fdf427e0809383cd1e2f61"
+    },
+    {
+      "arm": "sft",
+      "task": "signed-clamp/2",
+      "split": "train",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "record_sha256": "8ac58d5d9cf5ba984a9ae89b2a410ceb4496099cd6a1c2ef7db250b8a0e86ec2"
+    },
+    {
+      "arm": "sft",
+      "task": "bounded-add/2",
+      "split": "train",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "record_sha256": "9ad187ec42909426c15e44174690bd053ca3ae3ea00491fafe8841c51fd8f697"
+    },
+    {
+      "arm": "sft",
+      "task": "align-up-power2/2",
+      "split": "train",
+      "passed": false,
+      "category": "grammar",
+      "counterexample": null,
+      "record_sha256": "ec526bc7c547b5264a76140a5a0a1379ab1b2425b6f64a1b8ef4f3755c922bc0"
+    },
+    {
+      "arm": "sft",
+      "task": "aligned-offset-valid/2",
+      "split": "train",
+      "passed": false,
+      "category": "division_by_zero",
+      "counterexample": {
+        "inputs": [
+          -1025,
+          0
+        ],
+        "expected": false
+      },
+      "record_sha256": "5759c4eea21ed58782bf60beb4b1a81d6e86c0642b9a1a95255542e6607a7e56"
+    },
+    {
+      "arm": "sft",
+      "task": "signed-field-extract/2",
+      "split": "development_holdout",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "record_sha256": "5ddab820c8e4397223a9c81c907569cef5403656cef29964a3903c362c3889fe"
+    },
+    {
+      "arm": "sft",
+      "task": "field-fits-unsigned/2",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "contract_mismatch",
+      "counterexample": {
+        "inputs": [
+          0,
+          0
+        ],
+        "expected": false,
+        "actual": true
+      },
+      "record_sha256": "6e3b1790bbfe74d06c203c15fa170c5f4d37481348f25af027acfa8f07595d77"
+    },
+    {
+      "arm": "sft",
+      "task": "window-end/2",
+      "split": "development_holdout",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "record_sha256": "1132d49962c96be8d8eb8165ee38febd173c26d2386942f47c352105ab715626"
+    },
+    {
+      "arm": "sft",
+      "task": "windows-overlap/2",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "truncated",
+      "counterexample": null,
+      "record_sha256": "105fcd62c9923d95b2ab53b6c4e32d053d6d04cf952b031d35b530e361c93ac6"
+    },
+    {
+      "arm": "klpo",
+      "task": "signed-clamp/2",
+      "split": "train",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "record_sha256": "fec068e0b9827034e9952a9ac10bb9dbd46ca3d8aed18222b71b4b6580e91668"
+    },
+    {
+      "arm": "klpo",
+      "task": "bounded-add/2",
+      "split": "train",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "record_sha256": "d641efd07858d1746251d0f2c32eee853ea360ae1f1fda17396773f300bec559"
+    },
+    {
+      "arm": "klpo",
+      "task": "align-up-power2/2",
+      "split": "train",
+      "passed": false,
+      "category": "grammar",
+      "counterexample": null,
+      "record_sha256": "fefd1ff791d5a8d897d699d20491faeb94593d986cbd1a1dfba28030e5bfe711"
+    },
+    {
+      "arm": "klpo",
+      "task": "aligned-offset-valid/2",
+      "split": "train",
+      "passed": false,
+      "category": "division_by_zero",
+      "counterexample": {
+        "inputs": [
+          -1025,
+          0
+        ],
+        "expected": false
+      },
+      "record_sha256": "57af2bdb1c456df50896e3c428591b8b6a16f1db67dd7b3214c9ae506e5385e3"
+    },
+    {
+      "arm": "klpo",
+      "task": "signed-field-extract/2",
+      "split": "development_holdout",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "record_sha256": "663f9c99c641cebe4b8f2c095f629c59b41dc80508cd0d507c06781d9e44cd04"
+    },
+    {
+      "arm": "klpo",
+      "task": "field-fits-unsigned/2",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "contract_mismatch",
+      "counterexample": {
+        "inputs": [
+          0,
+          0
+        ],
+        "expected": false,
+        "actual": true
+      },
+      "record_sha256": "6393de1c15924b9926bc0500c889685292232a801b42c694690d6447413bc1aa"
+    },
+    {
+      "arm": "klpo",
+      "task": "window-end/2",
+      "split": "development_holdout",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "record_sha256": "c2916f1d318fcd2df86102b26841c0cee4298d614bdedc7dc2d179072e464b13"
+    },
+    {
+      "arm": "klpo",
+      "task": "windows-overlap/2",
+      "split": "development_holdout",
+      "passed": false,
+      "category": "truncated",
+      "counterexample": null,
+      "record_sha256": "0f8d16889aeb0914e46c86ec90cc0475507ef68e92b7dc3305526227af7ab183"
+    }
+  ],
+  "complete": true,
+  "quality_improvement_established": false,
+  "native_illumos": false,
+  "note": "Public finite development pack; single samples; formatting accepted by the frozen v2 contract, not retroactive rescoring."
+}

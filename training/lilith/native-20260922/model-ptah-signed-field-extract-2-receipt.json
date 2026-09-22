@@ -1,0 +1,34 @@
+{
+  "command": [
+    "python3",
+    "candidate.py"
+  ],
+  "copy_in": {
+    "content_bytes": 5214,
+    "content_sha256": "0413c5f61a1e96768ecb292ab3f64428134c7120ce77242581a0825ca6517fe7",
+    "snapshot_bytes": 10240,
+    "snapshot_entries": 3,
+    "snapshot_sha256": "f8248fbf8d13fdcd8ad661143312a4ce83af2ca658cd611fd51bddb172f1fb2f"
+  },
+  "duration_ms": 1850,
+  "exit_code": 0,
+  "guest": {
+    "host": "127.0.0.1",
+    "port": 10115,
+    "user": "akh-exec"
+  },
+  "passed": true,
+  "remote_cleanup_succeeded": true,
+  "run_id": "8d769c30542d48a9a16bb51940b55ad6",
+  "schema": "lilith/native-execution@1",
+  "stderr": "",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_truncated": false,
+  "stdout": "native-cases-ok 350\n",
+  "stdout_sha256": "d091b9b1780992b441af88cc9a014e30e82b545ae341cf762fc2eb01f5e63a6a",
+  "stdout_truncated": false,
+  "supervisor_status": "exit",
+  "target": "candidate.py",
+  "timed_out": false,
+  "timeout_s": 30
+}

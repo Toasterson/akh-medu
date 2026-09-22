@@ -11,6 +11,7 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
         isolation: None,
         model_endpoint: None,
         native_candle: None,
+        training_worker: None,
         revision: "embedded-compat-v1".into(),
         kind,
         working_dir: turn.runtime.config.working_dir.clone(),

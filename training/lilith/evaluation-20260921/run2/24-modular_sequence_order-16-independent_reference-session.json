@@ -1,0 +1,60 @@
+{
+  "closed_at": null,
+  "core_service": null,
+  "schema_version": 1,
+  "id": "01a0c52a-fbd5-7a81-9a0e-935c2010af3f",
+  "principal": "operator",
+  "akh": "ptah-eval",
+  "conversation_key": null,
+  "workspace_profile": "local-dev",
+  "workspace": {
+    "id": "akh-5fe77fbb1583cba1f24b8525578a2d19",
+    "sandbox_id": "akh-5fe77fbb1583cba1f24b8525578a2d19",
+    "executor": "akhexecd",
+    "generation": 1,
+    "site": "hephaistos",
+    "root": "/home/toasty/.local/share/akh-medu/lilith-evaluation-ab00aaa8ea134e0eb44d3e80ddc7a571/workspaces/akh-5fe77fbb1583cba1f24b8525578a2d19",
+    "platform": "linux",
+    "confinement": "unconfined"
+  },
+  "runtime": {
+    "runtime": "akhrtd",
+    "profile": "ptah",
+    "revision": "lilith-local-v1",
+    "kind": "internal",
+    "model": "ptah-qwen38",
+    "execution_mode": "brokered"
+  },
+  "instructions": "Solve the assigned coding exercise. Return only the requested Python function. No tools are available.",
+  "tools": [],
+  "approval_policy": "allow_granted",
+  "generation": 1,
+  "next_sequence": 9,
+  "turns": [
+    {
+      "id": "01a0c52a-fbd8-75c2-bd6b-98e631892a2d",
+      "request_id": "1253bc97f93e40b5a622a40603a84369-input",
+      "input": {
+        "origin": {
+          "kind": "human",
+          "principal": "operator"
+        },
+        "text": "Return only one Python function, with no Markdown fences or explanatory prose. Use integer/bool literals, local assignment, if/else, return, comparisons, and/or/not, conditional expressions, +, -, *, //, %, and bitwise & only. No calls (including min/max), imports, loops, shifts, exponentiation, decorators, helper functions, containers or strings. Keep the source under 4096 bytes. These are local Python reference tasks, not native OS validation.\n\nInputs are integers. Reject any input outside 0..65535 by returning -1. Write ring_distance(start: int, end: int, modulus: int) -> int. Also reject modulus zero or either position at least modulus. Return the forward distance from start to end wrapping at modulus; equal positions have distance zero.",
+        "data": null,
+        "artifacts": []
+      },
+      "status": "completed",
+      "generation": 1,
+      "runtime_job_id": "01a0c52a-fbd8-75c2-bd6b-98e631892a2d",
+      "cancel_requested": false,
+      "output": "def ring_distance(start: int, end: int, modulus: int) -> int:\n    if (start < 0 or start > 65535 or end < 0 or end > 65535 or modulus < 0 or modulus > 65535 or modulus == 0 or start >= modulus or end >= modulus):\n        return -1\n    return (end - start) % modulus",
+      "error": null,
+      "created_at": 1790014323672
+    }
+  ],
+  "provider_session": "internal-01a0c52b-0503-7fe3-b1b0-fb1af7f32022",
+  "controller": null,
+  "created_at": 1790014323669,
+  "last_progress_at": 1790014346014,
+  "dispatch_failures": 0
+}

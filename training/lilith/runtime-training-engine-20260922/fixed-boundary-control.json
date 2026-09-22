@@ -1,0 +1,68 @@
+{
+  "schema": "lilith/cache-correctness@3",
+  "status": "passed",
+  "engine_sha256": "5c68f6a1d451c87b6d77e3a54c2786305208a35b5b366ad8661a9ca0bbcb73d0",
+  "contract": {
+    "schema": "lilith/akhrtd-training-engine@1",
+    "context_tokens": 32768,
+    "max_new_tokens": 16384,
+    "thinking": true,
+    "prefill_chunk_tokens": 1,
+    "cache_offloading": true,
+    "cache": "DynamicCache(config), detached KV",
+    "update": "one optimizer step after full eligible bank",
+    "target_module": "model.language_model.layers.47.self_attn.q_proj",
+    "rank": 2
+  },
+  "positions": [
+    1023,
+    1024,
+    1025
+  ],
+  "reference": "resident tokenwise; full BF16 measured separately",
+  "variants": {
+    "resident": {
+      "loss": 24.001402378082275,
+      "cache_tensors": 136,
+      "cache_length": 1025,
+      "sliding_stored": 1023,
+      "global_stored": 1025
+    },
+    "synchronous": {
+      "loss": 24.001402378082275,
+      "cache_tensors": 136,
+      "cache_length": 1025,
+      "sliding_stored": 1023,
+      "global_stored": 1025
+    }
+  },
+  "logit_max_abs": {
+    "1023": 0.0,
+    "1024": 0.0,
+    "1025": 0.0
+  },
+  "gradient_max_abs": {
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": 2.3283064365386963e-10,
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": 0.0
+  },
+  "gradient_norms": {
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": 0.020742185413837433,
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": 2.572736978530884
+  },
+  "full_bf16_diagnostic": {
+    "1023": {
+      "max_abs": 17.1005859375,
+      "mean_abs": 1.399946689605713
+    },
+    "1024": {
+      "max_abs": 5.0625,
+      "mean_abs": 0.6998539566993713
+    },
+    "1025": {
+      "max_abs": 2.6875,
+      "mean_abs": 0.6275306940078735
+    }
+  },
+  "elapsed_seconds": 240.82348614199873,
+  "peak_gpu_bytes": 24379300352
+}

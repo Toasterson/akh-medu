@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "exact_across_fresh_processes": {
+    "base_logits_sha256": true,
+    "adapted_logits_sha256": true,
+    "base_tokens": true,
+    "adapter_tokens": true,
+    "manifest_sha256": true
+  },
+  "quality_claim": false
+}

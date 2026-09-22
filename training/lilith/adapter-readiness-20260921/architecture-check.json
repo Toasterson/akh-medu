@@ -1,0 +1,26 @@
+{
+  "status": "passed",
+  "device": "meta",
+  "architecture": "Gemma4UnifiedForConditionalGeneration",
+  "versions": {
+    "torch": "2.7.1+rocm6.3",
+    "transformers": "5.10.1",
+    "peft": "0.18.1"
+  },
+  "target": "model.language_model.layers.47.self_attn.q_proj",
+  "target_shape": [
+    8192,
+    3840
+  ],
+  "trainable_shapes": {
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": [
+      2,
+      3840
+    ],
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": [
+      8192,
+      2
+    ]
+  },
+  "training_executed": false
+}

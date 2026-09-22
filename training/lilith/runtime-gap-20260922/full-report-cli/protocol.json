@@ -1,0 +1,36 @@
+{
+  "schema": "lilith/latency-replay@2",
+  "binary_sha256": "bd6f0300f2f56fe9a0fb2eeded61d4ed150c6d4275230ef88f003848d48a8dc0",
+  "driver_sha256": "cc553fc4da4f7cfe24b5c76d626e1fceaf5d069c9d3df40d449a0cb20a0a9250",
+  "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+  "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+  "prompt_sha256": "8dcbc7e5b3e44a3c36893b23ebacd4bae0eaa789526bf912323567d8cee965e3",
+  "command": [
+    "/home/toasty/ws/agi/akh-medu/target/release/examples/candle_session_probe",
+    "--model",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+    "--tokenizer",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+    "--device",
+    "vulkan",
+    "--prompt-file",
+    "training/lilith/runtime-gap-20260922/full-report-cli/prompt.txt",
+    "--tokens",
+    "768"
+  ],
+  "timeout": 360,
+  "ttft_limit_seconds": 30,
+  "min_decode_tps": 15,
+  "require_complete": true,
+  "max_generation_seconds": 120.0,
+  "scope": "Exact tool-free reporter system/user rendering; completion CLI replaces session services. Requested output cap is recorded in command; session transport is outside this probe.",
+  "env": {
+    "AKH_GPU_MATMUL": "0",
+    "AKH_GPU_QUANT": "0",
+    "AKH_VULKAN_GROUPED_DECODE": "1",
+    "AKH_VULKAN_MATMUL_STRIDES": "1",
+    "AKH_VULKAN_PIPELINE_CACHE_ENTRIES": "16384",
+    "AKH_VULKAN_REUSABLE_KV": "1",
+    "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
+  }
+}

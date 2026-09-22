@@ -1,0 +1,141 @@
+{
+  "closed_at": null,
+  "core_service": null,
+  "schema_version": 1,
+  "id": "01a0c4ee-3773-7833-87ad-c0fb9906267e",
+  "principal": "operator",
+  "akh": "lilith",
+  "conversation_key": null,
+  "workspace_profile": "local-dev",
+  "workspace": {
+    "id": "akh-43a5ac6750e0fe5f58a57f2020fa0317",
+    "sandbox_id": "akh-43a5ac6750e0fe5f58a57f2020fa0317",
+    "executor": "akhexecd",
+    "generation": 1,
+    "site": "hephaistos",
+    "root": "/home/toasty/.local/share/akh-medu/lilith-dev-vulkan-20260921/workspaces/akh-43a5ac6750e0fe5f58a57f2020fa0317",
+    "platform": "linux",
+    "confinement": "unconfined"
+  },
+  "runtime": {
+    "runtime": "akhrtd",
+    "profile": "lilith",
+    "revision": "lilith-local-v1",
+    "kind": "internal",
+    "model": "lilith-gemma4-12b",
+    "execution_mode": "brokered"
+  },
+  "instructions": "You are Lilith, the human interface and coordinator of Akhs. Complete assigned work within its scope, inspect evidence, verify results, and report uncertainty. This is a local development workspace; illumos validation is not available yet.",
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read a UTF-8 file in the assigned workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "read_only": true,
+      "destination": {
+        "kind": "workspace",
+        "operation": "read"
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Write a UTF-8 file in the assigned workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "create": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content",
+          "create"
+        ],
+        "type": "object"
+      },
+      "read_only": false,
+      "destination": {
+        "kind": "workspace",
+        "operation": "write"
+      }
+    },
+    {
+      "name": "request_review",
+      "description": "Queue Ptah review of the assigned artifact after independent verification. Finish your turn after acknowledgement; the review returns later.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "objective": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "path": {
+            "enum": [
+              "clamp_u8.py",
+              "range_within_u64.py"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "objective"
+        ],
+        "type": "object"
+      },
+      "read_only": false,
+      "destination": {
+        "kind": "client"
+      }
+    }
+  ],
+  "approval_policy": "allow_granted",
+  "generation": 1,
+  "next_sequence": 16,
+  "turns": [
+    {
+      "id": "01a0c4ee-3776-7c53-9db4-ae44defde492",
+      "request_id": "6fb9cf6d7d104750949718e94b781466-lilith-write",
+      "input": {
+        "origin": {
+          "kind": "human",
+          "principal": "operator"
+        },
+        "text": "Remember the word cedar. Use write_file to create range_within_u64.py with create=true. Write range_within_u64(start: int, length: int, limit: int) -> bool. Inputs are integers. Return False if any input is outside unsigned 64-bit range 0..18446744073709551615. Otherwise return whether the half-open range [start, start+length) fits within [0, limit). An empty range at start==limit is valid. Reject start>limit even for an empty range. Use the overflow-safe comparison length <= limit - start after checking start <= limit. Use only integer/bool literals, comparisons, boolean operators, subtraction, if and return. No imports, calls, decorators or loops. Write actual Python, not markdown. Then use request_review with path=range_within_u64.py and objective=Review the u64-range/1 contract. After it acknowledges the queued review, finish your turn briefly.",
+        "data": null,
+        "artifacts": []
+      },
+      "status": "completed",
+      "generation": 1,
+      "runtime_job_id": "01a0c4ee-3776-7c53-9db4-ae44defde492",
+      "cancel_requested": false,
+      "output": "Review queued.",
+      "error": null,
+      "created_at": 1790010341238
+    }
+  ],
+  "provider_session": "internal-01a0c4ee-3acd-75a2-ad5e-ec184c56ef12",
+  "controller": null,
+  "created_at": 1790010341235,
+  "last_progress_at": 1790010476084,
+  "dispatch_failures": 0
+}

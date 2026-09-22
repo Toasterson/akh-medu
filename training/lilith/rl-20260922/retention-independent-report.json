@@ -1,0 +1,28 @@
+{
+  "schema": "lilith/rl-retention-independent-replay@2",
+  "complete": true,
+  "arms": {
+    "base": {
+      "passed": 4,
+      "completed": 4,
+      "total": 4,
+      "adapter_sha256": "bf79f04d4ee5487d669ef010e0376aafddbcdea831a2192072ea62269a2677c6"
+    },
+    "sft": {
+      "passed": 4,
+      "completed": 4,
+      "total": 4,
+      "adapter_sha256": "5c7af89bf578e57bef3036f6c574edfa6c71ef69139604c16bad68cb9a00e5f4"
+    },
+    "klpo": {
+      "passed": 4,
+      "completed": 4,
+      "total": 4,
+      "adapter_sha256": "c583780e5eca2e517464d2e50a53ebfb5d874affc1a856834e2ef262e7cf3db3"
+    }
+  },
+  "cold_reload_exact": true,
+  "candidate_sha256": "80be5b0fbeb264292f84f0e757adf84259a213c4c3654dc87bd3c448fb1ff808",
+  "quality_improvement_established": false,
+  "retention_regression_observed": false
+}

@@ -1,0 +1,13 @@
+{
+  "schema": "lilith/failed-attempt@1",
+  "pid": 43400,
+  "status": "failed",
+  "exit_code": 139,
+  "phase": "loading_parent",
+  "cause": "incompatible HSA_OVERRIDE_GFX_VERSION=10.3.0 on native gfx1100",
+  "parent_load_completed": false,
+  "generation_started": false,
+  "trajectories_collected": 0,
+  "optimizer_steps": 0,
+  "manifest_changed_after_attempt": false
+}

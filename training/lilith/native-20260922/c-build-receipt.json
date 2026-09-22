@@ -1,0 +1,38 @@
+{
+  "command": [
+    "gcc",
+    "-std=c11",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "check.c",
+    "-o",
+    "check-c"
+  ],
+  "copy_in": {
+    "content_bytes": 270,
+    "content_sha256": "6d0838d293c7d20f86b5e2db5d2a7f35f82425e6b3f5bab7723b24ff0de5d957",
+    "snapshot_bytes": 10240,
+    "snapshot_entries": 3,
+    "snapshot_sha256": "f8248fbf8d13fdcd8ad661143312a4ce83af2ca658cd611fd51bddb172f1fb2f"
+  },
+  "duration_ms": 2338,
+  "exit_code": 0,
+  "guest": {
+    "host": "127.0.0.1",
+    "port": 10115,
+    "user": "akh-exec"
+  },
+  "remote_cleanup_succeeded": true,
+  "run_id": "77c5344164f644798f94cf4097266168",
+  "schema": "lilith/native-execution@1",
+  "stderr": "",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_truncated": false,
+  "stdout": "",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stdout_truncated": false,
+  "target": "check.c",
+  "timed_out": false,
+  "timeout_s": 30
+}

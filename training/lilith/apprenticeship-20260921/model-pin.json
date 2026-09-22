@@ -1,0 +1,11 @@
+{
+  "model": "lilith-gemma4-12b",
+  "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+  "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+  "device": {
+    "kind": "vulkan",
+    "ordinal": 0
+  },
+  "max_output_tokens": 512,
+  "max_context_tokens": 2048
+}

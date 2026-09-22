@@ -1,0 +1,22 @@
+{
+  "cleanup_policy": "unique-run-directory-removed-after-every-attempt",
+  "execution_boundary": "ssh_guest",
+  "executor_source_sha256": "ce45f0b90b09c58c65c669152a012f2d499bff5d2fc9bb1c0e523e6b62b2d339",
+  "guest_identity": "lilith-illumos-20260922",
+  "host_exposure": "SLIRP loopback SSH only; no host mounts or forwarded secrets",
+  "known_hosts_sha256": "aa8a5572c99c8529d8df19c9269c2690a500205bf0d4a5ba058f7ce75aeb90ee",
+  "max_output_bytes": 65536,
+  "max_snapshot_bytes": 33554432,
+  "max_timeout_s": 60,
+  "privilege_policy": "unprivileged akh-exec; executor never invokes sudo",
+  "rootfs_sha256": "437edebceb20931ffee43d0838b0caf284e174368a1def421128a4375ac4f8ee",
+  "schema": "lilith/native-executor-contract@1",
+  "ssh": {
+    "host": "127.0.0.1",
+    "host_key_fingerprint": "SHA256:9XvZc8Pd/zkdM9zOqOQEXp2Z0ZDej3IPI3ommnQeVj0",
+    "port": 10115,
+    "user": "akh-exec"
+  },
+  "staging_protocol": "tar-stdin+exact-content-v1",
+  "supervisor_sha256": "bd57d20c6cb3837cf43078c09571edfc28633609fbad3619994546c92c64ae89"
+}

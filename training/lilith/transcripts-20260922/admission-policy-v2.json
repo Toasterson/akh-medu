@@ -1,0 +1,19 @@
+{
+  "schema": "akh/lilith-transcript-admission-policy@2",
+  "frozen_at": "2026-09-22T15:15:00Z",
+  "deny_session_sha256": [
+    "3eb081070474c27b53247d6763ab73fa1760ed487e2f95b248168b7c1c894e30",
+    "7903d55377df92a216fdd89c0425056847e59f2bb90eddcd1e16f53707098d55",
+    "eb449680a515016d0ffd0c78c212263d3a896f8f2b0437aea15188f19a4404a7"
+  ],
+  "deny_family_tags": [
+    "sealed:adam-eval-observe-version/1",
+    "sealed:adam-eval-instrument-order/1",
+    "sealed:kaine-eval-observe-authority/1",
+    "sealed:kaine-eval-instrument-board/1"
+  ],
+  "eval_content_sha256": [],
+  "reward_manifest": "training/lilith/adam-kaine-reward-20260922/manifest.json",
+  "reward_manifest_semantic_sha256": "a491b9bd86fd52b1f4ca5dd756e218bd31e9b6e4ff5baae5c9f7961d917a2734",
+  "note": "The three denied sessions are the live 2026-09-22 Lilith experiment sessions and are excluded before the historical repository export to prevent evaluation/protocol leakage."
+}

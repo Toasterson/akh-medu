@@ -1,0 +1,13 @@
+{
+  "base_commit": "329ebff421d2eff75ef12f29001baac20ff01ef3",
+  "source_sha256": {
+    "vendor/candle-core/src/vulkan_backend.rs": "ca3212e88810cf55d419f46da9c32bbbb0f56fb9771794c584a6dd90ad371754",
+    "examples/candle_session_probe.rs": "7a2d6dd6d4e112b550fde8e0606311beb886e9f19b44c41f124e36edad8cb2bf",
+    "scripts/session-platform/prepare-lilith.py": "b549c636f9ea5c35dd721442a9568ff30d9ac5c7f0afd2af19cceffa82a21fd1"
+  },
+  "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+  "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+  "notes": "Performance experiments used the probe hash recorded in experiment.json. An unused optional source-byte-budget override was removed after the measurements; it was unset during every experiment. Final code always uses the same 16 MiB byte budget.",
+  "akhrtd_sha256": "6c04d8b1d47ca523e5ac8221dd0eb98eeb0799125ecadc61191ac7f2594eac2f",
+  "runtime_config_check": "passed"
+}

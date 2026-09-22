@@ -1,0 +1,12 @@
+{
+  "schema": "lilith/rl-probe@1",
+  "status": "cancelled_precollection",
+  "pid": 300496,
+  "deployed_weights_changed": false,
+  "quality_claim": false,
+  "source_sha256": "fcbc3d130b94a0aed8fb366e97d4365464dc756c48d4bcd7985968dc38e40488",
+  "phase": "aborted_before_collection",
+  "elapsed_seconds": 3.3129292640005588,
+  "reason": "Added immutable task-manifest admission check before any generation; own loader interrupted, no trajectories collected.",
+  "exit_code": 130
+}

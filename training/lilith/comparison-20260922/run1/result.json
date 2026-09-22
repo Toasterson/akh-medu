@@ -1,0 +1,30 @@
+{
+  "status": "completed",
+  "private_root": "/home/toasty/.local/share/akh-medu/lilith-comparison-92c4b4fbfb144f3fb507fa8de5cdea02",
+  "quality_claim": false,
+  "native_illumos": false,
+  "observations": 16,
+  "scores": {
+    "lilith": {
+      "train": {
+        "passed": 1,
+        "total": 4
+      },
+      "development_holdout": {
+        "passed": 3,
+        "total": 4
+      }
+    },
+    "ptah": {
+      "train": {
+        "passed": 2,
+        "total": 4
+      },
+      "development_holdout": {
+        "passed": 4,
+        "total": 4
+      }
+    }
+  },
+  "services_stopped": true
+}

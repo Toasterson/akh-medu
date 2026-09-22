@@ -1,0 +1,278 @@
+{
+  "schema": "lilith/failure-diagnosis@1",
+  "purpose": "Post-hoc diagnosis only; no changed score, tuning, retry or admission.",
+  "failures": [
+    {
+      "task": "alignment-16",
+      "arm": "independent_reference",
+      "seed": 0,
+      "source_sha256": "b29e6c22fd8a6ecce02b554a13b61782a94e900fc3cc00c308f4ec2d1e387d2b",
+      "strict_outcome": {
+        "task": "alignment-16",
+        "seed": 0,
+        "arm": "independent_reference",
+        "passed": false,
+        "category": "unsupported_syntax",
+        "detail": "unsupported syntax or AST size",
+        "cases": 0
+      },
+      "diagnostics": [
+        {
+          "kind": "unscored_exact_integer_identity_normalization",
+          "identity": "~x == -x - 1 for Python integers",
+          "scored": false,
+          "original_source_sha256": "b29e6c22fd8a6ecce02b554a13b61782a94e900fc3cc00c308f4ec2d1e387d2b",
+          "transformed_source_sha256": "218f41c3e2de302bc5de250b1cfba153c8edcbe6034eeb4cfe3f320bd692e95e",
+          "transformed_source": "def align_up(value: int, alignment: int) -> int:\n    if value < 0 or value > 65535 or alignment < 1 or (alignment > 65535):\n        return -1\n    if alignment & alignment - 1 != 0:\n        return -1\n    result = value + alignment - 1 & -(alignment - 1) - 1\n    if result > 65535:\n        return -1\n    return result\n",
+          "result": {
+            "passed": true,
+            "category": "passed",
+            "cases": 169,
+            "source_sha256": "218f41c3e2de302bc5de250b1cfba153c8edcbe6034eeb4cfe3f320bd692e95e"
+          },
+          "interpretation": "Artificial tiny-language constraint; this alone is not an arithmetic or illumos-coding deficit."
+        },
+        {
+          "kind": "isolated_function_secondary_check",
+          "function_index": 0,
+          "scored": false,
+          "source_sha256": "ea60eb2b846845527031c6ea3a0fc6264eff4f46d05b22bfe3455936d381e751",
+          "result": {
+            "passed": false,
+            "category": "unsupported_syntax",
+            "detail": "unsupported syntax or AST size",
+            "cases": 0
+          }
+        }
+      ],
+      "score_unchanged": true,
+      "top_level_function_count": 1,
+      "next_intervention": "Diagnose semantic failures separately from the artificial tiny-language constraint. Teach complete input-domain checks and one final artifact using fresh non-holdout examples; do not export these evaluation solutions. No quality-tuning recommendation solely to avoid unary complement."
+    },
+    {
+      "task": "alignment-8",
+      "arm": "independent_reference",
+      "seed": 0,
+      "source_sha256": "9763feda913e1f63175d65ece122053f21f184988b8fe31f147698fd3d6408db",
+      "strict_outcome": {
+        "task": "alignment-8",
+        "seed": 0,
+        "arm": "independent_reference",
+        "passed": false,
+        "category": "boundary_semantics",
+        "input": [
+          0,
+          2
+        ],
+        "expected": 0,
+        "actual": 1,
+        "cases": 17
+      },
+      "diagnostics": [
+        {
+          "kind": "isolated_function_secondary_check",
+          "function_index": 0,
+          "scored": false,
+          "source_sha256": "7073f118adf8880c2cee72df0b31f856a01a0181869373a5a7856141e86fe82f",
+          "result": {
+            "passed": false,
+            "category": "boundary_semantics",
+            "input": [
+              0,
+              2
+            ],
+            "expected": 0,
+            "actual": 1,
+            "cases": 17
+          }
+        }
+      ],
+      "score_unchanged": true,
+      "top_level_function_count": 1,
+      "next_intervention": "Diagnose semantic failures separately from the artificial tiny-language constraint. Teach complete input-domain checks and one final artifact using fresh non-holdout examples; do not export these evaluation solutions. No quality-tuning recommendation solely to avoid unary complement."
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "arm": "none",
+      "seed": 0,
+      "source_sha256": "2e10c8e1f2b6e17fb2a1d4a4f760cc1220712f1bb0e555267b6fc6454ad1eef7",
+      "strict_outcome": {
+        "task": "modular_sequence_order-8",
+        "seed": 0,
+        "arm": "none",
+        "passed": false,
+        "category": "unsupported_syntax",
+        "detail": "one function required",
+        "cases": 0
+      },
+      "diagnostics": [
+        {
+          "finding": "duplicate_function_definitions",
+          "evidence": "The prompt and checker require exactly one function; the raw output contains multiple definitions."
+        },
+        {
+          "kind": "isolated_function_secondary_check",
+          "function_index": 0,
+          "scored": false,
+          "source_sha256": "de31627477f365a62ff2ad51ba4ac0ebe647f7d0cb8153bb4666cebc0da090cb",
+          "result": {
+            "passed": false,
+            "category": "domain_rejection",
+            "input": [
+              0,
+              0,
+              256
+            ],
+            "expected": -1,
+            "actual": 0,
+            "cases": 195
+          }
+        },
+        {
+          "kind": "isolated_function_secondary_check",
+          "function_index": 1,
+          "scored": false,
+          "source_sha256": "f095970282327508ebc89df938bba60fb46d2cb4ff57d41299d6530e10fc14b1",
+          "result": {
+            "passed": false,
+            "category": "domain_rejection",
+            "input": [
+              0,
+              0,
+              256
+            ],
+            "expected": -1,
+            "actual": 0,
+            "cases": 195
+          }
+        }
+      ],
+      "score_unchanged": true,
+      "top_level_function_count": 2,
+      "contract_diagnosis": "Observed omitted modulus-domain check: all inputs, including modulus, are explicitly restricted to0..255. A conventional8-bit ring may use modulus256, but this task rejects256. Whether that convention influenced the model is unproven.",
+      "next_intervention": "Diagnose semantic failures separately from the artificial tiny-language constraint. Teach complete input-domain checks and one final artifact using fresh non-holdout examples; do not export these evaluation solutions. No quality-tuning recommendation solely to avoid unary complement."
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "arm": "text",
+      "seed": 0,
+      "source_sha256": "2e10c8e1f2b6e17fb2a1d4a4f760cc1220712f1bb0e555267b6fc6454ad1eef7",
+      "strict_outcome": {
+        "task": "modular_sequence_order-8",
+        "seed": 0,
+        "arm": "text",
+        "passed": false,
+        "category": "unsupported_syntax",
+        "detail": "one function required",
+        "cases": 0
+      },
+      "diagnostics": [
+        {
+          "finding": "duplicate_function_definitions",
+          "evidence": "The prompt and checker require exactly one function; the raw output contains multiple definitions."
+        },
+        {
+          "kind": "isolated_function_secondary_check",
+          "function_index": 0,
+          "scored": false,
+          "source_sha256": "de31627477f365a62ff2ad51ba4ac0ebe647f7d0cb8153bb4666cebc0da090cb",
+          "result": {
+            "passed": false,
+            "category": "domain_rejection",
+            "input": [
+              0,
+              0,
+              256
+            ],
+            "expected": -1,
+            "actual": 0,
+            "cases": 195
+          }
+        },
+        {
+          "kind": "isolated_function_secondary_check",
+          "function_index": 1,
+          "scored": false,
+          "source_sha256": "f095970282327508ebc89df938bba60fb46d2cb4ff57d41299d6530e10fc14b1",
+          "result": {
+            "passed": false,
+            "category": "domain_rejection",
+            "input": [
+              0,
+              0,
+              256
+            ],
+            "expected": -1,
+            "actual": 0,
+            "cases": 195
+          }
+        }
+      ],
+      "score_unchanged": true,
+      "top_level_function_count": 2,
+      "contract_diagnosis": "Observed omitted modulus-domain check: all inputs, including modulus, are explicitly restricted to0..255. A conventional8-bit ring may use modulus256, but this task rejects256. Whether that convention influenced the model is unproven.",
+      "next_intervention": "Diagnose semantic failures separately from the artificial tiny-language constraint. Teach complete input-domain checks and one final artifact using fresh non-holdout examples; do not export these evaluation solutions. No quality-tuning recommendation solely to avoid unary complement."
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "arm": "vsa",
+      "seed": 0,
+      "source_sha256": "2e10c8e1f2b6e17fb2a1d4a4f760cc1220712f1bb0e555267b6fc6454ad1eef7",
+      "strict_outcome": {
+        "task": "modular_sequence_order-8",
+        "seed": 0,
+        "arm": "vsa",
+        "passed": false,
+        "category": "unsupported_syntax",
+        "detail": "one function required",
+        "cases": 0
+      },
+      "diagnostics": [
+        {
+          "finding": "duplicate_function_definitions",
+          "evidence": "The prompt and checker require exactly one function; the raw output contains multiple definitions."
+        },
+        {
+          "kind": "isolated_function_secondary_check",
+          "function_index": 0,
+          "scored": false,
+          "source_sha256": "de31627477f365a62ff2ad51ba4ac0ebe647f7d0cb8153bb4666cebc0da090cb",
+          "result": {
+            "passed": false,
+            "category": "domain_rejection",
+            "input": [
+              0,
+              0,
+              256
+            ],
+            "expected": -1,
+            "actual": 0,
+            "cases": 195
+          }
+        },
+        {
+          "kind": "isolated_function_secondary_check",
+          "function_index": 1,
+          "scored": false,
+          "source_sha256": "f095970282327508ebc89df938bba60fb46d2cb4ff57d41299d6530e10fc14b1",
+          "result": {
+            "passed": false,
+            "category": "domain_rejection",
+            "input": [
+              0,
+              0,
+              256
+            ],
+            "expected": -1,
+            "actual": 0,
+            "cases": 195
+          }
+        }
+      ],
+      "score_unchanged": true,
+      "top_level_function_count": 2,
+      "contract_diagnosis": "Observed omitted modulus-domain check: all inputs, including modulus, are explicitly restricted to0..255. A conventional8-bit ring may use modulus256, but this task rejects256. Whether that convention influenced the model is unproven.",
+      "next_intervention": "Diagnose semantic failures separately from the artificial tiny-language constraint. Teach complete input-domain checks and one final artifact using fresh non-holdout examples; do not export these evaluation solutions. No quality-tuning recommendation solely to avoid unary complement."
+    }
+  ]
+}

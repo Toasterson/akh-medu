@@ -1,0 +1,11 @@
+{
+  "schema": "lilith/rl-probe@1",
+  "status": "running",
+  "pid": 43400,
+  "deployed_weights_changed": false,
+  "quality_claim": false,
+  "source_sha256": "ed03a1564914a3bea25229f6865dc09c79298c8b8b75b950a4c06712c541ce56",
+  "task_manifest_sha256": "f4f0e5918ef4fffdcd18a5193a2c54b4cf960c655bf1171b4b0672614af9c437",
+  "phase": "loading_parent",
+  "elapsed_seconds": 4.264398652998352
+}

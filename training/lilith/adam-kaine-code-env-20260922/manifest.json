@@ -1,0 +1,1374 @@
+{
+  "development_ids": [
+    "signed-field-extract/2",
+    "field-fits-unsigned/2",
+    "window-end/2",
+    "windows-overlap/2"
+  ],
+  "limitations": [
+    "finite bounded cases are not proofs",
+    "native illumos is an audit after bounded admission",
+    "transfers mechanisms into Gemma; does not train sovereign ADAM/Kaine weights"
+  ],
+  "manifest_sha256": "e0e80b64281322320f784d435ceccdf365c69b32fc036e4bef21cc51ca956fce",
+  "policy": "verified_code_effect_v1",
+  "reward_source_sha256": "33b82ed7d5de572542b64e840e1ffefc2d9d55626c96038b1fb736db1e8fd29f",
+  "schema": "lilith/adam-kaine-code-curriculum@1",
+  "sealed_eval_ids": [
+    "saturating-sub/3",
+    "power-two-in-range/3",
+    "unsigned-field-at-offset/3",
+    "intervals-adjacent/3"
+  ],
+  "task_source_sha256": "ca7d125daf1448b0890b8d6f97f2c85773c1400edd51659769a0578d51c9664c",
+  "tasks": [
+    {
+      "cases_sha256": "2f82a8f4635e49906da1e106c5a9763a6ebed7906cfd2a32e320935cb76ece38",
+      "family": "bounded_normalization",
+      "id": "signed-clamp/2",
+      "negative_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "65def3e8fa8a1c9d865d3a91a6571bf2830ce897355c2d9c6432b1f3f1b80cfb"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "fcf3aa03ba62ec476926cba6cbb2dbd61a3375dbda2bd5c33e36e044d4266592"
+          },
+          {
+            "action": "test",
+            "passed": false,
+            "receipt_sha256": "d2b2419d3d983ccd9d9ef04dd666c23a834e1d5bc9057b43e1b83af8d766a0f9"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "a2d04d9a1167a2b74b639463f919539ffec2e904f2867e4c94541b11551eb781"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "fcf3aa03ba62ec476926cba6cbb2dbd61a3375dbda2bd5c33e36e044d4266592",
+          "cases": 1,
+          "category": "contract_mismatch",
+          "counterexample": {
+            "actual": 1,
+            "expected": -1,
+            "inputs": [
+              -1025,
+              -1
+            ]
+          },
+          "formatting_compliant": true,
+          "generated_text_sha256": "fcf3aa03ba62ec476926cba6cbb2dbd61a3375dbda2bd5c33e36e044d4266592",
+          "passed": false,
+          "presentation": "raw_source",
+          "total_cases": 496
+        },
+        "family": "bounded_normalization",
+        "generated_text_sha256": "fcf3aa03ba62ec476926cba6cbb2dbd61a3375dbda2bd5c33e36e044d4266592",
+        "klpo_reward": 0.05,
+        "passed": false,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 0.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "train",
+        "task_id": "signed-clamp/2"
+      },
+      "prompt": "Inputs are arbitrary integers. Return a clamped to the inclusive interval from -b to b; return -1 if b is outside 0..255. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "c15b7f71c80b11457757e6e5031d179a233d18b36b9d3f4abeec57f574f7da51",
+      "reference_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "65def3e8fa8a1c9d865d3a91a6571bf2830ce897355c2d9c6432b1f3f1b80cfb"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10"
+          },
+          {
+            "action": "test",
+            "passed": true,
+            "receipt_sha256": "c84d6f99f25a5d0aec9b4d64b2151e317346fe0f97bea7084b8b22c5b815e6aa"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "a11d39d7d7cdb775466b02321fe2ee8f7dfe0f1072a011a150158e4b733dd8d7"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10",
+          "cases": 496,
+          "category": "passed",
+          "counterexample": null,
+          "formatting_compliant": true,
+          "generated_text_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10",
+          "passed": true,
+          "presentation": "raw_source",
+          "total_cases": 496
+        },
+        "family": "bounded_normalization",
+        "generated_text_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10",
+        "klpo_reward": 1.0,
+        "passed": true,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 1.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "train",
+        "task_id": "signed-clamp/2"
+      },
+      "reference_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10",
+      "split": "train"
+    },
+    {
+      "cases_sha256": "950f87a01b3b54a1c16d2e09da223a04cda3ae9a907067b237443b23c0720cb5",
+      "family": "bounded_normalization",
+      "id": "bounded-add/2",
+      "negative_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "c642a94d402cd4ac0f5ef5b8d996bca9b597ddfa0c62ea462c0d1c78370652a0"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "de024fce1fa7157e24667a378bbde60732147302fe5301fbc55130e22f18f5c6"
+          },
+          {
+            "action": "test",
+            "passed": false,
+            "receipt_sha256": "25783580c9620700ddca8afc451c5ee70911c4ec86860445b90f31f630ca6398"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "a2d04d9a1167a2b74b639463f919539ffec2e904f2867e4c94541b11551eb781"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "de024fce1fa7157e24667a378bbde60732147302fe5301fbc55130e22f18f5c6",
+          "cases": 1,
+          "category": "contract_mismatch",
+          "counterexample": {
+            "actual": -2050,
+            "expected": -1,
+            "inputs": [
+              -1025,
+              -1025
+            ]
+          },
+          "formatting_compliant": true,
+          "generated_text_sha256": "de024fce1fa7157e24667a378bbde60732147302fe5301fbc55130e22f18f5c6",
+          "passed": false,
+          "presentation": "raw_source",
+          "total_cases": 961
+        },
+        "family": "bounded_normalization",
+        "generated_text_sha256": "de024fce1fa7157e24667a378bbde60732147302fe5301fbc55130e22f18f5c6",
+        "klpo_reward": 0.05,
+        "passed": false,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 0.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "train",
+        "task_id": "bounded-add/2"
+      },
+      "prompt": "Inputs are arbitrary integers. If a or b is outside -128..127, return -1. Otherwise return their sum clamped to -128..127. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "e4f0e1010bc53e49d8d8a22494bc0d05f9503ca86ae7f971081b30672ec6df08",
+      "reference_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "c642a94d402cd4ac0f5ef5b8d996bca9b597ddfa0c62ea462c0d1c78370652a0"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681"
+          },
+          {
+            "action": "test",
+            "passed": true,
+            "receipt_sha256": "3b070531a42a0a26c0f523cb656e5b0576fa83fd7bbf658d4279e9c71e21364d"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "0a4ff3d569dce8166ea375d6eefcf6a81730bbb9639c6fc5f9d8bcbd6cbcf2ab"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681",
+          "cases": 961,
+          "category": "passed",
+          "counterexample": null,
+          "formatting_compliant": true,
+          "generated_text_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681",
+          "passed": true,
+          "presentation": "raw_source",
+          "total_cases": 961
+        },
+        "family": "bounded_normalization",
+        "generated_text_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681",
+        "klpo_reward": 1.0,
+        "passed": true,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 1.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "train",
+        "task_id": "bounded-add/2"
+      },
+      "reference_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681",
+      "split": "train"
+    },
+    {
+      "cases_sha256": "4e7cf6b50a5361c889967908901705f214d8e20dbed9c0396ce00f700bae2f30",
+      "family": "alignment",
+      "id": "align-up-power2/2",
+      "negative_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "240fcaee166b5164863d8d512892c05d1c6c06915356b98f23938dce219347be"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "464613f3e1fa93d4f062a503ba57de769049081993bce6278678909387e355a1"
+          },
+          {
+            "action": "test",
+            "passed": false,
+            "receipt_sha256": "3c83b38e42ad87de30ff2f4d6809c149dbd9bd070ecdabc8ccd97d3f478352cf"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "32964f9b30143ebbc932d4ea7c11f4cbf8c3221a8040fa1ce8ac2d16c7fe7890"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "464613f3e1fa93d4f062a503ba57de769049081993bce6278678909387e355a1",
+          "cases": 1,
+          "category": "division_by_zero",
+          "counterexample": {
+            "expected": -1,
+            "inputs": [
+              -1025,
+              0
+            ]
+          },
+          "formatting_compliant": true,
+          "generated_text_sha256": "464613f3e1fa93d4f062a503ba57de769049081993bce6278678909387e355a1",
+          "passed": false,
+          "presentation": "raw_source",
+          "total_cases": 374
+        },
+        "family": "alignment",
+        "generated_text_sha256": "464613f3e1fa93d4f062a503ba57de769049081993bce6278678909387e355a1",
+        "klpo_reward": 0.05,
+        "passed": false,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 0.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "train",
+        "task_id": "align-up-power2/2"
+      },
+      "prompt": "Inputs are arbitrary integers. Return the smallest multiple of b greater than or equal to a. Return -1 unless 0 <= a <= 65535 and b is one of 1,2,4,8,16,32,64. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "ee426b1f2988ded7dc8141816f53c57818a13ac8cdff1103256017846fa6c8c4",
+      "reference_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "240fcaee166b5164863d8d512892c05d1c6c06915356b98f23938dce219347be"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616"
+          },
+          {
+            "action": "test",
+            "passed": true,
+            "receipt_sha256": "f2593a98c59233ff51ffe7b220f05f19ed02452a20d4792c03cbdc104969138f"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "ef816742f3afe0f8b9a1971887eedcbe65d412321e64270ffb53903a5d8fd092"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616",
+          "cases": 374,
+          "category": "passed",
+          "counterexample": null,
+          "formatting_compliant": true,
+          "generated_text_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616",
+          "passed": true,
+          "presentation": "raw_source",
+          "total_cases": 374
+        },
+        "family": "alignment",
+        "generated_text_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616",
+        "klpo_reward": 1.0,
+        "passed": true,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 1.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "train",
+        "task_id": "align-up-power2/2"
+      },
+      "reference_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616",
+      "split": "train"
+    },
+    {
+      "cases_sha256": "9aaeae3d40cb5dd0df3137f75df9f09cb4274aa557a0196ba98c55642bae595f",
+      "family": "alignment",
+      "id": "aligned-offset-valid/2",
+      "negative_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "c3eca33ba128cb56ebb3f296017cc633eaacac3200053880e69301d018612fdc"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "deedcab359d01c654c7c4fedf74117e5a3307501297da2588312db4b92b2796d"
+          },
+          {
+            "action": "test",
+            "passed": false,
+            "receipt_sha256": "17affc88e9ee4b282d44c43aa15715354f81319f5f82104015eb466715cef949"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "32964f9b30143ebbc932d4ea7c11f4cbf8c3221a8040fa1ce8ac2d16c7fe7890"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "deedcab359d01c654c7c4fedf74117e5a3307501297da2588312db4b92b2796d",
+          "cases": 1,
+          "category": "division_by_zero",
+          "counterexample": {
+            "expected": false,
+            "inputs": [
+              -1025,
+              0
+            ]
+          },
+          "formatting_compliant": true,
+          "generated_text_sha256": "deedcab359d01c654c7c4fedf74117e5a3307501297da2588312db4b92b2796d",
+          "passed": false,
+          "presentation": "raw_source",
+          "total_cases": 363
+        },
+        "family": "alignment",
+        "generated_text_sha256": "deedcab359d01c654c7c4fedf74117e5a3307501297da2588312db4b92b2796d",
+        "klpo_reward": 0.05,
+        "passed": false,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 0.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "train",
+        "task_id": "aligned-offset-valid/2"
+      },
+      "prompt": "Inputs are arbitrary integers. Return bool indicating that a is in 0..65535, b is one of 1,2,4,8,16,32,64, and a is aligned to b. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "0b05fe6a01ea42c9daf3f4addf61a15f3b580cda71b7e84fcadfe07d78ad23e7",
+      "reference_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "c3eca33ba128cb56ebb3f296017cc633eaacac3200053880e69301d018612fdc"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4"
+          },
+          {
+            "action": "test",
+            "passed": true,
+            "receipt_sha256": "d238ded8f4acb706db3e2716e4d91db1ccd8f7b7c0fdc8980e747c532517d79d"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "84f91543157fcbc554757bad3ddf096e25962c99a21901945bc5154b8b9556bd"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4",
+          "cases": 363,
+          "category": "passed",
+          "counterexample": null,
+          "formatting_compliant": true,
+          "generated_text_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4",
+          "passed": true,
+          "presentation": "raw_source",
+          "total_cases": 363
+        },
+        "family": "alignment",
+        "generated_text_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4",
+        "klpo_reward": 1.0,
+        "passed": true,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 1.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "train",
+        "task_id": "aligned-offset-valid/2"
+      },
+      "reference_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4",
+      "split": "train"
+    },
+    {
+      "cases_sha256": "e94f8117d49f9a667ffd8dae04504f5a4e003d6092b04a4f76ccbad7d0b6f4f0",
+      "family": "packed_fields",
+      "id": "signed-field-extract/2",
+      "negative_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "3911abfabd4c6c741f21cfa43cccef7864fec2901470fb9d0d2f407a4cffc626"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "53d6a90b17ba4886e057396f2cce16e8b33f15a79528830c3ff72fda3d3d9763"
+          },
+          {
+            "action": "test",
+            "passed": false,
+            "receipt_sha256": "b5d2b8ac1cb6d3cb825719cda2fd258ca7cf920cfd50fa7efea29e0de15508b6"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "a2d04d9a1167a2b74b639463f919539ffec2e904f2867e4c94541b11551eb781"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "53d6a90b17ba4886e057396f2cce16e8b33f15a79528830c3ff72fda3d3d9763",
+          "cases": 1,
+          "category": "contract_mismatch",
+          "counterexample": {
+            "actual": 0,
+            "expected": -1,
+            "inputs": [
+              -1025,
+              0
+            ]
+          },
+          "formatting_compliant": true,
+          "generated_text_sha256": "53d6a90b17ba4886e057396f2cce16e8b33f15a79528830c3ff72fda3d3d9763",
+          "passed": false,
+          "presentation": "raw_source",
+          "total_cases": 350
+        },
+        "family": "packed_fields",
+        "generated_text_sha256": "53d6a90b17ba4886e057396f2cce16e8b33f15a79528830c3ff72fda3d3d9763",
+        "klpo_reward": 0.05,
+        "passed": false,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 0.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "development_holdout",
+        "task_id": "signed-field-extract/2"
+      },
+      "prompt": "Input a is an arbitrary integer and b is a field width. Return -1 unless 0 <= a <= 65535 and 1 <= b <= 8. Otherwise interpret the low b bits of a as a signed two-complement integer. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "d0129b6d8432fff1eee054d230e6871fa6c490083a33a41fa12257f765d18956",
+      "reference_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "3911abfabd4c6c741f21cfa43cccef7864fec2901470fb9d0d2f407a4cffc626"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676"
+          },
+          {
+            "action": "test",
+            "passed": true,
+            "receipt_sha256": "5fee15db73fbeb42c2dcb8c2240fc9a308ba44d4ae8636fa27e3c0ac31131f91"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "60f3fae29c98aa5cf9a024936c3efaf33bec28c13264485afb71b25787b3bd7d"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676",
+          "cases": 350,
+          "category": "passed",
+          "counterexample": null,
+          "formatting_compliant": true,
+          "generated_text_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676",
+          "passed": true,
+          "presentation": "raw_source",
+          "total_cases": 350
+        },
+        "family": "packed_fields",
+        "generated_text_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676",
+        "klpo_reward": 1.0,
+        "passed": true,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 1.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "development_holdout",
+        "task_id": "signed-field-extract/2"
+      },
+      "reference_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676",
+      "split": "development_holdout"
+    },
+    {
+      "cases_sha256": "4c88f9b2df8f0d27c58ad7e478d8ba7d6b4e184273d9bb39ca83d2f1b974e060",
+      "family": "packed_fields",
+      "id": "field-fits-unsigned/2",
+      "negative_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "3aee8d602d2f25054a2580457562ce42bd82e109ce0714ec57792a27eeb6c0ca"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "6bbb41c26050c7b3353eace8748f32c5c2e0e06699d6a20d59cf76d1c92d271b"
+          },
+          {
+            "action": "test",
+            "passed": false,
+            "receipt_sha256": "33542e7bada0a177f1acd4f0e3636601cf4be701de774432eecb6efdfafbe20c"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "78753888a2cdf3938681694600b44b585ce73735615c05c24697d76b4fbf6c7d"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "6bbb41c26050c7b3353eace8748f32c5c2e0e06699d6a20d59cf76d1c92d271b",
+          "cases": 271,
+          "category": "contract_mismatch",
+          "counterexample": {
+            "actual": true,
+            "expected": false,
+            "inputs": [
+              0,
+              0
+            ]
+          },
+          "formatting_compliant": true,
+          "generated_text_sha256": "6bbb41c26050c7b3353eace8748f32c5c2e0e06699d6a20d59cf76d1c92d271b",
+          "passed": false,
+          "presentation": "raw_source",
+          "total_cases": 630
+        },
+        "family": "packed_fields",
+        "generated_text_sha256": "6bbb41c26050c7b3353eace8748f32c5c2e0e06699d6a20d59cf76d1c92d271b",
+        "klpo_reward": 0.4571428571428571,
+        "passed": false,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 0.42857142857142855,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "development_holdout",
+        "task_id": "field-fits-unsigned/2"
+      },
+      "prompt": "Inputs are arbitrary integers. Return bool indicating that a fits in an unsigned field of width b, where b must be 1..16. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "58b5666dfd62c3dd48bb534daad77260e05b6c7cc6d8f208e2e372a7df851a0c",
+      "reference_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "3aee8d602d2f25054a2580457562ce42bd82e109ce0714ec57792a27eeb6c0ca"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a"
+          },
+          {
+            "action": "test",
+            "passed": true,
+            "receipt_sha256": "216e4a307e4292b39efe850c08bc892cd78e0d3ce46ccbd232bacac20d5d9071"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "6b802ca0a49a25e8add8266affb7162eec4d19361e75649cfe996a523042affe"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a",
+          "cases": 630,
+          "category": "passed",
+          "counterexample": null,
+          "formatting_compliant": true,
+          "generated_text_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a",
+          "passed": true,
+          "presentation": "raw_source",
+          "total_cases": 630
+        },
+        "family": "packed_fields",
+        "generated_text_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a",
+        "klpo_reward": 1.0,
+        "passed": true,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 1.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "development_holdout",
+        "task_id": "field-fits-unsigned/2"
+      },
+      "reference_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a",
+      "split": "development_holdout"
+    },
+    {
+      "cases_sha256": "8e542b5fabd42124c57dcbf35513f3054843e8ab4d09fd8cae0214dea9720ccf",
+      "family": "range_windows",
+      "id": "window-end/2",
+      "negative_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "9118740e8addf19430f0d9a9059cd5d1304b008846ed82faa6b846b991a92b2b"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "de024fce1fa7157e24667a378bbde60732147302fe5301fbc55130e22f18f5c6"
+          },
+          {
+            "action": "test",
+            "passed": false,
+            "receipt_sha256": "4708af154b2670a942ac5ff2022d1f970d555e774f164ccdd2c38917d9bc71d9"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "a2d04d9a1167a2b74b639463f919539ffec2e904f2867e4c94541b11551eb781"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "de024fce1fa7157e24667a378bbde60732147302fe5301fbc55130e22f18f5c6",
+          "cases": 1,
+          "category": "contract_mismatch",
+          "counterexample": {
+            "actual": -1026,
+            "expected": -1,
+            "inputs": [
+              -1025,
+              -1
+            ]
+          },
+          "formatting_compliant": true,
+          "generated_text_sha256": "de024fce1fa7157e24667a378bbde60732147302fe5301fbc55130e22f18f5c6",
+          "passed": false,
+          "presentation": "raw_source",
+          "total_cases": 578
+        },
+        "family": "range_windows",
+        "generated_text_sha256": "de024fce1fa7157e24667a378bbde60732147302fe5301fbc55130e22f18f5c6",
+        "klpo_reward": 0.05,
+        "passed": false,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 0.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "development_holdout",
+        "task_id": "window-end/2"
+      },
+      "prompt": "Inputs are arbitrary integers. a is a start offset and b is a length. Return the inclusive end offset, or -1 unless 0 <= a <= 65535, 1 <= b <= 256, and the end is at most 65535. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "7e273c593c613916fa0d77453c5643c50dbaf170d1e78d98da08a5f9fc1ada9f",
+      "reference_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "9118740e8addf19430f0d9a9059cd5d1304b008846ed82faa6b846b991a92b2b"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20"
+          },
+          {
+            "action": "test",
+            "passed": true,
+            "receipt_sha256": "d62ee378c3f2dd8f324b78ccf901bd204c0e00e7e0a9635955a55e3463b25122"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "20656cbbb052cde19a910c8cf301d8427e364846418a433782c13cb3e20b8d87"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20",
+          "cases": 578,
+          "category": "passed",
+          "counterexample": null,
+          "formatting_compliant": true,
+          "generated_text_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20",
+          "passed": true,
+          "presentation": "raw_source",
+          "total_cases": 578
+        },
+        "family": "range_windows",
+        "generated_text_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20",
+        "klpo_reward": 1.0,
+        "passed": true,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 1.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "development_holdout",
+        "task_id": "window-end/2"
+      },
+      "reference_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20",
+      "split": "development_holdout"
+    },
+    {
+      "cases_sha256": "f6f3e06e4f4c2fb0931ba8b18d81ce07c632f1fdeac836078624dc376fadab12",
+      "family": "range_windows",
+      "id": "windows-overlap/2",
+      "negative_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "372bf892c840046461f2f38a8564e1ef1cd1b2df23bf60702cdc27bca0deb421"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "17380ecd706b4f2528f939b32d86e8f3753c0cd5464f1ccab92ca6e065223928"
+          },
+          {
+            "action": "test",
+            "passed": false,
+            "receipt_sha256": "aded189b1c8e8eb06e787dba5d0f202fd57ad46c44098a39c876f050714ee1fb"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "a2d04d9a1167a2b74b639463f919539ffec2e904f2867e4c94541b11551eb781"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "17380ecd706b4f2528f939b32d86e8f3753c0cd5464f1ccab92ca6e065223928",
+          "cases": 1,
+          "category": "contract_mismatch",
+          "counterexample": {
+            "actual": true,
+            "expected": false,
+            "inputs": [
+              0,
+              0
+            ]
+          },
+          "formatting_compliant": true,
+          "generated_text_sha256": "17380ecd706b4f2528f939b32d86e8f3753c0cd5464f1ccab92ca6e065223928",
+          "passed": false,
+          "presentation": "raw_source",
+          "total_cases": 121
+        },
+        "family": "range_windows",
+        "generated_text_sha256": "17380ecd706b4f2528f939b32d86e8f3753c0cd5464f1ccab92ca6e065223928",
+        "klpo_reward": 0.05,
+        "passed": false,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 0.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "development_holdout",
+        "task_id": "windows-overlap/2"
+      },
+      "prompt": "Inputs a and b are packed windows: high byte is start and low byte is positive length. Return bool indicating whether the two half-open windows overlap. Return False if either low byte is zero. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "84090311197c900ff8ee3f12ef36b85068cb5526bca8de3dfd6aa21ea89d341c",
+      "reference_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "372bf892c840046461f2f38a8564e1ef1cd1b2df23bf60702cdc27bca0deb421"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7"
+          },
+          {
+            "action": "test",
+            "passed": true,
+            "receipt_sha256": "040ac06cc2effdc7db4806e2a7948b6a8078e17c61fb71aaad93203d8d068139"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "fedf96a84a22adc65c5be59c0664223f1f4add9450edc87a52f14cf68645462b"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7",
+          "cases": 121,
+          "category": "passed",
+          "counterexample": null,
+          "formatting_compliant": true,
+          "generated_text_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7",
+          "passed": true,
+          "presentation": "raw_source",
+          "total_cases": 121
+        },
+        "family": "range_windows",
+        "generated_text_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7",
+        "klpo_reward": 1.0,
+        "passed": true,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 1.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "development_holdout",
+        "task_id": "windows-overlap/2"
+      },
+      "reference_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7",
+      "split": "development_holdout"
+    },
+    {
+      "cases_sha256": "2219fc2317ac1e0c151c7b998db6835667e9bdc7d74ce43b8b99f129f2a21184",
+      "family": "signed_arithmetic",
+      "id": "saturating-sub/3",
+      "negative_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "5a47bb3be41dcc725aa44a50f2b333c5c722c5fcfbdea18d0cc179ea2cd54c34"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "1781289c1cb8e31e577ce351c80745ca1707f8bda9bf1252bf6e5bc6c26f6bd9"
+          },
+          {
+            "action": "test",
+            "passed": false,
+            "receipt_sha256": "48713f560d6b7288d7f81e2c6a631aa3c5857d2b02d4fc5459b39415031dc1f4"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "a2d04d9a1167a2b74b639463f919539ffec2e904f2867e4c94541b11551eb781"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "1781289c1cb8e31e577ce351c80745ca1707f8bda9bf1252bf6e5bc6c26f6bd9",
+          "cases": 1,
+          "category": "contract_mismatch",
+          "counterexample": {
+            "actual": 0,
+            "expected": -1,
+            "inputs": [
+              -1025,
+              -1025
+            ]
+          },
+          "formatting_compliant": true,
+          "generated_text_sha256": "1781289c1cb8e31e577ce351c80745ca1707f8bda9bf1252bf6e5bc6c26f6bd9",
+          "passed": false,
+          "presentation": "raw_source",
+          "total_cases": 324
+        },
+        "family": "signed_arithmetic",
+        "generated_text_sha256": "1781289c1cb8e31e577ce351c80745ca1707f8bda9bf1252bf6e5bc6c26f6bd9",
+        "klpo_reward": 0.05,
+        "passed": false,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 0.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "independent_eval",
+        "task_id": "saturating-sub/3"
+      },
+      "prompt": "Inputs are arbitrary integers. If either is outside -128..127 return -1; otherwise return a-b clamped to -128..127. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "7c23efdce7bf3097310677815828d356c55fc4b580702562113565dc99715456",
+      "reference_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "5a47bb3be41dcc725aa44a50f2b333c5c722c5fcfbdea18d0cc179ea2cd54c34"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "c6b9fa9a9839337d982efe0cb5b48e9d6c485cfd01ab8d0015313b75d7dad862"
+          },
+          {
+            "action": "test",
+            "passed": true,
+            "receipt_sha256": "9f790a4360b370a61c39dd532a8d4ee51f1b0e9c54144282f8b922466582a9ad"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "253617a752cf375071ecec791f0c1f686df1d7735c1de82df4bdbae302dd75e5"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "c6b9fa9a9839337d982efe0cb5b48e9d6c485cfd01ab8d0015313b75d7dad862",
+          "cases": 324,
+          "category": "passed",
+          "counterexample": null,
+          "formatting_compliant": true,
+          "generated_text_sha256": "c6b9fa9a9839337d982efe0cb5b48e9d6c485cfd01ab8d0015313b75d7dad862",
+          "passed": true,
+          "presentation": "raw_source",
+          "total_cases": 324
+        },
+        "family": "signed_arithmetic",
+        "generated_text_sha256": "c6b9fa9a9839337d982efe0cb5b48e9d6c485cfd01ab8d0015313b75d7dad862",
+        "klpo_reward": 1.0,
+        "passed": true,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 1.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "independent_eval",
+        "task_id": "saturating-sub/3"
+      },
+      "reference_sha256": "c6b9fa9a9839337d982efe0cb5b48e9d6c485cfd01ab8d0015313b75d7dad862",
+      "split": "independent_eval"
+    },
+    {
+      "cases_sha256": "a1578888377f695e0f9a8a2f4825d9679305674ee278dee9259c7c793fd911a4",
+      "family": "bit_properties",
+      "id": "power-two-in-range/3",
+      "negative_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "0912be012de01d6fb4c2e709b6d631140964c74ebd0c49a3011665327423ad2f"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "3843cb12e74b314069032f6ce0106b5fbf6cc851b6624f3759f62b974411d21b"
+          },
+          {
+            "action": "test",
+            "passed": false,
+            "receipt_sha256": "36ab89308d2fa3eea0579ae82335ac5ec7a15797498857b733221e319c9b70ff"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "b939d0b6b73ff8fef5be29cf31dcbe9a19ba780f4b3715f7b0eab6c986c5d9bb"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "3843cb12e74b314069032f6ce0106b5fbf6cc851b6624f3759f62b974411d21b",
+          "cases": 105,
+          "category": "contract_mismatch",
+          "counterexample": {
+            "actual": true,
+            "expected": false,
+            "inputs": [
+              0,
+              -1
+            ]
+          },
+          "formatting_compliant": true,
+          "generated_text_sha256": "3843cb12e74b314069032f6ce0106b5fbf6cc851b6624f3759f62b974411d21b",
+          "passed": false,
+          "presentation": "raw_source",
+          "total_cases": 247
+        },
+        "family": "bit_properties",
+        "generated_text_sha256": "3843cb12e74b314069032f6ce0106b5fbf6cc851b6624f3759f62b974411d21b",
+        "klpo_reward": 0.44999999999999996,
+        "passed": false,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 0.42105263157894735,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "independent_eval",
+        "task_id": "power-two-in-range/3"
+      },
+      "prompt": "Return bool indicating that a is a power of two from 1 through 1024 inclusive and b equals the base-2 exponent; inputs are arbitrary integers. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "fbe7b47a8bcaccf2122b88b1cd295fde04023e88efb8db968d8128f8daad205b",
+      "reference_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "0912be012de01d6fb4c2e709b6d631140964c74ebd0c49a3011665327423ad2f"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "165908d5a373040eda4f9b94fa01f62e2cadcf3668771368893e389482904d37"
+          },
+          {
+            "action": "test",
+            "passed": true,
+            "receipt_sha256": "16fe2b4f3b66a32a2e558b9778b32ec5001e05815fa91398c3029382eaa86448"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "185911ffd844354107b74272c374a1ff4f329ba9363df088ac4fb9cb9b62ca5d"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "165908d5a373040eda4f9b94fa01f62e2cadcf3668771368893e389482904d37",
+          "cases": 247,
+          "category": "passed",
+          "counterexample": null,
+          "formatting_compliant": true,
+          "generated_text_sha256": "165908d5a373040eda4f9b94fa01f62e2cadcf3668771368893e389482904d37",
+          "passed": true,
+          "presentation": "raw_source",
+          "total_cases": 247
+        },
+        "family": "bit_properties",
+        "generated_text_sha256": "165908d5a373040eda4f9b94fa01f62e2cadcf3668771368893e389482904d37",
+        "klpo_reward": 1.0,
+        "passed": true,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 1.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "independent_eval",
+        "task_id": "power-two-in-range/3"
+      },
+      "reference_sha256": "165908d5a373040eda4f9b94fa01f62e2cadcf3668771368893e389482904d37",
+      "split": "independent_eval"
+    },
+    {
+      "cases_sha256": "04f3be459504a8b2c5187d644ee33a39f4fb226bb0a08c95fba519bb987db6ff",
+      "family": "packed_offsets",
+      "id": "unsigned-field-at-offset/3",
+      "negative_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "d468bf7408d2a8994fa65fe2cfb1d9336d1dfa81d2f6fce73dd9b745c589733f"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "6dfcead128c68a0aea0fe1cb7f5da46f5d93d7c7f0184c6c0209b8ffdfdd3d5c"
+          },
+          {
+            "action": "test",
+            "passed": false,
+            "receipt_sha256": "2bc8910b1e80111d8867d51ef2dd9b6643eb8b290814985779363ec2b6ab3dd1"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "a2d04d9a1167a2b74b639463f919539ffec2e904f2867e4c94541b11551eb781"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "6dfcead128c68a0aea0fe1cb7f5da46f5d93d7c7f0184c6c0209b8ffdfdd3d5c",
+          "cases": 1,
+          "category": "contract_mismatch",
+          "counterexample": {
+            "actual": -1025,
+            "expected": -1,
+            "inputs": [
+              -1025,
+              0
+            ]
+          },
+          "formatting_compliant": true,
+          "generated_text_sha256": "6dfcead128c68a0aea0fe1cb7f5da46f5d93d7c7f0184c6c0209b8ffdfdd3d5c",
+          "passed": false,
+          "presentation": "raw_source",
+          "total_cases": 264
+        },
+        "family": "packed_offsets",
+        "generated_text_sha256": "6dfcead128c68a0aea0fe1cb7f5da46f5d93d7c7f0184c6c0209b8ffdfdd3d5c",
+        "klpo_reward": 0.05,
+        "passed": false,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 0.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "independent_eval",
+        "task_id": "unsigned-field-at-offset/3"
+      },
+      "prompt": "a is arbitrary and b packs width in the low byte and bit offset in the next byte. Return -1 unless 0<=a<=65535, width is 1..8, offset is 0..15, and width+offset<=16; otherwise return that unsigned field. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "5aaf48e53deb2e76389af7c4f21950fc7b4f69a82877c65931aa5582ff139854",
+      "reference_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "d468bf7408d2a8994fa65fe2cfb1d9336d1dfa81d2f6fce73dd9b745c589733f"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "c81a19c1bfeb8d9c5c3eb2854fc629a7cde6b9484803bcddd3b36820ec24d470"
+          },
+          {
+            "action": "test",
+            "passed": true,
+            "receipt_sha256": "89e0cfe83bef1841cb9fd0e5995df7b2fce8251f1a29eddfde4490e261258755"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "b6dfba4d1090dbc008792b3ad4734b41c897bb2c9eb6451ad41813f8a5ec008d"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "c81a19c1bfeb8d9c5c3eb2854fc629a7cde6b9484803bcddd3b36820ec24d470",
+          "cases": 264,
+          "category": "passed",
+          "counterexample": null,
+          "formatting_compliant": true,
+          "generated_text_sha256": "c81a19c1bfeb8d9c5c3eb2854fc629a7cde6b9484803bcddd3b36820ec24d470",
+          "passed": true,
+          "presentation": "raw_source",
+          "total_cases": 264
+        },
+        "family": "packed_offsets",
+        "generated_text_sha256": "c81a19c1bfeb8d9c5c3eb2854fc629a7cde6b9484803bcddd3b36820ec24d470",
+        "klpo_reward": 1.0,
+        "passed": true,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 1.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "independent_eval",
+        "task_id": "unsigned-field-at-offset/3"
+      },
+      "reference_sha256": "c81a19c1bfeb8d9c5c3eb2854fc629a7cde6b9484803bcddd3b36820ec24d470",
+      "split": "independent_eval"
+    },
+    {
+      "cases_sha256": "af2364895d6c2536aad155b2ad2c2d5032d06f66c65c353a959973a74d53d746",
+      "family": "interval_adjacency",
+      "id": "intervals-adjacent/3",
+      "negative_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "487784b121eaf6738e1f5f9d881e643a031660bb6c0104f94fee7cc0943baba6"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "8694171b6af4da4d77ff8bfa81c16c9df7e5796bcacce70e00b3b0212edc1366"
+          },
+          {
+            "action": "test",
+            "passed": false,
+            "receipt_sha256": "6464921eb3874ebdfff3e52cadcf16ec12a56dc0042124a95154d17a1b1a6d74"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "a2d04d9a1167a2b74b639463f919539ffec2e904f2867e4c94541b11551eb781"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "8694171b6af4da4d77ff8bfa81c16c9df7e5796bcacce70e00b3b0212edc1366",
+          "cases": 1,
+          "category": "contract_mismatch",
+          "counterexample": {
+            "actual": true,
+            "expected": false,
+            "inputs": [
+              0,
+              0
+            ]
+          },
+          "formatting_compliant": true,
+          "generated_text_sha256": "8694171b6af4da4d77ff8bfa81c16c9df7e5796bcacce70e00b3b0212edc1366",
+          "passed": false,
+          "presentation": "raw_source",
+          "total_cases": 169
+        },
+        "family": "interval_adjacency",
+        "generated_text_sha256": "8694171b6af4da4d77ff8bfa81c16c9df7e5796bcacce70e00b3b0212edc1366",
+        "klpo_reward": 0.05,
+        "passed": false,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 0.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "independent_eval",
+        "task_id": "intervals-adjacent/3"
+      },
+      "prompt": "a and b pack half-open byte intervals: high byte is start and low byte is length. Return bool when both lengths are positive and the intervals touch at exactly one boundary without overlapping. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "b300f9652f66bfa1d48eb9d3b5b8505aa02839c045eef86de6381881209be945",
+      "reference_reward": {
+        "episode_steps": [
+          {
+            "action": "observe",
+            "receipt_sha256": "487784b121eaf6738e1f5f9d881e643a031660bb6c0104f94fee7cc0943baba6"
+          },
+          {
+            "action": "patch",
+            "receipt_sha256": "00a1f4c50db0f5fd5f88a6c75142f07286e22f213e22e7ed159bc5b9eb33a6b4"
+          },
+          {
+            "action": "test",
+            "passed": true,
+            "receipt_sha256": "831224a4d10b5b98ac2dacf3d8305412c46ceb01ce7a145616bc9f78dbb84be2"
+          },
+          {
+            "action": "report",
+            "receipt_sha256": "977e1e6d56763d526e057d327f081d5dcddb0d0d78426b3a14eaa1ccf2a9c340"
+          }
+        ],
+        "evidence": {
+          "artifact_sha256": "00a1f4c50db0f5fd5f88a6c75142f07286e22f213e22e7ed159bc5b9eb33a6b4",
+          "cases": 169,
+          "category": "passed",
+          "counterexample": null,
+          "formatting_compliant": true,
+          "generated_text_sha256": "00a1f4c50db0f5fd5f88a6c75142f07286e22f213e22e7ed159bc5b9eb33a6b4",
+          "passed": true,
+          "presentation": "raw_source",
+          "total_cases": 169
+        },
+        "family": "interval_adjacency",
+        "generated_text_sha256": "00a1f4c50db0f5fd5f88a6c75142f07286e22f213e22e7ed159bc5b9eb33a6b4",
+        "klpo_reward": 1.0,
+        "passed": true,
+        "policy": "verified_code_effect_v1",
+        "presentation": "raw_source",
+        "reward": {
+          "budget": 1.0,
+          "disposition": 1.0,
+          "effect": 1.0,
+          "provenance": 1.0,
+          "validity": 1.0
+        },
+        "schema": "lilith/adam-kaine-code-reward@1",
+        "split": "independent_eval",
+        "task_id": "intervals-adjacent/3"
+      },
+      "reference_sha256": "00a1f4c50db0f5fd5f88a6c75142f07286e22f213e22e7ed159bc5b9eb33a6b4",
+      "split": "independent_eval"
+    }
+  ],
+  "training_ids": [
+    "signed-clamp/2",
+    "bounded-add/2",
+    "align-up-power2/2",
+    "aligned-offset-valid/2"
+  ]
+}

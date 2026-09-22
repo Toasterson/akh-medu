@@ -1,0 +1,1 @@
+{"cache":"explicit hybrid layers, detached KV","cache_offloading":true,"cache_transfer":"synchronous_caller_stream","context_tokens":32768,"max_new_tokens":16384,"prefill_chunk_tokens":1,"rank":2,"schema":"lilith/akhrtd-training-engine@1","target_module":"model.language_model.layers.47.self_attn.q_proj","thinking":true,"update":"one optimizer step after full eligible bank"}

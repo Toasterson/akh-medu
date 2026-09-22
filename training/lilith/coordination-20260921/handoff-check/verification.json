@@ -1,0 +1,9 @@
+{
+  "passed": true,
+  "cases": 2051,
+  "source_sha256": "bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6",
+  "scope": "integer clamp fixture only; not general code execution or illumos validation",
+  "receipt": "e298475ef67a4fad808c4c7a2f9aea13-verification",
+  "kind": "host_fixture_verification",
+  "verifier": "integer-clamp/1"
+}

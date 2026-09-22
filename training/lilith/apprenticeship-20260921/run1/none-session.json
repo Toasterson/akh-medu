@@ -1,0 +1,60 @@
+{
+  "closed_at": null,
+  "core_service": null,
+  "schema_version": 1,
+  "id": "01a0c507-ebca-7cc1-87ca-870cf221f5ed",
+  "principal": "operator",
+  "akh": "lilith-learner",
+  "conversation_key": null,
+  "workspace_profile": "local-dev",
+  "workspace": {
+    "id": "akh-13114de8a6ad374d9caa40c941af58b7",
+    "sandbox_id": "akh-13114de8a6ad374d9caa40c941af58b7",
+    "executor": "akhexecd",
+    "generation": 1,
+    "site": "hephaistos",
+    "root": "/home/toasty/.local/share/akh-medu/lilith-dev-vulkan-20260921/workspaces/akh-13114de8a6ad374d9caa40c941af58b7",
+    "platform": "linux",
+    "confinement": "unconfined"
+  },
+  "runtime": {
+    "runtime": "akhrtd",
+    "profile": "lilith",
+    "revision": "lilith-local-v1",
+    "kind": "internal",
+    "model": "lilith-gemma4-12b",
+    "execution_mode": "brokered"
+  },
+  "instructions": "You are Lilith. Solve the assigned coding exercise using the supplied evidence. Return only the requested Python function. No tools are available.",
+  "tools": [],
+  "approval_policy": "allow_granted",
+  "generation": 1,
+  "next_sequence": 9,
+  "turns": [
+    {
+      "id": "01a0c507-ebcc-77f3-b5ee-961876e7d72e",
+      "request_id": "3cda5489f8a047068dbb2beba2af7cc3-probe",
+      "input": {
+        "origin": {
+          "kind": "human",
+          "principal": "operator"
+        },
+        "text": "Write only a Python function can_reserve(used: int, requested: int, capacity: int) -> bool. Inputs are integers. Return False if any input is outside 0..65535 or used exceeds capacity. Otherwise return whether requested units fit in the remaining capacity. A request of zero at full capacity is valid. Use comparisons, boolean operators, subtraction, integer/bool literals, local assignments, if and return; no calls, imports, loops or attributes. Do not claim native OS validation.",
+        "data": null,
+        "artifacts": []
+      },
+      "status": "completed",
+      "generation": 1,
+      "runtime_job_id": "01a0c507-ebcc-77f3-b5ee-961876e7d72e",
+      "cancel_requested": false,
+      "output": "```python\ndef can_reserve(used: int, requested: int, capacity: int) -> bool:\n    if used < 0 or used > 65535 or requested < 0 or requested > 65535 or capacity < 0 or capacity > 65535:\n        return False\n    if used > capacity:\n        return False\n    remaining = capacity - used\n    if requested <= remaining:\n        return True\n    return False\n```",
+      "error": null,
+      "created_at": 1790012025804
+    }
+  ],
+  "provider_session": "internal-01a0c507-ef3a-7a91-a5cf-383234c463f9",
+  "controller": null,
+  "created_at": 1790012025802,
+  "last_progress_at": 1790012085669,
+  "dispatch_failures": 0
+}

@@ -1,0 +1,10 @@
+{
+  "status": "completed",
+  "root": "/home/toasty/.local/share/akh-medu/lilith-evaluation-ab00aaa8ea134e0eb44d3e80ddc7a571",
+  "services_stopped": true,
+  "weights_updated": false,
+  "qwen_certified": false,
+  "native_illumos": false,
+  "observations": 24,
+  "quality": "See report; run completion is not model correctness or parity."
+}

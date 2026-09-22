@@ -1,0 +1,13 @@
+#cloud-config
+users:
+  - name: sol
+    gecos: Lilith native validation
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILbOnfICY6yxovk3KRrxpOuB/3QbmeiKdjRWhryhyB8B lilith-illumos-20260922
+ssh_pwauth: false
+disable_root: true
+chpasswd:
+  expire: false

@@ -1,0 +1,140 @@
+{
+  "closed_at": null,
+  "core_service": null,
+  "schema_version": 1,
+  "id": "01a0c489-9ebe-7f10-9484-6a412210fae1",
+  "principal": "operator",
+  "akh": "lilith",
+  "conversation_key": null,
+  "workspace_profile": "local-dev",
+  "workspace": {
+    "id": "akh-4073122dbd3b087a70b582bc67811c10",
+    "sandbox_id": "akh-4073122dbd3b087a70b582bc67811c10",
+    "executor": "akhexecd",
+    "generation": 1,
+    "site": "hephaistos",
+    "root": "/home/toasty/.local/share/akh-medu/lilith-dev-vulkan-20260921/workspaces/akh-4073122dbd3b087a70b582bc67811c10",
+    "platform": "linux",
+    "confinement": "unconfined"
+  },
+  "runtime": {
+    "runtime": "akhrtd",
+    "profile": "lilith",
+    "revision": "lilith-local-v1",
+    "kind": "internal",
+    "model": "lilith-gemma4-12b",
+    "execution_mode": "brokered"
+  },
+  "instructions": "You are Lilith, the human interface and coordinator of Akhs. Complete assigned work within its scope, inspect evidence, verify results, and report uncertainty. This is a local development workspace; illumos validation is not available yet.",
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read a UTF-8 file in the assigned workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "read_only": true,
+      "destination": {
+        "kind": "workspace",
+        "operation": "read"
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Write a UTF-8 file in the assigned workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "create": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content",
+          "create"
+        ],
+        "type": "object"
+      },
+      "read_only": false,
+      "destination": {
+        "kind": "workspace",
+        "operation": "write"
+      }
+    },
+    {
+      "name": "request_review",
+      "description": "Queue Ptah review of the assigned clamp_u8.py artifact after independent verification. Finish your turn after acknowledgement; the review returns later.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "objective": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "path": {
+            "enum": [
+              "clamp_u8.py"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "objective"
+        ],
+        "type": "object"
+      },
+      "read_only": false,
+      "destination": {
+        "kind": "client"
+      }
+    }
+  ],
+  "approval_policy": "allow_granted",
+  "generation": 1,
+  "next_sequence": 16,
+  "turns": [
+    {
+      "id": "01a0c489-9ec0-76f2-b2c9-317584cd1169",
+      "request_id": "86d9723212dc41faa32e6ee6f5be2553-lilith-write",
+      "input": {
+        "origin": {
+          "kind": "human",
+          "principal": "operator"
+        },
+        "text": "Remember the word cedar. Use write_file to create clamp_u8.py with create=true. Write a Python function clamp_u8(value: int) -> int that returns 0 for integers below 0, 255 for integers above 255, otherwise value. Use only if comparisons and returns, no imports, calls, decorators or loops. Write actual Python, not markdown. Then use request_review with path=clamp_u8.py and objective=Review the integer clamp contract. After it acknowledges the queued review, finish your turn briefly.",
+        "data": null,
+        "artifacts": []
+      },
+      "status": "completed",
+      "generation": 1,
+      "runtime_job_id": "01a0c489-9ec0-76f2-b2c9-317584cd1169",
+      "cancel_requested": false,
+      "output": "Review queued.",
+      "error": null,
+      "created_at": 1790003748544
+    }
+  ],
+  "provider_session": "internal-01a0c489-a217-7901-a0e5-5d7059d3fdf5",
+  "controller": null,
+  "created_at": 1790003748542,
+  "last_progress_at": 1790003917392,
+  "dispatch_failures": 0
+}

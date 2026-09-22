@@ -1,0 +1,20 @@
+{
+  "category": "reviewer_factual_overgeneralization",
+  "contract_failure": false,
+  "observation": "Ptah says floats raise TypeError in one bullet, then correctly says 1.5 returns unchanged. Float comparisons do not generally raise TypeError here. This is outside the integer-only contract, but the review claim is inaccurate.",
+  "observed_behavior": [
+    {
+      "input": 1.5,
+      "actual": 1.5
+    },
+    {
+      "input": -0.5,
+      "actual": 0
+    },
+    {
+      "input": 300.5,
+      "actual": 255
+    }
+  ],
+  "implication": "Do not use a model review as the sole correctness oracle; preserve this finding for review-quality evaluation, without changing the fixture pass criterion."
+}

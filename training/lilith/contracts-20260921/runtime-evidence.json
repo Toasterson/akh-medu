@@ -1,0 +1,30 @@
+{
+  "profiles": {
+    "lilith": {
+      "model": "lilith-gemma4-12b",
+      "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+      "device": {
+        "kind": "vulkan",
+        "ordinal": 0
+      },
+      "max_context_tokens": 2048,
+      "max_output_tokens": 512
+    },
+    "ptah": {
+      "model": "ptah-qwen38",
+      "model_sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+      "device": {
+        "kind": "hip",
+        "ordinal": 0
+      },
+      "max_context_tokens": 2048,
+      "max_output_tokens": 512
+    }
+  },
+  "turn_seconds": [
+    133.565561356,
+    115.103714347,
+    267.002114674
+  ],
+  "akhrtd_sha256": "09a224fa4b07e7f2d5fe907e82c143c60d891be7a99b98a20b2c9c2104240fd1"
+}

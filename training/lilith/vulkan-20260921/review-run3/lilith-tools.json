@@ -1,0 +1,32 @@
+[
+  {
+    "call": {
+      "id": "internal-0-0",
+      "session_id": "01a0c45b-2b19-7882-8e3f-c752aae00da3",
+      "turn_id": "01a0c45b-2b1b-7433-acd4-8bd9723d4b80",
+      "generation": 1,
+      "name": "write_file",
+      "arguments": {
+        "content": "def clamp_u8(value: int) -> int:\n    if value < 0:\n        return 0\n    if value > 255:\n        return 255\n    return value",
+        "create": true,
+        "path": "clamp_u8.py"
+      }
+    },
+    "operation_id": "6cc35bf8afae9763b05c9aa1b58f7ed04fb82de68972222dcdd751401d32f517",
+    "destination": {
+      "kind": "workspace",
+      "operation": "write"
+    },
+    "sent": true,
+    "result": {
+      "success": true,
+      "text": "{\"bytes\":123,\"revision\":\"bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6\"}",
+      "data": {
+        "bytes": 123,
+        "revision": "bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6"
+      },
+      "receipt": "6cc35bf8afae9763b05c9aa1b58f7ed04fb82de68972222dcdd751401d32f517"
+    },
+    "unknown": false
+  }
+]

@@ -1,0 +1,61 @@
+[
+  {
+    "call": {
+      "id": "internal-0-0",
+      "session_id": "01a0c489-9ebe-7f10-9484-6a412210fae1",
+      "turn_id": "01a0c489-9ec0-76f2-b2c9-317584cd1169",
+      "generation": 1,
+      "name": "write_file",
+      "arguments": {
+        "content": "def clamp_u8(value: int) -> int:\n    if value < 0:\n        return 0\n    if value > 255:\n        return 255\n    return value",
+        "create": true,
+        "path": "clamp_u8.py"
+      }
+    },
+    "operation_id": "630c8b372cb592536dd70dd2814f98448d19b03942b2e91a026c93a53941cccb",
+    "destination": {
+      "kind": "workspace",
+      "operation": "write"
+    },
+    "sent": true,
+    "result": {
+      "success": true,
+      "text": "{\"bytes\":123,\"revision\":\"bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6\"}",
+      "data": {
+        "bytes": 123,
+        "revision": "bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6"
+      },
+      "receipt": "630c8b372cb592536dd70dd2814f98448d19b03942b2e91a026c93a53941cccb"
+    },
+    "unknown": false
+  },
+  {
+    "call": {
+      "id": "internal-1-0",
+      "session_id": "01a0c489-9ebe-7f10-9484-6a412210fae1",
+      "turn_id": "01a0c489-9ec0-76f2-b2c9-317584cd1169",
+      "generation": 1,
+      "name": "request_review",
+      "arguments": {
+        "objective": "Review the integer clamp contract.",
+        "path": "clamp_u8.py"
+      }
+    },
+    "operation_id": "d8c48eea5a375f2cf87c99c3c6c845856c8b725633d7bcf79703ba4b0af5ad87",
+    "destination": {
+      "kind": "client"
+    },
+    "sent": true,
+    "result": {
+      "success": true,
+      "text": "Review queued. Finish this turn; the result will arrive later.",
+      "data": {
+        "assignment_id": "387ec4c2cec1429654b4d3eee99c6af8a941d3fe4a52ffb3a581fbbe567a2b23",
+        "source_sha256": "bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6",
+        "status": "queued"
+      },
+      "receipt": "387ec4c2cec1429654b4d3eee99c6af8a941d3fe4a52ffb3a581fbbe567a2b23"
+    },
+    "unknown": false
+  }
+]

@@ -1,0 +1,14 @@
+{
+  "schema": "lilith/failed-attempt@1",
+  "pid": 56106,
+  "status": "failed",
+  "exit_code": 1,
+  "phase": "before_parent_load",
+  "error": "NameError: name 'torch' is not defined",
+  "parent_load_completed": false,
+  "generation_started": false,
+  "trajectories_collected": 0,
+  "optimizer_steps": 0,
+  "replacement": "../retention-run2",
+  "original_manifest_retained": "../../../retention-manifest.json"
+}

@@ -1,0 +1,34 @@
+{
+  "command": [
+    "python3",
+    "candidate.py"
+  ],
+  "copy_in": {
+    "content_bytes": 11250,
+    "content_sha256": "d52e5dc6293a71d7facbcd3c35f18e8deab1ec97c577d804105c5de5ddfafa01",
+    "snapshot_bytes": 10240,
+    "snapshot_entries": 3,
+    "snapshot_sha256": "f8248fbf8d13fdcd8ad661143312a4ce83af2ca658cd611fd51bddb172f1fb2f"
+  },
+  "duration_ms": 1847,
+  "exit_code": 1,
+  "guest": {
+    "host": "127.0.0.1",
+    "port": 10115,
+    "user": "akh-exec"
+  },
+  "passed": false,
+  "remote_cleanup_succeeded": true,
+  "run_id": "5797b965fcee4ef7b2867883b4dfc2c5",
+  "schema": "lilith/native-execution@1",
+  "stderr": "Traceback (most recent call last):\n  File \"/var/tmp/lilith-native/5797b965fcee4ef7b2867883b4dfc2c5/candidate.py\", line 13, in <module>\n    raise AssertionError((_a, _b, _expected, _actual))\nAssertionError: (0, 0, False, True)\n",
+  "stderr_sha256": "202fd219acca818933f5ceeacfb87d893ce6bede378263e7e859af0e649e6e06",
+  "stderr_truncated": false,
+  "stdout": "",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stdout_truncated": false,
+  "supervisor_status": "exit",
+  "target": "candidate.py",
+  "timed_out": false,
+  "timeout_s": 30
+}

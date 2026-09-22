@@ -1,0 +1,84 @@
+{
+  "schema": "lilith/adapter-readiness@v1",
+  "status": "blocked",
+  "ready_to_train": false,
+  "ready_to_deploy": false,
+  "weights_updated": false,
+  "interpreter": "/usr/bin/python3",
+  "platform": "Linux-6.8.0-47-generic-x86_64-with-glibc2.35",
+  "packages_discoverable_without_import": {
+    "torch": false,
+    "transformers": false,
+    "peft": false,
+    "safetensors": false,
+    "datasets": false
+  },
+  "llama_finetune_on_path": null,
+  "model": {
+    "path": "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+    "exists": true,
+    "gguf_magic": true,
+    "bytes": 7121860000,
+    "sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6"
+  },
+  "corpus": {
+    "sha256": "6de63f1da4172e74af9070a21d63c644bec65df7127feaa22b4f681e955445fd",
+    "examples": 1,
+    "errors": [
+      "corpus_not_admitted_for_training"
+    ],
+    "manifest": {
+      "split": "development_candidate",
+      "examples": 1,
+      "excluded_families": [
+        "bounded_range"
+      ],
+      "excluded_reason": "current development transfer family",
+      "weights_updated": false,
+      "eligible_for_training": false,
+      "reason": "tiny seed corpus; Gemma 4 adapter path and broader independent evaluation not certified",
+      "corpus_sha256": "6de63f1da4172e74af9070a21d63c644bec65df7127feaa22b4f681e955445fd"
+    },
+    "scope": "integrity only; no quality or leakage certification"
+  },
+  "source_sha256": {
+    "scripts/train_lora.py": "52914a09cb84ee4d13565f9c4d97ff244d8134c74cd98d3f5f84b42aaf3633aa",
+    "src/training/lora.rs": "07d8c4828a86c6051fbd7df2dd61eca04c64d80ac0a2af84947aaf142ec2440f",
+    "src/nlu/candle_backend.rs": "cc886064a4f584a2186215101e7817f65727b0730bea84443ed8aae5cf904994",
+    "src/nlu/vendored/quantized_gemma4.rs": "e09816a7b087b71eefaeff5b8db496d858b564dae1a122bfac478847e7c43ab9"
+  },
+  "blockers": [
+    {
+      "id": "training_dependencies_missing",
+      "detail": "Missing in this interpreter: torch, transformers, peft, safetensors, datasets"
+    },
+    {
+      "id": "training_parent_not_certified",
+      "detail": "Exact pinned parent is now downloaded and hashverified (parent-download.json); quantizer source revision/recipe and deployed export round trip remain uncertified."
+    },
+    {
+      "id": "corpus_not_admitted_for_training",
+      "detail": "See corpus audit."
+    },
+    {
+      "id": "legacy_llamacpp_backend_disabled",
+      "detail": "Unsafe binary relabeling is disabled; no validated converter exists."
+    },
+    {
+      "id": "broader_training_not_certified",
+      "detail": "Historical inventory preceded setup. Bounded exact-parent last-layer optimizer/save-reload now passes (mechanics-run1/result.json); broader curriculum training, cold-process reload and deployed export remain uncertified."
+    },
+    {
+      "id": "deployment_adapter_not_certified",
+      "detail": "No demonstrated adapter application in the deployed quantized Gemma path or merged/requantized artifact parity; raw registry byte loading is insufficient."
+    },
+    {
+      "id": "quality_gates_not_certified",
+      "detail": "Require diagnosed failure targets, retention replay, independent family holdouts and exact deployed-artifact evaluation before promotion."
+    }
+  ],
+  "next_action": "Establish an exact trainable parent and a pinned isolated AMD training environment, then prove a tiny non-production forward/backward/save/reload/export round trip before using admitted lessons.",
+  "lineage_followup": "lineage.json",
+  "inventory_collected_before_isolated_setup": true,
+  "current_followup": "current-readiness.json"
+}

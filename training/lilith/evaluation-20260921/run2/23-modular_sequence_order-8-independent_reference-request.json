@@ -1,0 +1,5 @@
+{
+  "text": "Return only one Python function, with no Markdown fences or explanatory prose. Use integer/bool literals, local assignment, if/else, return, comparisons, and/or/not, conditional expressions, +, -, *, //, %, and bitwise & only. No calls (including min/max), imports, loops, shifts, exponentiation, decorators, helper functions, containers or strings. Keep the source under 4096 bytes. These are local Python reference tasks, not native OS validation.\n\nInputs are integers. Reject any input outside 0..255 by returning -1. Write ring_distance(start: int, end: int, modulus: int) -> int. Also reject modulus zero or either position at least modulus. Return the forward distance from start to end wrapping at modulus; equal positions have distance zero.",
+  "session_id": "01a0c52a-96ad-7830-aa16-1c1ad277eae8",
+  "turn_id": "01a0c52a-96af-7fe1-929e-c439f365bee7"
+}

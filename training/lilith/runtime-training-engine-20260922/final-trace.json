@@ -1,0 +1,63 @@
+{
+  "norm": {
+    "input_diff": 0.541015625,
+    "output_diff": 26.125,
+    "full_layout": {
+      "shape": [
+        1,
+        32,
+        3840
+      ],
+      "stride": [
+        122880,
+        3840,
+        1
+      ],
+      "offset": 0
+    },
+    "cached_layout": {
+      "shape": [
+        1,
+        1,
+        3840
+      ],
+      "stride": [
+        3840,
+        3840,
+        1
+      ],
+      "offset": 0
+    }
+  },
+  "lm_head": {
+    "input_diff": 26.125,
+    "output_diff": 13.0,
+    "full_layout": {
+      "shape": [
+        1,
+        1,
+        3840
+      ],
+      "stride": [
+        122880,
+        3840,
+        1
+      ],
+      "offset": 119040
+    },
+    "cached_layout": {
+      "shape": [
+        1,
+        1,
+        3840
+      ],
+      "stride": [
+        3840,
+        3840,
+        1
+      ],
+      "offset": 0
+    }
+  },
+  "logits": 11.515625
+}

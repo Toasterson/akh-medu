@@ -1,0 +1,40 @@
+{
+  "repository": "https://github.com/yifanzhang-pro/KLPO",
+  "revision": "30c0ae8c3fa8f56213d6b57bc88b18ebee8ed696",
+  "files": [
+    {
+      "path": "README.md",
+      "url": "https://raw.githubusercontent.com/yifanzhang-pro/KLPO/30c0ae8c3fa8f56213d6b57bc88b18ebee8ed696/README.md",
+      "sha256": "75c49cbade42211085176307490bf27cc4ee4931eee4ccff840ab2b472a5e103"
+    },
+    {
+      "path": "docs/algorithms.md",
+      "url": "https://raw.githubusercontent.com/yifanzhang-pro/KLPO/30c0ae8c3fa8f56213d6b57bc88b18ebee8ed696/docs/algorithms.md",
+      "sha256": "eee743ac1b903255253de30383c21fa705a99474953f806f3ab66919fd2d98c7"
+    },
+    {
+      "path": "klpo/loss.py",
+      "url": "https://raw.githubusercontent.com/yifanzhang-pro/KLPO/30c0ae8c3fa8f56213d6b57bc88b18ebee8ed696/klpo/loss.py",
+      "sha256": "7ff24795adec318be56271a80f20bef55dbc8ccce0125be62b6de607a65e9355"
+    },
+    {
+      "path": "klpo/_validation.py",
+      "url": "https://raw.githubusercontent.com/yifanzhang-pro/KLPO/30c0ae8c3fa8f56213d6b57bc88b18ebee8ed696/klpo/_validation.py",
+      "sha256": "9d82aa525bb348d5b3d26e705f219a777b18e29a06a6e06d0f0c73d35b056d3e"
+    }
+  ],
+  "algorithm": "token regression with independent auxiliary Monte Carlo sampler draws",
+  "equation": "-mean_responses sum_tokens stopgrad(R-beta*(logp_action-logq_action))*(logp_action-mean_j(logp_aux_j))",
+  "constraints": [
+    "Actual collection sampler q is fixed, not a separate reference model.",
+    "Auxiliary draws IID with replacement, independent of complete rollout and across prefixes.",
+    "Complete trajectories; include termination tokens; exclude prompt, padding and tool observations.",
+    "Sum tokens, average responses; no length normalization, group centering, clipping, importance multiplier or critic.",
+    "Consume each auxiliary bank once for this probe; repeated adaptive reuse is not fresh unbiased estimation."
+  ],
+  "claims": {
+    "q_function_solved": false,
+    "quality_improvement": false,
+    "upstream_gpu_benchmark_validated": false
+  }
+}

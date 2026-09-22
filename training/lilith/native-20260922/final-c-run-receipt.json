@@ -1,0 +1,35 @@
+{
+  "command": [
+    "sh",
+    "-c",
+    "gcc -std=c11 -Wall -Wextra -Werror check.c -o check-c && ./check-c"
+  ],
+  "copy_in": {
+    "content_bytes": 270,
+    "content_sha256": "6d0838d293c7d20f86b5e2db5d2a7f35f82425e6b3f5bab7723b24ff0de5d957",
+    "snapshot_bytes": 10240,
+    "snapshot_entries": 3,
+    "snapshot_sha256": "6f6ad1cb442722079321a56649a8db01c78aeda3952f75ad9c98954ca06f8394"
+  },
+  "duration_ms": 1841,
+  "exit_code": 0,
+  "guest": {
+    "host": "127.0.0.1",
+    "port": 10115,
+    "user": "akh-exec"
+  },
+  "passed": true,
+  "remote_cleanup_succeeded": true,
+  "run_id": "9ae60c5eac52497c874600299c27f85e",
+  "schema": "lilith/native-execution@1",
+  "stderr": "",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_truncated": false,
+  "stdout": "c-native-smoke: ok\n",
+  "stdout_sha256": "78cf0c9adcc3ec558c8eba0c9803d5a1d98c2b0306fc29ca964ad56f74a17fb2",
+  "stdout_truncated": false,
+  "supervisor_status": "exit",
+  "target": "check.c",
+  "timed_out": false,
+  "timeout_s": 30
+}

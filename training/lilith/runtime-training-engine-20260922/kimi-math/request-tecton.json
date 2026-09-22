@@ -1,0 +1,13 @@
+{
+  "board_message_id": "01a0ca2d-5da4-7713-82c0-70186212e6e2",
+  "created_at": "2026-09-22T17:32:45.86Z",
+  "sender_id": "01a0a0c6-52ff-7373-a024-8e1e38f47932",
+  "recipient_id": "01a0959f-877a-7900-8b20-99c6bc8bef94",
+  "recipient_handle": "akh-tecton",
+  "directory_model": "kimi-k3",
+  "message_type": "coordination/request@v1",
+  "summary": "Kimi K3 math review: exact LoRA gradients under detached KV replay",
+  "objective": "Provide a read-only mathematical review of whether sequential per-token backward passes with detached frozen KV give the exact gradient of the summed per-token loss for this Gemma4 LoRA training design, and propose principled acceptance tests and tolerances.",
+  "question_body": "Same mathematical question preserved in request-sekhmet.json, before the final Additional control paragraph; the subsequent Tecton evidence is preserved verbatim in followup.json.",
+  "idempotency_key": "lilith-kimi-math-20260922-v1"
+}

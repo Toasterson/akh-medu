@@ -1,0 +1,93 @@
+{
+  "service_id": "akhrtd",
+  "listen": "127.0.0.1:18421",
+  "data_dir": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/state/akhrtd",
+  "principals": [
+    {
+      "id": "operator",
+      "token_file": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/credentials/operator.sha256",
+      "token_sha256": true,
+      "roles": [
+        "admin"
+      ],
+      "akhs": [
+        "lilith-coordinator",
+        "khnum-inline-patcher",
+        "ptah-inline-reviewer",
+        "lilith-report-recovery"
+      ]
+    },
+    {
+      "id": "akhsessd",
+      "token_file": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/credentials/akhsessd.sha256",
+      "token_sha256": true,
+      "roles": [
+        "session"
+      ],
+      "akhs": [
+        "lilith-coordinator",
+        "khnum-inline-patcher",
+        "ptah-inline-reviewer",
+        "lilith-report-recovery"
+      ]
+    }
+  ],
+  "endpoints": {
+    "sessions": {
+      "url": "http://127.0.0.1:18420",
+      "token_file": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/credentials/akhrtd.token"
+    }
+  },
+  "runtimes": {
+    "lilith": {
+      "revision": "lilith-local-v1",
+      "kind": "internal",
+      "execution_mode": "brokered",
+      "working_dir": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/runtime/lilith",
+      "binary": "/home/toasty/ws/agi/akh-medu/target/release/akhrtd",
+      "isolation": {
+        "directory": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/runtime/lilith/profile"
+      },
+      "timeout_secs": 600,
+      "native_candle": {
+        "model": "lilith-gemma4-12b",
+        "model_path": "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+        "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+        "tokenizer_path": "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+        "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+        "device": {
+          "kind": "vulkan",
+          "ordinal": 0
+        },
+        "max_context_tokens": 2048,
+        "max_output_tokens": 512,
+        "max_iterations": 4
+      }
+    },
+    "khnum": {
+      "revision": "lilith-local-v1",
+      "kind": "internal",
+      "execution_mode": "brokered",
+      "working_dir": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/runtime/khnum",
+      "binary": "/home/toasty/ws/agi/akh-medu/target/release/akhrtd",
+      "isolation": {
+        "directory": "/home/toasty/.local/share/akh-medu/lilith-coordination-7edc1c01916a47d3b923e51cc3f90a75/runtime/khnum/profile"
+      },
+      "timeout_secs": 600,
+      "native_candle": {
+        "model": "lilith-gemma4-12b",
+        "model_path": "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+        "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+        "tokenizer_path": "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+        "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+        "device": {
+          "kind": "vulkan",
+          "ordinal": 0
+        },
+        "max_context_tokens": 2048,
+        "max_output_tokens": 512,
+        "max_iterations": 4
+      }
+    }
+  }
+}

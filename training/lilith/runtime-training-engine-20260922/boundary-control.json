@@ -1,0 +1,47 @@
+{
+  "schema": "lilith/training-engine-boundary-control@1",
+  "status": "failed_equivalence",
+  "positions": [
+    1023,
+    1024,
+    1025
+  ],
+  "logit_differences": {
+    "1023": {
+      "max_abs": 55.25,
+      "mean_abs": 15.731794357299805
+    },
+    "1024": {
+      "max_abs": 40.3125,
+      "mean_abs": 13.695833206176758
+    },
+    "1025": {
+      "max_abs": 47.25,
+      "mean_abs": 24.17211151123047
+    }
+  },
+  "gradient_position": 1025,
+  "losses": {
+    "full": 25.441240310668945,
+    "cached": 13.19963550567627,
+    "abs": 12.241604804992676
+  },
+  "gradient_differences": {
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": {
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "full_norm": 0.0,
+      "cached_norm": 0.0
+    },
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": {
+      "max_abs": 1.1996169090270996,
+      "mean_abs": 0.01117788627743721,
+      "full_norm": 3.1838202476501465,
+      "cached_norm": 1.0188452005386353
+    }
+  },
+  "cache_tensors_checked": 96,
+  "peak_gpu_bytes": 24328010752,
+  "elapsed_seconds": 166.94975442600116,
+  "finding": "DynamicCache alone omitted Gemma4 shared_kv_states between chunks; engine fixed after this receipt; no optimizer step"
+}

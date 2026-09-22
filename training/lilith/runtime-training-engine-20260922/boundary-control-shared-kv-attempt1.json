@@ -1,0 +1,7 @@
+{
+  "schema": "lilith/training-engine-boundary-control@2",
+  "shared_kv_persisted": true,
+  "status": "interrupted",
+  "superseded_by": "boundary-control-shared-kv-attempt2.json",
+  "termination_evidence": "process absent during final audit; no numerical result emitted"
+}

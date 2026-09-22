@@ -1,0 +1,60 @@
+{
+  "closed_at": null,
+  "core_service": null,
+  "schema_version": 1,
+  "id": "01a0c91f-c880-7831-97dd-1b1534ebadae",
+  "principal": "operator",
+  "akh": "ptah-compare",
+  "conversation_key": null,
+  "workspace_profile": "local-dev",
+  "workspace": {
+    "id": "akh-23db90bace2e0a82fa42cac19ac55a25",
+    "sandbox_id": "akh-23db90bace2e0a82fa42cac19ac55a25",
+    "executor": "akhexecd",
+    "generation": 1,
+    "site": "hephaistos",
+    "root": "/home/toasty/.local/share/akh-medu/lilith-comparison-92c4b4fbfb144f3fb507fa8de5cdea02/workspaces/akh-23db90bace2e0a82fa42cac19ac55a25",
+    "platform": "linux",
+    "confinement": "unconfined"
+  },
+  "runtime": {
+    "runtime": "akhrtd",
+    "profile": "ptah",
+    "revision": "lilith-local-v1",
+    "kind": "internal",
+    "model": "ptah-qwen38",
+    "execution_mode": "brokered"
+  },
+  "instructions": "Solve the assigned coding exercise. No tools are available.",
+  "tools": [],
+  "approval_policy": "allow_granted",
+  "generation": 1,
+  "next_sequence": 9,
+  "turns": [
+    {
+      "id": "01a0c91f-c882-7113-998e-b434e6760dbe",
+      "request_id": "f2352908fbd743d5b459d1fc253654d5-input",
+      "input": {
+        "origin": {
+          "kind": "human",
+          "principal": "operator"
+        },
+        "text": "Inputs are arbitrary integers. If a or b is outside -128..127, return -1. Otherwise return their sum clamped to -128..127. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+        "data": null,
+        "artifacts": []
+      },
+      "status": "completed",
+      "generation": 1,
+      "runtime_job_id": "01a0c91f-c882-7113-998e-b434e6760dbe",
+      "cancel_requested": false,
+      "output": "```python\ndef f(a: int, b: int) -> int:\n    if a < -128 or a > 127 or b < -128 or b > 127:\n        return -1\n    s = a + b\n    if s < -128:\n        return -128\n    if s > 127:\n        return 127\n    return s\n```",
+      "error": null,
+      "created_at": 1790080698498
+    }
+  ],
+  "provider_session": "internal-01a0c91f-cb6a-7c62-bbfa-df18a8e2728f",
+  "controller": null,
+  "created_at": 1790080698496,
+  "last_progress_at": 1790080709200,
+  "dispatch_failures": 0
+}

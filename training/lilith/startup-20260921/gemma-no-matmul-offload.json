@@ -1,0 +1,6 @@
+{
+  "exit_code": 0,
+  "timeout": false,
+  "wall_seconds": 25.835700218001875,
+  "changed_variable": "AKH_GPU_MATMUL=0"
+}
