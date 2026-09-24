@@ -212,6 +212,43 @@ enum SchemaAction {
         #[arg(long)]
         confirmed_by: Option<String>,
     },
+    /// Run one memory-hygiene pass on the `-w` akh now (Phase 53j): merge
+    /// exact predicate-spelling collisions, retract superseded values of
+    /// single-valued predicates, repair contradictions per `[memory]
+    /// contradiction_policy`. The daemon runs the same pass on every sleep
+    /// tick; this is for cutover and verification.
+    Hygiene {
+        /// Report what would change without mutating.
+        #[arg(long)]
+        dry_run: bool,
+        /// Mutation bound for this pass (default: the akh's `[memory]
+        /// hygiene_batch`).
+        #[arg(long)]
+        max_mutations: Option<u64>,
+    },
+    /// Fold predicate spellings onto one canonical predicate (Phase 53j):
+    /// explicit `--canonical X --alias Y …`, every schema-pack alias
+    /// (`--declared`), or every exact spelling collision (`--collisions`).
+    MergePredicates {
+        /// The predicate to keep (explicit mode).
+        #[arg(long, conflicts_with_all = ["declared", "collisions"])]
+        canonical: Option<String>,
+        /// A spelling to fold into `--canonical` (repeatable).
+        #[arg(long = "alias", requires = "canonical")]
+        aliases: Vec<String>,
+        /// Merge every alias declared by an installed schema pack.
+        #[arg(long, conflicts_with = "collisions")]
+        declared: bool,
+        /// Merge every exact spelling collision.
+        #[arg(long)]
+        collisions: bool,
+        /// Report what would move without mutating.
+        #[arg(long)]
+        dry_run: bool,
+        /// Most triples to move in this call.
+        #[arg(long)]
+        limit: Option<u64>,
+    },
     /// Reject a pending proposal so it never re-surfaces on a later
     /// promotion pass.
     Reject {
@@ -1377,6 +1414,52 @@ fn dispatch_schema(current_ws: &str, action: SchemaAction) -> Result<()> {
                 "version": version,
             });
             let result = acp_call("_akh/schema/install", params)?;
+            print_acp(&result)?;
+        }
+        SchemaAction::Hygiene {
+            dry_run,
+            max_mutations,
+        } => {
+            let params = serde_json::json!({
+                "workspace": current_ws,
+                "dry_run": dry_run,
+                "max_mutations": max_mutations,
+            });
+            let result = acp_call("_akh/memory/hygiene", params)?;
+            print_acp(&result)?;
+        }
+        SchemaAction::MergePredicates {
+            canonical,
+            aliases,
+            declared,
+            collisions,
+            dry_run,
+            limit,
+        } => {
+            let mode = if declared {
+                "declared"
+            } else if collisions {
+                "collisions"
+            } else {
+                "explicit"
+            };
+            if mode == "explicit" && (canonical.is_none() || aliases.is_empty()) {
+                return Err(miette::miette!(
+                    code = "akh::cli::merge_predicates",
+                    help = "Pass `--canonical <predicate> --alias <spelling>` (repeat --alias), \
+                            or `--declared` / `--collisions`.",
+                    "nothing to merge"
+                ));
+            }
+            let params = serde_json::json!({
+                "workspace": current_ws,
+                "mode": mode,
+                "canonical": canonical,
+                "aliases": aliases,
+                "dry_run": dry_run,
+                "limit": limit,
+            });
+            let result = acp_call("_akh/memory/merge_predicates", params)?;
             print_acp(&result)?;
         }
         SchemaAction::Coverage { top } => {

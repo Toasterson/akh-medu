@@ -22,7 +22,7 @@ use super::autonomy::{
 };
 use super::error::AgentResult;
 use super::llm_metrics::{LlmUsage, UsageScope};
-use crate::akh_config::AutonomyConfig;
+use crate::akh_config::{AutonomyConfig, MemoryConfig};
 use crate::client::DaemonStatus;
 use crate::config::UpstreamEndpointConfig;
 use crate::engine::Engine;
@@ -114,6 +114,8 @@ struct TaskStart {
 pub struct SleepTickReport {
     /// The transcript-harvest task.
     pub harvest: DaemonTaskReport,
+    /// The memory-hygiene task (Phase 53j).
+    pub hygiene: DaemonTaskReport,
     /// The sleep-cycle task.
     pub sleep: DaemonTaskReport,
 }
@@ -306,6 +308,9 @@ pub struct AgentDaemon {
     /// Per-akh automation gating (P5). Defaults to [`AutonomyConfig::default`]
     /// (master on, default budget; ADR 113 decision 6).
     autonomy: AutonomyConfig,
+    /// Per-akh `[memory]` settings: the hygiene batch bound (Phase 53j). The
+    /// contradiction policy itself lives on the engine.
+    memory: MemoryConfig,
     /// Where this akh's executor tools run, from the effective `[exec]`
     /// (`AkhConfig::effective_exec`, resolved by akhomed at daemon spawn).
     /// Decides the idle-cycle default. Defaults to `InProcess`, the
@@ -385,6 +390,7 @@ impl AgentDaemon {
             shutdown: None,
             status: None,
             autonomy: AutonomyConfig::default(),
+            memory: MemoryConfig::default(),
             last_equivalence_triple_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(feature = "postgres")]
             db: None,
@@ -459,6 +465,12 @@ impl AgentDaemon {
     pub fn with_autonomy(mut self, autonomy: AutonomyConfig) -> Self {
         self.governor.set_budget(autonomy.budget);
         self.autonomy = autonomy;
+        self
+    }
+
+    /// Set the per-akh `[memory]` settings (hygiene batch bound).
+    pub fn with_memory(mut self, memory: MemoryConfig) -> Self {
+        self.memory = memory;
         self
     }
 
@@ -653,11 +665,15 @@ impl AgentDaemon {
     }
 
     /// One sleep tick: [`DaemonTask::Harvest`] first, then
-    /// [`DaemonTask::SleepCycle`], each through [`Self::run_task`]
-    /// (ADR 113 decision 5). A sleep-cycle error cannot skip harvest, and a
-    /// harvest error cannot skip the sleep cycle.
+    /// [`DaemonTask::MemoryHygiene`], then [`DaemonTask::SleepCycle`], each
+    /// through [`Self::run_task`] (ADR 113 decision 5, Phase 53j). No task's
+    /// failure can skip another.
     pub fn run_sleep_tick(&mut self) -> SleepTickReport {
-        self.sleep_tick_with(|d| d.run_harvest(), |d| d.run_sleep_cycle())
+        self.sleep_tick_with(
+            |d| d.run_harvest(),
+            |d| d.run_memory_hygiene(),
+            |d| d.run_sleep_cycle(),
+        )
     }
 
     /// [`Self::run_sleep_tick`] with injectable task bodies; the ordering and
@@ -665,11 +681,66 @@ impl AgentDaemon {
     fn sleep_tick_with(
         &mut self,
         harvest: impl FnOnce(&mut Self) -> TaskRun,
+        hygiene: impl FnOnce(&mut Self) -> TaskRun,
         sleep: impl FnOnce(&mut Self) -> TaskRun,
     ) -> SleepTickReport {
         let harvest = self.run_task(DaemonTask::Harvest, harvest);
+        let hygiene = self.run_task(DaemonTask::MemoryHygiene, hygiene);
         let sleep = self.run_task(DaemonTask::SleepCycle, sleep);
-        SleepTickReport { harvest, sleep }
+        SleepTickReport {
+            harvest,
+            hygiene,
+            sleep,
+        }
+    }
+
+    /// One bounded memory-hygiene pass (Phase 53j): merge exact spelling
+    /// collisions, retract superseded single-valued values, repair
+    /// contradictions per the engine's policy. Works on the engine handle
+    /// only (never the agent lock), like harvest; each graph mutation takes
+    /// the engine's own mutation lock, so live turns interleave.
+    fn run_memory_hygiene(&self) -> TaskRun {
+        let options =
+            crate::schema::HygieneOptions::for_engine(&self.engine, self.memory.hygiene_batch);
+        match crate::schema::run_hygiene(&self.engine, options) {
+            Ok(report) => {
+                let unresolved: Vec<&str> = report
+                    .unresolved
+                    .iter()
+                    .take(5)
+                    .map(|u| u.predicate.as_str())
+                    .collect();
+                tracing::info!(
+                    target: "akh::autonomy",
+                    workspace = %self.workspace,
+                    task = DaemonTask::MemoryHygiene.as_str(),
+                    policy = report.policy,
+                    merged_families = report.merged.len(),
+                    merged_triples = report.merged_triples(),
+                    superseded = report.superseded,
+                    repaired = report.repaired,
+                    functional_violations = report.functional_violations,
+                    provenance_records = report.provenance_records,
+                    mutations = report.mutations,
+                    truncated = report.truncated,
+                    ambiguous_families = report.ambiguous_families.len(),
+                    pending_declared_aliases = report.pending_declared_aliases.len(),
+                    unresolved = ?unresolved,
+                    "memory hygiene pass"
+                );
+                TaskRun::Ran
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "akh::autonomy",
+                    workspace = %self.workspace,
+                    task = DaemonTask::MemoryHygiene.as_str(),
+                    error = %error,
+                    "memory hygiene pass failed; the next sleep tick resumes it"
+                );
+                TaskRun::Failed(error.to_string())
+            }
+        }
     }
 
     /// Log the effective autonomy plan once at daemon start: unknown task
@@ -3428,12 +3499,101 @@ mod tests {
         assert_eq!(report.outcome, TaskOutcome::Ran);
     }
 
+    /// Phase 53j: the real hygiene body runs on the sleep tick even when the
+    /// sleep cycle fails, reports its retractions as the task's fact delta,
+    /// and a second tick over the repaired graph is a no-op.
+    #[test]
+    fn memory_hygiene_runs_independently_of_the_sleep_cycle_and_is_idempotent() {
+        use crate::graph::Triple;
+
+        let shared = test_shared_agent();
+        let engine = Arc::clone(&shared.read().unwrap().engine);
+        let subject = engine.resolve_or_create_entity("janus").unwrap();
+        for (i, spelling) in ["next_check", "next-check", "next check"]
+            .iter()
+            .enumerate()
+        {
+            let triple = Triple {
+                timestamp: 100 + i as u64,
+                ..Triple::new(
+                    subject,
+                    engine.resolve_or_create_relation(spelling).unwrap(),
+                    engine
+                        .resolve_or_create_entity(&format!("check-{i}"))
+                        .unwrap(),
+                )
+            };
+            engine.add_triple(&triple).unwrap();
+        }
+        let pack = crate::schema::compile(
+            r#"{"pack": {"name": "daemon-hygiene", "version": "1"},
+                "relations": [{"name": "next_check", "cardinality": "single_valued",
+                               "temporal": true}]}"#,
+        )
+        .unwrap();
+        crate::schema::install_pack(&engine, &pack).unwrap();
+
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        let tick = daemon.sleep_tick_with(
+            |_| TaskRun::Ran,
+            |d| d.run_memory_hygiene(),
+            |_| TaskRun::Failed("sleep cycle exploded".into()),
+        );
+        assert_eq!(tick.hygiene.outcome, TaskOutcome::Ran);
+        assert_eq!(tick.sleep.outcome.label(), "failed");
+        assert!(
+            tick.hygiene.facts.retracted >= 4,
+            "two alias edges moved and two superseded: {:?}",
+            tick.hygiene.facts
+        );
+        let next_check = engine.lookup_symbol("next_check").unwrap();
+        let live: Vec<_> = engine
+            .triples_from(subject)
+            .into_iter()
+            .filter(|t| t.predicate == next_check)
+            .collect();
+        assert_eq!(live.len(), 1);
+        assert_eq!(engine.resolve_label(live[0].object), "check-2");
+
+        let again = daemon.sleep_tick_with(
+            |_| TaskRun::Ran,
+            |d| d.run_memory_hygiene(),
+            |_| TaskRun::Ran,
+        );
+        assert_eq!(again.hygiene.outcome, TaskOutcome::Ran);
+        assert!(
+            again.hygiene.facts.is_empty(),
+            "second pass must not mutate: {:?}",
+            again.hygiene.facts
+        );
+    }
+
+    #[test]
+    fn memory_hygiene_follows_the_autonomy_switch() {
+        let shared = test_shared_agent();
+        let mut autonomy = AutonomyConfig::default();
+        autonomy.tasks.insert("memory_hygiene".into(), false);
+        let mut daemon =
+            AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default()).with_autonomy(autonomy);
+        let tick = daemon.sleep_tick_with(
+            |_| TaskRun::Ran,
+            |_| panic!("disabled hygiene must not run"),
+            |_| TaskRun::Ran,
+        );
+        assert!(matches!(
+            tick.hygiene.outcome,
+            TaskOutcome::SkippedDisabled(_)
+        ));
+        assert_eq!(tick.sleep.outcome, TaskOutcome::Ran);
+    }
+
     #[test]
     fn harvest_is_skipped_as_not_configured_without_a_store() {
         let shared = test_shared_agent();
         let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
         let tick = daemon.sleep_tick_with(
             |_| panic!("harvest must not run without a store"),
+            |_| TaskRun::Ran,
             |_| TaskRun::Ran,
         );
         assert!(matches!(
@@ -3471,13 +3631,21 @@ mod tests {
                 TaskRun::Ran
             },
             |_| {
+                order.lock().unwrap().push(DaemonTask::MemoryHygiene);
+                TaskRun::Ran
+            },
+            |_| {
                 order.lock().unwrap().push(DaemonTask::SleepCycle);
                 TaskRun::Failed("sleep cycle exploded".into())
             },
         );
         assert_eq!(
             *order.lock().unwrap(),
-            vec![DaemonTask::Harvest, DaemonTask::SleepCycle]
+            vec![
+                DaemonTask::Harvest,
+                DaemonTask::MemoryHygiene,
+                DaemonTask::SleepCycle
+            ]
         );
         assert_eq!(tick.harvest.outcome, TaskOutcome::Ran);
         assert_eq!(tick.sleep.outcome.label(), "failed");
@@ -3486,6 +3654,7 @@ mod tests {
         // sleep cycle still runs.
         let tick = daemon.sleep_tick_with(
             |_| TaskRun::Failed("store unavailable".into()),
+            |_| TaskRun::Ran,
             |_| TaskRun::Ran,
         );
         assert_eq!(

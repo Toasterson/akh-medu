@@ -208,6 +208,52 @@ pub struct McpConfig {
     pub servers: Vec<crate::agent::tools::mcp_config::McpServerSpec>,
 }
 
+/// Per-akh memory hygiene (`[memory]`, Phase 53j, ADR 113).
+///
+/// ```toml
+/// [memory]
+/// contradiction_policy = "warn"   # "warn" (default) | "replace" | "reject"
+/// hygiene_batch = 1000            # max graph mutations per hygiene pass
+/// ```
+///
+/// `contradiction_policy` sets what `add_triple` does with a detected
+/// contradiction (warn and insert, replace the conflicting edge, or refuse
+/// the write) and how the daemon's memory-hygiene pass repairs existing
+/// contradictions on functional predicates. Predicates a schema pack
+/// declares `single_valued` are never contradictions: the newest value
+/// supersedes the older ones under every policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryConfig {
+    /// Contradiction policy for this akh's engine and hygiene repair.
+    #[serde(default)]
+    pub contradiction_policy: crate::engine::ContradictionPolicy,
+    /// Upper bound on graph mutations per memory-hygiene pass. `0` makes the
+    /// pass report-only.
+    #[serde(default = "default_hygiene_batch")]
+    pub hygiene_batch: usize,
+}
+
+fn default_hygiene_batch() -> usize {
+    crate::schema::DEFAULT_HYGIENE_BATCH
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            contradiction_policy: crate::engine::ContradictionPolicy::default(),
+            hygiene_batch: default_hygiene_batch(),
+        }
+    }
+}
+
+impl MemoryConfig {
+    /// Whether every field is at its default (the table is then omitted
+    /// when the config is saved).
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Per-akh background-automation gating (P5; defaults per ADR 113 decision 6).
 ///
 /// `enabled` is the master switch and defaults to **on**: every akh runs its
@@ -854,6 +900,10 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board: Option<crate::agent::djehuty::BoardConfig>,
 
+    /// Memory hygiene: contradiction policy and hygiene batch (Phase 53j).
+    #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
+    pub memory: MemoryConfig,
+
     /// Delegation / external scheduling (Phase 36). Parsed now; the
     /// `DelegationManager` is wired behind the `delegation` feature in its phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -898,6 +948,7 @@ impl Default for AkhConfig {
             autonomy: AutonomyConfig::default(),
             mcp: McpConfig::default(),
             board: None,
+            memory: MemoryConfig::default(),
             delegation: None,
             exec: None,
         }
@@ -1069,6 +1120,7 @@ impl AkhConfig {
                 ],
             ),
             ("autonomy", &["enabled", "tasks", "budget"]),
+            ("memory", &["contradiction_policy", "hygiene_batch"]),
             (
                 "delegation",
                 &[
@@ -1594,6 +1646,65 @@ mod tests {
         // Round-trips through serialization.
         let back: AkhConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.autonomy, cfg.autonomy);
+    }
+
+    #[test]
+    fn memory_table_sets_the_contradiction_policy_per_akh() {
+        use crate::engine::ContradictionPolicy;
+
+        // Default: unchanged engine behaviour (warn), default batch.
+        let cfg: AkhConfig = toml::from_str(r#"name = "vesta""#).unwrap();
+        assert_eq!(cfg.memory, MemoryConfig::default());
+        assert_eq!(cfg.memory.contradiction_policy, ContradictionPolicy::Warn);
+        assert_eq!(
+            cfg.memory.hygiene_batch,
+            crate::schema::DEFAULT_HYGIENE_BATCH
+        );
+        assert!(
+            !toml::to_string(&cfg).unwrap().contains("[memory]"),
+            "a default [memory] is not written back"
+        );
+
+        for (value, policy) in [
+            ("warn", ContradictionPolicy::Warn),
+            ("replace", ContradictionPolicy::Replace),
+            ("reject", ContradictionPolicy::Reject),
+        ] {
+            let src = format!(
+                "name = \"vesta\"\n[memory]\ncontradiction_policy = \"{value}\"\nhygiene_batch = 50\n"
+            );
+            let cfg: AkhConfig = toml::from_str(&src).expect("parse");
+            assert_eq!(cfg.memory.contradiction_policy, policy);
+            assert_eq!(cfg.memory.hygiene_batch, 50);
+            let raw: toml::Value = toml::from_str(&src).unwrap();
+            assert!(AkhConfig::unknown_keys(&raw).is_empty());
+            let back: AkhConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.memory, cfg.memory);
+        }
+
+        // An unknown policy is a parse error, not a silent default.
+        assert!(
+            toml::from_str::<AkhConfig>(
+                "name = \"vesta\"\n[memory]\ncontradiction_policy = \"ignore\"\n"
+            )
+            .is_err()
+        );
+        // A typo inside [memory] is flagged; a top-level scalar misplaced
+        // under it is called out as the TOML-ordering footgun.
+        let raw: toml::Value = toml::from_str(
+            "name = \"vesta\"\n[memory]\ncontradiction_polcy = \"replace\"\nmodel = \"x\"\n",
+        )
+        .unwrap();
+        let unknown = AkhConfig::unknown_keys(&raw);
+        assert!(
+            unknown
+                .iter()
+                .any(|k| k.path == "memory.contradiction_polcy")
+        );
+        assert!(
+            unknown.iter().any(|k| k.path == "memory.model"
+                && k.misplaced_under_table.as_deref() == Some("memory"))
+        );
     }
 
     #[test]

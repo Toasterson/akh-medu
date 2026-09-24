@@ -835,6 +835,57 @@ pub enum DerivationKind {
         /// The idempotent request id of the call.
         request_id: String,
     },
+
+    // --- Phase 53j: memory hygiene (ADR 113) ----------------------------------
+    /// A live triple was retracted or rewritten by memory hygiene (tag 109).
+    ///
+    /// Stored *before* the retraction, with `derived_id` = the retracted
+    /// triple's object, so the ledger keeps a durable "what replaced this
+    /// fact and why" record after the TMS marks the object retracted.
+    /// See [`HygieneAction`] for what each action means for
+    /// `successor`.
+    MemoryHygiene {
+        /// What hygiene did to the triple.
+        action: HygieneAction,
+        /// Subject of the retracted triple.
+        subject: SymbolId,
+        /// Predicate of the retracted triple.
+        predicate: SymbolId,
+        /// The replacement: the superseding object (`SingleValuedSupersede`,
+        /// `ContradictionRepair`) or the canonical predicate the triple was
+        /// re-asserted under (`PredicateMerge`).
+        successor: SymbolId,
+        /// For a temporal single-valued predicate: when the superseded value
+        /// stopped holding (unix seconds, the successor's assertion time).
+        /// `None` for non-temporal supersession, merges and repairs.
+        valid_until: Option<u64>,
+    },
+}
+
+/// What a [`DerivationKind::MemoryHygiene`] record documents (Phase 53j).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HygieneAction {
+    /// A newer assertion of a single-valued predicate superseded this value
+    /// (on insert, or when hygiene cleared the backlog).
+    SingleValuedSupersede,
+    /// The triple was re-asserted under the canonical predicate and the
+    /// alias-spelled original retracted.
+    PredicateMerge,
+    /// Contradiction repair under the akh's `[memory] contradiction_policy`
+    /// retracted this value of a functional predicate.
+    ContradictionRepair,
+}
+
+impl HygieneAction {
+    /// Stable snake-case name (reports, explain output).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            HygieneAction::SingleValuedSupersede => "single_valued_supersede",
+            HygieneAction::PredicateMerge => "predicate_merge",
+            HygieneAction::ContradictionRepair => "contradiction_repair",
+        }
+    }
 }
 
 /// Who a cognitive tool call runs on behalf of (Phase 53e).
@@ -908,7 +959,7 @@ impl DerivationKind {
     /// The array index is the kind's persisted numeric tag.  Keep additions in
     /// lock-step with [`Self::tag`]; unlike a name derived from `Debug`, these
     /// strings are an explicit compatibility contract.
-    pub const KIND_NAMES: [&'static str; 109] = [
+    pub const KIND_NAMES: [&'static str; 110] = [
         "extracted",
         "seed",
         "graph_edge",
@@ -1018,6 +1069,7 @@ impl DerivationKind {
         "note_reprojection",
         "source_attributed",
         "delegated_call",
+        "memory_hygiene",
     ];
 
     /// Every registry symbol referenced by this derivation payload.
@@ -1050,6 +1102,12 @@ impl DerivationKind {
                     )
                 })
                 .collect(),
+            Self::MemoryHygiene {
+                subject,
+                predicate,
+                successor,
+                ..
+            } => vec![*subject, *predicate, *successor],
             Self::ContextInheritance { context, ancestor } => vec![*context, *ancestor],
             Self::ContextLifting {
                 from_context,
@@ -1301,6 +1359,7 @@ impl DerivationKind {
             Self::NoteReprojection { .. } => 106,
             Self::SourceAttributed { .. } => 107,
             Self::DelegatedCall { .. } => 108,
+            Self::MemoryHygiene { .. } => 109,
         }
     }
 }
@@ -1970,7 +2029,7 @@ mod tests {
     #[test]
     fn delegated_call_is_the_appended_tag_108_without_symbols() {
         assert_eq!(DerivationKind::tag_for_name("delegated_call"), Some(108));
-        assert_eq!(DerivationKind::KIND_NAMES.len(), 109);
+        assert_eq!(DerivationKind::KIND_NAMES.len(), 110);
         let kind = attribution("claude-worker").derivation();
         assert_eq!(kind.tag(), 108);
         assert_eq!(kind.kind_name(), "delegated_call");
@@ -1978,6 +2037,25 @@ mod tests {
         // Appending keeps every earlier persisted tag stable.
         assert_eq!(DerivationKind::tag_for_name("source_attributed"), Some(107));
         let bytes = bincode::serialize(&ProvenanceRecord::new(sym(1), kind.clone())).unwrap();
+        let decoded: ProvenanceRecord = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.kind, kind);
+    }
+
+    #[test]
+    fn memory_hygiene_is_the_appended_tag_109_with_its_symbols() {
+        assert_eq!(DerivationKind::tag_for_name("memory_hygiene"), Some(109));
+        assert_eq!(DerivationKind::tag_for_name("delegated_call"), Some(108));
+        let kind = DerivationKind::MemoryHygiene {
+            action: HygieneAction::SingleValuedSupersede,
+            subject: sym(1),
+            predicate: sym(2),
+            successor: sym(3),
+            valid_until: Some(42),
+        };
+        assert_eq!(kind.tag(), 109);
+        assert_eq!(kind.kind_name(), "memory_hygiene");
+        assert_eq!(kind.referenced_symbol_ids(), vec![sym(1), sym(2), sym(3)]);
+        let bytes = bincode::serialize(&ProvenanceRecord::new(sym(3), kind.clone())).unwrap();
         let decoded: ProvenanceRecord = bincode::deserialize(&bytes).unwrap();
         assert_eq!(decoded.kind, kind);
     }

@@ -94,16 +94,53 @@ impl Default for EngineConfig {
     }
 }
 
+/// Phase 53j: what a single-valued write does to the live values.
+enum SupersessionPlan {
+    /// Publish the incoming edge, then retract these older values.
+    Supersede(Vec<Triple>),
+    /// A live value is newer than the incoming write: record the incoming
+    /// write as superseded by it and do not publish it.
+    IncomingIsStale { newest: Triple },
+}
+
+/// Order two values of one single-valued `(subject, predicate)` newest
+/// first: later assertion time, then higher confidence, then the higher
+/// object symbol id (allocated later). Total and deterministic, so the
+/// hygiene backlog pass and insert-time supersession agree on the winner.
+pub fn newest_first(a: &Triple, b: &Triple) -> std::cmp::Ordering {
+    b.timestamp
+        .cmp(&a.timestamp)
+        .then_with(|| b.confidence.total_cmp(&a.confidence))
+        .then_with(|| b.object.cmp(&a.object))
+}
+
 /// How the engine handles detected contradictions during `add_triple`.
+///
+/// Per akh via the workspace TOML `[memory] contradiction_policy`
+/// (`"warn"`, `"replace"` or `"reject"`; Phase 53j).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ContradictionPolicy {
     /// Log a warning but insert anyway (default).
     #[default]
+    #[serde(rename = "warn", alias = "Warn")]
     Warn,
     /// Return an error and refuse to insert.
+    #[serde(rename = "reject", alias = "Reject")]
     Reject,
     /// Remove the conflicting existing triple, then insert the new one.
+    #[serde(rename = "replace", alias = "Replace")]
     Replace,
+}
+
+impl ContradictionPolicy {
+    /// Stable config / report name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ContradictionPolicy::Warn => "warn",
+            ContradictionPolicy::Reject => "reject",
+            ContradictionPolicy::Replace => "replace",
+        }
+    }
 }
 
 /// Configuration for Phase 9 (Cyc-inspired HOL) subsystems.
@@ -1032,6 +1069,20 @@ impl Engine {
     /// `add_triple` with the encompassing mutation lock already held.
     fn add_triple_locked(&self, triple: &Triple) -> AkhResult<()> {
         self.ensure_mutations_active()?;
+        // Phase 53j: a write under a declared alias spelling is stored under
+        // its canonical relation, so the alias never accumulates new facts.
+        let canonical_triple;
+        let triple = match crate::schema::cardinality::declared_alias_target(self, triple.predicate)
+        {
+            Some(canonical) => {
+                canonical_triple = Triple {
+                    predicate: canonical,
+                    ..triple.clone()
+                };
+                &canonical_triple
+            }
+            None => triple,
+        };
         // Construct the complete replay envelope before any subsystem is
         // mutated. In particular, ContradictionPolicy::Replace must not retract
         // a live edge and emit its WAL record only to discover later that the
@@ -1094,6 +1145,36 @@ impl Engine {
             }
         }
 
+        // --- Phase 53j: single-valued supersession plan ---
+        // A declared single-valued predicate holds one live object per
+        // (subject, compartment). Older values are expected supersession,
+        // not contradictions: they are retracted (TMS + `memory_hygiene`
+        // provenance) after the new edge is published. A write that is older
+        // than the live value is itself superseded and never published.
+        let cardinality =
+            crate::schema::cardinality::declared_cardinality(self, stored_triple.predicate);
+        let superseded = if cardinality.is_single_valued() {
+            match self.plan_single_valued_supersession(&stored_triple) {
+                SupersessionPlan::Supersede(priors) => priors,
+                SupersessionPlan::IncomingIsStale { newest } => {
+                    self.record_hygiene_provenance(
+                        &stored_triple,
+                        crate::provenance::HygieneAction::SingleValuedSupersede,
+                        newest.object,
+                        cardinality.is_temporal().then_some(newest.timestamp),
+                    );
+                    tracing::debug!(
+                        subject = %self.resolve_label(stored_triple.subject),
+                        predicate = %self.resolve_label(stored_triple.predicate),
+                        "single-valued write older than the live value; recorded as superseded"
+                    );
+                    return Ok(());
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
         // --- Phase 9 pre-insert: contradiction detection ---
         let mut replacement_retracts = Vec::new();
         if self.phase9_config.detect_contradictions {
@@ -1101,7 +1182,7 @@ impl Engine {
             let disj = self.disjointness_constraints.read().unwrap();
             let temp = self.temporal_registry.read().unwrap();
             let mv = self.multi_valued_predicates.read().unwrap();
-            let contradictions = crate::graph::contradiction::check_contradictions(
+            let mut contradictions = crate::graph::contradiction::check_contradictions(
                 self,
                 &stored_triple,
                 &func,
@@ -1109,6 +1190,14 @@ impl Engine {
                 Some(&temp),
                 Some(&mv),
             );
+            if cardinality.is_single_valued() {
+                // Same (subject, predicate), different object: that is the
+                // supersession planned above, not a contradiction.
+                contradictions.retain(|c| {
+                    c.existing.subject != stored_triple.subject
+                        || c.existing.predicate != stored_triple.predicate
+                });
+            }
 
             if !contradictions.is_empty() {
                 match self.phase9_config.contradiction_policy {
@@ -1293,7 +1382,175 @@ impl Engine {
             );
         }
 
+        // --- Phase 53j: retract the superseded single-valued values ---
+        // After publication, so a failed retraction leaves the pre-53j state
+        // (both values live, reported by hygiene) and never loses the new one.
+        let valid_until = cardinality.is_temporal().then_some(stored_triple.timestamp);
+        for prior in &superseded {
+            self.record_hygiene_provenance(
+                prior,
+                crate::provenance::HygieneAction::SingleValuedSupersede,
+                stored_triple.object,
+                valid_until,
+            );
+            if let Err(error) =
+                self.remove_triple_locked(prior.subject, prior.predicate, prior.object)
+            {
+                tracing::warn!(
+                    code = "akh::engine::supersession_retract",
+                    %error,
+                    subject = %self.resolve_label(prior.subject),
+                    predicate = %self.resolve_label(prior.predicate),
+                    "superseded single-valued value not retracted; the next memory-hygiene pass retries"
+                );
+            }
+        }
+
         Ok(())
+    }
+
+    /// Phase 53j: the live values a single-valued `incoming` supersedes, or
+    /// the newer live value that makes `incoming` itself stale.
+    ///
+    /// Only the same `(subject, predicate, compartment)` competes. Newest
+    /// wins by assertion time; an equal timestamp goes to the incoming write
+    /// (it arrived last).
+    fn plan_single_valued_supersession(&self, incoming: &Triple) -> SupersessionPlan {
+        let mut priors = Vec::new();
+        let mut newest: Option<Triple> = None;
+        for edge in self.knowledge_graph.triples_from(incoming.subject) {
+            if edge.predicate != incoming.predicate
+                || edge.object == incoming.object
+                || edge.compartment_id != incoming.compartment_id
+            {
+                continue;
+            }
+            if edge.timestamp > incoming.timestamp {
+                if newest
+                    .as_ref()
+                    .is_none_or(|n| newest_first(&edge, n).is_lt())
+                {
+                    newest = Some(edge);
+                }
+            } else {
+                priors.push(edge);
+            }
+        }
+        match newest {
+            Some(newest) => SupersessionPlan::IncomingIsStale { newest },
+            None => SupersessionPlan::Supersede(priors),
+        }
+    }
+
+    /// Store a `memory_hygiene` provenance record for `retracted` (derived
+    /// symbol = its object). Best-effort: an in-memory engine has no ledger,
+    /// and a ledger failure must not undo the graph transition it documents.
+    /// Returns whether a record was stored.
+    fn record_hygiene_provenance(
+        &self,
+        retracted: &Triple,
+        action: crate::provenance::HygieneAction,
+        successor: SymbolId,
+        valid_until: Option<u64>,
+    ) -> bool {
+        if self.provenance_ledger.is_none() {
+            return false;
+        }
+        let mut record = ProvenanceRecord::new(
+            retracted.object,
+            DerivationKind::MemoryHygiene {
+                action,
+                subject: retracted.subject,
+                predicate: retracted.predicate,
+                successor,
+                valid_until,
+            },
+        )
+        .with_sources(vec![retracted.subject, retracted.predicate, successor])
+        .with_confidence(0.0);
+        match self.store_provenance(&mut record) {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(
+                    code = "akh::engine::hygiene_provenance",
+                    %error,
+                    action = action.as_str(),
+                    "memory-hygiene provenance not recorded"
+                );
+                false
+            }
+        }
+    }
+
+    /// Phase 53j: retract a still-live `stale` edge because `successor`
+    /// replaces it (single-valued backlog, contradiction repair), with a
+    /// `memory_hygiene` provenance record stored first. Goes through the
+    /// TMS retraction path, like `kg_delete`.
+    ///
+    /// Returns `Ok(false)` when `stale` is no longer live (nothing to do),
+    /// so re-running a hygiene pass is idempotent.
+    pub fn supersede_triple(
+        &self,
+        stale: &Triple,
+        successor: &Triple,
+        action: crate::provenance::HygieneAction,
+        valid_until: Option<u64>,
+    ) -> AkhResult<bool> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_mutations_active()?;
+        let Some(live) = self
+            .knowledge_graph
+            .triple(stale.subject, stale.predicate, stale.object)
+        else {
+            return Ok(false);
+        };
+        self.record_hygiene_provenance(&live, action, successor.object, valid_until);
+        self.remove_triple_locked(live.subject, live.predicate, live.object)?;
+        Ok(true)
+    }
+
+    /// Phase 53j: move a still-live edge from an alias predicate onto
+    /// `canonical` as one serialized transition: assert the re-spelled edge
+    /// (keeping confidence, timestamp, compartment and provenance link, and
+    /// honouring single-valued supersession), record `memory_hygiene`
+    /// provenance, then remove the alias edge exactly.
+    ///
+    /// The alias edge is removed **without** a TMS cascade: the fact still
+    /// holds, only its predicate spelling changed, so its object must not be
+    /// marked retracted. Returns `Ok(false)` when `alias_edge` is no longer
+    /// live or already uses `canonical`.
+    pub fn rewrite_predicate(&self, alias_edge: &Triple, canonical: SymbolId) -> AkhResult<bool> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_mutations_active()?;
+        if alias_edge.predicate == canonical {
+            return Ok(false);
+        }
+        let Some(live) = self.knowledge_graph.triple(
+            alias_edge.subject,
+            alias_edge.predicate,
+            alias_edge.object,
+        ) else {
+            return Ok(false);
+        };
+        let respelled = Triple {
+            predicate: canonical,
+            ..live.clone()
+        };
+        self.add_triple_locked(&respelled)?;
+        self.record_hygiene_provenance(
+            &live,
+            crate::provenance::HygieneAction::PredicateMerge,
+            canonical,
+            None,
+        );
+        self.commit_exact_retractions_locked(std::slice::from_ref(&live))?;
+        Ok(true)
     }
 
     #[inline]

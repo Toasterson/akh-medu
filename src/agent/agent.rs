@@ -358,6 +358,11 @@ impl Agent {
         // Core KG tools.
         registry.register(Box::new(tools::KgQueryTool));
         registry.register(Box::new(tools::KgMutateTool));
+        // Phase 53j: retraction and predicate merge, so memory can be
+        // corrected, not only appended to. Both are `Dangerous`: plan mode
+        // denies them and `/v1` scopes never expose them by default.
+        registry.register(Box::new(tools::KgDeleteTool));
+        registry.register(Box::new(tools::KgMergePredicatesTool));
         registry.register(Box::new(tools::EntitySchemaTool));
         registry.register(Box::new(tools::EntityTypesTool));
         registry.register(Box::new(tools::EntityTypeFilterTool));
@@ -4704,6 +4709,38 @@ mod backend_seam_tests {
                 .any(|sig| sig.name == "shell_exec"),
             "shell_exec tool should be registered via the default in-process backend"
         );
+    }
+
+    /// Phase 53j: the live registry carries `kg_delete` (it existed as a tool
+    /// impl and in test registries, but was never registered for real akhs)
+    /// and `kg_merge_predicates`, both `Dangerous` KG writes, so plan mode
+    /// denies them and the `/v1` read-only derivation never exposes them.
+    #[test]
+    fn live_registry_has_dangerous_kg_retraction_tools() {
+        use crate::agent::tool_manifest::{Capability, DangerLevel};
+
+        let agent = Agent::new(test_engine(), AgentConfig::default()).unwrap();
+        let registry = agent.tool_registry_handle();
+        for name in ["kg_delete", "kg_merge_predicates"] {
+            let tool = registry
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} must be registered"));
+            let manifest = tool.manifest();
+            assert_eq!(manifest.danger.level, DangerLevel::Dangerous, "{name}");
+            assert!(manifest.danger.capabilities.contains(&Capability::WriteKg));
+            let plan = crate::agent::permission::PermissionPolicy::new(
+                crate::agent::permission::PermissionMode::Plan,
+            );
+            assert!(matches!(
+                plan.decide(&manifest),
+                crate::agent::permission::PermissionDecision::Deny(_)
+            ));
+            #[cfg(feature = "core-api")]
+            {
+                assert!(!crate::core_service::is_cognitive_read_only(&manifest));
+                assert!(!crate::core_service::ToolScope::default().permits(name));
+            }
+        }
     }
 
     /// `ExecToolWiring::None` (`exec kind = "none"`) must register **zero**

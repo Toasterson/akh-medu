@@ -19,7 +19,15 @@
 > `deployment = "deployed"` mode refuses in-process execution and in-process
 > Codex/Claude runtimes; per-akh static MCP servers (`[[mcp.servers]]`,
 > `mcp__<server>__<tool>`). See "Core Service, Autonomy and Delegation" below.
-> Slices 53a–53e, 53g step 1, 53h and 53i are implemented on `phase53/full-akh`;
+> 53j adds memory hygiene: schema packs declare predicate cardinality
+> (`single_valued`, `temporal`) and `aliases`; the engine supersedes older
+> values on write and stores alias spellings under the canonical relation;
+> the daemon's `memory_hygiene` sleep-tick task merges exact predicate-spelling
+> collisions, clears the single-valued backlog and repairs contradictions per
+> the per-akh `[memory] contradiction_policy` (`src/schema/{cardinality,canonical,hygiene}.rs`,
+> `DerivationKind::MemoryHygiene` tag 109, `kg_merge_predicates` +
+> `_akh/memory/{hygiene,merge_predicates}`; `kg_delete` is now live).
+> Slices 53a–53e, 53g step 1, 53h, 53i and 53j are implemented on `phase53/full-akh`;
 > 53f (the Roman cutover) is an operational runbook,
 > [`deploy/roman-mini/CUTOVER.md`](../../deploy/roman-mini/CUTOVER.md). Superseded by this: the `core-server` mentions
 > in `docs/wayfinder/agent-loops/implementation.md` and
@@ -78,7 +86,7 @@ crates/seshat/          — Seshat's Archive service: pgvector schema (SeaORM), 
 crates/akh-egraph-bench/ — Phase 40 wake-path measurement harness (e-graph re-saturation / HNSW rebuild / fork arms; subprocess-per-cell; JSON + markdown reports) — permanent measurement infra per ADR 084
 ├── reason/              3 modules — e-graph language (AkhLang), rewrite rules, second-order quantification (Phase 9n), anti-unification (Phase 10h)
 ├── simd/                5 modules — runtime SIMD kernel dispatch (AVX2 / generic)
-├── schema/              3 modules — ADR 081 schema packs: portable JSON source parser/validator (schema.org subset + Obsidian value types + is-a subtyping + onto: shapes), confirm-time compiler → native-triple bincode blob (`CompiledSchemaPack`, registry-row seam `SchemaRegistry`), per-akh install as microtheory with the global-immutable-type-name guard; `akh schema compile/show` CLI; seed pack `data/schema-packs/schema-org-core.json`
+├── schema/              ADR 081 schema packs (+ Phase 53j cardinality/aliases, structural predicate keys `canonical`, bounded self-repair pass `hygiene`): portable JSON source parser/validator (schema.org subset + Obsidian value types + is-a subtyping + onto: shapes), confirm-time compiler → native-triple bincode blob (`CompiledSchemaPack`, registry-row seam `SchemaRegistry`), per-akh install as microtheory with the global-immutable-type-name guard; `akh schema compile/show` CLI; seed pack `data/schema-packs/schema-org-core.json`
 ├── skills/              1 module  — skillpack lifecycle (Cold/Warm/Hot)
 ├── store/               3 modules — tiered storage (hot/warm/cold)
 ├── thinking/           10 modules — Phase 41 Thinking Engine (ADR 052): unified ThinkingLoop over existing primitives, ThoughtState (HyperVec focus + DS hypotheses + faithful trace), ThinkingBudget, schedulers (round-robin/weighted/goal-shape), CompositeVerifier (contradiction + evidence + source reliability + convergence), VocBudgetController (Phase 11g), ThoughtPersistence seam (41d Postgres deferred), 41f scaling-law bench harness
@@ -400,8 +408,10 @@ cutover, an operational runbook in
   not the akh's. Minting/revoking/listing is exposed over ACP
   `_akh/delegation/grant/{mint,revoke,list}`.
 - **Autonomy governor (53b, `src/agent/autonomy.rs`)**: autonomy is on by
-  default. `DaemonTask` is the typed registry of every background task (24
-  variants, including `Harvest`, `Reactor`, `SleepCycle`, `IdleCycle`).
+  default. `DaemonTask` is the typed registry of every background task (25
+  variants, including `Harvest`, `MemoryHygiene` (53j), `Reactor`,
+  `SleepCycle`, `IdleCycle`). The sleep tick runs `Harvest`, then
+  `MemoryHygiene`, then `SleepCycle`, each independent of the others' failure.
   `AutonomyGovernor` enforces a per-akh daily `AutonomyBudget`
   (`max_tokens_per_day = 250_000`, `max_turns_per_day = 40`, UTC day) in front
   of LLM-cost tasks (librarian, reactor `LlmTurn`, knowledge extraction,

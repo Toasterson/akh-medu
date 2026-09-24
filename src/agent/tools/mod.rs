@@ -24,6 +24,7 @@ pub mod http_fetch;
 pub mod infer_rules;
 pub mod inference_config;
 pub mod kg_delete;
+pub mod kg_merge_predicates;
 pub mod kg_mutate;
 pub mod kg_query;
 pub mod mcp;
@@ -78,6 +79,7 @@ pub use http_fetch::HttpFetchTool;
 pub use infer_rules::InferRulesTool;
 pub use inference_config::InferenceConfigTool;
 pub use kg_delete::KgDeleteTool;
+pub use kg_merge_predicates::KgMergePredicatesTool;
 pub use kg_mutate::KgMutateTool;
 pub use kg_query::KgQueryTool;
 pub use mcp::{

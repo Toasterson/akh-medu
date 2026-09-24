@@ -7647,7 +7647,7 @@ tags = []
             crate::provenance::DerivationKind::tag_for_name("not_a_kind"),
             None
         );
-        assert_eq!(crate::provenance::DerivationKind::KIND_NAMES.len(), 109);
+        assert_eq!(crate::provenance::DerivationKind::KIND_NAMES.len(), 110);
         assert_eq!(unix_seconds_to_iso8601(0), "1970-01-01T00:00:00Z");
         assert_eq!(unix_seconds_to_iso8601(951_782_400), "2000-02-29T00:00:00Z");
     }

@@ -267,62 +267,134 @@ reports, not as errors.
 
 ## 10. Memory hygiene
 
-What exists today (verified 2026-09-24 on the integration branch):
+Phase 53j (ADR 113) made memory hygiene part of the akh. Nothing in this step
+edits triples by hand:
 
-1. **Single-valued status predicates via a schema pack: NOT AVAILABLE.**
-   - The schema-pack source format (`src/schema/source.rs`, JSON) has no
-     cardinality or functional field.
-   - Installing a pack does not touch contradiction detection.
-   - `Engine::declare_functional` only reclassifies `TemporalConflict` as
-     `FunctionalViolation` (still reported). It is not persisted, and nothing
-     reaches it from ACP.
-   - The global `ContradictionPolicy::Replace` is not configurable.
+- **Single-valued predicates.** A schema pack can declare a relation
+  `"cardinality": "single_valued"` (optionally `"temporal": true`). The engine
+  enforces it on every write (`memory_write`, `kg_mutate`, …): the newest value
+  for a `(subject, predicate)` stays live and the older one is retracted
+  through the TMS, with `memory_hygiene` provenance naming its successor and,
+  for temporal predicates, when it stopped holding. These predicates no longer
+  log `TemporalConflict` warnings.
+- **Aliases.** A pack's `"aliases"` are other spellings of a relation. A write
+  under an alias is stored under the canonical relation.
+- **Daemon task `memory_hygiene`** (free, on by default, bounded by
+  `[memory] hygiene_batch`, default 1000 mutations per tick). It runs on every
+  sleep tick after harvest and does not depend on the sleep cycle succeeding.
+  Each pass does three things:
+  1. It merges exact spelling collisions (`next_check` / `next-check` /
+     `next check`: same case-folded key once whitespace, `-` and `_` are
+     unified) onto one canonical spelling. The canonical spelling is the one a
+     pack declares; if no pack declares one, the most frequent spelling wins,
+     with ties broken lexicographically.
+  2. It retracts the older values of every single-valued predicate.
+  3. It repairs contradictions on functional predicates per
+     `[memory] contradiction_policy`: `warn` (the default) only reports them,
+     `replace` keeps the newest value and `reject` keeps the oldest.
 
-   This needs a code change: a per-predicate cardinality in schema packs that
-   the engine enforces as supersede-on-write. File it as a follow-up WI under
-   `01a0d43b-bf90`. Until it lands, `TemporalConflict` warnings on
-   `observed state` and `next_check` continue.
-2. **Merge the `next_check` spellings** (`next_check`, `next-check`,
-   `next check` → `next_check`). No merge or alias tool exists; use ACP
-   data-plane verbs through the `akh` CLI built in step 1:
+  Everything else is only reported: declared aliases whose spelling does not
+  collide, ambiguous families, and undeclared predicates holding several
+  values. Each pass logs `memory hygiene pass` under target `akh::autonomy`.
+- **`kg_delete`** is now registered in the live tool registry, as is
+  **`kg_merge_predicates`**. Both are `Dangerous`, so `/v1` scopes do not
+  expose them unless a scope or grant names them.
+
+`deploy/roman-mini/schemas/roman-memory.json` declares 11 state predicates the
+Romans write (`next_check`, `next_action`, `planned_action`, `current_phase`,
+`current_state`, `has_state`, `observed_state`, `verified_state`,
+`boundary_state`, `state`, `status`) as single-valued and temporal, with their
+observed alias spellings. The evidence is in each relation's `description`.
+
+Use the `akh` CLI built in step 1:
+
+```sh
+akhc() { env AKH_SYSTEM_PATHS=0 XDG_CONFIG_HOME="$ROOT/core-config" XDG_DATA_HOME="$ROOT/core-data" \
+    XDG_STATE_HOME="$ROOT/core-state" XDG_CACHE_HOME="$ROOT/core-cache" XDG_RUNTIME_DIR="$ROOT/core-runtime" \
+    "$CARGO_TARGET_DIR/release/akh" "$@"; }
+```
+
+1. **Compile, review and admit the pack** once. It lands in the core store's
+   registry table, and admission is a human confirm (ADR 081 decision 8):
 
    ```sh
-   akhc() { env AKH_SYSTEM_PATHS=0 XDG_CONFIG_HOME="$ROOT/core-config" XDG_DATA_HOME="$ROOT/core-data" \
-       XDG_STATE_HOME="$ROOT/core-state" XDG_CACHE_HOME="$ROOT/core-cache" XDG_RUNTIME_DIR="$ROOT/core-runtime" \
-       "$CARGO_TARGET_DIR/release/akh" "$@"; }
+   akhc schema compile "$REPO/deploy/roman-mini/schemas/roman-memory.json" --out "$BK/roman-memory.akhschema"
+   akhc schema show "$BK/roman-memory.akhschema"            # review the triples
+   akhc schema admit "$BK/roman-memory.akhschema" --yes
+   ```
+
+2. **Install it into each Roman.** The activation is recorded, so a later
+   wake converges it again. From this point, new writes supersede and
+   canonicalize:
+
+   ```sh
+   for r in janus minerva vesta; do akhc -w $r schema install roman-memory@1.0.0; done
+   ```
+
+3. **Dry-run, then run the first hygiene pass now** instead of waiting for the
+   sleep tick. Repeat the real pass while its report says `"truncated": true`:
+
+   ```sh
    for r in janus minerva vesta; do
-     for p in 'next-check' 'next check'; do
-       id=$(akhc -w $r acp create-symbol "$p" --kind relation)     # resolves the existing relation's id
-       echo "$r $p $id"
-       akhc -w $r acp query "SELECT ?s ?o WHERE { ?s <https://akh-medu.dev/sym/ID> ?o }"   # replace ID
-     done
+     akhc -w $r schema hygiene --dry-run > "$BK/hygiene-$r-dry.json"
+     akhc -w $r schema hygiene           > "$BK/hygiene-$r.json"
    done
    ```
 
-   For every `(s, o)` row, resolve the labels with `akhc -w $r acp triples <s-id>`,
-   then run the following:
+4. **Fold in the declared aliases the daemon only reports**, for example
+   `has_next_check` → `next_check`. Their spellings do not collide, so the
+   merge is an explicit operator action:
 
    ```sh
-   akhc -w $r acp add-triple "<s>" next_check "<o>"
-   akhc -w $r acp remove-triple "<s>" "next-check" "<o>"     # or "next check"
+   for r in janus minerva vesta; do
+     akhc -w $r schema merge-predicates --declared --dry-run
+     akhc -w $r schema merge-predicates --declared > "$BK/merge-declared-$r.json"
+   done
    ```
 
-   `remove-triple` records a WAL `Retract` and cascades through the TMS. (The
-   `kg_delete` tool is **not** registered in the live registry, so the `/v1`
-   operator principal cannot retract.) Keep the list of changed triples in
-   `$BK/hygiene-next-check.txt`.
-3. **Contradiction repair: no entry point exists.** There is no daemon task,
-   ACP method or tool; contradictions are reported, not blocked. Manual
-   procedure:
+   To merge a pair that is neither declared nor colliding, use
+   `akhc -w <akh> schema merge-predicates --canonical <keep> --alias <fold> [--alias …]`
+   (the `kg_merge_predicates` tool and `_akh/memory/merge_predicates` ACP method
+   do the same).
 
-   ```sh
-   grep -h TemporalConflict "$ROOT"/logs/core.*.log | sort | uniq -c | sort -rn | head -50
-   ```
+5. **Verify.**
+   - The pass is idempotent. `akhc -w $r schema hygiene --dry-run` reports
+     `"mutations": 0`, `"truncated": false`, `"merged": []` and
+     `"pending_declared_aliases": []`.
+   - Each subject has exactly one live `next_check`. Get the relation id, then
+     look for subjects that still hold more than one value. Expect no rows:
 
-   For each subject and predicate listed, run
-   `akhc -w <akh> acp triples <subject>`. Keep the newest value and
-   `remove-triple` the stale ones. Record each removal in
-   `$BK/hygiene-contradictions.txt`. File a follow-up WI for a real repair task.
+     ```sh
+     for r in janus minerva vesta; do
+       id=$(akhc -w $r acp create-symbol next_check --kind relation)    # resolves the existing id
+       akhc -w $r acp query "SELECT ?s (COUNT(?o) AS ?n) WHERE { ?s <https://akh-medu.dev/sym/$id> ?o } GROUP BY ?s HAVING (COUNT(?o) > 1)"
+     done
+     ```
+
+   - The WAL shows the retractions:
+     `sqlite3 "$ROOT/state/core/akh.sqlite3" "select kind,count(*) from akhomed_mutation_log where applied_at > '<step-10 start, UTC>' group by kind;"`
+     returns `assert` and `retract_batch` rows.
+   - After the next sleep tick, `grep 'memory hygiene pass' "$ROOT"/logs/core.*.log`
+     shows one line per Roman with `mutations=0`, and the `TemporalConflict`
+     count for the declared predicates stops growing:
+     `grep TemporalConflict "$ROOT"/logs/core.*.log | grep -c next_check`.
+
+   Undeclared predicates that still hold several values per subject appear in
+   the report's `unresolved` list. If one of them is state, add it to the pack
+   under a new version, then admit and install it again.
+
+Expected result, from `tests/hygiene_accept.rs` run on a private copy of the
+2026-09-24 store (`AKH_HYGIENE_ACCEPT_DB=… cargo test --features server --test hygiene_accept -- --ignored --nocapture`):
+
+| akh | `next_check` family before | after | retracted | `memory_hygiene` provenance |
+|---|---|---|---|---|
+| janus | 262 triples, 5 spellings, 127 subjects (29 with 2–46 values) | 127, one per subject | 366 | 403 |
+| minerva | 125 triples, 4 spellings, 56 subjects (15 with 2–39 values) | 56, one per subject | 248 | 257 |
+| vesta | 103 triples, 6 spellings, 54 subjects (11 with 2–32 values) | 54, one per subject | 191 | 221 |
+
+A second pass is a no-op on all three akhs. A hygiene pass takes 1–3 s per akh.
+The `memory_hygiene` daemon task can be switched off per akh with
+`[autonomy] tasks = { memory_hygiene = false }`.
 
 ## 11. Retire the old paths (after 24 h and acceptance)
 
@@ -394,5 +466,9 @@ are identical copies of `t3_entrypoint.py`.
    side-effecting tools, as today. Vesta's GitOps and homelab actions stay on
    the `vesta-ops` MCP broker. Provisioning an akhsbxd/akhexecd profile is a
    separate step.
-7. **Hygiene gaps** (step 10): per-predicate single-valued schemas and
-   contradiction repair need code. File the WIs before declaring 53f done.
+7. **Contradiction policy** (step 10). The Romans keep the default
+   `[memory] contradiction_policy = "warn"`. Once the state predicates are
+   declared single-valued, the remaining contradictions are on undeclared
+   predicates. Decide whether to switch an akh to `replace` (keep the newest
+   value) or `reject` (refuse conflicting writes). Either choice also changes
+   how hygiene repairs functional predicates.
