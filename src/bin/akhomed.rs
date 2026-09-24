@@ -2811,12 +2811,27 @@ impl ServerState {
                     }
                 };
 
-                if Agent::has_persisted_session(&engine) {
+                let agent = if Agent::has_persisted_session(&engine) {
                     Agent::resume_with_exec_wiring(engine, config, exec_wiring)
                 } else {
                     Agent::with_exec_wiring(engine, config, exec_wiring)
                 }
-                .map_err(|e| format!("failed to create agent: {e}"))
+                .map_err(|e| format!("failed to create agent: {e}"))?;
+
+                // Phase 53i (ADR 113 D9): the akh's own static MCP servers.
+                // Blocking discovery, so it runs here in the blocking task;
+                // never fatal (unreachable servers are retried lazily).
+                if !akh_config.mcp.servers.is_empty() {
+                    let report = agent.attach_mcp_servers(&akh_config.mcp.servers);
+                    tracing::info!(
+                        target: "akh::mcp",
+                        workspace = %name,
+                        servers = report.servers.len(),
+                        tools = report.registered_tools(),
+                        "static MCP servers attached"
+                    );
+                }
+                Ok(agent)
             }
         })
         .await

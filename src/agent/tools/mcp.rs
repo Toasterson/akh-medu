@@ -653,6 +653,249 @@ impl Tool for McpCallTool {
     }
 }
 
+// ── Shared MCP tool adaptation ────────────────────────────────────────────────
+//
+// One remote MCP tool descriptor (`tools/list` entry) adapted to the akh's
+// `Tool` surface. Shared by the ACP bridge (client-pushed servers,
+// `acp::mcp_bridge`) and the static per-akh servers (`mcp_static`, Phase 53i)
+// so both proxy the same way: exact parameter schemas preserved, LLM string
+// arguments coerced back to the JSON type the server declares.
+
+/// Behaviour hints a server attaches to a tool (MCP `ToolAnnotations`).
+///
+/// These are *hints from the remote server*, not guarantees: the akh only
+/// uses them to soften its own classification (a `readOnlyHint` tool is
+/// `Cautious` instead of `Dangerous`), never to grant anything.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct McpToolAnnotations {
+    /// `readOnlyHint`: the tool does not modify its environment.
+    pub read_only_hint: Option<bool>,
+    /// `destructiveHint`: the tool may perform destructive updates.
+    pub destructive_hint: Option<bool>,
+    /// `idempotentHint`: repeated calls with the same arguments have no extra effect.
+    pub idempotent_hint: Option<bool>,
+    /// `openWorldHint`: the tool interacts with external entities.
+    pub open_world_hint: Option<bool>,
+}
+
+impl McpToolAnnotations {
+    fn parse(value: &Value) -> Self {
+        let hint = |key: &str| value.get(key).and_then(Value::as_bool);
+        Self {
+            read_only_hint: hint("readOnlyHint"),
+            destructive_hint: hint("destructiveHint"),
+            idempotent_hint: hint("idempotentHint"),
+            open_world_hint: hint("openWorldHint"),
+        }
+    }
+}
+
+/// One parameter of a remote MCP tool, carrying enough type information to
+/// coerce the LLM's string argument back to the JSON type the server wants.
+#[derive(Debug, Clone)]
+pub struct McpToolParam {
+    /// Property name in the tool's `inputSchema`.
+    pub name: String,
+    /// JSON Schema `type` string (`"string"`, `"integer"`, `"number"`,
+    /// `"boolean"`, `"array"`, `"object"`); anything else is passed through
+    /// as a string.
+    pub ty: String,
+    /// Whether the property is listed in `inputSchema.required`.
+    pub required: bool,
+    /// Property description, if any.
+    pub description: String,
+    /// Exact property schema advertised by the remote server. Keeping this
+    /// intact is required for arrays/objects; flattening to a type string
+    /// teaches the model a contract the upstream does not have.
+    pub schema: Value,
+}
+
+/// A remote MCP tool descriptor (`{name, description, inputSchema, annotations}`)
+/// parsed into the pieces the akh's proxy tools need.
+#[derive(Debug, Clone)]
+pub struct McpToolDescriptor {
+    /// Tool name as the remote server knows it.
+    pub remote_name: String,
+    /// Remote description (may be empty).
+    pub description: String,
+    /// Parameters from `inputSchema.properties`.
+    pub params: Vec<McpToolParam>,
+    /// Server-declared behaviour hints.
+    pub annotations: McpToolAnnotations,
+}
+
+impl McpToolDescriptor {
+    /// Parse one raw `tools/list` entry. Returns `None` if it has no usable name.
+    pub fn parse(descriptor: &Value) -> Option<Self> {
+        let remote_name = descriptor.get("name")?.as_str()?.to_string();
+        if remote_name.is_empty() {
+            return None;
+        }
+        let description = descriptor["description"].as_str().unwrap_or("").to_string();
+
+        let required: HashSet<String> = descriptor["inputSchema"]["required"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let params = descriptor["inputSchema"]["properties"]
+            .as_object()
+            .map(|props| {
+                props
+                    .iter()
+                    .map(|(pname, pschema)| McpToolParam {
+                        name: pname.clone(),
+                        ty: pschema["type"].as_str().unwrap_or("string").to_string(),
+                        required: required.contains(pname),
+                        description: pschema["description"].as_str().unwrap_or("").to_string(),
+                        schema: pschema.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Some(Self {
+            remote_name,
+            description,
+            params,
+            annotations: descriptor
+                .get("annotations")
+                .map(McpToolAnnotations::parse)
+                .unwrap_or_default(),
+        })
+    }
+
+    /// Whether the server declared the tool read-only (`readOnlyHint: true`).
+    pub fn is_read_only(&self) -> bool {
+        self.annotations.read_only_hint == Some(true)
+    }
+
+    /// Build the remote JSON argument object without flattening structured
+    /// values. Native arrays/objects pass through unchanged; string-valued
+    /// arguments get bounded scalar/JSON coercion by the declared type.
+    /// Arguments the descriptor does not declare are dropped.
+    pub fn build_args(&self, input: &ToolInput) -> Value {
+        let mut args = serde_json::Map::new();
+        for p in &self.params {
+            let Some(raw) = input.get_value(&p.name) else {
+                continue;
+            };
+            args.insert(p.name.clone(), coerce_schema_value(raw, &p.ty));
+        }
+        Value::Object(args)
+    }
+
+    /// The akh-facing signature under `tool_name`.
+    pub fn signature(&self, tool_name: &str) -> ToolSignature {
+        ToolSignature {
+            name: tool_name.to_string(),
+            description: self.description.clone(),
+            parameters: self
+                .params
+                .iter()
+                .map(|p| ToolParam {
+                    name: p.name.clone(),
+                    description: p.description.clone(),
+                    required: p.required,
+                })
+                .collect(),
+        }
+    }
+
+    /// Manifest parameter schemas, preserving each property's exact schema.
+    pub fn param_schemas(&self) -> Vec<ToolParamSchema> {
+        self.params
+            .iter()
+            .map(|p| ToolParamSchema {
+                name: p.name.clone(),
+                description: p.description.clone(),
+                required: p.required,
+                param_type: p.ty.clone(),
+                schema: Some(p.schema.clone()),
+            })
+            .collect()
+    }
+}
+
+/// Coerce a (possibly string-valued) argument to the JSON type `ty`.
+/// Non-string values and unparseable strings are passed through unchanged.
+pub fn coerce_schema_value(raw: &Value, ty: &str) -> Value {
+    let Value::String(text) = raw else {
+        return raw.clone();
+    };
+    match ty {
+        "integer" => text
+            .parse::<i64>()
+            .map(Value::from)
+            .unwrap_or_else(|_| raw.clone()),
+        "number" => text
+            .parse::<f64>()
+            .map(Value::from)
+            .unwrap_or_else(|_| raw.clone()),
+        "boolean" => text
+            .parse::<bool>()
+            .map(Value::from)
+            .unwrap_or_else(|_| raw.clone()),
+        "array" => serde_json::from_str::<Value>(text)
+            .ok()
+            .filter(Value::is_array)
+            .unwrap_or_else(|| raw.clone()),
+        "object" => serde_json::from_str::<Value>(text)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| raw.clone()),
+        _ => raw.clone(),
+    }
+}
+
+/// Render an MCP `CallToolResult` as the text the akh sees.
+///
+/// Text content items are joined with newlines; embedded text resources are
+/// included; other content (images, audio, resource links) is summarised by
+/// type. When there is no textual content at all, `structuredContent` is
+/// rendered as pretty JSON. An empty result renders as an empty string.
+pub fn render_call_result(result: &Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for item in result["content"].as_array().into_iter().flatten() {
+        match item["type"].as_str() {
+            Some("text") => {
+                if let Some(text) = item["text"].as_str() {
+                    parts.push(text.to_string());
+                }
+            }
+            Some("resource") => match item["resource"]["text"].as_str() {
+                Some(text) => parts.push(text.to_string()),
+                None => parts.push(format!(
+                    "[resource {}]",
+                    item["resource"]["uri"].as_str().unwrap_or("(no uri)")
+                )),
+            },
+            Some("resource_link") => parts.push(format!(
+                "[resource link {}]",
+                item["uri"].as_str().unwrap_or("(no uri)")
+            )),
+            Some(other) => parts.push(format!(
+                "[{other} content{}]",
+                item["mimeType"]
+                    .as_str()
+                    .map(|m| format!(" ({m})"))
+                    .unwrap_or_default()
+            )),
+            None => {}
+        }
+    }
+    if parts.is_empty()
+        && let Some(structured) = result.get("structuredContent").filter(|v| !v.is_null())
+    {
+        return serde_json::to_string_pretty(structured).unwrap_or_default();
+    }
+    parts.join("\n")
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1113,5 +1356,64 @@ mod tests {
         let m = tool.manifest();
         assert_eq!(m.danger.level, DangerLevel::Dangerous);
         assert!(m.danger.capabilities.contains(&Capability::Network));
+    }
+
+    // ── Shared descriptor adaptation ─────────────────────────────────────────
+
+    #[test]
+    fn descriptor_parses_annotations_and_params() {
+        let d = McpToolDescriptor::parse(&json!({
+            "name": "list_projects",
+            "description": "List projects",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "page_size": {"type": "integer", "description": "max"},
+                    "tags": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["page_size"]
+            },
+            "annotations": {"readOnlyHint": true, "openWorldHint": false}
+        }))
+        .expect("descriptor");
+        assert_eq!(d.remote_name, "list_projects");
+        assert!(d.is_read_only());
+        assert_eq!(d.annotations.open_world_hint, Some(false));
+        assert_eq!(d.annotations.destructive_hint, None);
+        let args = d.build_args(
+            &ToolInput::new()
+                .with_param("page_size", "5")
+                .with_param("unknown", "dropped")
+                .with_value("tags", json!(["a"])),
+        );
+        assert_eq!(args, json!({"page_size": 5, "tags": ["a"]}));
+        let schemas = d.param_schemas();
+        let tags = schemas.iter().find(|p| p.name == "tags").unwrap();
+        assert_eq!(tags.schema.as_ref().unwrap()["items"]["type"], "string");
+    }
+
+    #[test]
+    fn descriptor_without_annotations_is_not_read_only() {
+        let d = McpToolDescriptor::parse(&json!({"name": "write"})).unwrap();
+        assert!(!d.is_read_only());
+        assert!(McpToolDescriptor::parse(&json!({"name": ""})).is_none());
+    }
+
+    #[test]
+    fn render_call_result_prefers_text_then_structured() {
+        let text = render_call_result(&json!({
+            "content": [
+                {"type": "text", "text": "a"},
+                {"type": "image", "mimeType": "image/png", "data": "xx"},
+                {"type": "resource", "resource": {"uri": "u", "text": "b"}}
+            ]
+        }));
+        assert_eq!(text, "a\n[image content (image/png)]\nb");
+        let structured = render_call_result(&json!({
+            "content": [],
+            "structuredContent": {"ok": true}
+        }));
+        assert!(structured.contains("\"ok\": true"));
+        assert_eq!(render_call_result(&Value::Null), "");
     }
 }
