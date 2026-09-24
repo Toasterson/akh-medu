@@ -87,7 +87,12 @@ fn assert_singleton_fact(
     for existing in engine.triples_from(s) {
         if existing.predicate == p
             && existing.object != o
-            && let Err(e) = engine.remove_triple(s, p, existing.object)
+            && let Err(e) = engine.remove_triple_scoped(
+                s,
+                p,
+                existing.object,
+                crate::tms::RetractionScope::CascadeIfOrphaned,
+            )
         {
             tracing::warn!(error = %e, subject, predicate, "daemon: failed to retract stale curation fact");
         }
