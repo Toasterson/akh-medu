@@ -31,7 +31,11 @@ import plistlib
 import secrets
 import shutil
 import sys
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11 (macOS /usr/bin/python3 is 3.9)
+    tomllib = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import full_akh as fa  # noqa: E402
@@ -94,6 +98,12 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
 
     for role in fa.ROLES:
         path = root / f"core-config/akh-medu/workspaces/{role}.toml"
+        if tomllib is None:
+            raise SystemExit(
+                "configure_core.py needs Python >= 3.11 (tomllib) to read the existing "
+                f"workspace TOMLs; this is {sys.version.split()[0]}. Run it with "
+                "/opt/homebrew/bin/python3 (cutover.sh selects one automatically)."
+            )
         existing = tomllib.loads(path.read_text()) if path.exists() else None
         servers, server_warnings = fa.mcp_servers(session, role)
         warnings.extend(server_warnings)

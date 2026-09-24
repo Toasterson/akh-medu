@@ -12,9 +12,15 @@ import re
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
 import unittest.mock
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11: the CI runner has 3.10
+    tomllib = None
+
+NEEDS_TOMLLIB = unittest.skipIf(tomllib is None, "needs Python >= 3.11 (tomllib)")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import configure_core  # noqa: E402
@@ -101,6 +107,7 @@ def fixture(root: Path) -> None:
         '[autonomy]\nenabled = false\ntasks = {}\n[mcp]\nrequire_pushed_mcp = false\n[exec]\nkind = "none"\n')
 
 
+@NEEDS_TOMLLIB
 class RenderTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -309,6 +316,7 @@ class PrivateWriteTests(unittest.TestCase):
         self.assertEqual(path.read_text(), '{"old": true}\n')
         self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["events.json"])
 
+    @NEEDS_TOMLLIB
     def test_render_keeps_secrets_private(self):
         fixture(self.root)
         (self.root / "secrets").chmod(0o755)
@@ -347,6 +355,7 @@ class ProvenanceTests(unittest.TestCase):
                 fa.main_provenance(repo, fetch=False)
 
 
+@NEEDS_TOMLLIB
 class TomlWriterTests(unittest.TestCase):
     def test_round_trips_escapes_and_inline_tables(self):
         doc = {"s": 'quote " back \\ tab\t del\x7f nl\n é', "n": 3, "b": False,

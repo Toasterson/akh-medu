@@ -25,6 +25,8 @@ AGENTS="$OWNER_HOME/Library/LaunchAgents"
 DAEMONS=/Library/LaunchDaemons
 QUIET_TIMEOUT_SECS="${QUIET_TIMEOUT_SECS:-1200}"
 DRY_RUN="${DRY_RUN:-0}"
+# configure_core.py needs tomllib (Python >= 3.11); macOS /usr/bin/python3 is 3.9.
+PY="${PY:-/opt/homebrew/bin/python3}"
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
 run() { log "+ $*"; [ "$DRY_RUN" = 1 ] || "$@"; }
@@ -44,6 +46,7 @@ owner git -C "$REPO" fetch -q origin
 SHA="$(owner git -C "$REPO" rev-parse --short=12 HEAD)"
 owner git -C "$REPO" merge-base --is-ancestor HEAD origin/main || die "HEAD $SHA is not on origin/main"
 log "provenance: $REPO is clean and HEAD $SHA is on origin/main"
+"$PY" -c 'import sys; sys.exit(sys.version_info < (3, 11))' || die "$PY is older than Python 3.11; set PY=/path/to/python3.11+"
 for b in akhomed akh-acp akheventd akhsessd akhrtd akhsbxd akhexecd akh-trigger; do
   [ -x "$BIN_DIR/$b" ] || die "missing $BIN_DIR/$b (run CUTOVER.md step 1)"
 done
@@ -57,7 +60,7 @@ if [ "$DRY_RUN" != 1 ]; then
   deadline=$(( $(date +%s) + QUIET_TIMEOUT_SECS ))
   while :; do
     running="$(curl -s -H "Authorization: Bearer $(cat "$ROOT/secrets/operator.key")" \
-      'http://127.0.0.1:18431/v1/sessions?compact=true' | python3 -c \
+      'http://127.0.0.1:18431/v1/sessions?compact=true' | "$PY" -c \
       'import json,sys; s=json.load(sys.stdin); r=[x.get("id") for x in s if x.get("status")=="running"]; print(len(r))')"
     [ "$running" = 0 ] && break
     [ "$(date +%s)" -lt "$deadline" ] || die "$running turn(s) still running after ${QUIET_TIMEOUT_SECS}s; admission stays paused, re-run later"
@@ -83,8 +86,8 @@ for f in t3_entrypoint.py roman-janus daemon_credentials.py observer.py; do as_o
 
 # --- step 4: install binaries and render the full-akh configuration ----------
 log "step 4: render configuration and install binaries from $SHA"
-as_owner python3 "$REPO/deploy/roman-mini/configure_core.py" --root "$ROOT" --binaries "$BIN_DIR" --repo "$REPO" --no-fetch
-as_owner python3 -c 'import tomllib,sys;[tomllib.load(open(p,"rb")) for p in sys.argv[1:]];print("toml ok")' \
+as_owner "$PY" "$REPO/deploy/roman-mini/configure_core.py" --root "$ROOT" --binaries "$BIN_DIR" --repo "$REPO" --no-fetch
+as_owner "$PY" -c 'import tomllib,sys;[tomllib.load(open(p,"rb")) for p in sys.argv[1:]];print("toml ok")' \
   "$ROOT/core-config/akh-medu/config.toml" "$ROOT"/core-config/akh-medu/workspaces/{janus,minerva,vesta}.toml
 for b in akheventd akhsessd akhrtd akhsbxd akhexecd akh-trigger; do
   as_owner cp -p "$ROOT/bin/$b" "$BK/$b.pre-phase53"
@@ -111,12 +114,12 @@ run launchctl kickstart -k system/dev.roman-akhs.executor
 
 # --- step 7: reactor seeds ------------------------------------------------------
 log "step 7: apply and enable reactor seeds"
-as_owner python3 "$REPO/deploy/roman-mini/apply_reactor_seeds.py" "$ROOT"
-as_owner python3 "$REPO/deploy/roman-mini/apply_reactor_seeds.py" "$ROOT" --enable
+as_owner "$PY" "$REPO/deploy/roman-mini/apply_reactor_seeds.py" "$ROOT"
+as_owner "$PY" "$REPO/deploy/roman-mini/apply_reactor_seeds.py" "$ROOT" --enable
 
 # --- step 8: re-target events and resume admission ---------------------------
 log "step 8: re-target events, resume admission"
-as_owner python3 "$REPO/deploy/roman-mini/retarget_events.py" "$ROOT"
+as_owner "$PY" "$REPO/deploy/roman-mini/retarget_events.py" "$ROOT"
 run launchctl bootstrap system "$DAEMONS/dev.roman-akhs.events.plist"
 run launchctl bootstrap "$GUI" "$AGENTS/dev.roman-akhs.observer.plist"
 run launchctl bootstrap "$GUI" "$AGENTS/dev.roman-akhs.laya-controller.plist"
