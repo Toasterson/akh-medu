@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::source::{PackScope, SchemaPackSource, parse_source};
+use super::source::{Cardinality, PackScope, SchemaPackSource, parse_source};
 use super::{SchemaError, SchemaResult};
 
 // ---------------------------------------------------------------------------
@@ -37,6 +37,19 @@ pub const ARITY_2: &str = "onto:arity/2";
 pub const PRED_ARG1_TYPE: &str = "onto:arg1type";
 /// `(r, onto:arg2type, T)` — required object type (matches `ArityPredicates`).
 pub const PRED_ARG2_TYPE: &str = "onto:arg2type";
+
+/// `(r, onto:cardinality, onto:cardinality/…)` — declared cardinality of a
+/// relation (Phase 53j). Absent means multi-valued.
+pub const PRED_CARDINALITY: &str = "onto:cardinality";
+/// Cardinality value: one live object per subject, newest supersedes.
+pub const CARDINALITY_SINGLE_VALUED: &str = "onto:cardinality/single-valued";
+/// Cardinality value: single-valued, and superseded values are history
+/// (they stopped holding when the successor was asserted).
+pub const CARDINALITY_SINGLE_VALUED_TEMPORAL: &str = "onto:cardinality/single-valued-temporal";
+/// `(alias, onto:alias-of, r)` — `alias` is another spelling of relation `r`
+/// (Phase 53j; the same edge ADR 081 promotion records for aliased
+/// frontier terms).
+pub const PRED_ALIAS_OF: &str = "onto:alias-of";
 
 /// Current blob format version. Bump on any incompatible change to
 /// [`CompiledSchemaPack`]'s layout.
@@ -173,6 +186,25 @@ fn lower(source: &SchemaPackSource, source_text: &str) -> CompiledSchemaPack {
         }
         if let Some(ref t2) = r.arg2_type {
             triples.push(PortableTriple::new(&r.name, PRED_ARG2_TYPE, t2));
+        }
+        // Phase 53j: cardinality + aliases. Multi-valued is the absence of a
+        // cardinality triple, so packs without these fields compile to the
+        // exact same triples (and the same checksums) as before.
+        match (r.cardinality, r.temporal) {
+            (Cardinality::Multi, _) => {}
+            (Cardinality::SingleValued, false) => triples.push(PortableTriple::new(
+                &r.name,
+                PRED_CARDINALITY,
+                CARDINALITY_SINGLE_VALUED,
+            )),
+            (Cardinality::SingleValued, true) => triples.push(PortableTriple::new(
+                &r.name,
+                PRED_CARDINALITY,
+                CARDINALITY_SINGLE_VALUED_TEMPORAL,
+            )),
+        }
+        for alias in &r.aliases {
+            triples.push(PortableTriple::new(alias, PRED_ALIAS_OF, &r.name));
         }
     }
 
@@ -361,6 +393,37 @@ mod tests {
         assert!(has("worksFor", PRED_ARITY, ARITY_2));
         assert!(has("worksFor", PRED_ARG1_TYPE, "Person"));
         assert!(has("worksFor", PRED_ARG2_TYPE, "Organization"));
+    }
+
+    #[test]
+    fn cardinality_and_aliases_lower_to_native_triples() {
+        let pack = compile(
+            r#"{"pack": {"name": "card", "version": "1"},
+                "relations": [
+                  {"name": "next_check", "cardinality": "single_valued", "temporal": true,
+                   "aliases": ["next-check"]},
+                  {"name": "owner", "cardinality": "single_valued"},
+                  {"name": "tag"}]}"#,
+        )
+        .unwrap();
+        let has = |s: &str, p: &str, o: &str| {
+            pack.triples
+                .iter()
+                .any(|t| t.subject == s && t.predicate == p && t.object == o)
+        };
+        assert!(has(
+            "next_check",
+            PRED_CARDINALITY,
+            CARDINALITY_SINGLE_VALUED_TEMPORAL
+        ));
+        assert!(has("owner", PRED_CARDINALITY, CARDINALITY_SINGLE_VALUED));
+        assert!(has("next-check", PRED_ALIAS_OF, "next_check"));
+        assert!(
+            !pack
+                .triples
+                .iter()
+                .any(|t| t.subject == "tag" && t.predicate == PRED_CARDINALITY)
+        );
     }
 
     #[test]

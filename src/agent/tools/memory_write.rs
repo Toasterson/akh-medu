@@ -386,6 +386,78 @@ mod tests {
         assert!(!recent.is_empty(), "episode should be recallable");
     }
 
+    /// Phase 53j: once a schema pack declares `status` single-valued, a
+    /// status update through `memory_write` supersedes the previous value
+    /// (retracted, with `memory_hygiene` provenance) instead of piling up as
+    /// a contradiction; an alias spelling lands on the canonical predicate.
+    #[test]
+    fn single_valued_status_update_supersedes_with_provenance() {
+        use crate::provenance::{DerivationKind, HygieneAction};
+
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap();
+        let pack = crate::schema::compile(
+            r#"{"pack": {"name": "mw-status", "version": "1"},
+                "relations": [{"name": "status", "cardinality": "single_valued",
+                               "temporal": true, "aliases": ["has-status"]}]}"#,
+        )
+        .unwrap();
+        crate::schema::install_pack(&engine, &pack).unwrap();
+        let tool = MemoryWriteTool::new(AgentPredicates::init(&engine).unwrap());
+        let write = |summary: &str, predicate: &str, object: &str| {
+            let out = tool
+                .execute(
+                    &engine,
+                    ToolInput::new().with_value("summary", summary).with_value(
+                        "facts",
+                        json!([{"subject": "alert-7", "predicate": predicate, "object": object}]),
+                    ),
+                )
+                .unwrap();
+            assert!(out.success, "{}", out.result);
+        };
+        write("alert opened", "status", "firing");
+        write("alert resolved", "has-status", "resolved");
+
+        let alert = engine.lookup_symbol("alert-7").unwrap();
+        let status = engine.lookup_symbol("status").unwrap();
+        let live: Vec<String> = engine
+            .triples_from(alert)
+            .into_iter()
+            .filter(|t| t.predicate == status)
+            .map(|t| engine.resolve_label(t.object))
+            .collect();
+        assert_eq!(live, vec!["resolved"]);
+        let has_status = engine.lookup_symbol("has-status").unwrap();
+        assert!(engine.triples_with_predicate(has_status).is_empty());
+
+        let firing = engine.lookup_symbol("firing").unwrap();
+        let resolved = engine.lookup_symbol("resolved").unwrap();
+        assert!(engine.tms().was_retracted(firing));
+        let records = engine.provenance_of(firing).unwrap();
+        assert!(records.iter().any(|r| matches!(
+            r.kind,
+            DerivationKind::MemoryHygiene {
+                action: HygieneAction::SingleValuedSupersede,
+                successor,
+                valid_until: Some(_),
+                ..
+            } if successor == resolved
+        )));
+        // No contradiction is left for the old value.
+        assert!(
+            engine
+                .check_contradictions(&crate::graph::Triple::new(alert, status, resolved))
+                .iter()
+                .all(|c| c.existing.object != firing)
+        );
+    }
+
     #[test]
     fn re_running_same_source_is_idempotent() {
         let engine = test_engine();

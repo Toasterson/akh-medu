@@ -549,6 +549,7 @@ impl ServerState {
     /// cannot disagree with the executor actually in use. An unreadable
     /// `akh.toml` falls back to the default autonomy (on, budgeted) and the
     /// host executor. Phase 53 fix-up: also the akh's own `[board]` identity.
+    /// Phase 53j: also the akh's `[memory]` (hygiene batch bound).
     async fn daemon_settings(&self, name: &str) -> DaemonAkhSettings {
         use akh_medu::agent::autonomy::ExecPlacement;
         let host_exec = self.config.read().await.exec.clone();
@@ -557,11 +558,13 @@ impl ServerState {
                 autonomy: cfg.autonomy.clone(),
                 exec: ExecPlacement::from(&cfg.effective_exec(host_exec.as_ref())),
                 board: cfg.board.clone(),
+                memory: cfg.memory,
             },
             Err(_) => DaemonAkhSettings {
                 autonomy: akh_medu::akh_config::AutonomyConfig::default(),
                 exec: ExecPlacement::from(&host_exec.unwrap_or_default()),
                 board: None,
+                memory: akh_medu::akh_config::MemoryConfig::default(),
             },
         }
     }
@@ -1998,6 +2001,132 @@ impl ServerState {
         }))
     }
 
+    /// Run one memory-hygiene pass on a workspace now (`_akh/memory/hygiene`,
+    /// Phase 53j): the same bounded pass the daemon runs on every sleep tick.
+    /// Params: `workspace` (required), `dry_run` (default false),
+    /// `max_mutations` (default: the akh's `[memory] hygiene_batch`).
+    async fn memory_hygiene(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let batch = match params
+            .get("max_mutations")
+            .and_then(serde_json::Value::as_u64)
+        {
+            Some(max) => usize::try_from(max).unwrap_or(usize::MAX),
+            None => self
+                .get_akh_config(ws)
+                .await
+                .map(|cfg| cfg.memory.hygiene_batch)
+                .unwrap_or(akh_medu::schema::DEFAULT_HYGIENE_BATCH),
+        };
+        let dry_run = params
+            .get("dry_run")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let engine = self.get_engine(ws).await?;
+        let report = tokio::task::spawn_blocking(move || {
+            let mut options = akh_medu::schema::HygieneOptions::for_engine(&engine, batch);
+            options.dry_run = dry_run;
+            akh_medu::schema::run_hygiene(&engine, options)
+        })
+        .await
+        .map_err(|e| format!("hygiene task panicked: {e}"))?
+        .map_err(|e| format!("memory hygiene failed: {e}"))?;
+        tracing::info!(
+            target: "akh::autonomy",
+            workspace = %ws,
+            dry_run,
+            merged_triples = report.merged_triples(),
+            superseded = report.superseded,
+            repaired = report.repaired,
+            mutations = report.mutations,
+            truncated = report.truncated,
+            "memory hygiene pass (control plane)"
+        );
+        serde_json::to_value(report).map_err(|e| format!("could not encode hygiene report: {e}"))
+    }
+
+    /// Merge predicate spellings (`_akh/memory/merge_predicates`, Phase 53j).
+    /// Params: `workspace` (required); `mode` = `explicit` (default, needs
+    /// `canonical` + `aliases`), `declared` or `collisions`; `dry_run`;
+    /// `limit` (default 10000 triples).
+    async fn memory_merge_predicates(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        use akh_medu::schema::{MergeRequest, MergeSelection};
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let selection = match params
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("explicit")
+        {
+            "explicit" => MergeSelection::Explicit {
+                canonical: params
+                    .get("canonical")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        "explicit mode needs `canonical` and `aliases` (or use mode=declared / \
+                         mode=collisions)"
+                            .to_string()
+                    })?
+                    .to_string(),
+                aliases: params
+                    .get("aliases")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            },
+            "declared" => MergeSelection::Declared,
+            "collisions" => MergeSelection::Collisions,
+            other => {
+                return Err(format!(
+                    "unknown merge mode \"{other}\": use explicit, declared or collisions"
+                ));
+            }
+        };
+        let request = MergeRequest {
+            selection,
+            dry_run: params
+                .get("dry_run")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            limit: params
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .map(|l| usize::try_from(l).unwrap_or(usize::MAX))
+                .unwrap_or(akh_medu::schema::DEFAULT_MERGE_LIMIT),
+        };
+        let engine = self.get_engine(ws).await?;
+        let outcome =
+            tokio::task::spawn_blocking(move || akh_medu::schema::execute_merge(&engine, &request))
+                .await
+                .map_err(|e| format!("merge task panicked: {e}"))?
+                .map_err(|e| format!("predicate merge failed: {e}"))?;
+        tracing::info!(
+            workspace = %ws,
+            moved = outcome.moved,
+            canonicals = outcome.merged.len(),
+            dry_run = outcome.dry_run,
+            truncated = outcome.truncated,
+            "predicate merge (control plane)"
+        );
+        serde_json::to_value(outcome).map_err(|e| format!("could not encode merge outcome: {e}"))
+    }
+
     /// Report the in-force schema for a workspace's engine — every declared
     /// type with its effective (inherited-included) property shape, and
     /// every declared relation (`_akh/schema/digest`, ADR 081 Slice 3
@@ -2737,9 +2866,13 @@ impl ServerState {
         // is on, `effective_read_roots()` adds `~/.openclaw` so the agent's
         // `LocalFs` can read the akh's own OpenClaw past life (read-only; writes
         // still stay confined to `scratch/`). No config / legacy TOML → empty.
-        let extra_read_roots = AkhConfig::load(&self.paths.workspace_config_file(name))
+        let akh_config = AkhConfig::load(&self.paths.workspace_config_file(name)).ok();
+        let extra_read_roots = akh_config
+            .as_ref()
             .map(|c| c.effective_read_roots())
             .unwrap_or_default();
+        // Phase 53j: the per-akh `[memory] contradiction_policy`.
+        let memory = akh_config.map(|c| c.memory).unwrap_or_default();
 
         let config = EngineConfig {
             dimension: Dimension::DEFAULT,
@@ -2754,8 +2887,18 @@ impl ServerState {
             ..Default::default()
         };
 
-        let engine =
+        let mut engine =
             Engine::new(config).map_err(|e| format!("failed to open workspace \"{name}\": {e}"))?;
+        if memory.contradiction_policy != engine.phase9_config().contradiction_policy {
+            let mut phase9 = engine.phase9_config().clone();
+            phase9.contradiction_policy = memory.contradiction_policy;
+            engine.set_phase9_config(phase9);
+            tracing::info!(
+                workspace = %name,
+                policy = memory.contradiction_policy.as_str(),
+                "contradiction policy set from [memory]"
+            );
+        }
 
         // Wire audit broadcast sender so WS clients receive live entries.
         if let Some(ledger) = engine.audit_ledger() {
@@ -3737,6 +3880,8 @@ struct DaemonAkhSettings {
     exec: akh_medu::agent::autonomy::ExecPlacement,
     /// The akh's own Agent Board identity; `None` = process env fallback.
     board: Option<akh_medu::agent::djehuty::BoardConfig>,
+    /// `[memory]` hygiene settings (Phase 53j).
+    memory: akh_medu::akh_config::MemoryConfig,
 }
 
 /// Background daemon task: delegates to [`AgentDaemon`] for the full set of
@@ -3765,6 +3910,7 @@ async fn run_daemon_task(
         .with_autonomy(settings.autonomy)
         .with_exec_placement(settings.exec)
         .with_board_config(settings.board)
+        .with_memory(settings.memory)
         .with_workspace(ws_name.clone())
         .with_shutdown(shutdown_rx)
         .with_status(Arc::clone(&status))
@@ -4278,6 +4424,10 @@ impl akh_medu::acp::ServerControl for ServerState {
                 "goal/update" => self.goal_update(params).await,
                 "goal/cancel" => self.goal_cancel(params).await,
                 "goal/prioritize" => self.goal_prioritize(params).await,
+
+                // ── memory hygiene (Phase 53j, ADR 113) ───────────────────
+                "memory/hygiene" => self.memory_hygiene(params).await,
+                "memory/merge_predicates" => self.memory_merge_predicates(params).await,
 
                 // ── delegation grants (Phase 53e, ADR 113 D9) ─────────────
                 #[cfg(feature = "core-api")]
@@ -5229,6 +5379,89 @@ mod control_plane_tests {
         paths.ensure_dirs().expect("ensure dirs");
         let state = ServerState::new(paths, AkhomedConfig::default(), None);
         (tmp, state)
+    }
+
+    /// Phase 53j: `_akh/memory/{merge_predicates,hygiene}` over the ACP
+    /// control plane, and the per-akh `[memory] contradiction_policy` reaching
+    /// the engine on load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_hygiene_control_methods_merge_and_report() {
+        let (_tmp, state) = temp_state();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "alpha" }))
+            .await
+            .unwrap();
+        let config_path = state.paths.workspace_config_file("alpha");
+        let mut config = AkhConfig::load(&config_path).unwrap();
+        config.memory.contradiction_policy = akh_medu::engine::ContradictionPolicy::Replace;
+        config.save(&config_path).unwrap();
+
+        let engine = state.get_engine("alpha").await.unwrap();
+        assert_eq!(
+            engine.phase9_config().contradiction_policy,
+            akh_medu::engine::ContradictionPolicy::Replace
+        );
+        for (subject, predicate, object) in [
+            ("wi-1", "next_check", "a"),
+            ("wi-2", "next-check", "b"),
+            ("wi-3", "has_state", "open"),
+        ] {
+            engine
+                .add_triple(&Triple::new(
+                    engine.resolve_or_create_entity(subject).unwrap(),
+                    engine.resolve_or_create_relation(predicate).unwrap(),
+                    engine.resolve_or_create_entity(object).unwrap(),
+                ))
+                .unwrap();
+        }
+
+        let merged = state
+            .dispatch(
+                "_akh/memory/merge_predicates",
+                &json!({"workspace": "alpha", "canonical": "state", "aliases": ["has_state"]}),
+            )
+            .await;
+        assert!(
+            merged.unwrap_err().contains("no symbol named"),
+            "an unknown canonical is refused"
+        );
+        engine.resolve_or_create_relation("state").unwrap();
+        let merged = state
+            .dispatch(
+                "_akh/memory/merge_predicates",
+                &json!({"workspace": "alpha", "canonical": "state", "aliases": ["has_state"]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(merged["moved"], 1);
+
+        let dry = state
+            .dispatch(
+                "_akh/memory/hygiene",
+                &json!({"workspace": "alpha", "dry_run": true}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dry["dry_run"], true);
+        assert_eq!(dry["policy"], "replace");
+        assert_eq!(dry["merged"][0]["moved"], 1, "{dry}");
+        let report = state
+            .dispatch("_akh/memory/hygiene", &json!({"workspace": "alpha"}))
+            .await
+            .unwrap();
+        assert_eq!(report["merged"][0]["canonical"], "next-check");
+        let again = state
+            .dispatch("_akh/memory/hygiene", &json!({"workspace": "alpha"}))
+            .await
+            .unwrap();
+        assert_eq!(again["mutations"], 0);
+        assert!(
+            state
+                .dispatch("_akh/memory/hygiene", &json!({}))
+                .await
+                .unwrap_err()
+                .contains("workspace")
+        );
     }
 
     /// Phase 53e: `_akh/delegation/grant/*` over the ACP control plane.

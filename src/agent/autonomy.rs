@@ -171,6 +171,12 @@ pub enum DaemonTask {
     /// Transcript harvest of captured turns into episode indexes (ADR 091).
     /// Runs on the sleep tick, before and independent of `SleepCycle`.
     Harvest,
+    /// Memory hygiene (Phase 53j): merge exact predicate-spelling
+    /// collisions, retract superseded values of single-valued predicates,
+    /// and repair contradictions per `[memory] contradiction_policy`.
+    /// Bounded per tick; runs on the sleep tick after harvest, independent
+    /// of `SleepCycle`.
+    MemoryHygiene,
     /// Triple extraction from fetched content. It spends LLM tokens only
     /// when `[extraction.external_api]` is configured.
     KnowledgeExtraction,
@@ -205,7 +211,7 @@ pub enum DaemonTask {
 
 impl DaemonTask {
     /// Every task, in daemon select-arm order.
-    pub const ALL: [DaemonTask; 24] = [
+    pub const ALL: [DaemonTask; 25] = [
         DaemonTask::Equivalence,
         DaemonTask::Reflection,
         DaemonTask::Consolidation,
@@ -217,6 +223,7 @@ impl DaemonTask {
         DaemonTask::ContinuousLearning,
         DaemonTask::GoalGeneration,
         DaemonTask::Harvest,
+        DaemonTask::MemoryHygiene,
         DaemonTask::SleepCycle,
         DaemonTask::TriggerEvaluation,
         DaemonTask::Reactor,
@@ -246,6 +253,7 @@ impl DaemonTask {
             DaemonTask::GoalGeneration => "goal_generation",
             DaemonTask::SleepCycle => "sleep_cycle",
             DaemonTask::Harvest => "harvest",
+            DaemonTask::MemoryHygiene => "memory_hygiene",
             DaemonTask::KnowledgeExtraction => "knowledge_extraction",
             DaemonTask::BridgeTraining => "bridge_training",
             DaemonTask::OpenclawSync => "openclaw_sync",
@@ -287,6 +295,7 @@ impl DaemonTask {
             | DaemonTask::GoalGeneration
             | DaemonTask::SleepCycle
             | DaemonTask::Harvest
+            | DaemonTask::MemoryHygiene
             | DaemonTask::BridgeTraining
             | DaemonTask::KgCompaction
             | DaemonTask::RelationEnrichment
@@ -1220,6 +1229,16 @@ mod tests {
         assert_eq!(DaemonTask::Reflection.cost(), TaskCost::Free);
         assert_eq!(DaemonTask::GoalGeneration.cost(), TaskCost::Free);
         assert_eq!(DaemonTask::Harvest.cost(), TaskCost::Free);
+        assert_eq!(DaemonTask::MemoryHygiene.cost(), TaskCost::Free);
+        assert_eq!(DaemonTask::MemoryHygiene.gating(), TaskGating::Autonomy);
+        assert_eq!(
+            DaemonTask::MemoryHygiene.metering(),
+            BudgetMetering::Unmetered
+        );
+        assert_eq!(
+            "memory_hygiene".parse::<DaemonTask>(),
+            Ok(DaemonTask::MemoryHygiene)
+        );
         assert_eq!(
             DaemonTask::Reactor.metering(),
             BudgetMetering::PerOccurrence

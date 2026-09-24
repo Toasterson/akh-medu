@@ -600,3 +600,119 @@ slot. A failure to close is logged at `warn` and never masks the delegation's re
 - Add `[board]` to `janus.toml`, `minerva.toml` and `vesta.toml` with
   `token_env = "ROMAN_BOARD_JANUS|MINERVA|VESTA"`. `daemon_credentials.py`'s `core`
   role must export those three variables into akhomed's environment.
+
+## 53j — memory hygiene (as built, 2026-09-24)
+
+The operator's original ask ("memory self-improvement"). Before 53j nothing ever
+retracted: every status update added a live value plus a `TemporalConflict`
+warning, and one predicate accumulated under several spellings (`next_check`,
+`next-check`, `next check`).
+
+- **Schema-pack cardinality and aliases** (`src/schema/source.rs`, `compile.rs`):
+  `RelationDef` gains `cardinality` (`multi` default | `single_valued`), `temporal`
+  (only with `single_valued`) and `aliases`. They lower to
+  `(r, onto:cardinality, onto:cardinality/single-valued[-temporal])` and
+  `(alias, onto:alias-of, r)`, so old packs compile to identical triples and
+  checksums. The blob format is unchanged. New diagnostics:
+  `akh::schema::{temporal_requires_single_valued, alias_is_relation, duplicate_alias}`.
+- **Read side** (`src/schema/cardinality.rs`): declarations are read straight from
+  the live KG, with no cache and no persisted registry, so install, wake and
+  relocation all make them visible. An alias counts only when its target is a
+  declared relation `(r, is-a, relation)`. The ADR 081 promotion `onto:alias-of`
+  edges point at properties and do not rewrite predicates.
+- **Engine write path** (`Engine::add_triple_locked`):
+  - A declared alias is stored under its canonical relation.
+  - For a single-valued predicate, older live values in the same
+    `(subject, compartment)` are retracted **after** the new edge is
+    published, with `RetractionScope::CascadeIfOrphaned` (below).
+  - A write older than the live value (`newest_first`: timestamp, then
+    confidence, then object id) is recorded as superseded and not published.
+  - Same-(s, p) contradictions are filtered out for these predicates, so they
+    no longer warn.
+  - Provenance: `DerivationKind::MemoryHygiene { action: HygieneAction, subject,
+    predicate, successor, valid_until }` is **tag 109** (`memory_hygiene`,
+    appended after 53e's 108). `valid_until` is set for temporal predicates.
+  - New engine APIs: `supersede_triple` (retraction with provenance, scope
+    `CascadeIfOrphaned`) and `rewrite_predicate` (assert the re-spelled edge,
+    then remove the alias edge with scope `ExactTriple`, since the fact still
+    holds).
+  - **Retraction scope** (`tms::RetractionScope`,
+    `Engine::remove_triple_scoped`): the TMS tracks support per *symbol*, so
+    the historical `remove_triple` (`Symbol`) retracts the object symbol and
+    cascades through every conclusion it supports even while other subjects
+    still assert that value. Hygiene never does that: `ExactTriple` removes
+    only the edge; `CascadeIfOrphaned` cascades only when no other live edge
+    still has the object as its object. Superseding `(wi-569, status,
+    resolved)` therefore leaves `resolved`, `was_retracted(resolved)` and
+    anything derived from it alone while another subject is `resolved`.
+    `kg_delete` and the other bulk APIs keep `Symbol`. All scopes commit
+    through the same exact-edge `RetractBatch` transition.
+- **Structural keys** (`src/schema/canonical.rs`): `PredicateKey` = NFKC +
+  Unicode lowercasing + separator runs (whitespace, `_`, dash punctuation)
+  collapsed to `_`. There are no word lists, and namespaces stay distinct.
+  Collision families pick the canonical spelling deterministically:
+  1. the single declared relation;
+  2. an engine-reserved name (`is-a`);
+  3. the most live triples;
+  4. the smallest label.
+
+  A family with two declared relations, or with an alias belonging to another
+  relation, is `Ambiguous`. A family made only of declared aliases of an outside
+  relation is `DeclaredAliases`. Both are reported, never merged.
+- **Hygiene pass** (`src/schema/hygiene.rs`, `run_hygiene`): bounded by a
+  `MutationBudget`, it runs:
+  1. an auto-merge of exact collisions;
+  2. the single-valued backlog;
+  3. functional-predicate repair per policy: `warn` reports, `replace` keeps
+     the newest value, `reject` keeps the oldest.
+
+  The `HygieneReport` lists merges, superseded and repaired values, provenance
+  written, truncation, ambiguous families, pending declared aliases and the top
+  20 undeclared multi-value predicates. The pass is idempotent. The explicit
+  merge API is `execute_merge(MergeRequest { selection: Explicit | Declared |
+  Collisions, dry_run, limit })`.
+- **Daemon**: `DaemonTask::MemoryHygiene` (`memory_hygiene`, `TaskCost::Free`,
+  autonomy-gated, unmetered) runs on the sleep tick. The order is harvest,
+  then hygiene, then sleep cycle, and none of the three depends on another
+  succeeding. It works on the engine handle, never the agent lock, and logs
+  `memory hygiene pass` under `akh::autonomy`. The 53b `FactDelta` carries its
+  retractions.
+- **Config**: `[memory] contradiction_policy = "warn"|"replace"|"reject"`
+  (default `warn`, unchanged) and `hygiene_batch = 1000` form a known table.
+  akhomed's `get_engine` applies the policy to the engine's `Phase9Config`, and
+  the daemon gets `hygiene_batch` through `DaemonAkhSettings.memory`.
+  `ContradictionPolicy` now serializes lowercase and accepts the old
+  capitalized names.
+- **Surfaces**:
+  - tool `kg_merge_predicates` (`Dangerous`, `WriteKg`);
+  - **`kg_delete` is now registered** in the live registry. It was never
+    excluded on purpose; it existed only in test registries. It is
+    `Dangerous`, so plan mode denies it and `/v1` exposes it only by scope or
+    grant;
+  - ACP control methods `_akh/memory/hygiene` and `_akh/memory/merge_predicates`;
+  - CLI `akh schema hygiene [--dry-run]` and
+    `akh schema merge-predicates (--canonical X --alias Y… | --declared | --collisions)`.
+- **Roman seed pack**: `deploy/roman-mini/schemas/roman-memory.json` declares 11
+  temporal single-valued state predicates with their observed spellings. The
+  evidence per relation is in its `description`. CUTOVER step 10 is rewritten
+  around it.
+- **Acceptance** (`tests/hygiene_accept.rs`, `#[ignore]`, `AKH_HYGIENE_ACCEPT_DB`
+  pointing at a private copy): the test runs `snapshot::wake`, then
+  registry admit, install and activation, then hygiene until not truncated,
+  then the declared-alias merge, then two more passes. On a copy of the
+  2026-09-24 Roman store every subject ends with exactly one live value for
+  every declared predicate, and the second pass is a no-op. The `next_check`
+  family results:
+
+  | akh | before | after |
+  |---|---|---|
+  | janus | 262 live over 5 spellings, 127 subjects, 29 multi-valued, max 46 | 127 |
+  | minerva | 125 / 56 subjects | 56 |
+  | vesta | 103 / 54 subjects | 54 |
+
+  In total the first pass auto-merged 142 exact-collision families (543
+  triples; for example `is_a`/`is a` → `is-a` and `blocked by`/`blocked-by` →
+  `blocked_by`). The run made 805 retractions and wrote 881 `memory_hygiene`
+  records (555 `predicate_merge`, 326 `single_valued_supersede`). Each pass takes
+  1–3 s; wake dominates the run at 50–150 s.
+
