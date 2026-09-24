@@ -2059,6 +2059,7 @@ mod lifecycle_tests {
     #[cfg(feature = "core-integration-tests")]
     async fn real_core_roundtrip(_exact: bool, _instructions: Option<&str>) {
         use akh_medu::{
+            agent::tool::ToolRegistry,
             akh_config::AkhConfig,
             core_service::{CoreApp, CoreBackend, CoreConfig, CoreFuture, CorePrincipal},
             engine::Engine,
@@ -2077,6 +2078,11 @@ mod lifecycle_tests {
                         ..Default::default()
                     }))
                 })
+            }
+            // This round-trip exercises context, spans and accepted turns, not
+            // tool calls, so an empty live registry is enough.
+            fn tools<'a>(&'a self, _: &'a str) -> CoreFuture<'a, Arc<ToolRegistry>> {
+                Box::pin(async { Ok(Arc::new(ToolRegistry::new())) })
             }
         }
         // Abort even on assertion failure; no detached local server survives.
@@ -2130,6 +2136,7 @@ mod lifecycle_tests {
                     id: "sessions".into(),
                     token_file: token.clone(),
                     akhs: vec!["test".into()],
+                    tools: Default::default(),
                 }],
             },
             Arc::new(Backend(Arc::new(Engine::new(Default::default()).unwrap()))),

@@ -724,7 +724,6 @@ impl ServerState {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .remove(&name);
-                        #[cfg(not(feature = "core-server"))]
                         match self.get_agent(&name).await {
                             Ok(_) => {
                                 tracing::info!(workspace = %name, residency_epoch, "claimed and hydrated durable state after reconnect")
@@ -4408,6 +4407,12 @@ async fn main() {
         }
     };
 
+    // Phase 53a (ADR 113 D2): `/v1` is served only when AKH_CORE_CONFIG names
+    // a core config. Read it before the global config so a deployment that
+    // asked for the core API never silently falls back to default storage.
+    let core_cfg_path: Option<std::path::PathBuf> =
+        std::env::var_os("AKH_CORE_CONFIG").map(std::path::PathBuf::from);
+
     // Load global config from $XDG_CONFIG_HOME/akh-medu/config.toml.
     // Creates a default config file on first boot.
     let config_path = paths.global_config_file();
@@ -4417,7 +4422,7 @@ async fn main() {
             c
         }
         Err(e) => {
-            if cfg!(feature = "core-server") {
+            if core_cfg_path.is_some() {
                 tracing::error!(error = %e, "core configuration failed; refusing default storage fallback");
                 std::process::exit(1);
             }
@@ -4444,25 +4449,49 @@ async fn main() {
         }
     }
 
-    // AKH_AUTO_START env var overrides config if set.
-    // "default" is treated as "no auto-start" (daemons are paused by default).
-    let env_auto_start: Option<Vec<String>> = match std::env::var("AKH_AUTO_START") {
-        Ok(val) => {
-            let trimmed = val.trim();
-            if trimmed.is_empty() || trimmed == "default" {
-                Some(Vec::new())
-            } else {
-                Some(
-                    trimmed
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty() && s != "default")
-                        .collect(),
-                )
-            }
+    // Phase 53a: load the core config right after the global config. A
+    // missing AKH_CORE_CONFIG means "no /v1", never a startup failure; a set
+    // but invalid one refuses to start (nothing has been started yet).
+    #[cfg(feature = "core-api")]
+    let core_config: Option<akh_medu::core_service::CoreConfig> = match &core_cfg_path {
+        None => {
+            tracing::info!("AKH_CORE_CONFIG unset; the /v1 core API is not served");
+            None
         }
-        Err(_) => None,
+        Some(path) => match akh_medu::core_service::CoreConfig::load(path) {
+            Ok(core) => Some(core),
+            Err(fault) => {
+                let err = akh_medu::core_service::CoreApiError::Config {
+                    path: path.clone(),
+                    message: fault.message,
+                };
+                eprintln!("{:?}", miette::Report::new(err));
+                std::process::exit(1);
+            }
+        },
     };
+    #[cfg(feature = "core-api")]
+    let core_principal_akhs: Vec<String> = core_config
+        .as_ref()
+        .map(|core| {
+            core.principals
+                .iter()
+                .flat_map(|principal| principal.akhs.iter().cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    #[cfg(not(feature = "core-api"))]
+    let core_principal_akhs: Vec<String> = {
+        if core_cfg_path.is_some() {
+            tracing::warn!(
+                "AKH_CORE_CONFIG is set but this akhomed was built without `core-api`; \
+                 /v1 is not served (build with --features server)"
+            );
+        }
+        Vec::new()
+    };
+
+    let env_auto_start = std::env::var("AKH_AUTO_START").ok();
 
     // CLI --auto-start <workspace> adds to the auto-start list.
     // This is opt-in: workspaces are NOT auto-started unless explicitly listed.
@@ -4480,33 +4509,24 @@ async fn main() {
         }
     }
 
-    // Merge: env var takes precedence if set; otherwise use config + CLI.
-    let auto_start: Vec<String> = if let Some(env_list) = env_auto_start {
-        // Env var overrides everything. Merge with CLI for dedup.
-        let mut merged = env_list;
-        for w in cli_auto_start {
-            if !merged.contains(&w) {
-                merged.push(w);
-            }
-        }
-        merged
-    } else {
-        // Config provides defaults (filtered to remove "default" sentinel),
-        // CLI --auto-start appends.
-        let mut merged: Vec<String> = config
-            .daemon
-            .auto_start
-            .iter()
-            .filter(|s| s.as_str() != "default")
-            .cloned()
-            .collect();
-        for w in cli_auto_start {
-            if !merged.contains(&w) {
-                merged.push(w);
-            }
-        }
-        merged
-    };
+    // Phase 53a (ADR 113 D2): the auto-start set is the UNION of
+    // AKH_AUTO_START, the configured `[daemon] auto_start`, CLI --auto-start
+    // and every akh a core principal serves — an akh reachable over /v1 is a
+    // full akh with its daemon running.
+    let auto_start = resolve_auto_start(
+        env_auto_start.as_deref(),
+        &config.daemon.auto_start,
+        &cli_auto_start,
+        &core_principal_akhs,
+    );
+    tracing::info!(
+        akhs = ?auto_start,
+        env = ?env_auto_start,
+        configured = ?config.daemon.auto_start,
+        cli = ?cli_auto_start,
+        core_principals = ?core_principal_akhs,
+        "resolved auto-start set (union)"
+    );
 
     // Phase 38: open the Postgres backing store (or fall back to local-only).
     let pg_pool = init_postgres(&config).await;
@@ -4529,8 +4549,7 @@ async fn main() {
         tracing::warn!("failed to write PID file: {e}");
     }
 
-    // Session and automation execution is owned by akhsessd/akhrtd in core mode.
-    #[cfg(not(feature = "core-server"))]
+    // Startup order (Phase 53a): workspace daemons → ACP → /v1.
     if !auto_start.is_empty() {
         let daemon_config = state.config.read().await.daemon.to_daemon_config();
         for ws_name in &auto_start {
@@ -4622,7 +4641,7 @@ async fn main() {
     // workspace — so ensure the one it will bind exists before starting it. The
     // resolution here must match `start_acp_server`'s (acp.workspace → first
     // auto_start → "default").
-    #[cfg(all(feature = "acp", not(feature = "core-server")))]
+    #[cfg(feature = "acp")]
     {
         let acp_ws = state
             .config
@@ -4671,7 +4690,7 @@ async fn main() {
     // inbound surface after ADR-061 P8.5 (REST/WS/web-UI/inbound-MCP retired).
     // Behind the `acp` feature; with it off the daemon has no inbound surface
     // and simply runs its workspace daemons until signalled.
-    #[cfg(all(feature = "acp", not(feature = "core-server")))]
+    #[cfg(feature = "acp")]
     let (acp_shutdown_tx, acp_handles, acp_socket_path) = {
         let acp_cfg = state.config.read().await.acp.clone();
         let fallback_ws = auto_start
@@ -4694,73 +4713,51 @@ async fn main() {
         (acp_tx, handles, acp_socket)
     };
 
-    // No HTTP/WS/MCP surface remains (ADR-061 P8.5) — ACP is the only inbound
-    // transport. Hold the process open until SIGTERM/SIGINT, then drain the ACP
-    // accept loops and workspace daemons. The ACP listeners and workspace
-    // daemons run as their own spawned tasks; main just waits and tears down.
-    #[cfg(feature = "core-server")]
-    let (core_shutdown_tx, core_handle) = {
-        let path = std::env::var_os("AKH_CORE_CONFIG")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                tracing::error!(
-                    "core-server requires AKH_CORE_CONFIG pointing to its scoped service config"
-                );
-                std::process::exit(1);
-            });
-        let config = akh_medu::core_service::CoreConfig::load(&path).unwrap_or_else(|error| {
-            tracing::error!(%error,"invalid cognitive service config");
-            std::process::exit(1)
-        });
-        let address = config.listen;
-        let backend: Arc<dyn akh_medu::core_service::CoreBackend> = state.clone();
-        let app = akh_medu::core_service::CoreApp::new(config, backend).unwrap_or_else(|error| {
-            tracing::error!(%error,"cognitive service initialization failed");
-            std::process::exit(1)
-        });
-        let router = akh_medu::core_service::router(app);
-        let listener = tokio::net::TcpListener::bind(address)
-            .await
-            .unwrap_or_else(|error| {
-                tracing::error!(%error,"cognitive listener bind failed");
-                std::process::exit(1)
-            });
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let handle = tokio::spawn(async move {
-            if let Err(error) = axum::serve(listener, router)
-                .with_graceful_shutdown(async {
-                    let _ = rx.await;
-                })
-                .await
-            {
-                tracing::error!(%error,"cognitive listener failed");
+    // ── /v1 core API (Phase 53a, ADR 113) ── the only other inbound surface
+    // besides ACP: the scoped, service-principal cognitive API, bound last and
+    // only when AKH_CORE_CONFIG is set. Afterwards main holds the process open
+    // until SIGTERM/SIGINT, then drains ACP, /v1 and the workspace daemons
+    // (all of which run as their own spawned tasks).
+    #[cfg(feature = "core-api")]
+    let (core_listener, startup_failed) = match core_config {
+        None => (None, false),
+        Some(core) => match start_core_api(Arc::clone(&state), core).await {
+            Ok(listener) => (Some(listener), false),
+            Err(error) => {
+                // Daemons and ACP are already running: drain them through the
+                // normal shutdown path below instead of exiting mid-flight.
+                eprintln!("{:?}", miette::Report::new(error));
+                (None, true)
             }
-        });
-        tracing::info!(%address,"cognitive service ready; sessions and provider loops are external");
-        (tx, handle)
+        },
     };
+    #[cfg(not(feature = "core-api"))]
+    let startup_failed = false;
 
     let paths_for_shutdown = paths.clone();
     let state_for_shutdown = state;
 
-    let ctrl_c = tokio::signal::ctrl_c();
-    #[cfg(unix)]
-    {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
-        tokio::select! {
-            _ = ctrl_c => {},
-            _ = sigterm.recv() => {},
+    if !startup_failed {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = ctrl_c => {},
+                _ = sigterm.recv() => {},
+            }
         }
-    }
-    #[cfg(not(unix))]
-    {
-        ctrl_c.await.ok();
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.ok();
+        }
     }
     tracing::info!("akhomed shutting down — draining workspace daemons");
 
     // Stop ACP accept loops first so no new sessions start mid-drain.
-    #[cfg(all(feature = "acp", not(feature = "core-server")))]
+    #[cfg(feature = "acp")]
     {
         tracing::info!("stopping ACP listeners");
         let _ = acp_shutdown_tx.send(true);
@@ -4784,10 +4781,11 @@ async fn main() {
         }
     }
 
-    #[cfg(feature = "core-server")]
-    {
+    #[cfg(feature = "core-api")]
+    if let Some((core_shutdown_tx, core_handle)) = core_listener {
+        tracing::info!("stopping /v1 core API listener");
         let _ = core_shutdown_tx.send(());
-        let _ = core_handle.await;
+        let _ = tokio::time::timeout(Duration::from_secs(3), core_handle).await;
     }
 
     // Signal all workspace daemons to stop, then join with timeout.
@@ -4824,7 +4822,7 @@ async fn main() {
     // short grace period to avoid leaving the process hanging.
     if aborted {
         tracing::info!("force-exiting after abort (daemon tasks run sync CPU work)");
-        std::process::exit(0);
+        std::process::exit(if startup_failed { 1 } else { 0 });
     }
 
     // Belt-and-suspenders: clean up PID file on normal exit too (already
@@ -4834,6 +4832,75 @@ async fn main() {
     if owns_pid_file(&paths) {
         akh_medu::client::remove_pid_file(&paths);
     }
+    if startup_failed {
+        std::process::exit(1);
+    }
+}
+
+/// Phase 53a (ADR 113 D2): the akhs whose daemons start at boot — the
+/// order-preserving, de-duplicated union of `AKH_AUTO_START` (comma list),
+/// the configured `[daemon] auto_start`, CLI `--auto-start` and every akh a
+/// core principal serves. `default` stays a "nothing" sentinel. The first
+/// entry is the ACP fallback workspace, so env keeps its historical priority.
+fn resolve_auto_start(
+    env: Option<&str>,
+    configured: &[String],
+    cli: &[String],
+    core_principal_akhs: &[String],
+) -> Vec<String> {
+    let mut merged: Vec<String> = Vec::new();
+    let env_items = env.into_iter().flat_map(|value| value.split(','));
+    let rest = configured
+        .iter()
+        .chain(cli)
+        .chain(core_principal_akhs)
+        .map(String::as_str);
+    for name in env_items.chain(rest).map(str::trim) {
+        if !name.is_empty() && name != "default" && !merged.iter().any(|m| m == name) {
+            merged.push(name.to_string());
+        }
+    }
+    merged
+}
+
+/// Bind and serve the `/v1` core API (Phase 53a) — last in the startup order,
+/// after the workspace daemons and ACP. Returns the shutdown sender and the
+/// serving task.
+#[cfg(feature = "core-api")]
+async fn start_core_api(
+    state: Arc<ServerState>,
+    core: akh_medu::core_service::CoreConfig,
+) -> Result<
+    (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ),
+    akh_medu::core_service::CoreApiError,
+> {
+    use akh_medu::core_service::{CoreApiError, CoreApp, CoreBackend, router};
+    let address = core.listen;
+    let data_dir = core.data_dir.clone();
+    let backend: Arc<dyn CoreBackend> = state;
+    let app = CoreApp::new(core, backend).map_err(|fault| CoreApiError::Config {
+        path: data_dir,
+        message: format!("core operations store: {}", fault.message),
+    })?;
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .map_err(|source| CoreApiError::Bind { address, source })?;
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        if let Err(error) = axum::serve(listener, router(app))
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
+            .await
+        {
+            tracing::error!(%error, "/v1 core API listener failed");
+        }
+    });
+    tracing::info!(%address, "/v1 core API ready (additive to daemons and ACP)");
+    Ok((tx, handle))
 }
 
 // ── ACP control-plane (`ServerControl for ServerState`) ─────────────────────
@@ -5868,6 +5935,71 @@ mod control_plane_tests {
         assert!(!state.workspaces.read().await.contains_key("publishing"));
     }
 
+    /// Phase 53a: `/v1` must not build a second runtime — the CoreBackend
+    /// hands out the very Engine and ToolRegistry Arcs the resident Agent uses.
+    #[cfg(feature = "core-api")]
+    #[tokio::test]
+    async fn core_api_backend_shares_the_agents_engine_and_tool_registry() {
+        use akh_medu::core_service::CoreBackend;
+        let (_tmp, state) = temp_state();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "core-shared" }))
+            .await
+            .expect("create");
+
+        let engine = CoreBackend::engine(&state, "core-shared").await.unwrap();
+        let tools = CoreBackend::tools(&state, "core-shared").await.unwrap();
+        let agent = state.get_agent("core-shared").await.unwrap();
+
+        assert!(Arc::ptr_eq(
+            &engine,
+            &CoreBackend::engine(&state, "core-shared").await.unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &tools,
+            &CoreBackend::tools(&state, "core-shared").await.unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &engine,
+            &state.get_engine("core-shared").await.unwrap()
+        ));
+        let resident = agent.read().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            std::ptr::eq(resident.engine(), Arc::as_ptr(&engine)),
+            "/v1 engine must be the Agent's engine"
+        );
+        assert!(
+            Arc::ptr_eq(&tools, &resident.tool_registry_handle()),
+            "/v1 tools must be the Agent's live registry"
+        );
+        assert!(tools.manifest("memory_write").is_some());
+    }
+
+    #[test]
+    fn auto_start_is_the_union_of_env_config_cli_and_core_principals() {
+        let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            resolve_auto_start(
+                Some(" janus, default ,"),
+                &owned(&["minerva", "janus"]),
+                &owned(&["cli-akh"]),
+                &owned(&["vesta", "minerva"]),
+            ),
+            owned(&["janus", "minerva", "cli-akh", "vesta"])
+        );
+        // No env at all: config first, then the core principals' akhs.
+        assert_eq!(
+            resolve_auto_start(None, &owned(&["default"]), &[], &owned(&["janus"])),
+            owned(&["janus"])
+        );
+        // An empty / "default" env no longer suppresses the others.
+        assert_eq!(
+            resolve_auto_start(Some("default"), &owned(&["a"]), &[], &[]),
+            owned(&["a"])
+        );
+        assert!(resolve_auto_start(None, &[], &[], &[]).is_empty());
+    }
+
     #[tokio::test]
     async fn get_agent_slow_path_is_single_flight() {
         let (_tmp, state) = temp_state();
@@ -6425,14 +6557,33 @@ mod control_plane_tests {
     }
 }
 
-#[cfg(feature = "core-server")]
+#[cfg(feature = "core-api")]
 impl akh_medu::core_service::CoreBackend for ServerState {
     fn engine<'a>(&'a self, akh: &'a str) -> akh_medu::core_service::CoreFuture<'a, Arc<Engine>> {
         Box::pin(async move {
-            // Relational snapshots capture Agent state; core-only tool sessions
-            // must materialize it too, without starting a provider/OODA loop.
+            // Materialize the Agent first: it is the one owner of the akh's
+            // runtime (snapshots capture Agent state), and the engine returned
+            // is the same cached Arc the Agent holds.
             self.get_agent(akh).await?;
             self.get_engine(akh).await
+        })
+    }
+    fn tools<'a>(
+        &'a self,
+        akh: &'a str,
+    ) -> akh_medu::core_service::CoreFuture<'a, Arc<akh_medu::agent::tool::ToolRegistry>> {
+        Box::pin(async move {
+            let agent = self.get_agent(akh).await?;
+            // The agent lock is a std RwLock that a running OODA cycle or turn
+            // can hold for a while; never block an async worker on it.
+            tokio::task::spawn_blocking(move || {
+                agent
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .tool_registry_handle()
+            })
+            .await
+            .map_err(|error| format!("tool registry lookup for {akh} failed: {error}"))
         })
     }
     fn config<'a>(

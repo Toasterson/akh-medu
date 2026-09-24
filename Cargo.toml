@@ -254,14 +254,21 @@ base64 = { version = "0.22.1", optional = true }
 default = ["acp", "embedded-runtime"]
 # Compatibility for existing embedded chat; specialized core builds omit providers.
 embedded-runtime = ["dep:akh-runtime"]
-# Cognitive/config/storage owner only: no client ACP, external provider or executor dependency.
-core-server = ["daemon", "postgres", "tracing-otel", "dep:axum", "dep:akh-service-store"]
+# Phase 53a (ADR 113): the scoped `/v1` cognitive core API is ADDITIVE. It is
+# served only when `AKH_CORE_CONFIG` is set and never removes daemon or ACP
+# behaviour. Part of `server`; the stripped core-only profile is gone.
+core-api = ["daemon", "dep:axum", "dep:akh-service-store"]
+# DEPRECATED (ADR 113): alias of `server`, kept only so existing build lines keep
+# working during the Phase 53 cutover. Deleted in 53h — build `--features server`.
+core-server = ["server"]
 daemon = ["tokio", "dep:chrono", "dep:cron"]
 # `server` = the akhomed daemon feature set: workspace daemons + the ACP
 # inbound transport. (Pre-ADR-061 it pulled axum/tower-http for REST/WS;
 # those surfaces are gone, so it now just means daemon + acp.) Phase 38 folds
 # in the Postgres backing store.
-server = ["daemon", "acp", "postgres", "tracing-otel", "remote-executor", "embedded-runtime"]
+# Phase 53a (ADR 113): one full akhomed profile — `core-api` (the additive `/v1`
+# surface) and `delegation` are part of it, so a stripped akh cannot be built.
+server = ["daemon", "acp", "postgres", "tracing-otel", "remote-executor", "embedded-runtime", "core-api", "delegation"]
 # Phase 38i: OTLP tracing skeleton. Default-on under `server` so akhomed
 # gets the OTLP layer; the lean `akh` client binary (no `server`) stays lean.
 tracing-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:opentelemetry-semantic-conventions"]

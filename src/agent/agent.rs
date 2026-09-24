@@ -2106,7 +2106,9 @@ impl Agent {
 
     /// Clone the internally synchronized registry so callers can release the
     /// outer agent slot before a permission round-trip or remote tool call.
-    pub(crate) fn tool_registry_handle(&self) -> Arc<ToolRegistry> {
+    /// Public since Phase 53a: the `/v1` core API resolves its tools from this
+    /// same live registry (ADR 113 D3).
+    pub fn tool_registry_handle(&self) -> Arc<ToolRegistry> {
         Arc::clone(&self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()))
     }
 

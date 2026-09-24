@@ -569,27 +569,37 @@ impl DelegationManager {
                 let task_clone = task;
                 let id_clone = id;
                 let target_clone = target;
-                tokio::spawn(async move {
-                    let result = peer::delegate_to_peer(&endpoint, &task_clone, id_clone).await;
-                    let outcome = match result {
-                        Ok(mut outcome) => {
-                            outcome.target = Some(target_clone);
-                            outcome
-                        }
-                        Err(e) => DelegationOutcome {
-                            id: id_clone,
-                            stdout: String::new(),
-                            structured: None,
-                            wall_time: Duration::ZERO,
-                            tokens_consumed: None,
-                            cost_usd: None,
-                            exit_code: None,
-                            goal_id: task_clone.goal_id,
-                            error: Some(e.to_string()),
-                            target: Some(target_clone),
-                        },
-                    };
-                    let _ = tx.send(Ok(outcome)).await;
+                // Phase 53a: `delegation` joined the `server` profile and this
+                // arm failed to compile — the ACP client's async-closure future
+                // (`chat_over_unix`/`chat_over_tcp`) is not provably `Send` for
+                // all lifetimes (higher-ranked inference limitation), so it
+                // cannot be a `tokio::spawn` task. Drive it on a blocking thread
+                // through the runtime handle instead; `Handle::block_on` has no
+                // `Send` bound, and the captured values are all `Send`.
+                let handle = tokio::runtime::Handle::current();
+                tokio::task::spawn_blocking(move || {
+                    handle.block_on(async move {
+                        let result = peer::delegate_to_peer(&endpoint, &task_clone, id_clone).await;
+                        let outcome = match result {
+                            Ok(mut outcome) => {
+                                outcome.target = Some(target_clone);
+                                outcome
+                            }
+                            Err(e) => DelegationOutcome {
+                                id: id_clone,
+                                stdout: String::new(),
+                                structured: None,
+                                wall_time: Duration::ZERO,
+                                tokens_consumed: None,
+                                cost_usd: None,
+                                exit_code: None,
+                                goal_id: task_clone.goal_id,
+                                error: Some(e.to_string()),
+                                target: Some(target_clone),
+                            },
+                        };
+                        let _ = tx.send(Ok(outcome)).await;
+                    })
                 });
             }
         }

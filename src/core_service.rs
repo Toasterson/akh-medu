@@ -1,10 +1,16 @@
-//! Narrow cognitive boundary for the specialized akhomed build.
-//! No provider, editor, session scheduler, process executor or client protocol is started here.
+//! The scoped `/v1` cognitive core API (feature `core-api`).
+//!
+//! Phase 53a (ADR 113, Anima WI `01a0d469-c9a8`,
+//! `docs/ai/phases/phase-53/README.md`): this surface is **additive** to the
+//! full akhomed. It is served only when `AKH_CORE_CONFIG` names a core config,
+//! and it never replaces the daemon loop or the ACP surface. Tools resolve from
+//! the akh's live [`ToolRegistry`] (the same `Arc` its `Agent` uses), filtered
+//! per principal by a [`ToolScope`].
 use crate::{
     agent::{
         agent::AgentPredicates,
         tool::{ToolInput, ToolRegistry},
-        tools,
+        tool_manifest::{Capability, DangerLevel, ToolManifest},
     },
     akh_config::AkhConfig,
     engine::Engine,
@@ -19,28 +25,198 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
     future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
 };
+use thiserror::Error;
 
 pub type CoreFuture<'a, T> =
     Pin<Box<dyn Future<Output = std::result::Result<T, String>> + Send + 'a>>;
 pub trait CoreBackend: Send + Sync {
     fn engine<'a>(&'a self, akh: &'a str) -> CoreFuture<'a, Arc<Engine>>;
     fn config<'a>(&'a self, akh: &'a str) -> CoreFuture<'a, Arc<AkhConfig>>;
+    /// The akh's **live** tool registry — the same `Arc` its `Agent` executes
+    /// through — so `/v1` sees exactly the tools the akh has (ADR 113 D3).
+    /// The caller filters it by the principal's [`ToolScope`].
+    fn tools<'a>(&'a self, akh: &'a str) -> CoreFuture<'a, Arc<ToolRegistry>>;
 }
+
+/// The nine cognitive tools the stripped `core-server` build hardcoded. They
+/// stay the default scope so existing core principals keep exactly the surface
+/// they had (ADR 113 D3); everything else (`shell_exec`, `delegate`,
+/// `agent_spawn`, …) is denied unless a scope (or, from 53e, a grant) names it.
+pub const LEGACY_COGNITIVE_TOOLS: [&str; 9] = [
+    "kg_query",
+    "kg_mutate",
+    "entity_schema",
+    "entity_types",
+    "entity_type_filter",
+    "memory_recall",
+    "memory_write",
+    "reason",
+    "similarity_search",
+];
+
+/// Which tools of the akh's live registry a core principal may see and call.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolScope {
+    /// Exactly [`LEGACY_COGNITIVE_TOOLS`] (the pre-53a surface).
+    #[default]
+    LegacyCognitive,
+    /// Exactly the named tools. A name the akh does not have is simply absent.
+    Named { tools: BTreeSet<String> },
+}
+
+impl ToolScope {
+    /// Whether this scope admits `tool`.
+    pub fn permits(&self, tool: &str) -> bool {
+        match self {
+            Self::LegacyCognitive => LEGACY_COGNITIVE_TOOLS.contains(&tool),
+            Self::Named { tools } => tools.contains(tool),
+        }
+    }
+
+    /// The admitted tool names, for diagnostics.
+    pub fn names(&self) -> Vec<String> {
+        match self {
+            Self::LegacyCognitive => LEGACY_COGNITIVE_TOOLS.iter().map(|t| (*t).into()).collect(),
+            Self::Named { tools } => tools.iter().cloned().collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorePrincipal {
     pub id: String,
     pub token_file: PathBuf,
     pub akhs: Vec<String>,
+    /// Tool surface of this principal (Phase 53a). Absent = legacy nine.
+    #[serde(default)]
+    pub tools: ToolScope,
+}
+
+/// Errors of the `/v1` core API (Phase 53a).
+#[derive(Debug, Error, Diagnostic)]
+pub enum CoreApiError {
+    #[error("invalid core API config {path}: {message}")]
+    #[diagnostic(
+        code(akh::core_api::config),
+        help(
+            "AKH_CORE_CONFIG must name a JSON/TOML file with `listen`, an absolute \
+             `data_dir` and at least one principal whose token file holds 24+ \
+             non-whitespace characters. Fix the file, or unset AKH_CORE_CONFIG to \
+             run akhomed without the /v1 surface."
+        )
+    )]
+    Config { path: PathBuf, message: String },
+
+    #[error("tool `{tool}` is outside the tool scope of core principal `{principal}`")]
+    #[diagnostic(
+        code(akh::core_api::tool_out_of_scope),
+        help(
+            "Nothing ran. Add the tool to this principal's scope in the core config \
+             (`\"tools\": {{\"kind\": \"named\", \"tools\": [...]}}`), or call one \
+             of the tools the scope admits: {allowed}."
+        )
+    )]
+    ToolOutOfScope {
+        principal: String,
+        tool: String,
+        allowed: String,
+    },
+
+    #[error("akh `{akh}` is unavailable to the core API: {message}")]
+    #[diagnostic(
+        code(akh::core_api::backend_unavailable),
+        help(
+            "The akh could not be loaded (missing workspace, handoff in progress, or \
+             a store failure). Check the akhomed log for this workspace and retry; \
+             nothing was executed."
+        )
+    )]
+    BackendUnavailable { akh: String, message: String },
+
+    #[error("core API listener could not bind {address}")]
+    #[diagnostic(
+        code(akh::core_api::bind),
+        help(
+            "Another process holds the address, or it is not local. Change `listen` \
+             in the core config or stop the other listener."
+        )
+    )]
+    Bind {
+        address: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl CoreApiError {
+    /// Wire code (the `Fault.code` / `ToolResult.data.code` string).
+    pub fn wire_code(&self) -> &'static str {
+        match self {
+            Self::Config { .. } => "core_config",
+            Self::ToolOutOfScope { .. } => "tool_out_of_scope",
+            Self::BackendUnavailable { .. } => "unavailable",
+            Self::Bind { .. } => "core_bind",
+        }
+    }
+
+    /// The rendered miette help text, if any.
+    pub fn help_text(&self) -> Option<String> {
+        self.help().map(|h| h.to_string())
+    }
+
+    /// An out-of-scope call is an ordinary tool failure the model can read,
+    /// not a transport error: HTTP 200, `success:false`, `data {code, help}`.
+    pub fn into_tool_result(self, receipt: Option<String>) -> ToolResult {
+        ToolResult {
+            success: false,
+            text: self.to_string(),
+            data: Some(json!({
+                "code": self.wire_code(),
+                "help": self.help_text(),
+                "executed": false,
+            })),
+            receipt,
+        }
+    }
+}
+
+impl From<CoreApiError> for Fault {
+    fn from(error: CoreApiError) -> Self {
+        let message = match error.help_text() {
+            Some(help) => format!("{error} ({help})"),
+            None => error.to_string(),
+        };
+        Fault::new(error.wire_code(), message)
+    }
+}
+
+/// `read_only` for the wire catalog, derived from the manifest's danger info:
+/// `Safe` and exercising only cognitive read capabilities.
+pub fn is_cognitive_read_only(manifest: &ToolManifest) -> bool {
+    manifest.danger.level == DangerLevel::Safe
+        && manifest.danger.capabilities.iter().all(|capability| {
+            matches!(
+                capability,
+                Capability::ReadKg
+                    | Capability::Reason
+                    | Capability::VsaAccess
+                    | Capability::ProvenanceAccess
+                    | Capability::MemoryAccess
+            )
+        })
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +275,7 @@ impl IntoResponse for ApiError {
             "invalid_request" => StatusCode::BAD_REQUEST,
             "not_found" => StatusCode::NOT_FOUND,
             "conflict" | "unknown_outcome" => StatusCode::CONFLICT,
+            "unavailable" => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self.0)).into_response()
@@ -205,37 +382,20 @@ pub fn router(app: CoreApp) -> Router {
             }),
         )
 }
-fn registry(engine: &Engine) -> Result<ToolRegistry> {
-    let predicates = AgentPredicates::init(engine).map_err(error)?;
-    let registry = ToolRegistry::new();
-    registry.register(Box::new(tools::KgQueryTool));
-    registry.register(Box::new(tools::KgMutateTool));
-    registry.register(Box::new(tools::EntitySchemaTool));
-    registry.register(Box::new(tools::EntityTypesTool));
-    registry.register(Box::new(tools::EntityTypeFilterTool));
-    registry.register(Box::new(tools::MemoryRecallTool::new(predicates.clone())));
-    registry.register(Box::new(tools::MemoryWriteTool::new(predicates)));
-    registry.register(Box::new(tools::ReasonTool));
-    registry.register(Box::new(tools::SimilaritySearchTool));
-    Ok(registry)
-}
-fn tools(registry: &ToolRegistry) -> Vec<ToolSpec> {
+/// The wire catalog of `registry`, restricted to `scope`.
+fn tools(registry: &ToolRegistry, scope: &ToolScope) -> Vec<ToolSpec> {
     crate::agent::agentic_chat::ollama_tool_catalog(registry)
         .into_iter()
-        .map(|t| {
-            let name = t["function"]["name"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            ToolSpec {
-                read_only: matches!(
-                    name.as_str(),
-                    "kg_query"
-                        | "memory_recall"
-                        | "similarity_search"
-                        | "entity_types"
-                        | "entity_type_filter"
-                ),
+        .filter_map(|t| {
+            let name = t["function"]["name"].as_str()?.to_string();
+            if !scope.permits(&name) {
+                return None;
+            }
+            let read_only = registry
+                .manifest(&name)
+                .is_some_and(|manifest| is_cognitive_read_only(&manifest));
+            Some(ToolSpec {
+                read_only,
                 destination: ToolDestination::Cognitive {
                     service: "core".into(),
                     tool: name.clone(),
@@ -246,9 +406,22 @@ fn tools(registry: &ToolRegistry) -> Vec<ToolSpec> {
                     .unwrap_or_default()
                     .into(),
                 input_schema: t["function"]["parameters"].clone(),
-            }
+            })
         })
         .collect()
+}
+/// Resolve the akh's live registry, mapping a load failure to a typed error.
+async fn live_tools(
+    app: &CoreApp,
+    akh: &str,
+) -> std::result::Result<Arc<ToolRegistry>, CoreApiError> {
+    app.backend
+        .tools(akh)
+        .await
+        .map_err(|message| CoreApiError::BackendUnavailable {
+            akh: akh.into(),
+            message,
+        })
 }
 async fn catalog(
     State(app): State<CoreApp>,
@@ -256,8 +429,8 @@ async fn catalog(
     axum::extract::Path(akh): axum::extract::Path<String>,
 ) -> Api<Vec<ToolSpec>> {
     authorize(&p, &akh)?;
-    let engine = app.backend.engine(&akh).await.map_err(error)?;
-    Ok(Json(tools(&registry(&engine)?)))
+    let registry = live_tools(&app, &akh).await.map_err(Fault::from)?;
+    Ok(Json(tools(&registry, &p.tools)))
 }
 async fn context(
     State(app): State<CoreApp>,
@@ -472,13 +645,26 @@ async fn tool_call(
     Json(request): Json<CognitiveToolCall>,
 ) -> Api<ToolResult> {
     authorize(&p, &request.akh)?;
+    // Scope first: an out-of-scope call never loads anything or begins an
+    // operation, and it is answered as an ordinary tool failure (HTTP 200).
+    if !p.tools.permits(&request.tool) {
+        return Ok(Json(
+            CoreApiError::ToolOutOfScope {
+                principal: p.id.clone(),
+                tool: request.tool.clone(),
+                allowed: p.tools.names().join(", "),
+            }
+            .into_tool_result(None),
+        ));
+    }
     let engine = app.backend.engine(&request.akh).await.map_err(error)?;
-    let registry = registry(&engine)?;
+    let registry = live_tools(&app, &request.akh).await.map_err(Fault::from)?;
     if !registry
         .list_advertised_manifests()
         .iter()
         .any(|m| m.name == request.tool)
     {
+        // In scope but the akh does not have it (e.g. exec kind = "none").
         return Ok(Json(ToolResult::denied(&request.tool, None)));
     }
     if !request.arguments.is_object() {
@@ -797,6 +983,7 @@ mod tests {
     struct Backend {
         engine: Arc<Engine>,
         config: Arc<AkhConfig>,
+        tools: Arc<ToolRegistry>,
     }
     impl CoreBackend for Backend {
         fn engine<'a>(&'a self, _: &'a str) -> CoreFuture<'a, Arc<Engine>> {
@@ -805,6 +992,62 @@ mod tests {
         fn config<'a>(&'a self, _: &'a str) -> CoreFuture<'a, Arc<AkhConfig>> {
             Box::pin(async { Ok(self.config.clone()) })
         }
+        fn tools<'a>(&'a self, _: &'a str) -> CoreFuture<'a, Arc<ToolRegistry>> {
+            Box::pin(async { Ok(self.tools.clone()) })
+        }
+    }
+
+    /// A backend whose registry is a real `Agent`'s live registry, so scope
+    /// tests run against the full tool surface (shell_exec, agent_spawn, …).
+    fn live_backend(capture_transcripts: bool) -> Arc<Backend> {
+        let engine = Arc::new(Engine::new(Default::default()).unwrap());
+        let agent =
+            crate::agent::Agent::new(Arc::clone(&engine), crate::agent::AgentConfig::default())
+                .unwrap();
+        let tools = agent.tool_registry_handle();
+        Arc::new(Backend {
+            engine,
+            config: Arc::new(AkhConfig {
+                capture_transcripts,
+                ..Default::default()
+            }),
+            tools,
+        })
+    }
+
+    fn scoped_app(dir: &Path, backend: Arc<Backend>, scope: ToolScope) -> CoreApp {
+        let token_file = dir.join("token");
+        std::fs::write(&token_file, "core-test-credential-long-enough").unwrap();
+        CoreApp::new(
+            CoreConfig {
+                sqlite: false,
+                listen: "127.0.0.1:0".parse().unwrap(),
+                data_dir: dir.into(),
+                principals: vec![CorePrincipal {
+                    id: "sessions".into(),
+                    token_file,
+                    akhs: vec!["test".into()],
+                    tools: scope,
+                }],
+            },
+            backend,
+        )
+        .unwrap()
+    }
+
+    async fn catalog_of(app: &CoreApp) -> Vec<ToolSpec> {
+        let response = router(app.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/akhs/test/tools")
+                    .header("authorization", "Bearer core-test-credential-long-enough")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap()).unwrap()
     }
 
     #[tokio::test]
@@ -822,6 +1065,7 @@ mod tests {
                         id: "sessions".into(),
                         token_file,
                         akhs: vec!["test".into()],
+                        tools: ToolScope::default(),
                     }],
                 },
                 Arc::new(Backend {
@@ -830,6 +1074,7 @@ mod tests {
                         capture_transcripts: capture,
                         ..Default::default()
                     }),
+                    tools: Arc::new(ToolRegistry::new()),
                 }),
             )
             .unwrap();
@@ -964,38 +1209,52 @@ mod tests {
     #[tokio::test]
     async fn core_tools_are_cognitive_scoped_and_accepted_turns_respect_capture_policy() {
         let dir = tempfile::tempdir().unwrap();
-        let token_file = dir.path().join("token");
-        std::fs::write(&token_file, "core-test-credential-long-enough").unwrap();
-        let config = AkhConfig {
-            capture_transcripts: false,
-            ..Default::default()
-        };
-        let backend = Arc::new(Backend {
-            engine: Arc::new(Engine::new(Default::default()).unwrap()),
-            config: Arc::new(config),
-        });
-        let app = CoreApp::new(
-            CoreConfig {
-                sqlite: false,
-                listen: "127.0.0.1:0".parse().unwrap(),
-                data_dir: dir.path().into(),
-                principals: vec![CorePrincipal {
-                    id: "sessions".into(),
-                    token_file,
-                    akhs: vec!["test".into()],
-                }],
-            },
-            backend.clone(),
-        )
-        .unwrap();
-        let registry = registry(&backend.engine).unwrap();
-        assert!(!tools(&registry).iter().any(|tool| matches!(
-            tool.name.as_str(),
-            "shell_exec" | "file_io" | "edit" | "delegate" | "reactor_manage"
-        )));
-        let denied=post(&app,"/v1/tools/call",json!({"request_id":"deny","session_id":"session","akh":"test","tool":"shell_exec","arguments":{"command":"touch impossible"}})).await;
-        assert_eq!(denied.0, StatusCode::OK);
-        assert_eq!(denied.1["success"], false);
+        let backend = live_backend(false);
+        // The live registry really carries the dangerous tools; only the
+        // principal's scope keeps them off the /v1 surface.
+        for present in ["shell_exec", "agent_spawn", "memory_write", "kg_query"] {
+            assert!(
+                backend.tools.manifest(present).is_some(),
+                "live registry should carry {present}"
+            );
+        }
+        let app = scoped_app(dir.path(), backend.clone(), ToolScope::default());
+
+        let catalog = catalog_of(&app).await;
+        let names: BTreeSet<&str> = catalog.iter().map(|t| t.name.as_str()).collect();
+        // Exactly the pre-53a nine, now served from the live registry.
+        assert_eq!(names, LEGACY_COGNITIVE_TOOLS.into_iter().collect());
+        let read_only = |name: &str| catalog.iter().find(|t| t.name == name).unwrap().read_only;
+        assert!(read_only("kg_query"));
+        assert!(!read_only("kg_mutate"));
+        assert!(!read_only("memory_write"));
+
+        for denied_tool in ["shell_exec", "agent_spawn", "delegate"] {
+            let denied = post(
+                &app,
+                "/v1/tools/call",
+                json!({"request_id":format!("deny-{denied_tool}"),"session_id":"session",
+                    "akh":"test","tool":denied_tool,"arguments":{"command":"touch impossible"}}),
+            )
+            .await;
+            assert_eq!(denied.0, StatusCode::OK, "{}", denied.1);
+            assert_eq!(denied.1["success"], false);
+            assert_eq!(denied.1["data"]["code"], "tool_out_of_scope");
+            assert!(
+                denied.1["data"]["help"]
+                    .as_str()
+                    .is_some_and(|help| help.contains("memory_write")),
+                "help should list the admitted tools: {}",
+                denied.1
+            );
+        }
+        // Denials never begin an operation.
+        assert!(
+            app.store
+                .scan::<Value>("core_operation/")
+                .unwrap()
+                .is_empty()
+        );
         let unauthorized=post(&app,"/v1/context",json!({"request_id":"ctx","session_id":"session","turn_id":"turn","akh":"other","input":{"origin":{"kind":"human","principal":"user"},"text":"hello"},"tools":[]})).await;
         assert_eq!(unauthorized.0, StatusCode::FORBIDDEN);
         let request = json!({"request_id":"accepted","akh":"test","session_id":"session","turn_id":"turn","input":{"origin":{"kind":"automation","automation_id":"alert","occurrence_id":"event"},"text":"private transcript"},"output":"private answer","model":null,"tool_receipts":[],"tools":[]});
@@ -1017,5 +1276,71 @@ mod tests {
                 .unwrap()
                 .contains("private transcript")
         );
+    }
+
+    #[tokio::test]
+    async fn a_named_scope_admits_exactly_its_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = scoped_app(
+            dir.path(),
+            live_backend(false),
+            ToolScope::Named {
+                tools: BTreeSet::from(["memory_write".to_string()]),
+            },
+        );
+        let catalog = catalog_of(&app).await;
+        assert_eq!(
+            catalog.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            vec!["memory_write"]
+        );
+        let written = post(
+            &app,
+            "/v1/tools/call",
+            json!({"request_id":"write","session_id":"session","akh":"test",
+                "tool":"memory_write","arguments":{"summary":"cedar is the word",
+                "facts":[{"subject":"word","predicate":"is","object":"cedar"}]}}),
+        )
+        .await;
+        assert_eq!(written.0, StatusCode::OK, "{}", written.1);
+        assert_eq!(written.1["success"], true, "{}", written.1);
+        let outside = post(
+            &app,
+            "/v1/tools/call",
+            json!({"request_id":"query","session_id":"session","akh":"test",
+                "tool":"kg_query","arguments":{"symbol":"word"}}),
+        )
+        .await;
+        assert_eq!(outside.0, StatusCode::OK);
+        assert_eq!(outside.1["data"]["code"], "tool_out_of_scope");
+    }
+
+    #[test]
+    fn tool_scope_serde_defaults_to_legacy_and_reads_named() {
+        let principal: CorePrincipal = serde_json::from_value(json!({
+            "id": "sessions", "token_file": "/t", "akhs": ["a"]
+        }))
+        .unwrap();
+        assert_eq!(principal.tools, ToolScope::LegacyCognitive);
+        let principal: CorePrincipal = serde_json::from_value(json!({
+            "id": "sessions", "token_file": "/t", "akhs": ["a"],
+            "tools": {"kind": "named", "tools": ["memory_write", "shell_exec"]}
+        }))
+        .unwrap();
+        assert!(principal.tools.permits("shell_exec"));
+        assert!(!principal.tools.permits("kg_query"));
+        assert!(ToolScope::default().permits("kg_query"));
+        assert!(!ToolScope::default().permits("agent_spawn"));
+    }
+
+    #[test]
+    fn out_of_scope_error_becomes_a_fault_with_its_code() {
+        let error = CoreApiError::ToolOutOfScope {
+            principal: "p".into(),
+            tool: "shell_exec".into(),
+            allowed: "kg_query".into(),
+        };
+        let fault = Fault::from(error);
+        assert_eq!(fault.code, "tool_out_of_scope");
+        assert!(fault.message.contains("kg_query"), "{fault:?}");
     }
 }

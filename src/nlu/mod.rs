@@ -23,7 +23,7 @@ pub mod vision_positions;
 pub mod vision_prompt;
 /// The vision tower runs tensors, so it needs the Candle backend; the artifact
 /// locator, preprocessing geometry and quantizer above it deliberately do not,
-/// so a core-server build still compiles them.
+/// so a lean (non-Candle) build still compiles them.
 #[cfg(feature = "candle-backend")]
 pub mod vision_tower;
 pub mod router;

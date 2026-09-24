@@ -47,7 +47,7 @@ pub mod cluster;
 pub mod compartment;
 #[cfg(feature = "daemon")]
 pub mod config;
-#[cfg(feature = "core-server")]
+#[cfg(feature = "core-api")]
 pub mod core_service;
 pub mod dispatch;
 pub mod eliza;
