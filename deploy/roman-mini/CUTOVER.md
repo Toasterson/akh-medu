@@ -40,6 +40,14 @@ UID_=$(id -u)                                         # 501
 | User LaunchAgents | `~/Library/LaunchAgents/dev.roman-akhs.{sessions,observer,laya,laya-controller,janus-escalation,vesta-ops,t3-activity,grafana-tunnel,anima-activity}.plist` |
 | Old core binary (kept) | `$ROOT/bin/akhomed-d563ba34a247` |
 
+## Scripted run
+
+Steps 2–8 are scripted in `cutover.sh`. After step 1 (build from main), run
+`sudo DRY_RUN=1 deploy/roman-mini/cutover.sh "$REPO"` to review the plan, then
+`sudo deploy/roman-mini/cutover.sh "$REPO"`. It stops at the first failure and
+prints the backup directory for Rollback. Root is needed only for the system
+LaunchDaemons; every other step runs as the deployment owner.
+
 ## 0. Preconditions (stop if any fails)
 
 1. The Phase 53 branches are merged to `main` by PR, **including
