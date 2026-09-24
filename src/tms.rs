@@ -73,6 +73,107 @@ pub struct RetractionResult {
     pub cascade_depth: usize,
 }
 
+impl RetractionResult {
+    /// Nothing retracted at the symbol level.
+    pub fn empty() -> Self {
+        Self {
+            retracted: Vec::new(),
+            re_evaluated: Vec::new(),
+            cascade_depth: 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Triple retraction scope (Phase 53j)
+// ---------------------------------------------------------------------------
+
+/// How far removing one `(subject, predicate, object)` edge reaches through
+/// the TMS.
+///
+/// The TMS tracks support at the **symbol** level, so retracting a triple's
+/// object symbol also retracts every conclusion supported by that symbol —
+/// even when the symbol is still asserted by other edges. Callers that
+/// remove one *value* of one subject (supersession, predicate merge,
+/// contradiction repair) must not take that shortcut: a shared value such as
+/// `resolved` stays true for every other subject that holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RetractionScope {
+    /// Remove exactly this edge. The TMS is not touched: no symbol is marked
+    /// retracted and no dependent conclusion is cascaded. Use when the fact
+    /// survives elsewhere (a predicate rewrite re-asserts it under the
+    /// canonical spelling).
+    ExactTriple,
+    /// Remove the edge, then run the symbol cascade for the object **only**
+    /// if no other live edge still asserts it as an object. Otherwise
+    /// behaves like [`RetractionScope::ExactTriple`]. The scope for removing
+    /// one superseded or contradicted value.
+    CascadeIfOrphaned,
+    /// Retract the object symbol unconditionally and cascade through every
+    /// dependent conclusion (the historical `kg_delete` semantics).
+    Symbol,
+}
+
+impl RetractionScope {
+    /// Stable lowercase name for logs and reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactTriple => "exact_triple",
+            Self::CascadeIfOrphaned => "cascade_if_orphaned",
+            Self::Symbol => "symbol",
+        }
+    }
+}
+
+/// What the TMS did for one scoped triple removal.
+#[derive(Debug, Clone)]
+pub enum CascadeOutcome {
+    /// The edge was not live, so nothing was removed or cascaded.
+    NotLive,
+    /// [`RetractionScope::ExactTriple`]: the cascade was not requested.
+    NotRequested,
+    /// [`RetractionScope::CascadeIfOrphaned`] and the object is still the
+    /// object of `remaining_assertions` other live edges: no cascade.
+    ObjectStillAsserted { remaining_assertions: usize },
+    /// The object symbol was retracted and the cascade ran.
+    Cascaded(RetractionResult),
+}
+
+/// Result of [`crate::engine::Engine::remove_triple_scoped`].
+#[derive(Debug, Clone)]
+pub struct TripleRetraction {
+    /// The scope the caller asked for.
+    pub scope: RetractionScope,
+    /// Every edge removed in the transition (the edge itself plus any edge
+    /// of a cascaded dependent). `0` when the edge was not live.
+    pub removed_edges: usize,
+    /// What happened at the symbol level.
+    pub cascade: CascadeOutcome,
+}
+
+impl TripleRetraction {
+    /// Whether the requested edge was live and has been removed.
+    pub fn removed(&self) -> bool {
+        !matches!(self.cascade, CascadeOutcome::NotLive)
+    }
+
+    /// Whether a TMS symbol cascade ran.
+    pub fn cascaded(&self) -> bool {
+        matches!(self.cascade, CascadeOutcome::Cascaded(_))
+    }
+
+    /// The symbol-level result, empty when no cascade ran (the shape the
+    /// unscoped `remove_triple` API has always returned).
+    pub fn into_retraction_result(self) -> RetractionResult {
+        match self.cascade {
+            CascadeOutcome::Cascaded(result) => result,
+            CascadeOutcome::NotLive
+            | CascadeOutcome::NotRequested
+            | CascadeOutcome::ObjectStillAsserted { .. } => RetractionResult::empty(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Truth Maintenance System
 // ---------------------------------------------------------------------------

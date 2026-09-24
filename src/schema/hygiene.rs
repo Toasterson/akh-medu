@@ -841,6 +841,165 @@ mod tests {
         }
     }
 
+    /// Derive `(value, implies, conclusion)` with `value` as the only
+    /// premise of `conclusion` (a rule-inference result, in TMS terms).
+    fn derive_from(engine: &Engine, value: &str, conclusion: &str) -> Triple {
+        let derived = Triple::new(
+            engine.resolve_or_create_entity(value).unwrap(),
+            engine.resolve_or_create_relation("implies").unwrap(),
+            engine.resolve_or_create_entity(conclusion).unwrap(),
+        );
+        engine
+            .add_triple_with_support(
+                &derived,
+                crate::tms::SupportSet::new(vec![derived.subject], DerivationKind::Reasoned, 1.0),
+            )
+            .unwrap();
+        derived
+    }
+
+    fn assert_derivation_intact(engine: &Engine, derived: &Triple) {
+        assert!(
+            engine.has_triple(derived.subject, derived.predicate, derived.object),
+            "derived triple supported by a still-asserted value was cascaded away"
+        );
+        let tms = engine.tms();
+        assert!(
+            !tms.was_retracted(derived.subject),
+            "shared value marked retracted"
+        );
+        assert!(
+            !tms.was_retracted(derived.object),
+            "conclusion marked retracted"
+        );
+    }
+
+    /// Supersession provenance names the stale value and its successor.
+    fn assert_supersession_recorded(engine: &Engine, subject: &str, stale: &str, successor: &str) {
+        let (subject, stale, successor) = (
+            engine.lookup_symbol(subject).unwrap(),
+            engine.lookup_symbol(stale).unwrap(),
+            engine.lookup_symbol(successor).unwrap(),
+        );
+        let records = engine
+            .provenance_by_kind_tags(&[MEMORY_HYGIENE_TAG])
+            .unwrap();
+        assert!(
+            records.iter().any(|r| r.derived_id == stale
+                && matches!(
+                    r.kind,
+                    DerivationKind::MemoryHygiene {
+                        subject: s,
+                        successor: n,
+                        ..
+                    } if s == subject && n == successor
+                )),
+            "missing memory_hygiene record for the supersession"
+        );
+    }
+
+    #[test]
+    fn insert_time_supersession_keeps_a_shared_value_and_its_derivations() {
+        let (engine, _dir) = engine();
+        install_pack(&engine, &compile(PACK).unwrap()).unwrap();
+        put(&engine, "wi-569", "status", "resolved", 1);
+        put(&engine, "wi-570", "status", "resolved", 1);
+        let derived = derive_from(&engine, "resolved", "closed");
+
+        put(&engine, "wi-569", "status", "reopened", 2);
+
+        assert_eq!(live_objects(&engine, "wi-569", "status"), vec!["reopened"]);
+        assert_eq!(live_objects(&engine, "wi-570", "status"), vec!["resolved"]);
+        assert_derivation_intact(&engine, &derived);
+        assert_supersession_recorded(&engine, "wi-569", "resolved", "reopened");
+    }
+
+    #[test]
+    fn backlog_supersession_keeps_a_shared_value_and_its_derivations() {
+        let (engine, _dir) = engine();
+        put(&engine, "wi-569", "status", "resolved", 1);
+        put(&engine, "wi-569", "status", "reopened", 2);
+        put(&engine, "wi-570", "status", "resolved", 1);
+        let derived = derive_from(&engine, "resolved", "closed");
+        install_pack(&engine, &compile(PACK).unwrap()).unwrap();
+
+        let report = run_hygiene(&engine, options()).unwrap();
+
+        assert_eq!(report.superseded, 1, "{report:?}");
+        assert_eq!(live_objects(&engine, "wi-569", "status"), vec!["reopened"]);
+        assert_eq!(live_objects(&engine, "wi-570", "status"), vec!["resolved"]);
+        assert_derivation_intact(&engine, &derived);
+        assert_supersession_recorded(&engine, "wi-569", "resolved", "reopened");
+    }
+
+    #[test]
+    fn superseding_the_last_assertion_of_a_value_cascades() {
+        let (engine, _dir) = engine();
+        install_pack(&engine, &compile(PACK).unwrap()).unwrap();
+        put(&engine, "wi-569", "status", "resolved", 1);
+        let derived = derive_from(&engine, "resolved", "closed");
+
+        put(&engine, "wi-569", "status", "reopened", 2);
+
+        assert_eq!(live_objects(&engine, "wi-569", "status"), vec!["reopened"]);
+        assert!(!engine.has_triple(derived.subject, derived.predicate, derived.object));
+        assert!(engine.tms().was_retracted(derived.subject));
+        assert!(engine.tms().was_retracted(derived.object));
+        assert_supersession_recorded(&engine, "wi-569", "resolved", "reopened");
+    }
+
+    #[test]
+    fn contradiction_repair_keeps_a_shared_value_and_its_derivations() {
+        let (engine, _dir) = engine();
+        put(&engine, "alice", "spouse", "bob", 1);
+        put(&engine, "alice", "spouse", "carol", 2);
+        put(&engine, "dana", "spouse", "bob", 1);
+        let derived = derive_from(&engine, "bob", "married");
+        let spouse = engine.lookup_symbol("spouse").unwrap();
+        engine.functional_preds_mut().declare_functional(spouse);
+
+        let report = run_hygiene(
+            &engine,
+            HygieneOptions {
+                policy: ContradictionPolicy::Replace,
+                ..options()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.repaired, 1, "{report:?}");
+        assert_eq!(live_objects(&engine, "alice", "spouse"), vec!["carol"]);
+        assert_eq!(live_objects(&engine, "dana", "spouse"), vec!["bob"]);
+        assert_derivation_intact(&engine, &derived);
+        assert_supersession_recorded(&engine, "alice", "bob", "carol");
+    }
+
+    #[test]
+    fn predicate_merge_keeps_derived_dependents() {
+        let (engine, _dir) = engine();
+        put(&engine, "janus", "next check", "tomorrow", 1);
+        let derived = derive_from(&engine, "tomorrow", "due");
+        let canonical = engine.resolve_or_create_relation("next_check").unwrap();
+        let alias = engine.lookup_symbol("next check").unwrap();
+
+        let report = merge_predicates(
+            &engine,
+            canonical,
+            &[alias],
+            &mut MutationBudget::unbounded(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(report.moved, 1);
+        assert_eq!(
+            live_objects(&engine, "janus", "next_check"),
+            vec!["tomorrow"]
+        );
+        assert!(live_objects(&engine, "janus", "next check").is_empty());
+        assert_derivation_intact(&engine, &derived);
+    }
+
     #[test]
     fn merge_rejects_canonical_among_aliases() {
         let (engine, _dir) = engine();

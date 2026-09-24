@@ -274,7 +274,8 @@ edits triples by hand:
   `"cardinality": "single_valued"` (optionally `"temporal": true`). The engine
   enforces it on every write (`memory_write`, `kg_mutate`, …): the newest value
   for a `(subject, predicate)` stays live and the older one is retracted
-  through the TMS, with `memory_hygiene` provenance naming its successor and,
+  (the TMS cascades only if no other subject still holds that value), with
+  `memory_hygiene` provenance naming its successor and,
   for temporal predicates, when it stopped holding. These predicates no longer
   log `TemporalConflict` warnings.
 - **Aliases.** A pack's `"aliases"` are other spellings of a relation. A write

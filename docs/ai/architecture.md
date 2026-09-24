@@ -175,6 +175,12 @@ All Phase 9 systems are wired into the engine's `add_triple()` and `remove_tripl
 2. **TMS retraction** — `TruthMaintenanceSystem::retract()` cascades to derived symbols
 3. Cascaded triples removed from KG + SPARQL
 
+`remove_triple_scoped(.., RetractionScope)` (Phase 53j) makes the reach explicit:
+`Symbol` is the cascade above, `ExactTriple` removes only the edge, and
+`CascadeIfOrphaned` cascades only when no other live edge still asserts the
+object. Memory hygiene (supersession, contradiction repair) uses
+`CascadeIfOrphaned`; predicate merge uses `ExactTriple`.
+
 **Inference integration** — `Engine::infer()` builds `InferPhase9Context`:
 - Hierarchy-aware spreading activation (specialization + inverse predicates)
 - Temporal decay of triple confidences based on `TemporalRegistry` profiles

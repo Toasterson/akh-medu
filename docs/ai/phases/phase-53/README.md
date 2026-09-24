@@ -623,8 +623,8 @@ warning, and one predicate accumulated under several spellings (`next_check`,
 - **Engine write path** (`Engine::add_triple_locked`):
   - A declared alias is stored under its canonical relation.
   - For a single-valued predicate, older live values in the same
-    `(subject, compartment)` are retracted through `remove_triple_locked` (TMS)
-    **after** the new edge is published.
+    `(subject, compartment)` are retracted **after** the new edge is
+    published, with `RetractionScope::CascadeIfOrphaned` (below).
   - A write older than the live value (`newest_first`: timestamp, then
     confidence, then object id) is recorded as superseded and not published.
   - Same-(s, p) contradictions are filtered out for these predicates, so they
@@ -632,9 +632,21 @@ warning, and one predicate accumulated under several spellings (`next_check`,
   - Provenance: `DerivationKind::MemoryHygiene { action: HygieneAction, subject,
     predicate, successor, valid_until }` is **tag 109** (`memory_hygiene`,
     appended after 53e's 108). `valid_until` is set for temporal predicates.
-  - New engine APIs: `supersede_triple` (TMS retraction with provenance) and
-    `rewrite_predicate` (assert the re-spelled edge, then remove the alias edge
-    exactly, **without** a TMS cascade, since the fact still holds).
+  - New engine APIs: `supersede_triple` (retraction with provenance, scope
+    `CascadeIfOrphaned`) and `rewrite_predicate` (assert the re-spelled edge,
+    then remove the alias edge with scope `ExactTriple`, since the fact still
+    holds).
+  - **Retraction scope** (`tms::RetractionScope`,
+    `Engine::remove_triple_scoped`): the TMS tracks support per *symbol*, so
+    the historical `remove_triple` (`Symbol`) retracts the object symbol and
+    cascades through every conclusion it supports even while other subjects
+    still assert that value. Hygiene never does that: `ExactTriple` removes
+    only the edge; `CascadeIfOrphaned` cascades only when no other live edge
+    still has the object as its object. Superseding `(wi-569, status,
+    resolved)` therefore leaves `resolved`, `was_retracted(resolved)` and
+    anything derived from it alone while another subject is `resolved`.
+    `kg_delete` and the other bulk APIs keep `Symbol`. All scopes commit
+    through the same exact-edge `RetractBatch` transition.
 - **Structural keys** (`src/schema/canonical.rs`): `PredicateKey` = NFKC +
   Unicode lowercasing + separator runs (whitespace, `_`, dash punctuation)
   collapsed to `_`. There are no word lists, and namespaces stay distinct.

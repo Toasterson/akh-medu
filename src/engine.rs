@@ -1148,9 +1148,11 @@ impl Engine {
         // --- Phase 53j: single-valued supersession plan ---
         // A declared single-valued predicate holds one live object per
         // (subject, compartment). Older values are expected supersession,
-        // not contradictions: they are retracted (TMS + `memory_hygiene`
-        // provenance) after the new edge is published. A write that is older
-        // than the live value is itself superseded and never published.
+        // not contradictions: they are retracted (`memory_hygiene`
+        // provenance + `RetractionScope::CascadeIfOrphaned`, so a value other
+        // subjects still hold is never cascaded) after the new edge is
+        // published. A write that is older than the live value is itself
+        // superseded and never published.
         let cardinality =
             crate::schema::cardinality::declared_cardinality(self, stored_triple.predicate);
         let superseded = if cardinality.is_single_valued() {
@@ -1393,9 +1395,12 @@ impl Engine {
                 stored_triple.object,
                 valid_until,
             );
-            if let Err(error) =
-                self.remove_triple_locked(prior.subject, prior.predicate, prior.object)
-            {
+            if let Err(error) = self.remove_triple_scoped_locked(
+                prior.subject,
+                prior.predicate,
+                prior.object,
+                crate::tms::RetractionScope::CascadeIfOrphaned,
+            ) {
                 tracing::warn!(
                     code = "akh::engine::supersession_retract",
                     %error,
@@ -1484,8 +1489,13 @@ impl Engine {
 
     /// Phase 53j: retract a still-live `stale` edge because `successor`
     /// replaces it (single-valued backlog, contradiction repair), with a
-    /// `memory_hygiene` provenance record stored first. Goes through the
-    /// TMS retraction path, like `kg_delete`.
+    /// `memory_hygiene` provenance record stored first.
+    ///
+    /// Removes the edge with `RetractionScope::CascadeIfOrphaned`: the TMS
+    /// cascades through the stale object only when no other live edge still
+    /// asserts it. Superseding `(wi-1, status, resolved)` must not retract
+    /// `resolved` (or anything derived from it) while `(wi-2, status,
+    /// resolved)` holds. `kg_delete` keeps the unconditional symbol cascade.
     ///
     /// Returns `Ok(false)` when `stale` is no longer live (nothing to do),
     /// so re-running a hygiene pass is idempotent.
@@ -1508,7 +1518,12 @@ impl Engine {
             return Ok(false);
         };
         self.record_hygiene_provenance(&live, action, successor.object, valid_until);
-        self.remove_triple_locked(live.subject, live.predicate, live.object)?;
+        self.remove_triple_scoped_locked(
+            live.subject,
+            live.predicate,
+            live.object,
+            crate::tms::RetractionScope::CascadeIfOrphaned,
+        )?;
         Ok(true)
     }
 
@@ -1516,7 +1531,8 @@ impl Engine {
     /// `canonical` as one serialized transition: assert the re-spelled edge
     /// (keeping confidence, timestamp, compartment and provenance link, and
     /// honouring single-valued supersession), record `memory_hygiene`
-    /// provenance, then remove the alias edge exactly.
+    /// provenance, then remove the alias edge exactly
+    /// (`RetractionScope::ExactTriple`).
     ///
     /// The alias edge is removed **without** a TMS cascade: the fact still
     /// holds, only its predicate spelling changed, so its object must not be
@@ -1549,7 +1565,12 @@ impl Engine {
             canonical,
             None,
         );
-        self.commit_exact_retractions_locked(std::slice::from_ref(&live))?;
+        self.remove_triple_scoped_locked(
+            live.subject,
+            live.predicate,
+            live.object,
+            crate::tms::RetractionScope::ExactTriple,
+        )?;
         Ok(true)
     }
 
@@ -3253,6 +3274,37 @@ impl Engine {
         self.remove_triple_locked(subject, predicate, object)
     }
 
+    /// Remove one triple with an explicit TMS reach (Phase 53j).
+    ///
+    /// [`Self::remove_triple`] is `RetractionScope::Symbol`: it retracts the
+    /// object *symbol* and cascades through every conclusion supported by
+    /// it, even when other subjects still assert that value. Removing one
+    /// superseded or contradicted value wants
+    /// [`RetractionScope::CascadeIfOrphaned`]; moving a fact to another
+    /// spelling wants [`RetractionScope::ExactTriple`]. All scopes commit
+    /// through the same exact-edge transition (KG, SPARQL, identity state,
+    /// replay-complete `RetractBatch` WAL record), and the planned TMS state
+    /// is published only after that transition succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the engine is quiesced or the transition cannot commit
+    /// (SPARQL failure restores every edge). A caller that can tolerate a
+    /// stale edge may log and let the next hygiene pass retry.
+    pub fn remove_triple_scoped(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+        scope: crate::tms::RetractionScope,
+    ) -> AkhResult<crate::tms::TripleRetraction> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.remove_triple_scoped_locked(subject, predicate, object, scope)
+    }
+
     /// `remove_triple` with the encompassing mutation checkpoint already held.
     /// Every bulk/cleanup API delegates here so TMS, SPARQL, identity state,
     /// and the replay-complete WAL transition cannot diverge.
@@ -3262,14 +3314,73 @@ impl Engine {
         predicate: SymbolId,
         object: SymbolId,
     ) -> AkhResult<crate::tms::RetractionResult> {
+        self.remove_triple_scoped_locked(
+            subject,
+            predicate,
+            object,
+            crate::tms::RetractionScope::Symbol,
+        )
+        .map(crate::tms::TripleRetraction::into_retraction_result)
+    }
+
+    /// Live edges other than `(subject, predicate, object)` that assert
+    /// `object` as their object.
+    fn other_assertions_of(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+    ) -> usize {
+        self.knowledge_graph
+            .triples_to(object)
+            .into_iter()
+            .filter(|t| t.subject != subject || t.predicate != predicate)
+            .count()
+    }
+
+    /// [`Self::remove_triple_scoped`] with the mutation checkpoint held.
+    fn remove_triple_scoped_locked(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+        scope: crate::tms::RetractionScope,
+    ) -> AkhResult<crate::tms::TripleRetraction> {
+        use crate::tms::{CascadeOutcome, RetractionScope, TripleRetraction};
+
         self.ensure_mutations_active()?;
         let Some(primary) = self.knowledge_graph.triple(subject, predicate, object) else {
-            return Ok(crate::tms::RetractionResult {
-                retracted: vec![],
-                re_evaluated: vec![],
-                cascade_depth: 0,
+            return Ok(TripleRetraction {
+                scope,
+                removed_edges: 0,
+                cascade: CascadeOutcome::NotLive,
             });
         };
+
+        // Decide the symbol-level reach before touching anything. A value
+        // still asserted by another edge is not retracted: the TMS tracks
+        // support per symbol, so cascading here would take down conclusions
+        // that other subjects' copies of the value still justify.
+        let exact_only = match scope {
+            RetractionScope::Symbol => None,
+            RetractionScope::ExactTriple => Some(CascadeOutcome::NotRequested),
+            RetractionScope::CascadeIfOrphaned => {
+                match self.other_assertions_of(subject, predicate, object) {
+                    0 => None,
+                    remaining_assertions => Some(CascadeOutcome::ObjectStillAsserted {
+                        remaining_assertions,
+                    }),
+                }
+            }
+        };
+        if let Some(outcome) = exact_only {
+            self.commit_exact_retractions_locked(std::slice::from_ref(&primary))?;
+            return Ok(TripleRetraction {
+                scope,
+                removed_edges: 1,
+                cascade: outcome,
+            });
+        }
 
         // Plan the TMS transition on a clone. The live TMS and every graph
         // projection remain untouched until the complete edge envelope has
@@ -3312,7 +3423,11 @@ impl Engine {
         if let Some(planned) = planned_tms {
             *self.tms.write().unwrap() = planned;
         }
-        Ok(result)
+        Ok(TripleRetraction {
+            scope,
+            removed_edges: removals.len(),
+            cascade: CascadeOutcome::Cascaded(result),
+        })
     }
 
     /// Host-only conservative invalidation for an isolated rule snapshot.
@@ -5292,6 +5407,116 @@ mod tests {
         assert!(!engine.has_triple(triples[2].subject, predicate, triples[2].object));
         assert!(!engine.has_triple(triples[3].subject, predicate, triples[3].object));
         assert!(!engine.has_triple(triples[4].subject, predicate, triples[4].object));
+    }
+
+    /// Phase 53j: `(wi-1, status, resolved)` + `(wi-2, status, resolved)`
+    /// plus a conclusion `closed` whose only support is `resolved`.
+    fn shared_value_engine() -> (Engine, tempfile::TempDir, [SymbolId; 6]) {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let wi1 = engine.resolve_or_create_entity("wi-1").unwrap();
+        let wi2 = engine.resolve_or_create_entity("wi-2").unwrap();
+        let status = engine.resolve_or_create_relation("status").unwrap();
+        let resolved = engine.resolve_or_create_entity("resolved").unwrap();
+        let implies = engine.resolve_or_create_relation("implies").unwrap();
+        let closed = engine.resolve_or_create_entity("closed").unwrap();
+        engine
+            .add_triple(&Triple::new(wi1, status, resolved))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(wi2, status, resolved))
+            .unwrap();
+        engine
+            .add_triple_with_support(
+                &Triple::new(resolved, implies, closed),
+                crate::tms::SupportSet::new(
+                    vec![resolved],
+                    crate::provenance::DerivationKind::Reasoned,
+                    1.0,
+                ),
+            )
+            .unwrap();
+        (engine, dir, [wi1, wi2, status, resolved, implies, closed])
+    }
+
+    #[test]
+    fn scoped_removal_cascades_only_as_far_as_the_scope_allows() {
+        use crate::tms::{CascadeOutcome, RetractionScope};
+
+        // ExactTriple: the edge goes, the TMS is untouched.
+        let (engine, _dir, [wi1, wi2, status, resolved, implies, closed]) = shared_value_engine();
+        let sink = Arc::new(RecordingSink::default());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
+        let sparql_before = engine.sparql().unwrap().len().unwrap();
+        let exact = engine
+            .remove_triple_scoped(wi1, status, resolved, RetractionScope::ExactTriple)
+            .unwrap();
+        assert!(matches!(exact.cascade, CascadeOutcome::NotRequested));
+        assert_eq!(exact.removed_edges, 1);
+        assert!(!engine.has_triple(wi1, status, resolved));
+        assert!(engine.has_triple(resolved, implies, closed));
+        assert!(!engine.tms().was_retracted(resolved));
+        assert_eq!(engine.sparql().unwrap().len().unwrap(), sparql_before - 1);
+        {
+            let records = sink.0.lock().unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].kind, crate::mutation::MutationKind::RetractBatch);
+            assert_eq!(records[0].payload["retracts"].as_array().unwrap().len(), 1);
+        }
+
+        // Not live any more: reported, nothing recorded.
+        let again = engine
+            .remove_triple_scoped(wi1, status, resolved, RetractionScope::Symbol)
+            .unwrap();
+        assert!(!again.removed());
+        assert_eq!(sink.0.lock().unwrap().len(), 1);
+
+        // CascadeIfOrphaned while wi-2 still asserts `resolved`: no cascade.
+        // (The derived `resolved implies closed` edge is outgoing, so it is
+        // not an assertion *of* `resolved`.)
+        let (engine, _dir, [wi1, _wi2, status, resolved, implies, closed]) = shared_value_engine();
+        let kept = engine
+            .remove_triple_scoped(wi1, status, resolved, RetractionScope::CascadeIfOrphaned)
+            .unwrap();
+        assert!(matches!(
+            kept.cascade,
+            CascadeOutcome::ObjectStillAsserted {
+                remaining_assertions: 1
+            }
+        ));
+        assert!(engine.has_triple(resolved, implies, closed));
+        assert!(!engine.tms().was_retracted(resolved));
+        assert!(!engine.tms().was_retracted(closed));
+
+        // ...and once the last assertion goes, the cascade runs.
+        let orphaned = engine
+            .remove_triple_scoped(wi2, status, resolved, RetractionScope::CascadeIfOrphaned)
+            .unwrap();
+        assert!(orphaned.cascaded());
+        assert_eq!(orphaned.removed_edges, 2);
+        assert!(!engine.has_triple(resolved, implies, closed));
+        assert!(engine.tms().was_retracted(resolved));
+        assert!(engine.tms().was_retracted(closed));
+
+        // Symbol keeps the historical kg_delete semantics even while wi-2
+        // still asserts the value.
+        let (engine, _dir, [wi1, wi2, status, resolved, implies, closed]) = shared_value_engine();
+        let symbol = engine
+            .remove_triple_scoped(wi1, status, resolved, RetractionScope::Symbol)
+            .unwrap();
+        assert!(symbol.cascaded());
+        assert!(!engine.has_triple(resolved, implies, closed));
+        assert!(engine.has_triple(wi2, status, resolved));
+        assert!(engine.tms().was_retracted(resolved));
     }
 
     #[test]

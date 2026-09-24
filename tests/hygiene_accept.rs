@@ -299,6 +299,31 @@ async fn hygiene_pass_on_a_copied_store() {
             provenance.len(),
             by_action
         );
+        // TMS reach of the hygiene retractions. `cascaded` = hygiene-retracted
+        // objects the TMS marked retracted (a symbol cascade ran on them);
+        // `still_asserted` = those that are nonetheless still the object of a
+        // live edge (a shared value the cascade must not have touched).
+        let live_objects: std::collections::HashSet<SymbolId> =
+            engine.all_triples().into_iter().map(|t| t.object).collect();
+        let hygiene_objects: std::collections::BTreeSet<SymbolId> =
+            provenance.iter().map(|r| r.derived_id).collect();
+        let (cascaded, still_asserted) = {
+            let tms = engine.tms();
+            let cascaded: Vec<SymbolId> = hygiene_objects
+                .iter()
+                .copied()
+                .filter(|&o| tms.was_retracted(o))
+                .collect();
+            let still_asserted = cascaded.iter().filter(|o| live_objects.contains(o)).count();
+            (cascaded.len(), still_asserted)
+        };
+        println!(
+            "tms: hygiene-retracted objects {} cascaded {} still-asserted-but-flagged {} (support sets {})",
+            hygiene_objects.len(),
+            cascaded,
+            still_asserted,
+            engine.tms().support_set_count()
+        );
         println!(
             "unresolved (undeclared multi-value) top: {:?}",
             idempotent
