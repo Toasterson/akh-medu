@@ -31,7 +31,7 @@ pub enum DelegationError {
         code(akh::delegation::no_target),
         help(
             "Enable additional targets in akh.toml: \
-             [delegation.local], [delegation.remote], or [delegation.peers]"
+             [delegation.native], [delegation.remote], or [delegation.peers]"
         )
     )]
     NoTarget { required: Vec<String> },
@@ -50,7 +50,7 @@ pub enum DelegationError {
     #[diagnostic(
         code(akh::delegation::timeout),
         help(
-            "Increase timeout_seconds in akh.toml [delegation.local] section, \
+            "Increase timeout_seconds in akh.toml [delegation.native] section, \
              or break the task into smaller subtasks"
         )
     )]
@@ -59,29 +59,20 @@ pub enum DelegationError {
         delegation_id: u64,
     },
 
-    #[error("worker process failed with exit code {exit_code}")]
+    #[error("delegation grant unavailable: {reason}")]
     #[diagnostic(
-        code(akh::delegation::worker_failed),
-        help("Check the task prompt for clarity. Worker stderr: {stderr}")
-    )]
-    WorkerFailed { exit_code: i32, stderr: String },
-
-    #[error("claude CLI not found on PATH")]
-    #[diagnostic(
-        code(akh::delegation::claude_not_found),
+        code(akh::delegation::grant_unavailable),
         help(
-            "Install Claude Code CLI: https://docs.anthropic.com/en/docs/claude-code \
-             or ensure 'claude' is on your PATH"
+            "Native-session delegation mints a per-delegation grant through the /v1 \
+             core API. Start akhomed with AKH_CORE_CONFIG set, or pick another target \
+             (`peer`, `remote`)."
         )
     )]
-    ClaudeNotFound,
+    GrantUnavailable { reason: String },
 
-    #[error("failed to generate MCP config: {message}")]
-    #[diagnostic(
-        code(akh::delegation::mcp_config),
-        help("Check that the temp directory is writable and akhomed_url is configured")
-    )]
-    McpConfig { message: String },
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    NativeSession(#[from] super::native_session::NativeSessionError),
 
     #[error("failed to parse structured output from worker")]
     #[diagnostic(
@@ -131,7 +122,7 @@ pub enum DelegationError {
     #[error("I/O error during delegation: {0}")]
     #[diagnostic(
         code(akh::delegation::io),
-        help("Check file permissions, disk space, and that the claude binary is accessible")
+        help("Check file permissions and disk space")
     )]
     Io(#[from] std::io::Error),
 }

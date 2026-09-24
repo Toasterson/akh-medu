@@ -248,6 +248,7 @@ fn admit(app: &SessionApp, p: &Principal, akh: &str, params: &Value) -> Result<M
                     akh: akh.into(),
                     workspace_profile: workspace,
                     conversation_key: None,
+                    grant: None,
                 },
             )?
         };

@@ -32,6 +32,7 @@ fn create(s: &Sessions, p: &Principal) -> SessionRecord {
             akh: "thoth".into(),
             workspace_profile: "rust".into(),
             conversation_key: Some("topic".into()),
+            grant: None,
         },
     )
     .unwrap()
@@ -699,6 +700,7 @@ fn conversation_rebind_waits_for_retirement_and_cleanup_and_preserves_replay() {
         akh: "thoth".into(),
         workspace_profile: "rust".into(),
         conversation_key: Some("topic".into()),
+        grant: None,
     };
     s.retire(
         &p,
@@ -764,6 +766,7 @@ fn concurrent_find_or_create_has_one_session_and_durable_dedupe() {
                             akh: "thoth".into(),
                             workspace_profile: "rust".into(),
                             conversation_key: Some("same".into()),
+                            grant: None,
                         },
                     )
                     .unwrap()
@@ -789,6 +792,7 @@ fn concurrent_find_or_create_has_one_session_and_durable_dedupe() {
                 akh: "thoth".into(),
                 workspace_profile: "rust".into(),
                 conversation_key: Some("same".into()),
+                grant: None,
             },
         )
         .unwrap();
@@ -800,7 +804,8 @@ fn concurrent_find_or_create_has_one_session_and_durable_dedupe() {
                 request_id: "create-0".into(),
                 akh: "thoth".into(),
                 workspace_profile: "rust".into(),
-                conversation_key: None
+                conversation_key: None,
+                grant: None,
             }
         )
         .is_err()
@@ -1321,6 +1326,7 @@ async fn slow_cognitive_service_does_not_hold_another_sessions_dispatch() {
                 akh: "slow".into(),
                 workspace_profile: "rust".into(),
                 conversation_key: None,
+                grant: None,
             },
         )
         .unwrap();
@@ -1666,6 +1672,7 @@ fn coordination_workspace_narrows_tools_without_changing_akh_identity() {
                 akh: "thoth".into(),
                 workspace_profile: "coordination".into(),
                 conversation_key: None,
+                grant: None,
             },
         )
         .unwrap();
@@ -1774,6 +1781,7 @@ async fn archived_cleanup_cannot_occupy_all_dispatch_workers() {
                     akh: "thoth".into(),
                     workspace_profile: "rust".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -1980,5 +1988,141 @@ async fn mcp_lost_response_is_a_tool_failure_not_a_quarantine_and_cannot_be_repl
             .success
     );
     assert_eq!(effects.load(Ordering::SeqCst), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_delegation_grant_stays_private_and_rides_every_cognitive_call() {
+    use akh_session_services::broker::Broker;
+    use axum::{Json, Router, routing::post};
+    use std::os::unix::fs::MetadataExt;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<CognitiveToolCall>::new()));
+    let record = seen.clone();
+    let core = Router::new().route(
+        "/v1/tools/call",
+        post(move |Json(call): Json<CognitiveToolCall>| {
+            let record = record.clone();
+            async move {
+                let receipt = call.request_id.clone();
+                record.lock().unwrap().push(call);
+                Json(ToolResult {
+                    success: true,
+                    text: "ok".into(),
+                    data: None,
+                    receipt: Some(receipt),
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, core).await.unwrap();
+    });
+    let (dir, old, p) = setup();
+    let token = dir.path().join("core-token");
+    std::fs::write(&token, "private-core-test-credential-0001").unwrap();
+    let mut config = (*old.config).clone();
+    config.endpoints.insert(
+        "core".into(),
+        serde_json::from_value(json!({"url":format!("http://{address}"),"token_file":token}))
+            .unwrap(),
+    );
+    config.akhs.get_mut("thoth").unwrap().tools = vec![ToolSpec {
+        name: "kg_query".into(),
+        description: "Query the akh".into(),
+        input_schema: json!({"type":"object"}),
+        read_only: true,
+        destination: ToolDestination::Cognitive {
+            service: "core".into(),
+            tool: "kg_query".into(),
+        },
+    }];
+    config.validate().unwrap();
+    let s = Sessions::new(old.store.clone(), Arc::new(config));
+
+    let secret = "delegation-grant-secret-value-0123456789";
+    let request = NewSession {
+        request_id: "delegated".into(),
+        akh: "thoth".into(),
+        workspace_profile: "rust".into(),
+        conversation_key: None,
+        grant: Some(GrantToken::new(secret)),
+    };
+    let session = s.create(&p, &request).unwrap();
+    // An exact replay returns the same session; another grant under the same
+    // request id is a conflict, not a silent swap.
+    assert_eq!(s.create(&p, &request).unwrap().id, session.id);
+    let swapped = NewSession {
+        grant: Some(GrantToken::new("another-grant-secret-value-0123456789")),
+        ..request.clone()
+    };
+    assert_eq!(s.create(&p, &swapped).unwrap_err().code, "conflict");
+
+    // The secret lives only in an owner-only private slot.
+    let everything =
+        serde_json::to_string(&s.store.scan::<serde_json::Value>("").unwrap()).unwrap();
+    assert!(
+        !everything.contains(secret),
+        "grant secret reached the store"
+    );
+    assert!(!serde_json::to_string(&session).unwrap().contains(secret));
+    let slots: Vec<_> = std::fs::read_dir(dir.path().join("session-delegation-grants"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(slots.len(), 1);
+    assert_eq!(std::fs::metadata(&slots[0]).unwrap().mode() & 0o077, 0);
+
+    submit(&s, &p, &session.id, "turn");
+    binding(&s, &session.id);
+    let job = s.next_job(&session.id).unwrap().unwrap();
+    let runtime = Principal {
+        id: "runtime-1".into(),
+        roles: vec!["runtime".into()],
+        ..p.clone()
+    };
+    let broker = Broker::new(s.clone()).unwrap();
+    let reply = broker
+        .tool(
+            &runtime,
+            ToolCall {
+                id: "query".into(),
+                session_id: session.id.clone(),
+                turn_id: job.turn_id.clone(),
+                generation: job.generation,
+                name: "kg_query".into(),
+                arguments: json!({"symbol": "cedar"}),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(reply.result.unwrap().success);
+    let calls = seen.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].grant, Some(GrantToken::new(secret)));
+    assert_eq!(calls[0].session_id, session.id);
+    assert_eq!(calls[0].akh, "thoth");
+
+    // A session without a grant keeps the pre-53e wire payload.
+    let plain = create(&s, &p);
+    submit(&s, &p, &plain.id, "plain-turn");
+    binding(&s, &plain.id);
+    let job = s.next_job(&plain.id).unwrap().unwrap();
+    broker
+        .tool(
+            &runtime,
+            ToolCall {
+                id: "plain-query".into(),
+                session_id: plain.id.clone(),
+                turn_id: job.turn_id.clone(),
+                generation: job.generation,
+                name: "kg_query".into(),
+                arguments: json!({}),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().unwrap()[1].grant, None);
     server.abort();
 }

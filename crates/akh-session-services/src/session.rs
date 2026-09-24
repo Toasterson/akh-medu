@@ -512,7 +512,18 @@ impl Sessions {
             ));
         }
         let dedupe = key("create", &[&principal.id, &request.request_id]);
-        let request_value = encode(request)?;
+        // Phase 53e: the grant secret never enters the store. Deduplicate on
+        // its fingerprint instead, so an exact replay still matches.
+        if let Some(grant) = &request.grant {
+            Self::validate_grant(grant)?;
+        }
+        let request_value = encode(&NewSession {
+            grant: request
+                .grant
+                .as_ref()
+                .map(crate::session_grants::grant_fingerprint),
+            ..request.clone()
+        })?;
         if let Some(old) = tx.get::<CommandRecord>(&dedupe)? {
             if old.request != request_value {
                 return Err(Fault::conflict(
@@ -549,6 +560,7 @@ impl Sessions {
                             "conversation already has a different workspace profile",
                         ));
                     }
+                    self.check_existing_grant(tx, &id, request.grant.as_ref())?;
                     tx.put(
                         &dedupe,
                         &CommandRecord {
@@ -596,13 +608,12 @@ impl Sessions {
         if let Some(index) = &conversation_key {
             tx.put(index, &session.id)?;
         }
-        append_event(
-            tx,
-            &mut session,
-            None,
-            "session_created",
-            json!({"akh": request.akh}),
-        )?;
+        let mut created = json!({"akh": request.akh});
+        if let Some(grant) = &request.grant {
+            self.store_grant(tx, &session.id, grant)?;
+            created["delegation_grant"] = json!(true);
+        }
+        append_event(tx, &mut session, None, "session_created", created)?;
         Ok(session)
     }
 
@@ -1449,6 +1460,7 @@ impl Sessions {
                             akh: definition.akh.clone(),
                             workspace_profile: definition.workspace_profile.clone(),
                             conversation_key,
+                            grant: None,
                         },
                     )?
                 }

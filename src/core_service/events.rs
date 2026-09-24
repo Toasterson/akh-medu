@@ -372,6 +372,7 @@ mod tests {
                     akhs: vec!["janus".into()],
                     tools: ToolScope::default(),
                     roles,
+                    grants: Default::default(),
                 }],
             },
             Arc::new(Backend(engine)),

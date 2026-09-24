@@ -814,6 +814,76 @@ pub enum DerivationKind {
         predicate: SymbolId,
         source: SymbolId,
     },
+
+    // --- Phase 53e: delegation grants (ADR 113 decision 9) ------------------
+    /// Knowledge written by a delegate's cognitive tool call over the `/v1`
+    /// core API, recorded as the **delegate's** provenance, not the akh's.
+    /// Stored as a sibling of the tool's own record while a
+    /// [`DelegateAttribution`] is active (see
+    /// [`with_delegate_attribution`]); `memory_write` uses it directly.
+    /// Carries no symbol references (tag 108).
+    DelegatedCall {
+        /// The delegate principal (the grant's principal, or the core
+        /// principal for a scope-authorized call without a grant).
+        principal: String,
+        /// The grant the call presented, if any.
+        grant_id: Option<String>,
+        /// The tool the delegate called.
+        tool: String,
+        /// The delegated session.
+        session_id: String,
+        /// The idempotent request id of the call.
+        request_id: String,
+    },
+}
+
+/// Who a cognitive tool call runs on behalf of (Phase 53e).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegateAttribution {
+    pub principal: String,
+    pub grant_id: Option<String>,
+    pub tool: String,
+    pub session_id: String,
+    pub request_id: String,
+}
+
+impl DelegateAttribution {
+    /// The provenance kind recording this attribution.
+    pub fn derivation(&self) -> DerivationKind {
+        DerivationKind::DelegatedCall {
+            principal: self.principal.clone(),
+            grant_id: self.grant_id.clone(),
+            tool: self.tool.clone(),
+            session_id: self.session_id.clone(),
+            request_id: self.request_id.clone(),
+        }
+    }
+}
+
+thread_local! {
+    static DELEGATE_ATTRIBUTION: std::cell::RefCell<Option<DelegateAttribution>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `attribution` active on this thread, restoring the previous
+/// attribution afterwards (also on panic). Tool execution for one `/v1` call
+/// runs synchronously on one blocking thread, so a thread-local is exact.
+pub fn with_delegate_attribution<R>(attribution: DelegateAttribution, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<DelegateAttribution>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            DELEGATE_ATTRIBUTION.with(|slot| *slot.borrow_mut() = previous);
+        }
+    }
+    let previous = DELEGATE_ATTRIBUTION.with(|slot| slot.borrow_mut().replace(attribution));
+    let _restore = Restore(previous);
+    f()
+}
+
+/// The delegate attribution active on this thread, if any.
+pub fn current_delegate_attribution() -> Option<DelegateAttribution> {
+    DELEGATE_ATTRIBUTION.with(|slot| slot.borrow().clone())
 }
 
 /// Version marker for exact RuleInference support triples encoded in the
@@ -838,7 +908,7 @@ impl DerivationKind {
     /// The array index is the kind's persisted numeric tag.  Keep additions in
     /// lock-step with [`Self::tag`]; unlike a name derived from `Debug`, these
     /// strings are an explicit compatibility contract.
-    pub const KIND_NAMES: [&'static str; 108] = [
+    pub const KIND_NAMES: [&'static str; 109] = [
         "extracted",
         "seed",
         "graph_edge",
@@ -947,6 +1017,7 @@ impl DerivationKind {
         "librarian_extraction",
         "note_reprojection",
         "source_attributed",
+        "delegated_call",
     ];
 
     /// Every registry symbol referenced by this derivation payload.
@@ -1100,7 +1171,8 @@ impl DerivationKind {
             | Self::RelationEnrichment { .. }
             | Self::OpenClawImport { .. }
             | Self::LibrarianExtraction { .. }
-            | Self::NoteReprojection { .. } => Vec::new(),
+            | Self::NoteReprojection { .. }
+            | Self::DelegatedCall { .. } => Vec::new(),
         }
     }
 
@@ -1228,6 +1300,7 @@ impl DerivationKind {
             Self::LibrarianExtraction { .. } => 105,
             Self::NoteReprojection { .. } => 106,
             Self::SourceAttributed { .. } => 107,
+            Self::DelegatedCall { .. } => 108,
         }
     }
 }
@@ -1882,6 +1955,49 @@ mod tests {
 
     fn sym(id: u64) -> SymbolId {
         SymbolId::new(id).unwrap()
+    }
+
+    fn attribution(principal: &str) -> DelegateAttribution {
+        DelegateAttribution {
+            principal: principal.into(),
+            grant_id: Some("grant-1".into()),
+            tool: "memory_write".into(),
+            session_id: "session-1".into(),
+            request_id: "request-1".into(),
+        }
+    }
+
+    #[test]
+    fn delegated_call_is_the_appended_tag_108_without_symbols() {
+        assert_eq!(DerivationKind::tag_for_name("delegated_call"), Some(108));
+        assert_eq!(DerivationKind::KIND_NAMES.len(), 109);
+        let kind = attribution("claude-worker").derivation();
+        assert_eq!(kind.tag(), 108);
+        assert_eq!(kind.kind_name(), "delegated_call");
+        assert!(kind.referenced_symbol_ids().is_empty());
+        // Appending keeps every earlier persisted tag stable.
+        assert_eq!(DerivationKind::tag_for_name("source_attributed"), Some(107));
+        let bytes = bincode::serialize(&ProvenanceRecord::new(sym(1), kind.clone())).unwrap();
+        let decoded: ProvenanceRecord = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.kind, kind);
+    }
+
+    #[test]
+    fn delegate_attribution_is_scoped_nested_and_panic_safe() {
+        assert_eq!(current_delegate_attribution(), None);
+        with_delegate_attribution(attribution("outer"), || {
+            assert_eq!(current_delegate_attribution().unwrap().principal, "outer");
+            with_delegate_attribution(attribution("inner"), || {
+                assert_eq!(current_delegate_attribution().unwrap().principal, "inner");
+            });
+            assert_eq!(current_delegate_attribution().unwrap().principal, "outer");
+        });
+        assert_eq!(current_delegate_attribution(), None);
+        let panicked = std::panic::catch_unwind(|| {
+            with_delegate_attribution(attribution("boom"), || panic!("tool panicked"))
+        });
+        assert!(panicked.is_err());
+        assert_eq!(current_delegate_attribution(), None);
     }
 
     #[test]

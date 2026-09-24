@@ -1566,13 +1566,37 @@ impl Engine {
     // -----------------------------------------------------------------------
 
     /// Store a provenance record in the ledger.
+    ///
+    /// Phase 53e (ADR 113 D9): while a delegate attribution is active on this
+    /// thread (a `/v1` tool call), a sibling `DelegatedCall` record for the
+    /// same symbol is stored too, so the write is the delegate's provenance.
     pub fn store_provenance(&self, record: &mut ProvenanceRecord) -> AkhResult<ProvenanceId> {
         validate_provenance_record_symbols(&self.registry, record)?;
         let ledger = self
             .provenance_ledger
             .as_ref()
             .ok_or(ProvenanceError::NoPersistence)?;
-        Ok(ledger.store(record)?)
+        let id = ledger.store(record)?;
+        Self::store_delegate_sibling(ledger, record)?;
+        Ok(id)
+    }
+
+    /// Record the active delegate attribution next to `record` (no-op when no
+    /// attribution is active or `record` already is the delegate's record).
+    fn store_delegate_sibling(
+        ledger: &ProvenanceLedger,
+        record: &ProvenanceRecord,
+    ) -> AkhResult<()> {
+        let Some(attribution) = crate::provenance::current_delegate_attribution() else {
+            return Ok(());
+        };
+        if matches!(record.kind, DerivationKind::DelegatedCall { .. }) {
+            return Ok(());
+        }
+        let mut sibling = ProvenanceRecord::new(record.derived_id, attribution.derivation())
+            .with_confidence(record.confidence);
+        ledger.store(&mut sibling)?;
+        Ok(())
     }
 
     /// Store one provenance record before publishing every triple it supports.
@@ -1597,7 +1621,11 @@ impl Engine {
         self.preflight_provenance_batch(triples, record)?;
 
         let provenance_id = match self.provenance_ledger.as_ref() {
-            Some(ledger) => Some(ledger.store(record)?),
+            Some(ledger) => {
+                let id = ledger.store(record)?;
+                Self::store_delegate_sibling(ledger, record)?;
+                Some(id)
+            }
             None => None,
         };
         for triple in triples {

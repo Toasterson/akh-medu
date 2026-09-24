@@ -1053,7 +1053,7 @@ impl AkhConfig {
                     "daily_cost_budget_cents",
                     "per_task_max_cents",
                     "akhomed_url",
-                    "local",
+                    "native",
                     "remote",
                     "peers",
                 ],

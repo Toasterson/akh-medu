@@ -157,6 +157,10 @@ pub const CONTROL_METHODS: &[&str] = &[
     "_akh/goal/update",
     "_akh/goal/cancel",
     "_akh/goal/prioritize",
+    // Phase 53e (ADR 113 D9): per-delegation tool grants, enforced by /v1.
+    "_akh/delegation/grant/mint",
+    "_akh/delegation/grant/revoke",
+    "_akh/delegation/grant/list",
 ];
 
 /// Whether `method` is a control-plane method (a member of [`CONTROL_METHODS`]).

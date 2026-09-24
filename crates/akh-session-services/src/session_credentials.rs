@@ -36,8 +36,11 @@ fn valid_token(token: &str) -> bool {
 }
 
 impl Sessions {
-    fn credential_path(&self, session: &str, service: &str) -> Result<PathBuf> {
-        let directory = self.config.data_dir.join("session-mcp-credentials");
+    /// Private, owner-only slot file under `data_dir/<directory>`. Shared by
+    /// MCP session capabilities and (Phase 53e) delegation grants: secrets
+    /// live here, only secret-free receipts enter the store.
+    pub(crate) fn private_slot_path(&self, directory: &str, slot_key: &str) -> Result<PathBuf> {
+        let directory = self.config.data_dir.join(directory);
         match fs::DirBuilder::new().mode(0o700).create(&directory) {
             Ok(()) => File::open(&self.config.data_dir)
                 .and_then(|f| f.sync_all())
@@ -52,11 +55,16 @@ impl Sessions {
         {
             return Err(unavailable());
         }
-        Ok(directory.join(digest(receipt_key(session, service).as_bytes())))
+        Ok(directory.join(digest(slot_key.as_bytes())))
     }
 
-    fn read_credential(&self, session: &str, service: &str) -> Result<Option<PrivateCredential>> {
-        let path = self.credential_path(session, service)?;
+    fn credential_path(&self, session: &str, service: &str) -> Result<PathBuf> {
+        self.private_slot_path("session-mcp-credentials", &receipt_key(session, service))
+    }
+
+    /// Read a private slot file; `None` when it does not exist. Anything that
+    /// is not an owner-only regular file of sane size is refused.
+    pub(crate) fn read_private_slot(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
         let file = match OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -78,6 +86,14 @@ impl Sessions {
         file.take(16_385)
             .read_to_end(&mut bytes)
             .map_err(|_| unavailable())?;
+        Ok(Some(bytes))
+    }
+
+    fn read_credential(&self, session: &str, service: &str) -> Result<Option<PrivateCredential>> {
+        let path = self.credential_path(session, service)?;
+        let Some(bytes) = Self::read_private_slot(&path)? else {
+            return Ok(None);
+        };
         let value: PrivateCredential = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
         if !valid_token(&value.token)
             || value.receipt.token_sha256 != digest(value.token.as_bytes())
@@ -90,9 +106,8 @@ impl Sessions {
     }
 
     /// Commit complete bytes before publishing the file. A crash before the
-    /// redb acknowledgement leaves this first intent available for exact replay.
-    fn write_credential(&self, value: &PrivateCredential) -> Result<()> {
-        let path = self.credential_path(&value.receipt.session_id, &value.receipt.service)?;
+    /// store acknowledgement leaves this first intent available for exact replay.
+    pub(crate) fn write_private_slot(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
         let temporary = path.with_extension(new_id());
         let result = (|| {
             let mut file = OpenOptions::new()
@@ -102,17 +117,49 @@ impl Sessions {
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(&temporary)
                 .map_err(|_| unavailable())?;
-            let bytes = serde_json::to_vec(value).map_err(|_| unavailable())?;
-            file.write_all(&bytes)
+            file.write_all(bytes)
                 .and_then(|_| file.sync_all())
                 .map_err(|_| unavailable())?;
-            fs::hard_link(&temporary, &path).map_err(|_| unavailable())?;
-            File::open(path.parent().expect("credential parent"))
+            fs::hard_link(&temporary, path).map_err(|_| unavailable())?;
+            File::open(path.parent().expect("private slot parent"))
                 .and_then(|f| f.sync_all())
                 .map_err(|_| unavailable())
         })();
         let _ = fs::remove_file(temporary);
         result
+    }
+
+    /// Remove a private slot file and any temporary link a crash left behind.
+    pub(crate) fn remove_private_slot(path: &std::path::Path) -> Result<()> {
+        let parent = path.parent().expect("private slot parent");
+        // A crash before publishing a complete file may leave its private
+        // temporary link. Only this slot's hashed prefix is ours.
+        let prefix = format!(
+            "{}.",
+            path.file_name()
+                .expect("private slot filename")
+                .to_string_lossy()
+        );
+        for entry in fs::read_dir(parent).map_err(|_| unavailable())? {
+            let entry = entry.map_err(|_| unavailable())?;
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                fs::remove_file(entry.path()).map_err(|_| unavailable())?;
+            }
+        }
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(unavailable()),
+        }
+        File::open(parent)
+            .and_then(|f| f.sync_all())
+            .map_err(|_| unavailable())
+    }
+
+    fn write_credential(&self, value: &PrivateCredential) -> Result<()> {
+        let path = self.credential_path(&value.receipt.session_id, &value.receipt.service)?;
+        let bytes = serde_json::to_vec(value).map_err(|_| unavailable())?;
+        Self::write_private_slot(&path, &bytes)
     }
 
     fn endpoint_fingerprint(&self, service: &str) -> Result<String> {
@@ -330,34 +377,10 @@ impl Sessions {
                 return Ok(());
             }
             for service in session.required_mcp_credentials.keys() {
-                let path = self.credential_path(session_id, service)?;
-                // A crash before publishing a complete file may leave its
-                // private temporary link. Only this slot's hashed prefix is ours.
-                let prefix = format!(
-                    "{}.",
-                    path.file_name()
-                        .expect("credential filename")
-                        .to_string_lossy()
-                );
-                for entry in fs::read_dir(path.parent().expect("credential parent"))
-                    .map_err(|_| unavailable())?
-                {
-                    let entry = entry.map_err(|_| unavailable())?;
-                    if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                        fs::remove_file(entry.path()).map_err(|_| unavailable())?;
-                    }
-                }
-                match fs::remove_file(&path) {
-                    Ok(()) => File::open(path.parent().expect("credential parent"))
-                        .and_then(|f| f.sync_all())
-                        .map_err(|_| unavailable())?,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(_) => return Err(unavailable()),
-                }
-                File::open(path.parent().expect("credential parent"))
-                    .and_then(|f| f.sync_all())
-                    .map_err(|_| unavailable())?;
+                Self::remove_private_slot(&self.credential_path(session_id, service)?)?;
             }
+            // Phase 53e: the delegation grant slot closes with the session.
+            self.remove_archived_grant(tx, session_id)?;
             tx.put(&removed, &true)
         })
     }
