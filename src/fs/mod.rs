@@ -157,6 +157,16 @@ pub enum FsError {
         #[source]
         source: std::io::Error,
     },
+
+    /// An akhsbxd/akhexecd file verb failed (lease, transport, a definite
+    /// executor failure or an unknown outcome). Transparent so the execd
+    /// diagnostic reaches the caller; a missing file still maps to
+    /// [`FsError::Io`] with `NotFound`, and a path outside the workspace to
+    /// [`FsError::OutsideSandbox`].
+    #[cfg(feature = "execd-executor")]
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Execd(#[from] crate::backend::execd::ExecdError),
 }
 
 /// Result alias for filesystem operations.

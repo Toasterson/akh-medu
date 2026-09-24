@@ -393,8 +393,8 @@ pub enum BudgetMetering {
 pub enum ExecPlacement {
     /// Commands run in the akhomed process's own address space.
     InProcess,
-    /// Commands run somewhere contained: a privilege-dropped local user or a
-    /// remote host.
+    /// Commands run somewhere contained: a privilege-dropped local user, a
+    /// remote host, or an akhsbxd/akhexecd sandbox.
     Contained,
     /// No executor tools are registered (`exec kind = "none"`).
     Disabled,
@@ -404,9 +404,9 @@ impl From<&ExecBackendConfig> for ExecPlacement {
     fn from(exec: &ExecBackendConfig) -> Self {
         match exec {
             ExecBackendConfig::InProcess => ExecPlacement::InProcess,
-            ExecBackendConfig::LocalDrop { .. } | ExecBackendConfig::Remote { .. } => {
-                ExecPlacement::Contained
-            }
+            ExecBackendConfig::LocalDrop { .. }
+            | ExecBackendConfig::Remote { .. }
+            | ExecBackendConfig::Execd { .. } => ExecPlacement::Contained,
             ExecBackendConfig::None => ExecPlacement::Disabled,
         }
     }

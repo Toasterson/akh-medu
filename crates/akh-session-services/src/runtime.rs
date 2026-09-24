@@ -404,6 +404,16 @@ impl Runtime {
         if !active.is_empty() {
             return Err(Fault::new("busy", "runtime capacity is occupied"));
         }
+        // Configuration load already refused this; re-check at admission so an
+        // environment flip or a hot-swapped profile can never slip through.
+        if profile.execution_mode == ExecutionMode::Colocated
+            && self.config.deployment_mode()?.is_deployed()
+        {
+            return Err(crate::config::colocated_forbidden(&format!(
+                "runtimes.{}",
+                request.binding.profile
+            )));
+        }
         let profile_lease = crate::runtime_profile::acquire(&profile)?;
         validate_conformance(&profile)?;
         if profile.kind == RuntimeKind::Internal {

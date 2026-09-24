@@ -491,6 +491,10 @@ pub struct Config {
     pub git_publication: Vec<GitPublicationProfile>,
     #[serde(default = "unconfined")]
     pub confinement: String,
+    /// `deployed` refuses `Colocated` native runtimes (Phase 53 decision 7).
+    /// `AKH_DEPLOYMENT=deployed` has the same effect; see [`Config::deployment_mode`].
+    #[serde(default)]
+    pub deployment: DeploymentMode,
     /// How often akhsessd's dispatcher re-checks each session for stalled
     /// progress or a retirement that can now be finalized. Throttles the
     /// reconciliation *decision*, not the fast per-session dispatch retry.
@@ -510,6 +514,22 @@ pub struct Config {
 }
 fn unconfined() -> String {
     "unconfined".into()
+}
+
+/// The fault a deployed service returns for a `Colocated` runtime. The message
+/// carries its own remedy because `Fault` has no separate help field.
+pub fn colocated_forbidden(subject: &str) -> Fault {
+    Fault::new(
+        "colocated_forbidden",
+        format!(
+            "{subject}: execution_mode \"colocated\" is forbidden in deployed mode; \
+             native runtime tools would run in the runtime's own address space. \
+             Set execution_mode = \"brokered\" (the default) with installed conformance \
+             evidence so workspace effects go through akhsbxd/akhexecd, or run this \
+             service with deployment = \"development\" and without AKH_DEPLOYMENT=deployed \
+             for local development only."
+        ),
+    )
 }
 fn default_reconciliation_interval_ms() -> u64 {
     5 * 60_000
@@ -532,8 +552,41 @@ impl Config {
         config.validate()?;
         Ok(config)
     }
+    /// The effective deployment mode: the configured value, made stricter by
+    /// `AKH_DEPLOYMENT=deployed` (the environment can never relax it).
+    pub fn deployment_mode(&self) -> Result<DeploymentMode> {
+        DeploymentMode::resolve_from_env(self.deployment)
+            .map_err(|error| Fault::invalid(error.to_string()))
+    }
+
+    /// Refuse runtime profiles and akh bindings that would execute workspace
+    /// effects in the runtime's own address space while deployed (ADR 113
+    /// decision 3). A development configuration is always accepted.
+    pub fn validate_deployment(&self, mode: DeploymentMode) -> Result<()> {
+        if !mode.is_deployed() {
+            return Ok(());
+        }
+        let colocated = self
+            .runtimes
+            .iter()
+            .filter(|(_, profile)| profile.execution_mode == ExecutionMode::Colocated)
+            .map(|(id, _)| format!("runtimes.{id}"))
+            .chain(
+                self.akhs
+                    .iter()
+                    .filter(|(_, akh)| akh.runtime.execution_mode == ExecutionMode::Colocated)
+                    .map(|(id, _)| format!("akhs.{id}.runtime")),
+            )
+            .collect::<Vec<_>>();
+        if colocated.is_empty() {
+            return Ok(());
+        }
+        Err(colocated_forbidden(&colocated.join(", ")))
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_key(&self.service_id)?;
+        self.validate_deployment(self.deployment_mode()?)?;
         if let Some(StoreConfig::Postgres { url_env, schema }) = &self.store
             && (url_env.is_empty() || schema.is_empty())
         {
@@ -787,5 +840,56 @@ mod endpoint_tests {
             .unwrap();
         assert_eq!(response.text().await.unwrap(), "restored");
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod deployment_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn config(deployment: &str, mode: Option<&str>) -> Config {
+        let dir = std::env::temp_dir();
+        let mut runtime =
+            json!({"revision":"1","kind":"codex","working_dir":dir,"binary":"/usr/bin/true"});
+        if let Some(mode) = mode {
+            runtime["execution_mode"] = json!(mode);
+        }
+        serde_json::from_value(json!({
+            "service_id":"runtime","listen":"127.0.0.1:0","data_dir":dir,"deployment":deployment,
+            "principals":[{"id":"sessions","roles":["session"],"token_file":"/unused"}],
+            "runtimes":{"codex-worker":runtime}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn deployed_runtime_services_refuse_colocated_profiles() {
+        let colocated = config("deployed", Some("colocated"));
+        let fault = colocated
+            .validate_deployment(DeploymentMode::Deployed)
+            .unwrap_err();
+        assert_eq!(fault.code, "colocated_forbidden");
+        assert!(fault.message.contains("runtimes.codex-worker"), "{fault}");
+        // The same profile is accepted for development.
+        colocated
+            .validate_deployment(DeploymentMode::Development)
+            .unwrap();
+    }
+
+    #[test]
+    fn an_omitted_execution_mode_is_brokered_and_passes_deployed_validation() {
+        let omitted = config("deployed", None);
+        assert_eq!(
+            omitted.runtimes["codex-worker"].execution_mode,
+            ExecutionMode::Brokered
+        );
+        omitted
+            .validate_deployment(DeploymentMode::Deployed)
+            .unwrap();
+        assert_eq!(
+            config("development", None).deployment,
+            DeploymentMode::Development
+        );
     }
 }

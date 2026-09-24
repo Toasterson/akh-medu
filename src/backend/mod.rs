@@ -49,6 +49,9 @@ pub mod process_supervisor;
 #[cfg(feature = "remote-executor")]
 pub mod remote;
 
+#[cfg(feature = "execd-executor")]
+pub mod execd;
+
 pub use local_drop::{ExecPath, LocalDropBackend, LocalDropConfig, LocalDropError};
 
 pub use process_supervisor::{
@@ -143,6 +146,16 @@ pub enum ExecError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Remote(#[from] remote::RemoteError),
+
+    /// An akhsbxd/akhexecd exec failed (allocation, lease, transport, a
+    /// definite executor failure or an unknown outcome). Transparent so
+    /// [`execd::ExecdError`]'s code and help reach the caller unchanged; only
+    /// [`execd::ExecdBackend`] constructs it. A deadline still maps to
+    /// [`ExecError::Timeout`].
+    #[cfg(feature = "execd-executor")]
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Execd(#[from] execd::ExecdError),
 }
 
 /// Result alias for exec operations.
@@ -245,6 +258,13 @@ pub enum Confinement {
     /// "a real remote login, boundary unverified".
     #[cfg(feature = "remote-executor")]
     RemoteUnverified,
+
+    /// The executor runs inside an isolation boundary of its own — a
+    /// container, pod, gVisor/Kata/microVM sandbox, illumos zone or jail — as
+    /// asserted by its operator through the akhexecd workspace binding
+    /// ([`execd::ExecdBackend`], Phase 53c). akhomed cannot verify the claim
+    /// remotely (ADR 082 §8); an unknown or absent label never maps here.
+    Sandboxed,
 }
 
 /// An executor's self-reported posture, returned by [`Backend::handshake`].

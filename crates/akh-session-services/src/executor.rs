@@ -204,7 +204,7 @@ impl Executor {
         store.transaction(|tx|{
             for mut receipt in tx.scan::<OperationReceipt>("receipt/")?{
                 if !receipt.status.terminal() && receipt.status != TurnStatus::Unknown {
-                    receipt.status=if matches!(receipt.request.operation.as_str(),"read"|"list"|"search"|"exec_poll"|"git_snapshot"){TurnStatus::Failed}else{TurnStatus::Unknown};
+                    receipt.status=if is_read_only_workspace_operation(&receipt.request.operation){TurnStatus::Failed}else{TurnStatus::Unknown};
                     receipt.result=Some(ToolResult{success:false,text:"Executor restarted before a durable terminal receipt. Reconcile the operation before further mutations.".into(),data:Some(json!({"code":"unknown_outcome"})),receipt:Some(receipt.id.clone())});
                     tx.put(&receipt_key(&receipt.id),&receipt)?;
                 }
@@ -380,17 +380,28 @@ impl Executor {
         Ok(json!({"released":true,"files_retained":true}))
     }
 
+    /// Admit an operation without an authenticated caller (in-process use and
+    /// tests). HTTP callers go through [`Self::operate_as`] so the receipt
+    /// names who admitted it.
     pub fn operate(&self, request: WorkspaceOperation) -> Result<OperationReceipt> {
+        self.operate_as(request, None)
+    }
+
+    /// Admit an operation on behalf of `principal`, recorded on a fresh
+    /// receipt. A replayed id returns the original receipt unchanged,
+    /// including its original principal.
+    pub fn operate_as(
+        &self,
+        request: WorkspaceOperation,
+        principal: Option<&str>,
+    ) -> Result<OperationReceipt> {
         validate_key(&request.id)?;
         if !request.arguments.is_object() {
             return Err(Fault::invalid("tool arguments must be an object"));
         }
         let _lock = self.mutations.lock().unwrap_or_else(|e| e.into_inner());
         let ws = self.workspace(&request)?;
-        let is_write = !matches!(
-            request.operation.as_str(),
-            "read" | "list" | "search" | "exec_poll" | "git_snapshot"
-        );
+        let is_write = !is_read_only_workspace_operation(&request.operation);
         let (receipt, fresh) = self.store.transaction(|tx| {
             if let Some(old) = tx.get::<OperationReceipt>(&receipt_key(&request.id))? {
                 if old.request != request {
@@ -417,6 +428,7 @@ impl Executor {
                 result: None,
                 started_at: now_ms(),
                 finished_at: None,
+                principal: principal.map(str::to_owned),
             };
             tx.put(&receipt_key(&request.id), &receipt)?;
             Ok((receipt, true))
@@ -548,6 +560,8 @@ impl Executor {
                 Ok(json!({"created":true}))
             }
             "list" => Ok(json!({"entries":ws.list(args["path"].as_str().unwrap_or("."))?})),
+            "stat" => serde_json::to_value(ws.stat(args["path"].as_str().unwrap_or("."))?)
+                .map_err(|_| Fault::invalid("stat encoding failed")),
             "search" => {
                 let regex = regex::RegexBuilder::new(argument(args, "pattern")?)
                     .size_limit(1024 * 1024)

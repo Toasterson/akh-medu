@@ -58,14 +58,149 @@ pub enum RuntimeKind {
     Claude,
 }
 
+/// How a native runtime reaches workspace effects.
+///
+/// `Brokered` is the default (ADR 113 decision 3 / Phase 53 decision 7): a
+/// profile that does not say otherwise must route every workspace tool through
+/// the session broker to akhsbxd/akhexecd. `Colocated` has to be chosen
+/// explicitly, and deployed services refuse it outright.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
     /// Provider native tools are permitted only inside the bound workspace environment.
-    #[default]
+    /// Development only: a deployed service refuses it (see [`DeploymentMode`]).
     Colocated,
     /// Workspace tools must traverse the session broker. Admission requires conformance evidence.
+    #[default]
     Brokered,
+}
+
+/// Whether a process runs as a development instance or as a deployed service
+/// (Phase 53 decision 6).
+///
+/// Deployed processes execute no workspace side effects in their own address
+/// space (ADR 113 decision 3): akhomed refuses the in-process executor and
+/// in-process coding runtimes, and akhrtd refuses `Colocated` native runtimes.
+/// `Development` is the default so tests and local runs are unaffected.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentMode {
+    /// Local development and tests: in-process execution is allowed.
+    #[default]
+    Development,
+    /// A deployed service: side effects must go through akhsbxd/akhexecd.
+    Deployed,
+}
+
+/// `AKH_DEPLOYMENT` held a value that is not a [`DeploymentMode`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{variable}={value:?} is not a deployment mode; use \"deployed\" or \"development\"")]
+pub struct UnknownDeploymentMode {
+    pub variable: &'static str,
+    pub value: String,
+}
+
+impl DeploymentMode {
+    /// Environment variable that selects deployed mode for any Akh service.
+    pub const ENV: &'static str = "AKH_DEPLOYMENT";
+
+    pub fn is_deployed(self) -> bool {
+        self == Self::Deployed
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Development => "development",
+            Self::Deployed => "deployed",
+        }
+    }
+
+    /// Parse an `AKH_DEPLOYMENT` value (case-insensitive, surrounding
+    /// whitespace ignored).
+    pub fn parse_env_value(value: &str) -> std::result::Result<Self, UnknownDeploymentMode> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "deployed" => Ok(Self::Deployed),
+            "development" | "dev" => Ok(Self::Development),
+            _ => Err(UnknownDeploymentMode {
+                variable: Self::ENV,
+                value: value.to_owned(),
+            }),
+        }
+    }
+
+    /// Combine the configured mode with an optional `AKH_DEPLOYMENT` value.
+    ///
+    /// The environment can only make a process stricter: `deployed` in either
+    /// place wins, so an inherited `AKH_DEPLOYMENT=development` cannot relax a
+    /// host whose configuration says `deployed`.
+    pub fn resolve(
+        configured: Self,
+        env_value: Option<&str>,
+    ) -> std::result::Result<Self, UnknownDeploymentMode> {
+        let from_env = env_value
+            .map(Self::parse_env_value)
+            .transpose()?
+            .unwrap_or_default();
+        Ok(configured.max(from_env))
+    }
+
+    /// [`Self::resolve`] against the live process environment.
+    pub fn resolve_from_env(configured: Self) -> std::result::Result<Self, UnknownDeploymentMode> {
+        let value = std::env::var(Self::ENV).ok();
+        Self::resolve(configured, value.as_deref())
+    }
+}
+
+/// The kind of a workspace entry reported by the executor's read-only `stat`
+/// verb. Symlinks are reported, never followed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceEntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+/// Result of the executor's read-only `stat` verb. A missing entry is
+/// `exists: false` with no kind or size, not an error.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceStat {
+    pub exists: bool,
+    #[serde(default)]
+    pub kind: Option<WorkspaceEntryKind>,
+    /// Byte length for regular files; `None` for other kinds.
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
+impl WorkspaceStat {
+    pub const MISSING: Self = Self {
+        exists: false,
+        kind: None,
+        size: None,
+    };
+
+    pub fn is_symlink(&self) -> bool {
+        self.kind == Some(WorkspaceEntryKind::Symlink)
+    }
+}
+
+/// Workspace operations that never change workspace state. The executor's
+/// mutation fence, its restart recovery and the session broker's approval
+/// policy all consult this one list.
+pub const READ_ONLY_WORKSPACE_OPERATIONS: &[&str] = &[
+    "read",
+    "list",
+    "search",
+    "stat",
+    "exec_poll",
+    "git_snapshot",
+];
+
+pub fn is_read_only_workspace_operation(operation: &str) -> bool {
+    READ_ONLY_WORKSPACE_OPERATIONS.contains(&operation)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -609,6 +744,11 @@ pub struct OperationReceipt {
     pub result: Option<ToolResult>,
     pub started_at: u64,
     pub finished_at: Option<u64>,
+    /// The authenticated principal that admitted this operation (ADR 113
+    /// attribution). `None` for receipts written before this field existed and
+    /// for in-process callers that bypass the HTTP surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1110,4 +1250,65 @@ pub struct ServiceRestart {
     pub request_id: String,
     pub expected_manifest_sha256: String,
     pub profile: Option<ServiceProfile>,
+}
+
+#[cfg(test)]
+mod deployment_tests {
+    use super::*;
+
+    #[test]
+    fn deployment_mode_defaults_to_development_and_env_only_escalates() {
+        assert_eq!(DeploymentMode::default(), DeploymentMode::Development);
+        let resolve = DeploymentMode::resolve;
+        assert_eq!(
+            resolve(DeploymentMode::Development, None).unwrap(),
+            DeploymentMode::Development
+        );
+        assert_eq!(
+            resolve(DeploymentMode::Development, Some(" Deployed ")).unwrap(),
+            DeploymentMode::Deployed
+        );
+        // An inherited `development` cannot relax a deployed configuration.
+        assert_eq!(
+            resolve(DeploymentMode::Deployed, Some("development")).unwrap(),
+            DeploymentMode::Deployed
+        );
+        let error = resolve(DeploymentMode::Development, Some("prod")).unwrap_err();
+        assert_eq!(error.variable, "AKH_DEPLOYMENT");
+        assert_eq!(error.value, "prod");
+    }
+
+    #[test]
+    fn native_runtimes_default_to_brokered() {
+        assert_eq!(ExecutionMode::default(), ExecutionMode::Brokered);
+    }
+
+    #[test]
+    fn receipt_principal_is_optional_on_the_wire() {
+        let legacy = serde_json::json!({
+            "id":"op","status":"completed","result":null,"started_at":1,"finished_at":2,
+            "request":{"id":"op","session_id":"s","turn_id":"t","workspace_id":"w",
+                "generation":1,"operation":"stat","arguments":{"path":"."}}
+        });
+        let receipt: OperationReceipt = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(receipt.principal, None);
+        // Absent principals serialize exactly as before, so older strict readers accept them.
+        assert_eq!(serde_json::to_value(&receipt).unwrap(), legacy);
+        let mut attributed = receipt;
+        attributed.principal = Some("akhomed".into());
+        assert_eq!(
+            serde_json::to_value(&attributed).unwrap()["principal"],
+            "akhomed"
+        );
+    }
+
+    #[test]
+    fn stat_is_read_only_and_reports_symlinks_without_following() {
+        assert!(is_read_only_workspace_operation("stat"));
+        assert!(!is_read_only_workspace_operation("write"));
+        let stat: WorkspaceStat =
+            serde_json::from_value(serde_json::json!({"exists":true,"kind":"symlink"})).unwrap();
+        assert!(stat.is_symlink());
+        assert_eq!(stat.size, None);
+    }
 }

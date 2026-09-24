@@ -279,6 +279,65 @@ fn build_local_drop_backend(
     Ok(Arc::new(backend) as Arc<dyn akh_medu::backend::Backend>)
 }
 
+/// Allocate an akhsbxd/akhexecd sandbox workspace for a workspace whose
+/// `[exec]` selects `kind = "execd"` (Phase 53c / ADR 113 decision 3).
+///
+/// Same fail-loud rule as the other executors: an allocation that fails stops
+/// the akh from loading; there is no fallback to local execution. Logs the
+/// binding and its honestly classified confinement once per workspace.
+#[cfg(feature = "execd-executor")]
+fn build_execd_backend(
+    exec: &akh_medu::akh_config::ExecBackendConfig,
+    workspace: &str,
+) -> Result<Arc<dyn akh_medu::backend::Backend>, String> {
+    use akh_medu::backend::Backend as _;
+    use akh_medu::backend::execd::ExecdBackend;
+    use miette::Diagnostic as _;
+
+    let cfg = exec
+        .to_execd_config(workspace)
+        .expect("Execd variant implies Some");
+    tracing::info!(
+        target: "akh::backend::execd",
+        workspace = %workspace,
+        sandbox_url = %cfg.sandbox_url,
+        profile = %cfg.profile,
+        principal = %cfg.principal,
+        session = %cfg.session_id,
+        "allocating execd sandbox workspace"
+    );
+    let backend = ExecdBackend::connect(cfg).map_err(|e| {
+        let code = e.code().map(|c| format!(" [{c}]")).unwrap_or_default();
+        let help = e.help().map(|h| format!(" help: {h}")).unwrap_or_default();
+        format!(
+            "workspace {workspace}: execd exec backend could not allocate a sandbox \
+             workspace: {e}{code}{help}"
+        )
+    })?;
+    tracing::info!(
+        target: "akh::backend::execd",
+        workspace = %workspace,
+        sandbox = %backend.binding().sandbox_id,
+        confinement_label = %backend.binding().confinement,
+        confinement = ?backend.handshake().confinement,
+        "workspace exec runs in an execd sandbox"
+    );
+    Ok(Arc::new(backend) as Arc<dyn akh_medu::backend::Backend>)
+}
+
+/// Built without `execd-executor`: refuse rather than execute locally.
+#[cfg(not(feature = "execd-executor"))]
+fn build_execd_backend(
+    _exec: &akh_medu::akh_config::ExecBackendConfig,
+    workspace: &str,
+) -> Result<Arc<dyn akh_medu::backend::Backend>, String> {
+    Err(format!(
+        "workspace {workspace}: [exec] kind = \"execd\" but this akhomed was built without \
+         the `execd-executor` feature; rebuild with `--features server` (which includes it) \
+         — refusing to fall back to local execution"
+    ))
+}
+
 ///
 /// The agent lives behind a `std::sync::RwLock`, so capture (sync) runs under the
 /// lock and the guard is dropped before the async DB persist. A not-yet-loaded
@@ -2732,6 +2791,20 @@ impl ServerState {
         let akh_config = self.get_akh_config(name).await?;
         let host_exec = self.config.read().await.exec.clone();
         let exec_kind = akh_config.effective_exec(host_exec.as_ref());
+        // Phase 53 decision 6: a deployed akhomed refuses in-process side
+        // effects on every load, including lazy loads of relocated akhs. The
+        // process mode was fixed at startup; a replaced config can only make
+        // it stricter.
+        {
+            let config = self.config.read().await;
+            let policy = akh_medu::deployment::ExecPolicy {
+                mode: akh_medu::deployment::process_mode().max(config.deployment),
+                allow_legacy_exec: config.allow_legacy_exec,
+            };
+            policy
+                .admit(name, &exec_kind, akh_config.backend)
+                .map_err(|e| format!("workspace {name}: {}", e.summary()))?;
+        }
         // Coding runtimes execute under the local daemon identity. They cannot
         // substitute for an explicitly disabled, remote, or privilege-dropped executor.
         if matches!(
@@ -2771,6 +2844,9 @@ impl ServerState {
                                 "executor disabled for workspace (exec kind = none): no shell/file tools registered"
                             );
                             ExecToolWiring::None
+                        }
+                        ExecBackendConfig::Execd { .. } => {
+                            ExecToolWiring::Backend(build_execd_backend(&exec_kind, &name)?)
                         }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
                             let rbc = exec_kind
@@ -2822,6 +2898,9 @@ impl ServerState {
                                 "executor disabled for workspace (exec kind = none): no shell/file tools registered"
                             );
                             ExecToolWiring::None
+                        }
+                        ExecBackendConfig::Execd { .. } => {
+                            ExecToolWiring::Backend(build_execd_backend(&exec_kind, &name)?)
                         }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
                             // The build was not compiled with `remote-executor`
@@ -4490,6 +4569,25 @@ async fn main() {
         let host = host.trim();
         if !host.is_empty() {
             config.acp.tcp_bind = Some(host.to_string());
+        }
+    }
+
+    // Phase 53 decision 6: resolve deployed mode once (config or
+    // AKH_DEPLOYMENT) and refuse to start a deployed host whose default
+    // executor would run side effects in-process.
+    match config.check_deployment() {
+        Ok(policy) => {
+            let _ = akh_medu::deployment::set_process_mode(policy.mode);
+            tracing::info!(
+                target: "akh::deployment",
+                mode = policy.mode.as_str(),
+                allow_legacy_exec = policy.allow_legacy_exec,
+                "deployment mode"
+            );
+        }
+        Err(err) => {
+            eprintln!("{:?}", miette::Report::new(err));
+            std::process::exit(1);
         }
     }
 

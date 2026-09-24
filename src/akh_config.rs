@@ -366,6 +366,45 @@ pub enum ExecBackendConfig {
     /// kind = "none"
     /// ```
     None,
+    /// Run executor-facing tools in a sandbox workspace that akhsbxd
+    /// allocates and akhexecd operates
+    /// (`crate::backend::execd::ExecdBackend`, Phase 53c / ADR 113 decision
+    /// 3). This is the deployed-mode executor: no side effect runs in
+    /// akhomed's address space.
+    ///
+    /// ```toml
+    /// [exec]
+    /// kind = "execd"
+    /// sandbox_url = "https://akhsbxd.lab.internal"
+    /// sandbox_token_file = "/run/akh/credentials/akhsbxd-token"
+    /// profile = "rust-workspace"
+    /// principal = "janus"
+    /// # executor_url = "http://127.0.0.1:8413"      # default: akhsbxd gateway
+    /// # executor_token_file = "/run/akh/credentials/akhexecd-token"
+    /// # poll_wait_ms = 5000
+    /// ```
+    Execd {
+        /// akhsbxd base URL.
+        sandbox_url: String,
+        /// Bearer token file for akhsbxd (principal with the `session` role).
+        sandbox_token_file: std::path::PathBuf,
+        /// akhexecd base URL for direct operations. Omit to use akhsbxd's
+        /// `/v1/executors/{sandbox}/…` gateway (the default; the token then
+        /// also needs the `executor_proxy` role at akhsbxd).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        executor_url: Option<String>,
+        /// Bearer token file for akhexecd operations (role `session` there).
+        /// Omit to reuse `sandbox_token_file`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        executor_token_file: Option<std::path::PathBuf>,
+        /// akhsbxd workspace profile to allocate from.
+        profile: String,
+        /// Principal the allocation is made for.
+        principal: String,
+        /// Server-side wait per `exec_poll`, 1..=10000 ms.
+        #[serde(default = "default_execd_poll_wait_ms")]
+        poll_wait_ms: u64,
+    },
 }
 
 impl ExecBackendConfig {
@@ -442,10 +481,66 @@ impl ExecBackendConfig {
         }
         Some(cfg)
     }
+
+    /// Translate `kind = "execd"` into the config
+    /// [`crate::backend::execd::ExecdBackend::connect`] takes, minting a fresh
+    /// allocation session for `workspace`. `None` for other kinds.
+    #[cfg(feature = "execd-executor")]
+    pub fn to_execd_config(&self, workspace: &str) -> Option<crate::backend::execd::ExecdConfig> {
+        use crate::backend::execd::{ExecdConfig, ExecutorRoute};
+        let Self::Execd {
+            sandbox_url,
+            sandbox_token_file,
+            executor_url,
+            executor_token_file,
+            profile,
+            principal,
+            poll_wait_ms,
+        } = self
+        else {
+            return None;
+        };
+        let token_file = executor_token_file
+            .clone()
+            .unwrap_or_else(|| sandbox_token_file.clone());
+        let route = match executor_url {
+            Some(url) => ExecutorRoute::Direct {
+                url: url.clone(),
+                token_file,
+            },
+            None => ExecutorRoute::ViaSandbox { token_file },
+        };
+        Some(
+            ExecdConfig::new(
+                sandbox_url.clone(),
+                sandbox_token_file.clone(),
+                profile.clone(),
+                principal.clone(),
+                workspace,
+            )
+            .with_executor(route)
+            .with_poll_wait(std::time::Duration::from_millis(*poll_wait_ms)),
+        )
+    }
+
+    /// Short, stable name of the variant for logs and diagnostics.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::InProcess => "in-process",
+            Self::LocalDrop { .. } => "local-drop",
+            Self::Remote { .. } => "remote",
+            Self::None => "none",
+            Self::Execd { .. } => "execd",
+        }
+    }
 }
 
 fn default_remote_port() -> u16 {
     22
+}
+
+fn default_execd_poll_wait_ms() -> u64 {
+    5_000
 }
 
 impl Default for ExecBackendConfig {
@@ -975,6 +1070,13 @@ impl AkhConfig {
                     "workdir",
                     "shell",
                     "path",
+                    "sandbox_url",
+                    "sandbox_token_file",
+                    "executor_url",
+                    "executor_token_file",
+                    "profile",
+                    "principal",
+                    "poll_wait_ms",
                 ],
             ),
         ]
@@ -2253,5 +2355,67 @@ auth = { token_file = "/tmp/observer.key" }
         );
         assert_eq!(loaded.mcp, cfg.mcp);
         assert_eq!(loaded.model, cfg.model);
+    }
+}
+
+#[cfg(all(test, feature = "execd-executor"))]
+mod execd_config_tests {
+    use super::*;
+    use crate::backend::execd::ExecutorRoute;
+
+    #[test]
+    fn execd_exec_table_parses_without_unknown_keys_and_translates() {
+        let raw = r#"
+name = "janus"
+[exec]
+kind = "execd"
+sandbox_url = "https://akhsbxd.lab"
+sandbox_token_file = "/run/akh/credentials/akhsbxd"
+profile = "rust-workspace"
+principal = "janus"
+"#;
+        let cfg: AkhConfig = toml::from_str(raw).unwrap();
+        assert!(AkhConfig::unknown_keys(&toml::from_str(raw).unwrap()).is_empty());
+        let exec = cfg.effective_exec(None);
+        assert_eq!(exec.kind_name(), "execd");
+        let execd = exec.to_execd_config("janus").unwrap();
+        assert_eq!(execd.profile, "rust-workspace");
+        assert_eq!(execd.poll_wait, std::time::Duration::from_millis(5_000));
+        assert!(execd.session_id.starts_with("akhomed-janus-"));
+        // Without executor_url/_token_file: the akhsbxd gateway with the sandbox token.
+        assert_eq!(
+            execd.executor,
+            ExecutorRoute::ViaSandbox {
+                token_file: "/run/akh/credentials/akhsbxd".into()
+            }
+        );
+        // Each translation mints a fresh allocation session.
+        assert_ne!(
+            exec.to_execd_config("janus").unwrap().session_id,
+            execd.session_id
+        );
+
+        let direct: AkhConfig = toml::from_str(&format!(
+            "{raw}executor_url = \"http://127.0.0.1:8413\"\n\
+             executor_token_file = \"/run/akh/credentials/akhexecd\"\npoll_wait_ms = 250\n"
+        ))
+        .unwrap();
+        let direct = direct
+            .effective_exec(None)
+            .to_execd_config("janus")
+            .unwrap();
+        assert_eq!(
+            direct.executor,
+            ExecutorRoute::Direct {
+                url: "http://127.0.0.1:8413".into(),
+                token_file: "/run/akh/credentials/akhexecd".into()
+            }
+        );
+        assert_eq!(direct.poll_wait, std::time::Duration::from_millis(250));
+        assert!(
+            ExecBackendConfig::InProcess
+                .to_execd_config("janus")
+                .is_none()
+        );
     }
 }

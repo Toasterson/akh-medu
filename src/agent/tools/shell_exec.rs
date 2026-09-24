@@ -167,6 +167,20 @@ impl Tool for ShellExecTool {
                     "Remote execution failed: {remote}"
                 )));
             }
+            // Only `ExecdBackend` (feature `execd-executor`) produces this.
+            // Include the diagnostic help: for an unknown outcome or a lapsed
+            // lease it tells the model not to retry blindly.
+            #[cfg(feature = "execd-executor")]
+            Err(ExecError::Execd(execd)) => {
+                use miette::Diagnostic as _;
+                let help = execd
+                    .help()
+                    .map(|help| format!("\n{help}"))
+                    .unwrap_or_default();
+                return Ok(ToolOutput::err(format!(
+                    "Sandboxed execution failed: {execd}{help}"
+                )));
+            }
         };
 
         let stdout_str = String::from_utf8_lossy(&outcome.stdout);
