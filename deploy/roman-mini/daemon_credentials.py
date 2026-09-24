@@ -6,6 +6,7 @@ resolved; no agent-supplied command, reference, or environment is accepted.
 """
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -53,11 +54,21 @@ def main():
         env['ROMAN_ANIMA_TOKEN'] = json.loads(capture(['/Users/toasty/.local/bin/anima-pat', 'get-auth-header']))['Authorization'].removeprefix('Bearer ')
         for akh in ('janus', 'minerva', 'vesta'):
             env['ROMAN_BOARD_' + akh.upper()] = json.loads((root / 'secrets' / f'board-{akh}.json').read_text())['bearer_token']
+        # ADR 113 decision 4 / 53d: Board, Anima and alert events are admitted
+        # into each akh's own reactor. `reactor_manage enable` refuses without
+        # this gate. It is process-wide, so while it is set an akh's own
+        # reactor_manage call can enable a schedule it staged; CUTOVER.md lists
+        # this as an operator decision.
+        env['AKH_REACTOR_ENABLE'] = '1'
         # akhomed reads AKH_CORE_CONFIG and friends from the environment (see
-        # configure_core.py), not from a `--config` argument, and its binary name
-        # is content-addressed rather than a fixed `bin/<name>`.
-        executable = json.loads((root / 'evidence/core-binary.json').read_text())['path']
-        os.execve(executable, [executable], env)
+        # configure_core.py), not from a `--config` argument. The binary is the
+        # provenance-named `bin/akhomed-main-<sha>` recorded by configure_core.py
+        # (deploy-from-main rule); refuse anything else.
+        release = json.loads((root / 'config/core-release.json').read_text())
+        executable = Path(release['binary'])
+        if executable.parent.resolve() != (root / 'bin').resolve() or not re.fullmatch(r'akhomed-main-[0-9a-f]{7,40}', executable.name):
+            raise RuntimeError('core release binary is not bin/akhomed-main-<sha>; rerun configure_core.py')
+        os.execve(executable, [str(executable)], env)
         return
     else:
         raise RuntimeError('unsupported daemon')

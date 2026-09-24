@@ -94,11 +94,11 @@ unchanged until the 53f runbook verifies the target:
 - `ROMAN_T3_HEALTH_URL` — overrides the URL the `models` health-check probes
   (default stays `http://127.0.0.1:18431/v1/sessions`).
 
-At cutover, pointing these at akhomed's ACP/`/v1` listener (today
-`127.0.0.1:18430`, per `configure_core.py`) requires first confirming akhomed's
-TCP ACP accepts `_meta.akh` for role selection, or adding an `akh-acp
---akhomed` mode (both raised as open questions in 53d/53f — not resolved by
-this pass).
+Resolved in 53d/53f prep: akhomed's TCP ACP does not read `_meta.akh`, so
+`akh-acp --akhomed` bridges it. `configure_core.py` renders `config/t3-acp.json`
+(`tcp://127.0.0.1:18444`, `/healthz` on 18430, the `akh-acp-main-<sha>` binary);
+when that file exists `t3_entrypoint.py` execs `akh-acp --akhomed ... --t3-compat`
+without `--workspace-profile`. Deleting the file is the rollback.
 
 ## Shell-wrapper "scripts" (`roman-janus`, `roman-minerva`, `roman-vesta`, `roman-activity-*`)
 
@@ -208,14 +208,13 @@ Each of these needs its own work item before it lands (not done in this pass):
    `laya`) — either extend `prepare.py`/`activate.py` or add small
    `configure_*.py` scripts matching the existing pattern, so these are
    reproducible from a clean clone like the others already are.
-7. **`daemon_credentials.py`'s new `core` role is not yet wired to
-   `dev.roman-akhs.core.plist`.** `configure_core.py` still renders
-   `ProgramArguments: [str(executable)]` directly. Routing it through
-   `daemon_credentials.py core <root>` (so the core process actually receives
-   `ROMAN_OLLAMA_KEY` and the MCP tokens) is a 53f runbook step, done together
-   with flipping `[exec]`/`[autonomy]`/`[[mcp.servers]]` in the target
-   workspace TOMLs — not done in this pass to avoid touching the live plist
-   ahead of that verified cutover.
+7. ~~**`daemon_credentials.py`'s new `core` role is not yet wired to
+   `dev.roman-akhs.core.plist`.**~~ **Done in 53f prep (repository side):**
+   `configure_core.py` now renders the core plist as
+   `python3 bin/daemon_credentials.py core <root>`; the `core` role sets
+   `AKH_REACTOR_ENABLE=1` and execs the provenance-named
+   `bin/akhomed-main-<sha>` recorded in `config/core-release.json`. The live
+   plist changes only when the operator runs [CUTOVER.md](CUTOVER.md).
 8. **Sokar has no credential distinct from `ROMAN_ARCHIVE_TOKEN`.** Confirm
    whether that's intentional (shared token good enough for Sokar's current
    scope) or whether Sokar needs its own 1Password reference before 53i's
