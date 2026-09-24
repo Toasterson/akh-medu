@@ -15,7 +15,7 @@ use crate::agent::agent::AgentPredicates;
 use crate::agent::error::{AgentError, AgentResult};
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use crate::graph::Triple;
@@ -238,6 +238,7 @@ impl Tool for MemoryWriteTool {
                 ),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::WriteKg, Capability::MemoryAccess]),
                 description: "Writes an episodic memory entry to the knowledge graph.".into(),

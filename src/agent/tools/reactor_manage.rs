@@ -11,7 +11,7 @@ use crate::agent::reactor::{
 };
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 
@@ -239,6 +239,7 @@ impl Tool for ReactorManageTool {
                 ToolParamSchema::optional_schema("event", "Event object for wake", event_schema),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Critical,
                 capabilities: HashSet::from([
                     Capability::WriteKg,

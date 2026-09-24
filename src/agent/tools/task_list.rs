@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use std::collections::HashSet;
@@ -227,9 +227,13 @@ impl Tool for TaskListTool {
                  present, reads it when absent.",
             )],
             danger: DangerInfo {
-                level: DangerLevel::Safe,
+                // Mutating: a call with `tasks` replaces the list every
+                // session of this process shares.
+                effect: ToolEffect::Mutating,
+                level: DangerLevel::Cautious,
                 capabilities: HashSet::new(),
-                description: "In-memory task tracking only — no filesystem, network, or KG access."
+                description: "Replaces the shared in-process task list — no filesystem, network, \
+                              or KG access."
                     .into(),
                 shadow_triggers: vec![],
             },

@@ -5027,7 +5027,7 @@ mod backend_seam_tests {
     fn resume_reconciles_stale_tools_and_seeds_live_view() {
         use crate::agent::tool_graph::ToolGraphRegistrar;
         use crate::agent::tool_manifest::{
-            Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource,
+            Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolSource,
         };
         use std::collections::HashSet;
 
@@ -5041,6 +5041,7 @@ mod backend_seam_tests {
                 description: "gone in a newer build".into(),
                 parameters: vec![],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Safe,
                     capabilities: HashSet::new(),
                     description: "x".into(),

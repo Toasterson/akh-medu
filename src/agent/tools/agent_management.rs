@@ -7,7 +7,7 @@
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use crate::workspace::validate_workspace_name;
@@ -91,6 +91,7 @@ impl Tool for AgentListTool {
             description: "Lists all agent workspaces via akhomed — read-only network call.".into(),
             parameters: vec![],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::Network]),
                 description: "Read-only listing of agent workspaces.".into(),
@@ -232,6 +233,7 @@ impl Tool for AgentSpawnTool {
                 ),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::Network, Capability::WriteKg]),
                 description: "Creates a workspace and optionally writes role triples.".into(),
@@ -341,6 +343,7 @@ impl Tool for AgentMessageTool {
                 ToolParamSchema::required("message", "Message text to deliver."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::Network, Capability::WriteKg]),
                 description: "Writes message triples into another workspace's KG.".into(),
@@ -420,6 +423,7 @@ impl Tool for AgentRetireTool {
                 "Workspace name to delete.",
             )],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Dangerous,
                 capabilities: HashSet::from([Capability::Network]),
                 description: "Permanently deletes a workspace and all its data.".into(),

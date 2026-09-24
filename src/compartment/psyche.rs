@@ -700,7 +700,9 @@ impl PsychePredicates {
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::tool_manifest::{DangerInfo, ToolManifest, ToolParamSchema, ToolSource};
+    use crate::agent::tool_manifest::{
+        DangerInfo, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
+    };
 
     use super::*;
 
@@ -710,6 +712,7 @@ mod tests {
             description: "safe tool".into(),
             parameters: vec![],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::ReadKg]),
                 description: "safe".into(),
@@ -725,6 +728,7 @@ mod tests {
             description: "execute shell commands".into(),
             parameters: vec![ToolParamSchema::required("command", "Shell command.")],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Critical,
                 capabilities: HashSet::from([Capability::ProcessExec]),
                 description: "arbitrary execution".into(),
@@ -740,6 +744,7 @@ mod tests {
             description: "file read/write".into(),
             parameters: vec![],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Dangerous,
                 capabilities: HashSet::from([
                     Capability::ReadFilesystem,
@@ -974,6 +979,7 @@ mod tests {
             description: "critical tool".into(),
             parameters: vec![],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Critical,
                 capabilities: HashSet::new(), // no capabilities to match
                 description: "critical".into(),

@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::backend::{ProgressTracker, SupervisedExecution, SupervisorError};
 use crate::engine::Engine;
@@ -1238,6 +1238,7 @@ impl Tool for CompileFeedbackTool {
                 ),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::ProcessExec]),
                 description:

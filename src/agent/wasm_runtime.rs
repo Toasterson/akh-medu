@@ -19,7 +19,7 @@ mod inner {
     use crate::agent::error::{AgentError, AgentResult};
     use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
     use crate::agent::tool_manifest::{
-        Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+        Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
     };
     use crate::engine::Engine;
 
@@ -217,6 +217,7 @@ mod inner {
             description,
             parameters,
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: danger_level,
                 capabilities,
                 description: danger_description,

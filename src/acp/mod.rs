@@ -866,6 +866,16 @@ impl AkhAcpAgent {
         result
     }
 
+    /// Refuse access to `session_id` unless this connection is granted the
+    /// session's workspace. An unknown id needs an authenticated connection
+    /// only; the caller then reports it as unknown.
+    fn authorize_session_access(&self, session_id: &str) -> Result<(), AcpAuthError> {
+        match self.session_workspace_of(session_id) {
+            Some(ws) => self.authorize_workspace(&ws),
+            None => self.access().map(|_| ()),
+        }
+    }
+
     /// The workspace a tracked session routes to, if the session exists.
     fn session_workspace_of(&self, session_id: &str) -> Option<String> {
         self.sessions
@@ -4626,13 +4636,31 @@ async fn serve_permission_asks(
 ///
 /// Errors when the akh has no psyche at all (nothing to tune) or a weight is
 /// not a number.
+/// The weight params of `_akh/psyche/archetypes`; any of them makes it a SET.
+const ARCHETYPE_WEIGHT_KEYS: [&str; 4] = ["healer", "sage", "guardian", "explorer"];
+
+/// Whether an `_akh/*` data-plane request changes an akh's safety mode or
+/// psyche: `_akh/permission/mode` with a `mode`, or `_akh/psyche/archetypes`
+/// with any weight. Those SETs need the control plane (architect decision,
+/// Phase 53 review); the GETs stay per-akh.
+fn is_control_plane_write(method: &str, params: &serde_json::Value) -> bool {
+    match method {
+        "_akh/permission/mode" => params.get("mode").is_some(),
+        "_akh/psyche/archetypes" => ARCHETYPE_WEIGHT_KEYS
+            .iter()
+            .any(|key| params.get(key).is_some()),
+        _ => false,
+    }
+}
+
 fn set_archetype_weights(
     engine: &Engine,
     agent: &mut Agent,
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    const KEYS: [&str; 4] = ["healer", "sage", "guardian", "explorer"];
-    let wants_set = KEYS.iter().any(|k| params.get(k).is_some());
+    let wants_set = ARCHETYPE_WEIGHT_KEYS
+        .iter()
+        .any(|k| params.get(k).is_some());
 
     if wants_set {
         let mut psyche = agent.psyche().cloned().ok_or_else(|| {
@@ -4912,14 +4940,9 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                     let me = me.clone();
                     async move {
                         let session_key = req.session_id.to_string();
-                        let granted = match me.session_workspace_of(&session_key) {
-                            Some(ws) => me.authorize_workspace(&ws),
-                            // Unknown ids still need an authenticated
-                            // connection; `load_retained_session` then
-                            // reports them as unknown.
-                            None => me.access().map(|_| ()),
-                        };
-                        if let Err(error) = granted {
+                        // Unknown ids still need an authenticated connection;
+                        // `load_retained_session` then reports them as unknown.
+                        if let Err(error) = me.authorize_session_access(&session_key) {
                             return responder.respond_with_error(error.rpc_error());
                         }
                         match me.load_retained_session(&session_key) {
@@ -4991,6 +5014,15 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                             }
                         };
                         let text = prompt.text;
+
+                        // Authorize before touching the session: an
+                        // unauthorized client must not be able to mark a
+                        // session active (or probe ids) by prompting it. Same
+                        // rule as `session/load`; unknown ids still need an
+                        // authenticated connection and then fail as unknown.
+                        if let Err(error) = me.authorize_session_access(&session_key) {
+                            return responder.respond_with_error(error.rpc_error());
+                        }
 
                         // Atomically validate, touch, and exclusively check out
                         // the session. Unknown/evicted ids fail closed instead
@@ -5708,6 +5740,14 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                                         .map(str::to_string)
                                         .unwrap_or_else(|| default_ws.clone());
                                     if let Err(error) = me.authorize_workspace(&workspace) {
+                                        return responder.respond_with_error(error.rpc_error());
+                                    }
+                                    // Switching an akh's safety mode or psyche is
+                                    // control-plane even though it names one akh;
+                                    // reading them stays per-akh.
+                                    if is_control_plane_write(method, &req.params)
+                                        && let Err(error) = me.authorize_control(method)
+                                    {
                                         return responder.respond_with_error(error.rpc_error());
                                     }
 
@@ -7678,6 +7718,7 @@ tags = []
                 description: "test-only echo".into(),
                 parameters: vec![],
                 danger: crate::agent::tool_manifest::DangerInfo {
+                    effect: crate::agent::tool_manifest::ToolEffect::Mutating,
                     level: crate::agent::tool_manifest::DangerLevel::Safe,
                     capabilities: std::collections::HashSet::new(),
                     description: String::new(),
@@ -7803,6 +7844,7 @@ tags = []
                     description: self.tag.into(),
                     parameters: vec![],
                     danger: crate::agent::tool_manifest::DangerInfo {
+                        effect: crate::agent::tool_manifest::ToolEffect::Mutating,
                         level: crate::agent::tool_manifest::DangerLevel::Dangerous,
                         capabilities: std::collections::HashSet::from([Capability::Network]),
                         description: "session-scoped network proxy".into(),
@@ -9901,6 +9943,204 @@ tags = []
         );
     }
 
+    /// Open one authenticated ACP/TCP client connection to `addr` and run
+    /// `requests` on it (after `initialize` with `bearer`).
+    async fn scoped_tcp_session<T, F, Fut>(
+        addr: std::net::SocketAddr,
+        bearer: &str,
+        requests: F,
+    ) -> Result<T, agent_client_protocol::Error>
+    where
+        T: Send + 'static,
+        F: FnOnce(ConnectionTo<AcpRole>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, agent_client_protocol::Error>> + Send,
+    {
+        let stream = TcpStream::connect(addr).await.expect("connect tcp");
+        let (read_half, write_half) = stream.into_split();
+        let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+        let bearer = bearer.to_string();
+        Client
+            .builder()
+            .name("akh-scoped-session-test-client")
+            .connect_with(transport, async move |cx| {
+                let mut meta = Meta::new();
+                meta.insert(AUTH_META_KEY.into(), format!("Bearer {bearer}").into());
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1).meta(meta))
+                    .block_task()
+                    .await?;
+                requests(cx).await
+            })
+            .await
+    }
+
+    /// Phase 53 review: `session/prompt` authorizes the session's akh before
+    /// checking the session out, so another principal can neither mark it
+    /// active nor touch its recency (nor learn more than `session/load` does).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn session_prompt_authorizes_before_touching_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+        let addr = listener.local_addr().expect("local addr");
+        let me = workspace().with_ingress_auth(janus_vesta_principals(dir.path()));
+        let observer = me.clone();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_tcp_loop(me, listener, shutdown_rx).await });
+
+        // Janus opens two sessions; the first is the older one.
+        let (first, second) = scoped_tcp_session(addr, JANUS_TOKEN, |cx| async move {
+            let mut ids = Vec::new();
+            for _ in 0..2 {
+                let mut meta = Meta::new();
+                meta.insert("akh/workspace".into(), "janus".into());
+                let created = cx
+                    .send_request(NewSessionRequest::new(PathBuf::from("/tmp")).meta(meta))
+                    .block_task()
+                    .await?;
+                ids.push(created.session_id.to_string());
+            }
+            Ok((ids[0].clone(), ids[1].clone()))
+        })
+        .await
+        .expect("janus opens sessions");
+        let order_before: Vec<String> = observer
+            .session_order
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+
+        // Vesta prompts Janus's older session.
+        let target = first.clone();
+        let refused = scoped_tcp_session(addr, VESTA_TOKEN, move |cx| async move {
+            cx.send_request(PromptRequest::new(
+                SessionId::new(target),
+                vec![ContentBlock::from("hello")],
+            ))
+            .block_task()
+            .await
+            .map(|_| ())
+        })
+        .await
+        .expect_err("vesta must not prompt a janus session");
+        assert_eq!(
+            error_code(&refused).as_deref(),
+            Some("akh::acp::workspace_not_granted")
+        );
+        let order_after: Vec<String> = observer
+            .session_order
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(
+            order_before, order_after,
+            "a refused prompt must not touch the session's recency"
+        );
+        assert!(
+            order_after.iter().position(|id| *id == first)
+                < order_after.iter().position(|id| *id == second)
+        );
+        assert!(observer.session_active_turns.lock().unwrap().is_empty());
+
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// Phase 53 review (architect decision): switching an akh's permission
+    /// mode or psyche is control-plane; reading them stays per-akh.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn permission_mode_and_archetype_sets_need_the_control_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+        let addr = listener.local_addr().expect("local addr");
+        let me = workspace().with_ingress_auth(janus_vesta_principals(dir.path()));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_tcp_loop(me, listener, shutdown_rx).await });
+
+        let results = scoped_tcp_session(addr, JANUS_TOKEN, |cx| async move {
+            let mut results = Vec::new();
+            for params in [
+                serde_json::json!({"workspace": "janus"}),
+                serde_json::json!({"workspace": "janus", "mode": "bypass"}),
+            ] {
+                results.push(
+                    cx.send_request(AkhExtRequest {
+                        method: "_akh/permission/mode".into(),
+                        params,
+                    })
+                    .block_task()
+                    .await
+                    .map(|_| ()),
+                );
+            }
+            for params in [
+                serde_json::json!({"workspace": "janus"}),
+                serde_json::json!({"workspace": "janus", "sage": 0.9}),
+            ] {
+                results.push(
+                    cx.send_request(AkhExtRequest {
+                        method: "_akh/psyche/archetypes".into(),
+                        params,
+                    })
+                    .block_task()
+                    .await
+                    .map(|_| ()),
+                );
+            }
+            Ok(results)
+        })
+        .await
+        .expect("janus initializes");
+        let not_control = |result: &Result<(), agent_client_protocol::Error>| {
+            result.as_ref().err().and_then(error_code).as_deref()
+                != Some("akh::acp::control_not_granted")
+        };
+        results[0].as_ref().expect("reading the mode is per-akh");
+        assert_eq!(
+            error_code(
+                results[1]
+                    .as_ref()
+                    .expect_err("setting the mode needs control")
+            )
+            .as_deref(),
+            Some("akh::acp::control_not_granted")
+        );
+        assert!(not_control(&results[2]), "reading archetypes is per-akh");
+        assert_eq!(
+            error_code(
+                results[3]
+                    .as_ref()
+                    .expect_err("tuning archetypes needs control")
+            )
+            .as_deref(),
+            Some("akh::acp::control_not_granted")
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    #[test]
+    fn control_plane_writes_are_the_mode_and_archetype_sets() {
+        use serde_json::json;
+        assert!(is_control_plane_write(
+            "_akh/permission/mode",
+            &json!({"mode": "plan"})
+        ));
+        assert!(!is_control_plane_write("_akh/permission/mode", &json!({})));
+        assert!(is_control_plane_write(
+            "_akh/psyche/archetypes",
+            &json!({"explorer": 0.2})
+        ));
+        assert!(!is_control_plane_write(
+            "_akh/psyche/archetypes",
+            &json!({"workspace": "a"})
+        ));
+        assert!(!is_control_plane_write("_akh/goals", &json!({"mode": "x"})));
+    }
+
     /// An unknown token is refused at `initialize`, even with principals set.
     #[tokio::test]
     async fn acp_tcp_principal_refuses_unknown_token() {
@@ -11259,7 +11499,7 @@ tags = []
     async fn permission_asker_bridge_relays_decision() {
         use crate::agent::permission::PermissionAsker;
         use crate::agent::tool_manifest::{
-            Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource,
+            Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolSource,
         };
         use std::collections::HashSet;
 
@@ -11269,6 +11509,7 @@ tags = []
                 description: "t".into(),
                 parameters: vec![],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Dangerous,
                     capabilities: HashSet::from([Capability::WriteFilesystem]),
                     description: "t".into(),

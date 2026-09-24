@@ -10,7 +10,7 @@ use crate::{
     agent::{
         agent::AgentPredicates,
         tool::{ToolInput, ToolRegistry},
-        tool_manifest::{Capability, DangerLevel, ToolManifest},
+        tool_manifest::{Capability, DangerLevel, ToolEffect, ToolManifest},
     },
     akh_config::AkhConfig,
     engine::Engine,
@@ -234,10 +234,18 @@ impl From<CoreApiError> for Fault {
     }
 }
 
-/// `read_only` for the wire catalog, derived from the manifest's danger info:
-/// `Safe` and exercising only cognitive read capabilities.
+/// `read_only` for the wire catalog and the default delegation grant.
+///
+/// All three must hold:
+/// - the tool **declares** itself read-only
+///   ([`ToolEffect::ReadOnly`](crate::agent::tool_manifest::ToolEffect::ReadOnly)); a tool
+///   that says nothing is mutating, so a `Safe` scratchpad or checklist writer
+///   can never be read-only by omission (Phase 53 review);
+/// - its danger level is `Safe`;
+/// - it exercises only cognitive read capabilities.
 pub fn is_cognitive_read_only(manifest: &ToolManifest) -> bool {
-    manifest.danger.level == DangerLevel::Safe
+    manifest.danger.effect.is_read_only()
+        && manifest.danger.level == DangerLevel::Safe
         && manifest.danger.capabilities.iter().all(|capability| {
             matches!(
                 capability,
@@ -754,6 +762,40 @@ impl crate::agent::permission::PermissionAsker for AuthorizedCallApproval {
     }
 }
 
+/// Make sure a successful mutating `/v1` call is the delegate's provenance.
+///
+/// Tools that store provenance already leave one `DelegatedCall` per written
+/// symbol (the tool's own record or the engine's sibling, deduplicated per
+/// call); `trace` names them. A mutating tool that wrote without provenance
+/// (`kg_mutate` → `add_triple`, `core_memory_*`, `task_list`, ...) left none,
+/// so exactly one call-level record keyed by the call's `request_id` is added
+/// here. Declared read-only tools changed nothing and record nothing. The
+/// operation store guarantees a request id executes once, so a replay never
+/// records twice. A ledger failure does not undo the tool's effect; it is
+/// logged so the gap is visible rather than failing an already-applied call.
+fn record_call_provenance(
+    engine: &Engine,
+    attribution: &DelegateAttribution,
+    effect: ToolEffect,
+    output: &crate::agent::AgentResult<crate::agent::tool::ToolOutput>,
+    trace: &crate::provenance::DelegateCallTrace,
+) {
+    let Ok(output) = output else { return };
+    if !output.success || effect.is_read_only() || !trace.is_empty() {
+        return;
+    }
+    if let Err(failure) = engine.record_delegated_call(attribution, &output.symbols_involved) {
+        tracing::warn!(
+            target: "akh::core_api",
+            principal = %attribution.principal,
+            tool = %attribution.tool,
+            request_id = %attribution.request_id,
+            error = %failure,
+            "delegated call ran but its DelegatedCall provenance was not recorded"
+        );
+    }
+}
+
 async fn tool_call(
     State(app): State<CoreApp>,
     Extension(p): Extension<CorePrincipal>,
@@ -795,9 +837,13 @@ async fn tool_call(
             Arc::new(AuthorizedCallApproval {
                 tool: copy.tool.clone(),
             });
-        let output = {
+        let effect = registry
+            .manifest(&copy.tool)
+            .map(|manifest| manifest.danger.effect)
+            .unwrap_or_default();
+        let (output, trace) = {
             let _approved = registry.session_scope(Some(approval), None);
-            crate::provenance::with_delegate_attribution(attribution, || {
+            crate::provenance::with_delegate_attribution_traced(attribution.clone(), || {
                 registry.execute(
                     &copy.tool,
                     ToolInput {
@@ -807,6 +853,7 @@ async fn tool_call(
                 )
             })
         };
+        record_call_provenance(&engine, &attribution, effect, &output, &trace);
         engine.persist().map_err(error)?;
         Ok::<_, Fault>(match output {
             Ok(output) => ToolResult {
@@ -1957,6 +2004,272 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    // ── Phase 53 review fixes ───────────────────────────────────────────
+
+    /// The default grant (and the catalog's `read_only`) holds only tools that
+    /// declare themselves read-only, plus `memory_write`: never the `Safe`
+    /// writers `core_memory_*` (virtual context strategy), `task_list` or
+    /// `inference_config`.
+    #[tokio::test]
+    async fn the_default_grant_and_read_only_catalog_exclude_mutating_tools() {
+        use crate::agent::tools::{
+            ArchivalSearchTool, CoreMemoryAppendTool, CoreMemoryReplaceTool,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let backend = live_backend(false);
+        // What akhomed registers on the `virtual` context strategy.
+        backend
+            .tools
+            .register(Box::new(CoreMemoryAppendTool::new("test")));
+        backend
+            .tools
+            .register(Box::new(CoreMemoryReplaceTool::new("test")));
+        backend.tools.register(Box::new(ArchivalSearchTool::new()));
+
+        let granted = GrantTools::ReadOnlyPlusMemoryWrite.resolve(&backend.tools);
+        for mutating in [
+            "core_memory_append",
+            "core_memory_replace",
+            "task_list",
+            "inference_config",
+            "kg_mutate",
+            "shell_exec",
+        ] {
+            assert!(!granted.contains(mutating), "{mutating} in {granted:?}");
+        }
+        for read in ["kg_query", "archival_search", "memory_write"] {
+            assert!(granted.contains(read), "{read} missing from {granted:?}");
+        }
+        for name in granted.iter().filter(|name| *name != "memory_write") {
+            let manifest = backend.tools.manifest(name).unwrap();
+            assert!(
+                manifest.danger.effect.is_read_only(),
+                "{name} is granted but does not declare itself read-only"
+            );
+        }
+
+        let every = ToolScope::Named {
+            tools: [
+                "core_memory_append",
+                "core_memory_replace",
+                "task_list",
+                "inference_config",
+                "kg_query",
+                "archival_search",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        };
+        let app = scoped_app(dir.path(), backend, every);
+        let catalog = catalog_of(&app).await;
+        let read_only = |name: &str| catalog.iter().find(|t| t.name == name).unwrap().read_only;
+        assert!(!read_only("core_memory_append"));
+        assert!(!read_only("core_memory_replace"));
+        assert!(!read_only("task_list"));
+        assert!(!read_only("inference_config"));
+        assert!(read_only("kg_query"));
+        assert!(read_only("archival_search"));
+    }
+
+    /// A `Safe` manifest with only read capabilities is still not read-only
+    /// unless it declares so.
+    #[test]
+    fn read_only_needs_an_explicit_declaration() {
+        use crate::agent::tool_manifest::{DangerInfo, ToolSource};
+        let manifest = |effect: ToolEffect| ToolManifest {
+            name: "t".into(),
+            description: String::new(),
+            parameters: vec![],
+            danger: DangerInfo {
+                effect,
+                level: DangerLevel::Safe,
+                capabilities: [Capability::ReadKg].into(),
+                description: String::new(),
+                shadow_triggers: vec![],
+            },
+            source: ToolSource::Native,
+        };
+        assert!(!is_cognitive_read_only(&manifest(ToolEffect::Mutating)));
+        assert!(is_cognitive_read_only(&manifest(ToolEffect::ReadOnly)));
+    }
+
+    /// A delegate's write through a tool that stores no provenance of its own
+    /// (`kg_mutate` → `add_triple`) is still the delegate's: exactly one
+    /// call-level `DelegatedCall`, keyed by the request id, on the written
+    /// subject. A read-only call records nothing; a replay records nothing new.
+    #[tokio::test]
+    async fn a_delegate_kg_mutate_leaves_one_delegated_call_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = persistent_backend(dir.path());
+        let app = scoped_app(dir.path(), backend.clone(), ToolScope::default());
+        let delegated = |engine: &Engine| {
+            engine
+                .provenance_by_kind_tags(&[DerivationKind::tag_for_name("delegated_call").unwrap()])
+                .unwrap()
+        };
+
+        let args = json!({"subject": "cedar", "predicate": "grows-in", "object": "lebanon"});
+        let mutated = call_tool(&app, "mutate", "kg_mutate", args.clone(), None).await;
+        assert_eq!(mutated["success"], true, "{mutated}");
+        let records = delegated(&backend.engine);
+        assert_eq!(records.len(), 1, "{records:?}");
+        let DerivationKind::DelegatedCall {
+            principal,
+            grant_id,
+            tool,
+            session_id,
+            request_id,
+        } = &records[0].kind
+        else {
+            panic!("unexpected kind {:?}", records[0].kind);
+        };
+        assert_eq!(principal, "sessions");
+        assert_eq!(grant_id, &None);
+        assert_eq!(tool, "kg_mutate");
+        assert_eq!(session_id, "session");
+        assert_eq!(request_id, "mutate");
+        let cedar = backend.engine.resolve_symbol("cedar").unwrap();
+        assert_eq!(
+            records[0].derived_id, cedar,
+            "hangs off the written subject"
+        );
+        assert!(
+            backend
+                .engine
+                .provenance_of(cedar)
+                .unwrap()
+                .iter()
+                .any(|r| matches!(r.kind, DerivationKind::DelegatedCall { .. }))
+        );
+
+        // The idempotent replay executes nothing and records nothing.
+        let replay = call_tool(&app, "mutate", "kg_mutate", args, None).await;
+        assert_eq!(replay["success"], true, "{replay}");
+        assert_eq!(delegated(&backend.engine).len(), 1);
+
+        // A declared read-only tool changes nothing and records nothing.
+        let read = call_tool(&app, "read", "kg_query", json!({"symbol": "cedar"}), None).await;
+        assert_eq!(read["receipt"], "read", "{read}");
+        assert_eq!(delegated(&backend.engine).len(), 1);
+    }
+
+    /// `memory_write` stores its own `DelegatedCall`; the engine adds no
+    /// sibling for the same symbol and the call adds no call-level record.
+    #[tokio::test]
+    async fn a_delegate_memory_write_is_not_recorded_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = persistent_backend(dir.path());
+        let app = scoped_app(dir.path(), backend.clone(), ToolScope::default());
+        let written = call_tool(&app, "write", "memory_write", memory_write_args(), None).await;
+        assert_eq!(written["success"], true, "{written}");
+        let records = backend
+            .engine
+            .provenance_by_kind_tags(&[DerivationKind::tag_for_name("delegated_call").unwrap()])
+            .unwrap();
+        assert!(!records.is_empty());
+        let mut symbols = records.iter().map(|r| r.derived_id).collect::<Vec<_>>();
+        let before = symbols.len();
+        symbols.sort();
+        symbols.dedup();
+        assert_eq!(
+            before,
+            symbols.len(),
+            "one DelegatedCall per symbol: {records:?}"
+        );
+    }
+
+    #[test]
+    fn a_second_write_to_one_symbol_in_one_call_adds_no_second_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(crate::engine::EngineConfig {
+            data_dir: Some(dir.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap();
+        let symbol = engine.resolve_or_create_entity("fact").unwrap();
+        let attribution = DelegateAttribution {
+            principal: "native:codex/code".into(),
+            grant_id: None,
+            tool: "t".into(),
+            session_id: "s".into(),
+            request_id: "r".into(),
+        };
+        let ((), trace) =
+            crate::provenance::with_delegate_attribution_traced(attribution.clone(), || {
+                for _ in 0..2 {
+                    let mut record =
+                        crate::provenance::ProvenanceRecord::new(symbol, DerivationKind::Extracted);
+                    engine.store_provenance(&mut record).unwrap();
+                }
+            });
+        assert_eq!(trace.attributed, [symbol].into());
+        let siblings = engine
+            .provenance_of(symbol)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.kind == attribution.derivation())
+            .count();
+        assert_eq!(siblings, 1);
+    }
+
+    /// An unbound grant binds to the first session presenting it; another
+    /// session is then refused.
+    #[tokio::test]
+    async fn an_unbound_grant_binds_to_the_first_presenting_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = live_backend(false);
+        let app = policy_app(
+            dir.path(),
+            backend.clone(),
+            ToolScope::default(),
+            GrantPolicy::Required,
+        );
+        let minted = mint(&app, &backend, GrantTools::default());
+        assert_eq!(minted.grant.session_id, None);
+        let first = call_tool(
+            &app,
+            "first",
+            "kg_query",
+            json!({"symbol": "x"}),
+            Some(&minted.secret),
+        )
+        .await;
+        assert_ne!(first["data"]["code"], "grant_session_mismatch", "{first}");
+        let bound = app.grants.list(Some("test")).unwrap();
+        assert_eq!(bound[0].session_id.as_deref(), Some("session"));
+
+        let presentation = GrantPresentation {
+            akh: "test",
+            presenter: "sessions",
+            session_id: "another-session",
+        };
+        assert!(matches!(
+            app.grants
+                .resolve(&minted.secret.token(), presentation)
+                .unwrap_err(),
+            GrantError::SessionMismatch { .. }
+        ));
+        // The akh's own bind after create is an idempotent no-op.
+        app.grants.bind_session(minted.grant.id, "session").unwrap();
+    }
+
+    /// Native-session delegation is only a target once the `/v1` grant
+    /// authority is published (no `AKH_CORE_CONFIG` = never).
+    #[cfg(feature = "delegation")]
+    #[test]
+    fn the_core_issuer_is_available_only_once_the_authority_is_published() {
+        use crate::agent::delegation::DelegationGrantIssuer;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = live_backend(false);
+        let slot = GrantAuthoritySlot::default();
+        let issuer = CoreGrantIssuer::new(Arc::clone(&slot), "test", backend.tools.clone());
+        assert!(!issuer.is_available());
+        let app = scoped_app(dir.path(), backend, ToolScope::default());
+        slot.set(app.grants.clone()).unwrap();
+        assert!(issuer.is_available());
     }
 
     #[test]

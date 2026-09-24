@@ -131,7 +131,7 @@ mod proxy {
     use crate::agent::error::AgentResult;
     use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolSignature};
     use crate::agent::tool_manifest::{
-        Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource,
+        Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolSource,
     };
     use crate::agent::tools::mcp::McpToolDescriptor;
     use crate::engine::Engine;
@@ -229,6 +229,7 @@ mod proxy {
                 description: self.descriptor.description.clone(),
                 parameters: self.descriptor.param_schemas(),
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Dangerous,
                     capabilities: HashSet::from([Capability::Network]),
                     description: "Calls a client-provided MCP server over the network.".into(),

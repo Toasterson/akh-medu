@@ -119,6 +119,41 @@ struct ServerState {
     /// core API is up. Empty = grants unavailable (`core_api_disabled`).
     #[cfg(feature = "core-api")]
     grant_authority: akh_medu::core_service::GrantAuthoritySlot,
+    /// Each resident Agent's live tool registry (weak handles), captured
+    /// when the Agent is created, so `/v1` calls and grant minting never wait on the Agent's
+    /// std `RwLock` (an OODA cycle or turn can hold it for a long time).
+    /// An Agent's registry `Arc` is fixed for its lifetime and registration
+    /// (53i lazy MCP tools, `sync_live_tools`) mutates it in place, so the
+    /// cached handle always sees the current tool set. Entries are keyed by
+    /// workspace and tied to the Agent instance they came from, so a
+    /// replaced or evicted Agent never serves a stale registry.
+    tool_registries: StdRwLock<HashMap<String, ResidentTools>>,
+}
+
+/// A resident Agent's tool registry, tied to the Agent instance it belongs to.
+///
+/// Both handles are weak: the cache never keeps an evicted Agent's registry
+/// (and the tools and engine handles it owns) alive, so eviction, sleep and
+/// relocation need no extra clean-up. The Agent holds the strong registry
+/// `Arc`, so the upgrade succeeds for exactly as long as that Agent lives.
+struct ResidentTools {
+    agent: std::sync::Weak<StdRwLock<Agent>>,
+    registry: std::sync::Weak<akh_medu::agent::tool::ToolRegistry>,
+}
+
+impl ResidentTools {
+    /// The registry, if `agent` is the (live) Agent it was captured from.
+    fn for_agent(
+        &self,
+        agent: &Arc<StdRwLock<Agent>>,
+    ) -> Option<Arc<akh_medu::agent::tool::ToolRegistry>> {
+        // The weak handle pins the allocation, so a new Agent can never reuse
+        // this address while the entry exists: pointer equality is identity.
+        if !std::ptr::eq(self.agent.as_ptr(), Arc::as_ptr(agent)) {
+            return None;
+        }
+        self.registry.upgrade()
+    }
 }
 
 /// Fetch (creating if needed) the per-workspace load lock from `locks`.
@@ -551,6 +586,7 @@ impl ServerState {
             agent_load_locks: RwLock::new(HashMap::new()),
             #[cfg(feature = "core-api")]
             grant_authority: Arc::default(),
+            tool_registries: StdRwLock::new(HashMap::new()),
         }
     }
 
@@ -2639,12 +2675,7 @@ impl ServerState {
         let authority = authority_in(&self.grant_authority)
             .map_err(render_grant_error)?
             .clone();
-        let registry = self
-            .get_agent(&workspace)
-            .await?
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .tool_registry_handle();
+        let registry = self.agent_tools(&workspace).await?;
         let minted = tokio::task::spawn_blocking(move || authority.mint(request, &registry))
             .await
             .map_err(|e| format!("grant mint task failed: {e}"))?
@@ -3053,14 +3084,17 @@ impl ServerState {
         let exec_kind = akh_config.effective_exec(host_exec.as_ref());
         // Phase 53 decision 6: a deployed akhomed refuses in-process side
         // effects on every load, including lazy loads of relocated akhs. The
-        // process mode was fixed at startup; a replaced config can only make
-        // it stricter.
+        // process policy (mode and `allow_legacy_exec`) was fixed at startup;
+        // a replaced config can only make it stricter, never re-admit a
+        // legacy executor the startup policy refused.
         {
             let config = self.config.read().await;
-            let policy = akh_medu::deployment::ExecPolicy {
-                mode: akh_medu::deployment::process_mode().max(config.deployment),
-                allow_legacy_exec: config.allow_legacy_exec,
-            };
+            let policy = akh_medu::deployment::process_policy().only_stricter(
+                akh_medu::deployment::ExecPolicy {
+                    mode: config.deployment,
+                    allow_legacy_exec: config.allow_legacy_exec,
+                },
+            );
             policy
                 .admit(name, &exec_kind, akh_config.backend)
                 .map_err(|e| format!("workspace {name}: {}", e.summary()))?;
@@ -3529,9 +3563,11 @@ impl ServerState {
         // only wires the config-file default.
         agent.set_capture_transcripts(akh_config.capture_transcripts);
 
-        // Extract the snapshot Arc before moving agent into the RwLock so it
-        // can be registered without ever re-acquiring the agent lock.
+        // Extract the snapshot and tool-registry Arcs before moving agent into
+        // the RwLock so they can be registered without ever re-acquiring the
+        // agent lock.
         let snapshot = agent.psyche_snapshot();
+        let registry = agent.tool_registry_handle();
         let shared = Arc::new(StdRwLock::new(agent));
         let mut agents = self.agents.write().await;
         // Another request may have raced us — keep the first one.
@@ -3540,6 +3576,9 @@ impl ServerState {
             .or_insert(Arc::clone(&shared));
         let result = Arc::clone(entry);
         drop(agents);
+        if Arc::ptr_eq(&result, &shared) {
+            self.remember_tools(name, &result, registry);
+        }
 
         // Register snapshot (idempotent — or_insert keeps the race-winner's snapshot).
         self.psyche_snapshots
@@ -3549,6 +3588,60 @@ impl ServerState {
             .or_insert(snapshot);
 
         Ok(result)
+    }
+
+    /// Record `agent`'s tool registry as the resident one for `name`.
+    fn remember_tools(
+        &self,
+        name: &str,
+        agent: &Arc<StdRwLock<Agent>>,
+        registry: Arc<akh_medu::agent::tool::ToolRegistry>,
+    ) {
+        self.tool_registries
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                name.to_string(),
+                ResidentTools {
+                    agent: Arc::downgrade(agent),
+                    registry: Arc::downgrade(&registry),
+                },
+            );
+    }
+
+    /// The live tool registry of `name`'s Agent (materialising the Agent if
+    /// needed), without taking the Agent lock on an async worker.
+    ///
+    /// Normally served from [`ServerState::tool_registries`]. An Agent that
+    /// entered the map another way (tests, a future insert path) is looked up
+    /// once through `spawn_blocking` and then cached.
+    async fn agent_tools(
+        &self,
+        name: &str,
+    ) -> Result<Arc<akh_medu::agent::tool::ToolRegistry>, String> {
+        let agent = self.get_agent(name).await?;
+        if let Some(registry) = self
+            .tool_registries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .and_then(|resident| resident.for_agent(&agent))
+        {
+            return Ok(registry);
+        }
+        let registry = tokio::task::spawn_blocking({
+            let agent = Arc::clone(&agent);
+            move || {
+                agent
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .tool_registry_handle()
+            }
+        })
+        .await
+        .map_err(|error| format!("tool registry lookup for {name} failed: {error}"))?;
+        self.remember_tools(name, &agent, Arc::clone(&registry));
+        Ok(registry)
     }
 
     /// Return the cached `Agent` for `name` if one is already resident,
@@ -4880,7 +4973,7 @@ async fn main() {
     // executor would run side effects in-process.
     match config.check_deployment() {
         Ok(policy) => {
-            let _ = akh_medu::deployment::set_process_mode(policy.mode);
+            let _ = akh_medu::deployment::set_process_policy(policy);
             tracing::info!(
                 target: "akh::deployment",
                 mode = policy.mode.as_str(),
@@ -6586,6 +6679,57 @@ mod control_plane_tests {
         assert!(tools.manifest("memory_write").is_some());
     }
 
+    /// Phase 53 review: `/v1` tool resolution and grant minting must not wait
+    /// on the Agent's std lock, which an OODA cycle or turn can hold for long.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn core_api_tools_do_not_wait_on_the_agent_lock() {
+        use akh_medu::core_service::CoreBackend;
+        let (_tmp, state) = temp_state();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "core-busy" }))
+            .await
+            .expect("create");
+        let agent = state.get_agent("core-busy").await.unwrap();
+        let expected = agent
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .tool_registry_handle();
+
+        // A long-running writer (an OODA cycle) holds the agent lock.
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn({
+            let agent = Arc::clone(&agent);
+            move || {
+                let _busy = agent.write().unwrap_or_else(|e| e.into_inner());
+                locked_tx.send(()).unwrap();
+                release_rx.recv().ok();
+            }
+        });
+        locked_rx.recv().unwrap();
+
+        let tools = tokio::time::timeout(
+            Duration::from_secs(5),
+            CoreBackend::tools(&state, "core-busy"),
+        )
+        .await
+        .expect("tools() must not block behind the agent write lock")
+        .unwrap();
+        assert!(Arc::ptr_eq(&tools, &expected));
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        // An evicted Agent's registry is not served (nor kept alive).
+        let weak = Arc::downgrade(&tools);
+        drop((tools, expected, agent));
+        state.agents.write().await.remove("core-busy");
+        assert!(
+            weak.upgrade().is_none(),
+            "the cache must not pin an evicted registry"
+        );
+    }
+
     #[test]
     fn auto_start_is_the_union_of_env_config_cli_and_core_principals() {
         let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -7183,19 +7327,9 @@ impl akh_medu::core_service::CoreBackend for ServerState {
         &'a self,
         akh: &'a str,
     ) -> akh_medu::core_service::CoreFuture<'a, Arc<akh_medu::agent::tool::ToolRegistry>> {
-        Box::pin(async move {
-            let agent = self.get_agent(akh).await?;
-            // The agent lock is a std RwLock that a running OODA cycle or turn
-            // can hold for a while; never block an async worker on it.
-            tokio::task::spawn_blocking(move || {
-                agent
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .tool_registry_handle()
-            })
-            .await
-            .map_err(|error| format!("tool registry lookup for {akh} failed: {error}"))
-        })
+        // The agent lock is a std RwLock that a running OODA cycle or turn
+        // can hold for a while; the cached registry never waits on it.
+        Box::pin(async move { self.agent_tools(akh).await })
     }
     fn config<'a>(
         &'a self,

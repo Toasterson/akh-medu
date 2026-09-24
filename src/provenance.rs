@@ -909,10 +909,41 @@ impl DelegateAttribution {
             request_id: self.request_id.clone(),
         }
     }
+
+    /// Label of the stable per-delegate entity a call-level record hangs off
+    /// when the call touched no symbol of its own, so `provenance_of` that
+    /// entity answers "what did this delegate do".
+    pub fn delegate_label(&self) -> String {
+        format!("delegate:{}", self.principal)
+    }
+}
+
+/// The DelegatedCall records one attributed call produced, by derived symbol.
+///
+/// Returned by [`with_delegate_attribution_traced`]. Each symbol appears once:
+/// the engine stores at most one `DelegatedCall` record per `(call, symbol)`,
+/// whether it is the tool's own record (`memory_write`) or a sibling.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DelegateCallTrace {
+    /// Symbols that carry a `DelegatedCall` record of this call.
+    pub attributed: std::collections::BTreeSet<SymbolId>,
+}
+
+impl DelegateCallTrace {
+    /// Whether the call left no `DelegatedCall` record at all (a write without
+    /// provenance of its own, such as `kg_mutate` or `core_memory_append`).
+    pub fn is_empty(&self) -> bool {
+        self.attributed.is_empty()
+    }
+}
+
+struct ActiveDelegation {
+    attribution: DelegateAttribution,
+    trace: DelegateCallTrace,
 }
 
 thread_local! {
-    static DELEGATE_ATTRIBUTION: std::cell::RefCell<Option<DelegateAttribution>> =
+    static DELEGATE_ATTRIBUTION: std::cell::RefCell<Option<ActiveDelegation>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -920,21 +951,69 @@ thread_local! {
 /// attribution afterwards (also on panic). Tool execution for one `/v1` call
 /// runs synchronously on one blocking thread, so a thread-local is exact.
 pub fn with_delegate_attribution<R>(attribution: DelegateAttribution, f: impl FnOnce() -> R) -> R {
-    struct Restore(Option<DelegateAttribution>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            let previous = self.0.take();
-            DELEGATE_ATTRIBUTION.with(|slot| *slot.borrow_mut() = previous);
+    with_delegate_attribution_traced(attribution, f).0
+}
+
+/// [`with_delegate_attribution`], also returning which symbols received a
+/// `DelegatedCall` record while `f` ran.
+pub fn with_delegate_attribution_traced<R>(
+    attribution: DelegateAttribution,
+    f: impl FnOnce() -> R,
+) -> (R, DelegateCallTrace) {
+    /// Puts the previous attribution back exactly once: explicitly on the
+    /// normal path (yielding the finished trace), or on drop during a panic.
+    struct Restore {
+        previous: Option<Option<ActiveDelegation>>,
+    }
+    impl Restore {
+        fn finish(&mut self) -> DelegateCallTrace {
+            let Some(previous) = self.previous.take() else {
+                return DelegateCallTrace::default();
+            };
+            DELEGATE_ATTRIBUTION
+                .with(|slot| std::mem::replace(&mut *slot.borrow_mut(), previous))
+                .map(|finished| finished.trace)
+                .unwrap_or_default()
         }
     }
-    let previous = DELEGATE_ATTRIBUTION.with(|slot| slot.borrow_mut().replace(attribution));
-    let _restore = Restore(previous);
-    f()
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            self.finish();
+        }
+    }
+    let previous = DELEGATE_ATTRIBUTION.with(|slot| {
+        slot.borrow_mut().replace(ActiveDelegation {
+            attribution,
+            trace: DelegateCallTrace::default(),
+        })
+    });
+    let mut restore = Restore {
+        previous: Some(previous),
+    };
+    let result = f();
+    let trace = restore.finish();
+    (result, trace)
 }
 
 /// The delegate attribution active on this thread, if any.
 pub fn current_delegate_attribution() -> Option<DelegateAttribution> {
-    DELEGATE_ATTRIBUTION.with(|slot| slot.borrow().clone())
+    DELEGATE_ATTRIBUTION.with(|slot| slot.borrow().as_ref().map(|a| a.attribution.clone()))
+}
+
+/// Claim `symbol` for a `DelegatedCall` record of the active call: returns the
+/// attribution the first time a symbol is claimed in this call and `None`
+/// afterwards (or when no attribution is active), so the engine never stores
+/// two `DelegatedCall` records for one `(call, symbol)`.
+pub(crate) fn claim_delegate_record(symbol: SymbolId) -> Option<DelegateAttribution> {
+    DELEGATE_ATTRIBUTION.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let active = slot.as_mut()?;
+        active
+            .trace
+            .attributed
+            .insert(symbol)
+            .then(|| active.attribution.clone())
+    })
 }
 
 /// Version marker for exact RuleInference support triples encoded in the

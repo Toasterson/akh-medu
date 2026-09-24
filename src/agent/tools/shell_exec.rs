@@ -14,7 +14,7 @@ use std::time::Duration;
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::backend::{Backend, ExecError, ExecRequest, InProcessBackend};
 use crate::engine::Engine;
@@ -229,6 +229,7 @@ impl Tool for ShellExecTool {
                 ToolParamSchema::optional("timeout", "Timeout in seconds (default: 30)."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Critical,
                 capabilities: HashSet::from([Capability::ProcessExec]),
                 description: "Executes arbitrary shell commands — full system access.".into(),

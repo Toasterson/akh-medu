@@ -3,7 +3,7 @@
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use std::collections::HashSet;
@@ -80,6 +80,7 @@ impl Tool for SimilaritySearchTool {
                 ToolParamSchema::optional("top_k", "Number of results to return (default: 5)."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::VsaAccess]),
                 description: "VSA-based semantic similarity search — no side effects.".into(),

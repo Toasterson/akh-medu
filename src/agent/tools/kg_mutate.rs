@@ -3,7 +3,7 @@
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use crate::graph::Triple;
@@ -78,6 +78,7 @@ impl Tool for KgMutateTool {
                 ToolParamSchema::optional("confidence", "Confidence score 0.0-1.0 (default: 1.0)."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::WriteKg]),
                 description: "Mutates the knowledge graph by adding triples.".into(),

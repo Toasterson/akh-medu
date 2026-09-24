@@ -1218,7 +1218,9 @@ mod prompt_isolation_tests {
     use super::*;
     use crate::agent::model_manager::{AgentModelManager, ModelManagerConfig};
     use crate::agent::ollama::OllamaConfig;
-    use crate::agent::tool_manifest::{DangerInfo, DangerLevel, ToolManifest, ToolSource};
+    use crate::agent::tool_manifest::{
+        DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolSource,
+    };
     use serde_json::json;
     use std::collections::HashSet;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -1231,6 +1233,7 @@ mod prompt_isolation_tests {
             description: description.into(),
             parameters: vec![],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::new(),
                 description: "test proxy".into(),

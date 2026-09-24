@@ -209,12 +209,43 @@ pub fn warn_on_legacy(subject: &str, admission: ExecAdmission) {
     }
 }
 
+impl ExecPolicy {
+    /// Combine this (startup) policy with a later `requested` one under
+    /// only-stricter semantics: the stricter mode wins, and a legacy executor
+    /// stays admitted only if **both** allow it. A config replaced after
+    /// startup can therefore tighten the policy but never relax it.
+    pub fn only_stricter(self, requested: ExecPolicy) -> ExecPolicy {
+        ExecPolicy {
+            mode: self.mode.max(requested.mode),
+            allow_legacy_exec: self.allow_legacy_exec && requested.allow_legacy_exec,
+        }
+    }
+}
+
 static PROCESS_MODE: OnceLock<DeploymentMode> = OnceLock::new();
+static PROCESS_POLICY: OnceLock<ExecPolicy> = OnceLock::new();
 
 /// Record the mode akhomed resolved at startup. The first call wins; a later
 /// call returns the mode already in force.
 pub fn set_process_mode(mode: DeploymentMode) -> Result<(), DeploymentMode> {
     PROCESS_MODE.set(mode).map_err(|_| process_mode())
+}
+
+/// Record the whole policy akhomed resolved at startup (mode **and**
+/// `allow_legacy_exec`). The first call wins; a later call returns the policy
+/// already in force. Also records the mode for [`process_mode`].
+pub fn set_process_policy(policy: ExecPolicy) -> Result<(), ExecPolicy> {
+    let _ = set_process_mode(policy.mode);
+    PROCESS_POLICY.set(policy).map_err(|_| process_policy())
+}
+
+/// The policy fixed at startup. Before [`set_process_policy`] ran, it is
+/// [`process_mode`] with no legacy opt-in (fail closed).
+pub fn process_policy() -> ExecPolicy {
+    PROCESS_POLICY.get().copied().unwrap_or(ExecPolicy {
+        mode: process_mode(),
+        allow_legacy_exec: false,
+    })
 }
 
 /// The process's deployment mode: what akhomed recorded at startup, otherwise
@@ -314,6 +345,30 @@ mod tests {
             "{summary}"
         );
         assert!(summary.contains("kind = \"execd\""), "{summary}");
+    }
+
+    #[test]
+    fn a_later_policy_can_only_tighten_the_startup_policy() {
+        let startup = ExecPolicy {
+            mode: DeploymentMode::Deployed,
+            allow_legacy_exec: false,
+        };
+        // A swapped config that relaxes both knobs changes nothing.
+        let relaxed = startup.only_stricter(ExecPolicy {
+            mode: DeploymentMode::Development,
+            allow_legacy_exec: true,
+        });
+        assert_eq!(relaxed, startup);
+        assert!(relaxed.check_exec("a", &local_drop()).is_err());
+        // A startup opt-in can still be withdrawn by a later config.
+        let opted_in = deployed(true);
+        assert_eq!(opted_in.only_stricter(deployed(false)), deployed(false));
+        // Development at startup, deployed later: the stricter mode wins.
+        let dev = ExecPolicy::default();
+        assert_eq!(
+            dev.only_stricter(deployed(false)).mode,
+            DeploymentMode::Deployed
+        );
     }
 
     #[test]

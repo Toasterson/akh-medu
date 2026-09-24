@@ -30,7 +30,7 @@ use crate::agent::context::core_memory;
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use crate::library::note_store::NoteCatalog;
@@ -83,9 +83,10 @@ impl Tool for CoreMemoryAppendTool {
                 .into(),
             parameters: vec![ToolParamSchema::required("text", "The line to remember.")],
             danger: DangerInfo {
-                level: DangerLevel::Safe,
-                capabilities: HashSet::from([Capability::MemoryAccess]),
-                description: "Writes to the akh's own core-memory scratchpad.".into(),
+                effect: ToolEffect::Mutating,
+                level: DangerLevel::Cautious,
+                capabilities: HashSet::from([Capability::MemoryAccess, Capability::WriteKg]),
+                description: "Writes to the akh's own core-memory scratchpad (persisted in the knowledge graph).".into(),
                 shadow_triggers: vec![],
             },
             source: ToolSource::Native,
@@ -155,9 +156,12 @@ impl Tool for CoreMemoryReplaceTool {
                 ToolParamSchema::required("new", "The replacement text (empty to delete)."),
             ],
             danger: DangerInfo {
-                level: DangerLevel::Safe,
-                capabilities: HashSet::from([Capability::MemoryAccess]),
-                description: "Edits the akh's own core-memory scratchpad.".into(),
+                effect: ToolEffect::Mutating,
+                level: DangerLevel::Cautious,
+                capabilities: HashSet::from([Capability::MemoryAccess, Capability::WriteKg]),
+                description:
+                    "Edits the akh's own core-memory scratchpad (persisted in the knowledge graph)."
+                        .into(),
                 shadow_triggers: vec![],
             },
             source: ToolSource::Native,
@@ -259,6 +263,7 @@ impl Tool for ArchivalSearchTool {
                 .into(),
             parameters: vec![ToolParamSchema::required("query", "What to look up.")],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::ReadKg, Capability::MemoryAccess]),
                 description: "Read-only knowledge-graph and note search — no side effects.".into(),
@@ -393,6 +398,7 @@ impl Tool for QueryGraphTool {
                 ToolParamSchema::optional("entity", "Entity label (for 'properties')."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::ReadKg]),
                 description: "Read-only typed knowledge-graph query — no side effects.".into(),

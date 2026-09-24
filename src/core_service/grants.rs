@@ -460,6 +460,12 @@ impl GrantAuthority {
 
     /// Resolve a presented grant for a call, checking expiry, akh, presenter
     /// and session binding. The tool check is [`DelegationGrant::permit`].
+    ///
+    /// An unbound grant is bound to the first session that presents it (after
+    /// every other check passed), atomically in the store: from then on it
+    /// opens that session only. This closes the window between minting and
+    /// the akh's own [`Self::bind_session`] after akhsessd answered the
+    /// create, which a slow or timed-out create would otherwise leave open.
     pub fn resolve(
         &self,
         presented: &GrantToken,
@@ -491,16 +497,17 @@ impl GrantAuthority {
                 presenter: at.presenter.into(),
             });
         }
-        if let Some(bound) = &grant.session_id
-            && bound != at.session_id
-        {
-            return Err(GrantError::SessionMismatch {
+        match &grant.session_id {
+            Some(bound) if bound != at.session_id => Err(GrantError::SessionMismatch {
                 grant_id: grant.id,
                 bound: bound.clone(),
                 presented: at.session_id.into(),
-            });
+            }),
+            Some(_) => Ok(grant),
+            // First presentation: bind it. A concurrent first presentation
+            // from another session loses inside the store transaction.
+            None => self.bind_session(grant.id, at.session_id),
         }
-        Ok(grant)
     }
 
     /// Bind an unbound grant to the session it was handed to. Binding to the
@@ -640,6 +647,10 @@ fn grant_uuid(id: &str) -> crate::agent::delegation::DelegationResult<Uuid> {
 
 #[cfg(feature = "delegation")]
 impl crate::agent::delegation::DelegationGrantIssuer for CoreGrantIssuer {
+    fn is_available(&self) -> bool {
+        authority_in(&self.slot).is_ok()
+    }
+
     fn issue(
         &self,
         request: &crate::agent::delegation::GrantRequest,
