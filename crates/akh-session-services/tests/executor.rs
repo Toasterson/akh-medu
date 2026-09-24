@@ -276,6 +276,7 @@ fn restart_does_not_replay_an_operation_with_an_unknown_outcome() {
                     result: None,
                     started_at: now_ms(),
                     finished_at: None,
+                    principal: None,
                 },
             )
         })
@@ -457,4 +458,105 @@ fn release_before_attach_fences_delayed_delivery_and_survives_restart() {
         Executor::new(config, Store::open(&dir.path().join("state.redb")).unwrap()).unwrap();
     assert_eq!(executor.attach(&request).unwrap_err().code, "conflict");
     assert!(!dir.path().join("workspaces/late").exists());
+}
+
+#[test]
+fn stat_is_read_only_and_stays_admitted_behind_the_unknown_outcome_fence() {
+    let (dir, executor) = setup();
+    std::fs::write(dir.path().join("workspaces/one/present"), b"12345").unwrap();
+    let stat = |id: &str, path: &str| {
+        let receipt = executor
+            .operate(request(id, "stat", json!({"path":path})))
+            .unwrap();
+        assert_eq!(receipt.status, TurnStatus::Completed);
+        serde_json::from_value::<WorkspaceStat>(receipt.result.unwrap().data.unwrap()).unwrap()
+    };
+    let present = stat("stat-present", "present");
+    assert_eq!(present.kind, Some(WorkspaceEntryKind::File));
+    assert_eq!(present.size, Some(5));
+    assert_eq!(stat("stat-absent", "absent"), WorkspaceStat::MISSING);
+
+    // An unresolved mutation fences every write, but a read-only stat is still admitted.
+    let fenced = request(
+        "fenced-write",
+        "write",
+        json!({"path":"x","content":"x","create":true}),
+    );
+    executor
+        .store
+        .transaction(|tx| {
+            tx.put(
+                &key("receipt", &["fenced-write"]),
+                &OperationReceipt {
+                    id: "fenced-write".into(),
+                    request: fenced.clone(),
+                    status: TurnStatus::Unknown,
+                    result: None,
+                    started_at: now_ms(),
+                    finished_at: None,
+                    principal: None,
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        executor
+            .operate(request("after-fence", "mkdir", json!({"path":"d"})))
+            .unwrap_err()
+            .code,
+        "conflict"
+    );
+    assert!(stat("stat-after-fence", "present").exists);
+    assert!(!dir.path().join("workspaces/one/d").exists());
+}
+
+#[tokio::test]
+async fn http_operations_record_the_authenticated_principal_on_the_receipt() {
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt;
+    let (dir, _executor) = setup();
+    let token = dir.path().join("akhomed.token");
+    std::fs::write(&token, "fixture-akhomed-execd-token-0123456789").unwrap();
+    let config: Config = serde_json::from_value(json!({
+        "service_id":"executor","listen":"127.0.0.1:0","data_dir":dir.path().join("state"),
+        "workspace_root":dir.path().join("workspaces"),
+        "principals":[{"id":"akhomed-janus","roles":["session"],"token_file":token}]
+    }))
+    .unwrap();
+    // `setup` attached the workspace in this store; reopen it behind the HTTP surface.
+    drop(_executor);
+    let executor = Executor::new(
+        Arc::new(config),
+        Store::open(&dir.path().join("state.redb")).unwrap(),
+    )
+    .unwrap();
+    let app = akh_session_services::server::executor_router(executor.clone());
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/operations")
+                .header(
+                    "authorization",
+                    "Bearer fixture-akhomed-execd-token-0123456789",
+                )
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&request("attributed", "stat", json!({"path":"."})))
+                        .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let receipt: OperationReceipt =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(receipt.principal.as_deref(), Some("akhomed-janus"));
+    assert_eq!(receipt.status, TurnStatus::Completed);
+    // The durable receipt carries the same attribution.
+    assert_eq!(
+        executor.receipt("attributed").unwrap().principal.as_deref(),
+        Some("akhomed-janus")
+    );
 }

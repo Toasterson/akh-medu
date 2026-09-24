@@ -12,6 +12,8 @@ runtime = ["dep:akh-runtime", "helpers"]
 candle-runtime = ["runtime", "dep:akh-medu", "akh-medu/candle-backend", "dep:base64"]
 # Opt-in real-core transport tests, without requiring GPU inference.
 core-integration-tests = ["session", "dep:akh-medu", "akh-medu/core-server"]
+# Phase 53c: loopback e2e of akh-medu's ExecdBackend against real akhsbxd + akhexecd routers.
+execd-e2e = ["executor", "sandbox", "dep:akh-medu", "akh-medu/execd-executor"]
 hip = ["candle-runtime", "akh-medu/hip"]
 vulkan = ["candle-runtime", "akh-medu/vulkan"]
 metal = ["candle-runtime", "akh-medu/metal"]
@@ -156,6 +158,10 @@ required-features = ["executor"]
 [[test]]
 name = "sandbox"
 required-features = ["sandbox"]
+
+[[test]]
+name = "execd_e2e"
+required-features = ["execd-e2e"]
 
 [[test]]
 name = "repository_bootstrap"

@@ -49,6 +49,7 @@ pub mod compartment;
 pub mod config;
 #[cfg(feature = "core-server")]
 pub mod core_service;
+pub mod deployment;
 pub mod dispatch;
 pub mod eliza;
 #[cfg(feature = "email")]

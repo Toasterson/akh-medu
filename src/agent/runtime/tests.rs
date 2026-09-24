@@ -401,3 +401,17 @@ fn live_installed_codex_session() {
 fn live_installed_claude_session() {
     live_runtime(RuntimeKind::Claude);
 }
+
+#[test]
+fn the_in_process_bridge_is_colocated_only_in_development() {
+    use crate::deployment::DeploymentMode;
+    assert_eq!(
+        bridge::execution_mode(DeploymentMode::Development).unwrap(),
+        akh_session_types::ExecutionMode::Colocated
+    );
+    let refused = bridge::execution_mode(DeploymentMode::Deployed).unwrap_err();
+    assert!(
+        refused.starts_with("akh::config::in_process_forbidden"),
+        "{refused}"
+    );
+}

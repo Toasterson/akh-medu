@@ -261,7 +261,7 @@ daemon = ["tokio", "dep:chrono", "dep:cron"]
 # inbound transport. (Pre-ADR-061 it pulled axum/tower-http for REST/WS;
 # those surfaces are gone, so it now just means daemon + acp.) Phase 38 folds
 # in the Postgres backing store.
-server = ["daemon", "acp", "postgres", "tracing-otel", "remote-executor", "embedded-runtime"]
+server = ["daemon", "acp", "postgres", "tracing-otel", "remote-executor", "embedded-runtime", "execd-executor"]
 # Phase 38i: OTLP tracing skeleton. Default-on under `server` so akhomed
 # gets the OTLP layer; the lean `akh` client binary (no `server`) stays lean.
 tracing-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:opentelemetry-semantic-conventions"]
@@ -331,6 +331,11 @@ client = ["acp"]
 # `tokio` for the internal runtime the sync trait methods block on. Off by
 # default — in-process/local-drop backends need no SSH dependency at all.
 remote-executor = ["dep:russh", "dep:base64", "tokio"]
+# Phase 53c (ADR 113 decision 3): `ExecdBackend` (src/backend/execd.rs) routes
+# executor-facing tools through akhsbxd allocation + akhexecd operations over
+# the blocking `ureq` client. No extra dependencies; the gate only keeps the
+# lean `akh` client from carrying it.
+execd-executor = []
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
