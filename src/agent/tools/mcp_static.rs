@@ -41,7 +41,9 @@ use super::mcp_config::{
 };
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
-use crate::agent::tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolSource,
+};
 use crate::engine::Engine;
 use crate::upstream_client::{UpstreamError, UpstreamMcpClient};
 
@@ -608,6 +610,7 @@ impl StaticMcpTool {
             .is_some_and(McpToolDescriptor::is_read_only);
         let server = self.server.name();
         DangerInfo {
+            effect: ToolEffect::Mutating,
             // Remote tools are external side effects by default. A server's
             // `readOnlyHint` softens that to Cautious, never to Safe: the
             // network hop and the server's own behaviour stay outside the

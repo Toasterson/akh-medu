@@ -2173,7 +2173,7 @@ mod tests {
     use crate::agent::error::AgentResult;
     use crate::agent::tool::{Tool, ToolOutput, ToolSignature};
     use crate::agent::tool_manifest::{
-        DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+        DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
     };
     use std::collections::HashSet;
 
@@ -2480,6 +2480,7 @@ mod tests {
                 description: "test archival evidence".into(),
                 parameters: vec![ToolParamSchema::required("query", "query")],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Safe,
                     capabilities: HashSet::new(),
                     description: String::new(),
@@ -3188,6 +3189,7 @@ mod tests {
                 description: "Echo the text back".into(),
                 parameters: vec![ToolParamSchema::required("text", "text to echo")],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Safe,
                     capabilities: HashSet::new(),
                     description: String::new(),
@@ -3431,6 +3433,7 @@ mod tests {
                     schema: None,
                 }],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Safe,
                     capabilities: HashSet::new(),
                     description: String::new(),
@@ -4157,6 +4160,7 @@ mod tests {
                 description: "Fake file I/O for testing".into(),
                 parameters: vec![],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Safe,
                     capabilities: std::collections::HashSet::new(),
                     description: "Fake tool for testing".into(),
@@ -4224,6 +4228,7 @@ mod tests {
                 description: format!("test evidence producer {}", self.0),
                 parameters: vec![],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Safe,
                     capabilities: HashSet::new(),
                     description: String::new(),

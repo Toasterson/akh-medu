@@ -600,3 +600,80 @@ slot. A failure to close is logged at `warn` and never masks the delegation's re
 - Add `[board]` to `janus.toml`, `minerva.toml` and `vesta.toml` with
   `token_env = "ROMAN_BOARD_JANUS|MINERVA|VESTA"`. `daemon_credentials.py`'s `core`
   role must export those three variables into akhomed's environment.
+
+## Review fixes, core (branch `phase53/rfA-core`, 2026-09-24)
+
+### Read-only is declared, never inferred
+
+`DangerInfo` has a new field, `effect: ToolEffect` (`Mutating` | `ReadOnly`,
+`#[serde(default)]` = `Mutating`). `is_cognitive_read_only` now needs three
+things: an explicit `ReadOnly` declaration, `Safe`, and read-only cognitive
+capabilities. It drives both the `/v1` catalog's `read_only` and the default
+`ReadOnlyPlusMemoryWrite` grant.
+
+- These tools were `Safe` but mutating, and could be granted by default. They are
+  now `Cautious` and `Mutating`:
+  - `core_memory_append` and `core_memory_replace` (also `WriteKg`);
+  - `task_list`;
+  - `inference_config`.
+- These tools are marked `ReadOnly` after an audit of every `Safe` tool:
+  `kg_query`, `similarity_search`, `reason`, `gap_analysis`, `memory_recall`,
+  `archival_search`, `query_graph`, `entity_schema` (3), `study_note` catalog,
+  list and read, `structured_task_list`, `tool_query`, `search_wiki`,
+  `openclaw_discover`, and `agent_list`.
+- A new tool is mutating until its author declares otherwise.
+
+### Every delegated mutation is the delegate's provenance
+
+- A `/v1` call of a mutating tool that stores no provenance of its own
+  (`kg_mutate` → `add_triple`, `core_memory_*`, `task_list`) now gets exactly one
+  call-level `DelegatedCall`, keyed by `request_id`. It derives from the first
+  symbol the tool touched (the written subject), with the rest as sources. If
+  the tool touched no symbol, the record hangs off the per-delegate entity
+  `delegate:<principal>`.
+- Siblings are deduplicated. A call gets at most one `DelegatedCall` per
+  symbol, and a tool that stores its own `DelegatedCall` (`memory_write`) gets
+  no sibling.
+- Read-only calls and replays record nothing.
+
+### Rollout order for the new wire shapes
+
+`OperationReceipt.principal` (53c) and `DerivationKind::DelegatedCall`
+(tag 108, 53e) break older readers. `deny_unknown_fields` stays, so deploy
+**readers before writers**:
+
+1. Restart akhsessd, akhsbxd and akhomed.
+2. Restart akhexecd last.
+3. Move every akhomed that can wake or relocate the same akh (ADR 049)
+   together, before the first delegated `/v1` call.
+
+Roll back in the reverse order. The operator runbook is
+`deploy/roman-mini/CUTOVER.md` ("Wire compatibility").
+
+### Smaller fixes
+
+- **Lock hygiene.** akhomed caches each resident Agent's `Arc<ToolRegistry>`
+  (weak handles tied to the Agent instance) when it creates the Agent. `/v1`
+  tool resolution and `_akh/delegation/grant/mint` no longer take the Agent's
+  std `RwLock`. The registry `Arc` is fixed for the Agent's lifetime.
+  Registration, including lazy MCP and `sync_live_tools`, mutates it in place.
+- **Legacy exec policy.** `allow_legacy_exec` is fixed at startup together with
+  the process mode (`deployment::set_process_policy`). A replaced config can
+  only tighten it (`ExecPolicy::only_stricter`).
+- **Native delegation availability.** `DelegationGrantIssuer::is_available`.
+  `CoreGrantIssuer` is available only once the `/v1` grant authority is
+  published, so an akh without `AKH_CORE_CONFIG` no longer picks
+  `NativeSession` and then fails every delegation with `GrantUnavailable`.
+- **Grant binding.** An unbound grant binds atomically to the first session that
+  presents it. If a create's answer is lost (a timeout after sending, or an
+  unreadable reply), it is re-sent with the same `request_id` (akhsessd
+  deduplicates creates) to recover the session id, and the session is then
+  archived.
+- **Event replay key.** The key is `(akh, source, type, id)`. One id under two
+  event types is two events.
+- **ACP.**
+  - `session/prompt` authorizes the session's akh before checking the session
+    out, the same as `session/load`.
+  - The SET forms of `_akh/permission/mode` (a `mode` param) and
+    `_akh/psyche/archetypes` (any weight) need `control`. The GET forms stay
+    per-akh.

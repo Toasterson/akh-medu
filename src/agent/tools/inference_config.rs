@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use crate::agent::error::{AgentError, AgentResult};
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 
@@ -103,12 +103,15 @@ impl Tool for InferenceConfigTool {
                 ToolParamSchema::optional("value", "New value (set): on/off (true/false, 1/0)."),
             ],
             danger: DangerInfo {
-                // Read-only or a decode-strategy switch; speculative decode is greedy-lossless, so
-                // this never changes *what* is generated, only how fast — and writes no KG/state.
-                level: DangerLevel::Safe,
+                // `set` flips a process-wide decode option for every session
+                // of this akh, so the tool is mutating even though speculative
+                // decode is greedy-lossless (same output, different speed).
+                effect: ToolEffect::Mutating,
+                level: DangerLevel::Cautious,
                 capabilities: HashSet::new(),
-                description: "Toggles inference options (decode strategy). No KG or state writes; \
-                              speculative decode is greedy-lossless (same output as plain decode)."
+                description: "Toggles process-wide inference options (decode strategy). No KG \
+                              writes; speculative decode is greedy-lossless (same output as \
+                              plain decode)."
                     .into(),
                 shadow_triggers: vec![],
             },

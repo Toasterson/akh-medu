@@ -1581,13 +1581,17 @@ impl Engine {
         Ok(id)
     }
 
-    /// Record the active delegate attribution next to `record` (no-op when no
-    /// attribution is active or `record` already is the delegate's record).
+    /// Record the active delegate attribution next to `record`.
+    ///
+    /// No-op when no attribution is active. At most one `DelegatedCall` record
+    /// is stored per `(call, derived symbol)`: a record that already is the
+    /// delegate's (`memory_write`) claims its symbol, and a second write to
+    /// the same symbol within one call adds no second sibling.
     fn store_delegate_sibling(
         ledger: &ProvenanceLedger,
         record: &ProvenanceRecord,
     ) -> AkhResult<()> {
-        let Some(attribution) = crate::provenance::current_delegate_attribution() else {
+        let Some(attribution) = crate::provenance::claim_delegate_record(record.derived_id) else {
             return Ok(());
         };
         if matches!(record.kind, DerivationKind::DelegatedCall { .. }) {
@@ -1597,6 +1601,46 @@ impl Engine {
             .with_confidence(record.confidence);
         ledger.store(&mut sibling)?;
         Ok(())
+    }
+
+    /// Record one call-level `DelegatedCall` for a `/v1` call whose tool wrote
+    /// without provenance of its own (`kg_mutate`, `core_memory_*`,
+    /// `task_list`, ...), so every delegated mutation is queryable as the
+    /// delegate's (Phase 53 review).
+    ///
+    /// The record derives the first symbol the tool reported touching (its
+    /// written subject, for `kg_mutate`), with the rest as sources. A call
+    /// that touched no symbol hangs off the stable per-delegate entity
+    /// [`DelegateAttribution::delegate_label`], so `provenance_of` that
+    /// entity lists them. Returns `None` on an engine without a provenance
+    /// ledger (in-memory), where there is nothing to record into.
+    ///
+    /// [`DelegateAttribution::delegate_label`]: crate::provenance::DelegateAttribution::delegate_label
+    pub fn record_delegated_call(
+        &self,
+        attribution: &crate::provenance::DelegateAttribution,
+        touched: &[SymbolId],
+    ) -> AkhResult<Option<ProvenanceId>> {
+        let Some(ledger) = self.provenance_ledger.as_ref() else {
+            return Ok(None);
+        };
+        let mut seen = std::collections::HashSet::new();
+        let touched: Vec<SymbolId> = touched
+            .iter()
+            .copied()
+            .filter(|symbol| self.registry.get(*symbol).is_some() && seen.insert(*symbol))
+            .collect();
+        let (derived, sources) = match touched.split_first() {
+            Some((first, rest)) => (*first, rest.to_vec()),
+            None => (
+                self.resolve_or_create_entity(&attribution.delegate_label())?,
+                Vec::new(),
+            ),
+        };
+        let mut record =
+            ProvenanceRecord::new(derived, attribution.derivation()).with_sources(sources);
+        validate_provenance_record_symbols(&self.registry, &record)?;
+        Ok(Some(ledger.store(&mut record)?))
     }
 
     /// Store one provenance record before publishing every triple it supports.

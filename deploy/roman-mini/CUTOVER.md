@@ -160,6 +160,35 @@ The observer update records akh admissions as `admitted` and a
 `no_subscriber` rejection as a workflow failure. The old copy would mark every
 akh-routed delivery `rejected`.
 
+### Wire compatibility: restart readers before writers
+
+Phase 53 adds two things that older binaries cannot read. Both types keep
+`deny_unknown_fields` on purpose; the fix is the restart order, not a looser
+reader.
+
+| New on the wire | Written by | Read by | An old reader does this |
+|---|---|---|---|
+| `OperationReceipt.principal` (53c; only serialized when set) | akhexecd | akhsessd (broker, snapshots, publication, repository bootstrap; also stored in its redb), akhsbxd, akhomed (`[exec] kind = "execd"`) | rejects the receipt, so the tool call fails |
+| `DerivationKind::DelegatedCall`, provenance tag 108 (53e) | akhomed (every `/v1` delegate write) | akhomed on every host that can wake or relocate the akh (redb ledger, Postgres snapshot and WAL) | cannot decode the provenance ledger |
+
+Order:
+
+1. **Readers first.** Restart akhsessd, akhsbxd and akhomed on the new binaries
+   before akhexecd. Until akhexecd restarts, the old akhexecd writes receipts
+   without `principal`, and the new readers accept those.
+2. **akhexecd last.** From now on receipts may carry `principal`.
+3. **Every akhomed that can host a given akh moves together.** This covers the
+   Mac core and any relocation target (ADR 049) that could wake janus, minerva
+   or vesta from the same store. Upgrade all of them before the first delegated
+   `/v1` call, which is the first `DelegatedCall` write. On this Mac there is
+   one core, so step 5 covers it. If a second host ever joins, upgrade it first.
+
+Rollback carries the same constraint in reverse. Once akhexecd has written
+receipts with `principal`, or akhomed has written a `DelegatedCall`, an old
+akhsessd or old akhomed cannot read that state. Either keep the new readers,
+or restore their stores from `$BK` (see Rollback). Downgrade akhexecd before
+the readers, never after.
+
 ## 5. Start the full core
 
 ```sh
@@ -358,6 +387,11 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/dev.roman-akhs.events.pli
 launchctl kickstart -k gui/$UID_/dev.roman-akhs.observer
 launchctl kickstart -k gui/$UID_/dev.roman-akhs.laya-controller
 ```
+
+Roll the services back writers first: akhexecd before akhsessd and akhsbxd,
+as described in "Wire compatibility" under step 4. If the new core recorded any
+delegated `/v1` call, the old core cannot decode that provenance. In that case
+restoring `akh.sqlite3` is required, not optional.
 
 Restoring `akh.sqlite3` throws away everything the full core harvested or
 learned since step 5. Prefer keeping the store: the old core reads it, unless a

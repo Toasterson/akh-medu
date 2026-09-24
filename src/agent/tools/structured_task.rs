@@ -27,7 +27,7 @@ use crate::agent::tasks::{
 };
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use crate::symbol::SymbolId;
@@ -221,6 +221,7 @@ impl Tool for StructuredTaskCreateTool {
                 ToolParamSchema::optional("source_note_id", "Numeric symbol id of a source note."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::WriteKg, Capability::MemoryAccess]),
                 description: "Writes a new task entity to the knowledge graph.".into(),
@@ -375,6 +376,7 @@ impl Tool for StructuredTaskUpdateTool {
                 ToolParamSchema::optional("status", "\"open\" or \"cancelled\"."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::WriteKg]),
                 description: "Modifies an existing task entity in the knowledge graph.".into(),
@@ -455,6 +457,7 @@ impl Tool for StructuredTaskCompleteTool {
                 .into(),
             parameters: vec![ToolParamSchema::required("id", "Numeric task id.")],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::WriteKg, Capability::MemoryAccess]),
                 description: "Writes a completion episode and updates task state in the \
@@ -526,6 +529,7 @@ impl Tool for StructuredTaskListTool {
                 "\"open\" (default), \"done\", \"cancelled\", or \"all\".",
             )],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::ReadKg]),
                 description: "Read-only query over task entities in the knowledge graph.".into(),

@@ -5,7 +5,7 @@ use crate::agent::error::{AgentError, AgentResult};
 use crate::agent::memory;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use crate::symbol::SymbolId;
@@ -225,6 +225,7 @@ impl Tool for MemoryRecallTool {
                 ),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::MemoryAccess, Capability::ReadKg]),
                 description: "Read-only episodic memory recall — no side effects.".into(),

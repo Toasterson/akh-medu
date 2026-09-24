@@ -7,7 +7,10 @@
 //!    grant authority): read-only cognitive tools plus `memory_write` by
 //!    default, presentable only by akhsessd's core principal;
 //! 2. creates an akhsessd session carrying the grant (`NewSession.grant`) and
-//!    binds the grant to that session;
+//!    binds the grant to that session (the core also binds an unbound grant
+//!    to the first session presenting it). A create whose answer was lost
+//!    (timeout, unreadable response) is re-sent with the same request id,
+//!    which akhsessd deduplicates, to recover the session and close it;
 //! 3. submits the task and polls the session until the turn ends;
 //! 4. revokes the grant, whatever happened;
 //! 5. closes the session, whatever happened: `POST /v1/sessions/{id}/archive`,
@@ -73,10 +76,17 @@ pub enum NativeSessionError {
         code(akh::delegation::native::transport),
         help(
             "Check that akhsessd is running and `url` in [delegation.native] points \
-             at it. Nothing was delegated if session creation failed."
+             at it. Nothing was delegated if session creation failed; a create that \
+             may have reached akhsessd is re-sent with its request id so the session \
+             it created is found and closed."
         )
     )]
-    Transport { url: String, message: String },
+    Transport {
+        url: String,
+        message: String,
+        /// Whether the request may have reached akhsessd.
+        delivery: Delivery,
+    },
 
     #[error("akhsessd rejected {url} ({status}): {code}: {message}")]
     #[diagnostic(
@@ -126,6 +136,33 @@ pub enum NativeSessionError {
     },
 }
 
+/// Whether a request that failed in transport may have reached akhsessd.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// It never left: DNS, connect or URL failure.
+    NotSent,
+    /// It may have been processed (timeout or I/O error after connecting).
+    Unknown,
+}
+
+impl NativeSessionError {
+    /// Whether akhsessd may have acted on the request despite the error: the
+    /// connection failed after sending, or the answer could not be read.
+    pub fn may_have_been_applied(&self) -> bool {
+        matches!(
+            self,
+            Self::Transport {
+                delivery: Delivery::Unknown,
+                ..
+            } | Self::Decode { .. }
+        )
+    }
+}
+
+/// How many times a create whose answer was lost is re-sent to recover the
+/// session akhsessd may have created.
+const CREATE_RECOVERY_ATTEMPTS: u32 = 3;
+
 /// A grant request from the delegation manager.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantRequest {
@@ -151,6 +188,14 @@ pub struct IssuedGrant {
 /// Mints and manages per-delegation grants for one akh. Implemented over the
 /// `/v1` core API's grant authority (`core_service::CoreGrantIssuer`).
 pub trait DelegationGrantIssuer: Send + Sync {
+    /// Whether the issuer can mint right now. The core issuer is wired at agent
+    /// creation but its authority is published only once `/v1` is serving (and
+    /// never without `AKH_CORE_CONFIG`); until then native sessions are not a
+    /// delegation target, so selection falls through to peer/remote instead of
+    /// failing every delegation with `GrantUnavailable`.
+    fn is_available(&self) -> bool {
+        true
+    }
     fn issue(&self, request: &GrantRequest) -> DelegationResult<IssuedGrant>;
     fn bind_session(&self, grant_id: &str, session_id: &str) -> DelegationResult<()>;
     fn revoke(&self, grant_id: &str) -> DelegationResult<()>;
@@ -327,9 +372,16 @@ impl NativeSessionClient {
                     message: fault.message,
                 })
             }
-            Err(error) => Err(NativeSessionError::Transport {
+            Err(ureq::Error::Transport(transport)) => Err(NativeSessionError::Transport {
                 url,
-                message: error.to_string(),
+                message: transport.to_string(),
+                delivery: match transport.kind() {
+                    ureq::ErrorKind::Dns
+                    | ureq::ErrorKind::ConnectionFailed
+                    | ureq::ErrorKind::InvalidUrl
+                    | ureq::ErrorKind::UnknownScheme => Delivery::NotSent,
+                    _ => Delivery::Unknown,
+                },
             }),
         }
     }
@@ -417,12 +469,28 @@ pub fn run_native_delegation(
     };
     let started = Instant::now();
     let request_id = format!("akh-delegation-{}", uuid::Uuid::now_v7());
-    let session = client.create_session(&new_session_request(
+    let create = new_session_request(
         &grant.akh,
         &config.workspace_profile,
         &request_id,
         grant.token.clone(),
-    ))?;
+    );
+    let session = match client.create_session(&create) {
+        Ok(session) => session,
+        Err(error) => {
+            if error.may_have_been_applied() {
+                // The session may exist without us knowing its id; find it so
+                // the cleanup closes it instead of orphaning it (and its grant
+                // slot) until something else archives it.
+                cleanup.session_id = recover_created_session(
+                    client,
+                    &create,
+                    Duration::from_millis(config.poll_interval_ms.max(10)),
+                );
+            }
+            return Err(error.into());
+        }
+    };
     cleanup.session_id = Some(session.id.clone());
     issuer.bind_session(&grant.id, &session.id)?;
     let turn = client.submit(
@@ -478,6 +546,52 @@ pub fn run_native_delegation(
         error: None,
         target: None,
     })
+}
+
+/// Re-send a create whose answer was lost, with the same request id and grant.
+/// akhsessd deduplicates creates by `(principal, request_id)` and identical
+/// parameters, so this returns the session the first attempt made, or makes
+/// it now; either way the caller closes it. `None` when akhsessd stays
+/// unreachable (the session, if any, is then archived by akhsessd's own
+/// sweeps and the grant is revoked regardless).
+fn recover_created_session(
+    client: &NativeSessionClient,
+    create: &NewSession,
+    backoff: Duration,
+) -> Option<String> {
+    for attempt in 1..=CREATE_RECOVERY_ATTEMPTS {
+        std::thread::sleep(backoff * attempt);
+        match client.create_session(create) {
+            Ok(session) => {
+                tracing::info!(
+                    target: "akh::delegation",
+                    session_id = %session.id, request_id = %create.request_id, attempt,
+                    "recovered the session of a create whose answer was lost; closing it"
+                );
+                return Some(session.id);
+            }
+            Err(error) if error.may_have_been_applied() => tracing::debug!(
+                target: "akh::delegation",
+                request_id = %create.request_id, attempt, %error,
+                "create recovery attempt failed; retrying"
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    target: "akh::delegation",
+                    request_id = %create.request_id, error = ?miette::Report::new(error),
+                    "akhsessd refused the create replay; no session to close"
+                );
+                return None;
+            }
+        }
+    }
+    tracing::warn!(
+        target: "akh::delegation",
+        request_id = %create.request_id,
+        "could not recover a possibly created delegation session; akhsessd's sweeps \
+         archive it (its grant is revoked)"
+    );
+    None
 }
 
 /// Ends a delegation on every exit path: revokes the grant first (so the
@@ -803,6 +917,78 @@ mod tests {
             *issuer.calls.lock().unwrap(),
             vec!["issue", "revoke grant-1"]
         );
+    }
+
+    #[test]
+    fn a_create_whose_answer_was_lost_is_replayed_to_close_the_session() {
+        let (url, log) = stub_akhsessd_status(vec![
+            // The create landed but its answer is unreadable (as after a
+            // timeout, the caller cannot know the session id).
+            (200, "not json"),
+            // The replay under the same request id returns that session.
+            (200, r#"{"id":"sess-3","turns":[]}"#),
+            (200, r#"{"id":"sess-3","turns":[]}"#),
+        ]);
+        let client = NativeSessionClient::new(url, "akhsessd-token-long-enough-000");
+        let issuer = RecordingIssuer::default();
+        let config = NativeDelegationConfig {
+            enabled: true,
+            workspace_profile: "code".into(),
+            poll_interval_ms: 10,
+            ..Default::default()
+        };
+        let error = run_native_delegation(
+            &client,
+            &issuer,
+            &config,
+            &DelegationTask::new("x"),
+            DelegationId(3),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                DelegationError::NativeSession(NativeSessionError::Decode { .. })
+            ),
+            "{error:?}"
+        );
+        // The grant was never bound by the akh and is revoked.
+        assert_eq!(
+            *issuer.calls.lock().unwrap(),
+            vec!["issue", "revoke grant-1"]
+        );
+        let requests = log.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3, "{requests:#?}");
+        let body = |raw: &str| -> NewSession {
+            serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+        };
+        assert!(requests[1].starts_with("POST /v1/sessions "));
+        assert_eq!(
+            body(&requests[0]),
+            body(&requests[1]),
+            "the replay is the identical create (same request id and grant)"
+        );
+        assert!(
+            requests[2].starts_with("POST /v1/sessions/sess-3/archive "),
+            "the recovered session is archived: {}",
+            requests[2]
+        );
+    }
+
+    #[test]
+    fn a_connect_failure_is_not_replayed() {
+        let error = NativeSessionError::Transport {
+            url: "http://127.0.0.1:9".into(),
+            message: "connection refused".into(),
+            delivery: Delivery::NotSent,
+        };
+        assert!(!error.may_have_been_applied());
+        let timeout = NativeSessionError::Transport {
+            url: "http://127.0.0.1:9".into(),
+            message: "timed out reading response".into(),
+            delivery: Delivery::Unknown,
+        };
+        assert!(timeout.may_have_been_applied());
     }
 
     #[test]

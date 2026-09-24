@@ -250,11 +250,17 @@ pub(super) async fn submit(
     let source = format!("{}/{}", event.source, event.event_type);
     let event_key = format!("{source}#{}", event.id);
     let fingerprint = event_fingerprint(&event)?;
-    let record_key = key("core_event", &[&akh, &event.source, &event.id]);
+    // The idempotency key is the whole event identity: the same id under two
+    // event types of one source is two events (they wake different
+    // subscriptions), not a replay or a conflict.
+    let record_key = key(
+        "core_event",
+        &[&akh, &event.source, &event.event_type, &event.id],
+    );
     let replay = |old: AdmittedEvent| -> Api<EventAdmission> {
         if old.fingerprint != fingerprint {
             return Err(Fault::from(EventAdmissionError::Conflict {
-                event_source: event.source.clone(),
+                event_source: source.clone(),
                 id: event.id.clone(),
             })
             .into());
@@ -464,6 +470,44 @@ mod tests {
         // The same id with a different payload is a conflict.
         let (status, body) = submit_to(&app, "janus", envelope("m-1", "changed")).await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    }
+
+    #[tokio::test]
+    async fn one_id_under_two_event_types_is_two_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = durable_engine();
+        let store = ReactorStore::new(&engine);
+        store
+            .put(&schedule("delegations", "djehuty-inbox/delegation"))
+            .unwrap();
+        store
+            .put(&schedule("mentions", "djehuty-inbox/mention"))
+            .unwrap();
+        let app = app(
+            dir.path(),
+            engine.clone(),
+            BTreeSet::from([CoreRole::Event]),
+        );
+
+        let (status, body) = submit_to(&app, "janus", envelope("m-1", "please review")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["schedules_woken"], json!(["delegations"]));
+
+        // Same source and id, another type (and payload): a distinct event,
+        // neither a duplicate of the first nor a conflict with it.
+        let mut mention = envelope("m-1", "you were mentioned");
+        mention["type"] = json!("mention");
+        let (status, body) = submit_to(&app, "janus", mention.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["duplicate"], false, "{body}");
+        assert_eq!(body["event_key"], "djehuty-inbox/mention#m-1");
+        assert_eq!(body["schedules_woken"], json!(["mentions"]));
+        assert_eq!(store.get("mentions").unwrap().state.pending_events.len(), 1);
+
+        // Each still replays as its own duplicate.
+        let (status, body) = submit_to(&app, "janus", mention).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["duplicate"], true);
     }
 
     #[tokio::test]

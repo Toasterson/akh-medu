@@ -221,9 +221,14 @@ impl DelegationManager {
         self
     }
 
-    /// Whether native-session delegation can run: enabled and able to mint.
+    /// Whether native-session delegation can run: enabled, with an issuer
+    /// that can mint **now** (its `/v1` grant authority is published).
     pub fn native_available(&self) -> bool {
-        self.config.native.enabled && self.grant_issuer.is_some()
+        self.config.native.enabled
+            && self
+                .grant_issuer
+                .as_ref()
+                .is_some_and(|issuer| issuer.is_available())
     }
 
     fn native_target(&self) -> DelegationTargetKind {
@@ -685,6 +690,42 @@ mod tests {
         fn revoke(&self, _: &str) -> DelegationResult<()> {
             Ok(())
         }
+    }
+
+    /// An issuer whose grant authority is not published (no `/v1`).
+    struct UnpublishedIssuer;
+    impl DelegationGrantIssuer for UnpublishedIssuer {
+        fn is_available(&self) -> bool {
+            false
+        }
+        fn issue(&self, _: &GrantRequest) -> DelegationResult<IssuedGrant> {
+            unreachable!("an unavailable issuer is never asked to mint")
+        }
+        fn bind_session(&self, _: &str, _: &str) -> DelegationResult<()> {
+            unreachable!()
+        }
+        fn revoke(&self, _: &str) -> DelegationResult<()> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn an_issuer_without_a_published_authority_is_not_a_native_target() {
+        let mut config = native_config();
+        config.remote.enabled = true;
+        config.remote.akhomed_public_url = "https://akh.example".into();
+        config.daily_cost_budget_cents = 100;
+        let manager = DelegationManager::new(config).with_grant_issuer(Arc::new(UnpublishedIssuer));
+        assert!(!manager.native_available());
+        assert!(matches!(
+            manager.select_target(&[], Some("native")),
+            Err(DelegationError::NoTarget { .. })
+        ));
+        // The gradient falls through to the next target instead.
+        assert!(matches!(
+            manager.select_target(&[], None).unwrap(),
+            DelegationTargetKind::RemoteTrigger { .. }
+        ));
     }
 
     fn native_config() -> DelegationConfig {

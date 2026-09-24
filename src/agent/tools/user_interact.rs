@@ -7,7 +7,7 @@
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use std::collections::HashSet;
@@ -65,6 +65,7 @@ impl Tool for UserInteractTool {
                 "Question to ask the user.",
             )],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::UserInteraction]),
                 description: "Prompts the user for input — no side effects beyond I/O.".into(),

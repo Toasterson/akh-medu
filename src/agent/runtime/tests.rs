@@ -79,6 +79,7 @@ impl Tool for Echo {
             parameters: vec![],
             source: ToolSource::Native,
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Safe,
                 capabilities: Default::default(),
                 description: "No side effects".into(),
