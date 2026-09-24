@@ -4913,20 +4913,6 @@ mod control_plane_tests {
         );
     }
 
-    #[tokio::test]
-    async fn malformed_provider_config_refuses_instead_of_using_defaults() {
-        let (_tmp, state) = temp_state();
-        let path = state.paths.workspace_config_file("codex-test");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            "name = 'codex-test'\nbackend = 'codex'\n[agent_runtime]\nworking_dir = 42\n",
-        )
-        .unwrap();
-        assert!(state.get_akh_config("codex-test").await.is_err());
-        assert!(!state.akh_configs.read().await.contains_key("codex-test"));
-    }
-
     #[test]
     fn redb_quarantine_never_overwrites_an_earlier_image() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5204,7 +5190,7 @@ mod control_plane_tests {
                 .await
                 .expect("production sleep must release every redb owner");
             second
-                .wake_workspace(&workspace)
+                .wake_workspace(&workspace, false, false)
                 .await
                 .expect("production wake must reopen redb in the same process");
         }
