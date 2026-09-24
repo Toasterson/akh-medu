@@ -101,6 +101,10 @@ pub enum AkhConfigError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     McpServers(#[from] crate::agent::tools::mcp_config::McpServersConfigError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Board(#[from] crate::agent::djehuty::BoardConfigError),
 }
 
 /// One unrecognized key found while loading an `akh.toml`, surfaced so the
@@ -836,6 +840,20 @@ pub struct AkhConfig {
     #[serde(default)]
     pub mcp: McpConfig,
 
+    /// This akh's own Agent Board identity (Phase 53): URL + token source (+
+    /// own agent id for inbox ingest). Reactor run reports, `DjehutyReply` and
+    /// board ingress use it; `None` falls back to the process-wide
+    /// `DJEHUTY_BOARD_*` environment (one identity for every akh on the host).
+    ///
+    /// ```toml
+    /// [board]
+    /// url = "https://board.lab.home"
+    /// auth = { token_env = "ROMAN_BOARD_JANUS" }
+    /// agent_id = "019d…"
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<crate::agent::djehuty::BoardConfig>,
+
     /// Delegation / external scheduling (Phase 36). Parsed now; the
     /// `DelegationManager` is wired behind the `delegation` feature in its phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -879,6 +897,7 @@ impl Default for AkhConfig {
             agent_runtime: None,
             autonomy: AutonomyConfig::default(),
             mcp: McpConfig::default(),
+            board: None,
             delegation: None,
             exec: None,
         }
@@ -981,6 +1000,9 @@ impl AkhConfig {
             message: e.to_string(),
         })?;
         crate::agent::tools::mcp_config::validate_mcp_servers(&cfg.mcp.servers)?;
+        if let Some(board) = &cfg.board {
+            board.validate(cfg.name())?;
+        }
         Ok((cfg, Self::unknown_keys(&raw)))
     }
 
@@ -1023,6 +1045,8 @@ impl AkhConfig {
             // `[[mcp.servers]]` entries are checked by serde itself
             // (`deny_unknown_fields` on `McpServerSpec`).
             ("mcp", &["require_pushed_mcp", "servers"]),
+            // `auth` is checked by serde (`deny_unknown_fields` on `BoardAuth`).
+            ("board", &["url", "auth", "agent_id", "allow_insecure_http"]),
             (
                 "agent_runtime",
                 &[
@@ -1480,6 +1504,67 @@ mod tests {
         assert_eq!(
             a.gate(DaemonTask::Librarian, ExecPlacement::Contained),
             TaskGate::Disabled(DisabledReason::ExplicitlyDisabled)
+        );
+    }
+
+    #[test]
+    fn board_table_parses_is_known_and_round_trips() {
+        let src = r#"
+            name = "janus"
+            model = "glm-5.3"
+            [board]
+            url = "https://board.lab.home"
+            auth = { token_env = "ROMAN_BOARD_JANUS" }
+            agent_id = "019d9844-ce74-7993-a9f0-c953b8f04a4e"
+        "#;
+        let cfg: AkhConfig = toml::from_str(src).expect("parse");
+        let board = cfg.board.as_ref().expect("[board] parsed");
+        assert_eq!(
+            board.auth,
+            crate::agent::djehuty::BoardAuth::TokenEnv("ROMAN_BOARD_JANUS".into())
+        );
+        assert!(board.own_agent_id().is_some());
+        board.validate("janus").expect("valid");
+        let raw: toml::Value = toml::from_str(src).unwrap();
+        assert!(
+            AkhConfig::unknown_keys(&raw).is_empty(),
+            "[board] keys are known"
+        );
+
+        // Saved configs keep `model` above the tables and re-load unchanged.
+        let saved = toml::to_string(&cfg).expect("serialize");
+        let reloaded: AkhConfig = toml::from_str(&saved).expect("reload");
+        assert_eq!(reloaded.board, cfg.board);
+        assert_eq!(reloaded.model.as_deref(), Some("glm-5.3"));
+
+        // A typo inside [board] and an unknown auth kind are refused.
+        assert!(
+            toml::from_str::<AkhConfig>(
+                "name = \"j\"\n[board]\nurl = \"https://b\"\nauth = { token_envv = \"X\" }\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn board_table_rejects_plain_http_and_relative_token_files() {
+        let insecure: AkhConfig = toml::from_str(
+            "name = \"j\"\n[board]\nurl = \"http://board.lab.home\"\nauth = { token_env = \"X\" }\n",
+        )
+        .unwrap();
+        let err = insecure.board.unwrap().validate("j").unwrap_err();
+        assert_eq!(
+            miette::Diagnostic::code(&err).unwrap().to_string(),
+            "akh::board::config::insecure_http"
+        );
+        let relative: AkhConfig = toml::from_str(
+            "name = \"j\"\n[board]\nurl = \"http://127.0.0.1:8080\"\nauth = { token_file = \"b.key\" }\n",
+        )
+        .unwrap();
+        let err = relative.board.unwrap().validate("j").unwrap_err();
+        assert_eq!(
+            miette::Diagnostic::code(&err).unwrap().to_string(),
+            "akh::board::config::token_file"
         );
     }
 

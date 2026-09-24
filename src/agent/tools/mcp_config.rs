@@ -656,7 +656,7 @@ impl McpServerSpec {
 /// names a loopback host. The accepted set is exactly the session services'
 /// `Endpoint::validate` rule (`localhost`, `127.0.0.1`, `[::1]`), so a URL is
 /// accepted by both or by neither.
-fn is_loopback_authority(rest: &str) -> bool {
+pub(crate) fn is_loopback_authority(rest: &str) -> bool {
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host_port = authority.rsplit('@').next().unwrap_or_default();
     let host = if host_port.starts_with('[') {

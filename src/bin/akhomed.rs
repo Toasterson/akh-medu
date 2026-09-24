@@ -548,25 +548,21 @@ impl ServerState {
     /// wires the tools with, so the idle-cycle default (ADR 113 decision 4)
     /// cannot disagree with the executor actually in use. An unreadable
     /// `akh.toml` falls back to the default autonomy (on, budgeted) and the
-    /// host executor.
-    async fn daemon_autonomy(
-        &self,
-        name: &str,
-    ) -> (
-        akh_medu::akh_config::AutonomyConfig,
-        akh_medu::agent::autonomy::ExecPlacement,
-    ) {
+    /// host executor. Phase 53 fix-up: also the akh's own `[board]` identity.
+    async fn daemon_settings(&self, name: &str) -> DaemonAkhSettings {
         use akh_medu::agent::autonomy::ExecPlacement;
         let host_exec = self.config.read().await.exec.clone();
         match self.get_akh_config(name).await {
-            Ok(cfg) => (
-                cfg.autonomy.clone(),
-                ExecPlacement::from(&cfg.effective_exec(host_exec.as_ref())),
-            ),
-            Err(_) => (
-                akh_medu::akh_config::AutonomyConfig::default(),
-                ExecPlacement::from(&host_exec.unwrap_or_default()),
-            ),
+            Ok(cfg) => DaemonAkhSettings {
+                autonomy: cfg.autonomy.clone(),
+                exec: ExecPlacement::from(&cfg.effective_exec(host_exec.as_ref())),
+                board: cfg.board.clone(),
+            },
+            Err(_) => DaemonAkhSettings {
+                autonomy: akh_medu::akh_config::AutonomyConfig::default(),
+                exec: ExecPlacement::from(&host_exec.unwrap_or_default()),
+                board: None,
+            },
         }
     }
 
@@ -3527,7 +3523,7 @@ impl ServerState {
 
         // P5 / 53b: gate background tasks by the akh's [autonomy] config and
         // its effective executor placement.
-        let (autonomy, exec) = self.daemon_autonomy(ws_name).await;
+        let settings = self.daemon_settings(ws_name).await;
 
         let pool = self.pg_pool();
         let global_cfg = self.config.read().await;
@@ -3540,8 +3536,7 @@ impl ServerState {
                 daemon_status,
                 shutdown_rx,
                 daemon_config,
-                autonomy,
-                exec,
+                settings,
                 daemon_ws_name,
                 task_handle,
                 pool,
@@ -3734,6 +3729,16 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
+/// Per-akh settings the background daemon needs from its `akh.toml`.
+struct DaemonAkhSettings {
+    /// `[autonomy]` gating and budget (Phase 53b).
+    autonomy: akh_medu::akh_config::AutonomyConfig,
+    /// Where the akh's executor tools run (ADR 113 decision 4).
+    exec: akh_medu::agent::autonomy::ExecPlacement,
+    /// The akh's own Agent Board identity; `None` = process env fallback.
+    board: Option<akh_medu::agent::djehuty::BoardConfig>,
+}
+
 /// Background daemon task: delegates to [`AgentDaemon`] for the full set of
 /// background learning tasks (goal generation, OODA cycles, equivalence
 /// learning, reflection, consolidation, schema discovery, rule inference,
@@ -3743,8 +3748,7 @@ async fn run_daemon_task(
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     daemon_config: akh_medu::agent::DaemonConfig,
-    autonomy: akh_medu::akh_config::AutonomyConfig,
-    exec: akh_medu::agent::autonomy::ExecPlacement,
+    settings: DaemonAkhSettings,
     ws_name: String,
     pause_handle: DaemonPauseHandle,
     // ADR 091: Postgres pool for the sleep-cycle transcript-harvest phase.
@@ -3758,8 +3762,9 @@ async fn run_daemon_task(
     use akh_medu::agent::AgentDaemon;
 
     let mut daemon = AgentDaemon::new(shared_agent, daemon_config)
-        .with_autonomy(autonomy)
-        .with_exec_placement(exec)
+        .with_autonomy(settings.autonomy)
+        .with_exec_placement(settings.exec)
+        .with_board_config(settings.board)
         .with_workspace(ws_name.clone())
         .with_shutdown(shutdown_rx)
         .with_status(Arc::clone(&status))
@@ -4379,7 +4384,7 @@ async fn start_acp_server(
     Option<String>,
     Vec<tokio::task::JoinHandle<()>>,
 ) {
-    use akh_medu::acp::{AkhAcpAgent, SharedSecretAuth, serve_tcp_loop, serve_unix_loop};
+    use akh_medu::acp::{AcpIngressAuth, AkhAcpAgent, serve_tcp_loop, serve_unix_loop};
     use std::path::PathBuf;
 
     let ws = acp_cfg
@@ -4453,16 +4458,18 @@ async fn start_acp_server(
 
     if let Some(addr) = acp_cfg.tcp_addr() {
         // TCP is a cluster/network ingress and is never opened without a valid
-        // shared-secret source. The Unix socket remains local-only and does not
-        // need the network credential. File-backed auth reloads on initialize,
-        // which permits overlap rotation without restarting this singleton.
-        let auth = match SharedSecretAuth::from_env() {
+        // credential source: `[[acp.principals]]` (scoped per akh, Phase 53) or,
+        // only when none are configured, the legacy unscoped shared secret. The
+        // Unix socket remains local-only and does not need the network
+        // credential. Token files reload on initialize, which permits overlap
+        // rotation without restarting this singleton.
+        let auth = match AcpIngressAuth::from_config(&acp_cfg.principals) {
             Ok(auth) => auth,
             Err(error) => {
                 tracing::error!(
                     addr = %addr,
-                    %error,
-                    "ACP TCP disabled: shared-secret authentication is not configured"
+                    error = ?miette::Report::new(error),
+                    "ACP TCP disabled: ingress authentication is not usable"
                 );
                 return (socket_str, None, handles);
             }
@@ -4859,7 +4866,7 @@ async fn main() {
                     let dc = daemon_config.clone();
                     // P5 / 53b: per-akh [autonomy] (on by default, budgeted)
                     // and the effective executor placement.
-                    let (autonomy, exec) = state.daemon_autonomy(ws_name).await;
+                    let settings = state.daemon_settings(ws_name).await;
                     let pause_handle = DaemonPauseHandle::new();
                     state
                         .daemon_pauses
@@ -4878,8 +4885,7 @@ async fn main() {
                             daemon_status,
                             shutdown_rx,
                             dc,
-                            autonomy,
-                            exec,
+                            settings,
                             daemon_ws,
                             task_handle,
                             pool,

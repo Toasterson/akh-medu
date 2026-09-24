@@ -178,6 +178,247 @@ impl DjehutyConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Per-akh board identity (`[board]` in the workspace TOML, Phase 53)
+// ---------------------------------------------------------------------------
+
+/// Where an akh's board bearer token lives. The config names the source,
+/// never the secret: `auth = { token_env = "VAR" }` or
+/// `auth = { token_file = "/abs/path" }`. Both are read on every use, so a
+/// rotated token takes effect without a restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum BoardAuth {
+    /// Bearer token read from an environment variable.
+    TokenEnv(String),
+    /// Bearer token read from a file (surrounding whitespace trimmed).
+    TokenFile(std::path::PathBuf),
+}
+
+impl BoardAuth {
+    /// A description safe to log: names the variable or file, never a value.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::TokenEnv(var) => format!("env `{var}`"),
+            Self::TokenFile(path) => format!("file `{}`", path.display()),
+        }
+    }
+
+    /// Read the token now.
+    pub fn resolve(&self, akh: &str) -> Result<String, BoardConfigError> {
+        let token = match self {
+            Self::TokenEnv(var) => std::env::var(var)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| BoardConfigError::TokenEnvUnset {
+                    akh: akh.to_string(),
+                    var: var.clone(),
+                })?,
+            Self::TokenFile(path) => {
+                let raw = std::fs::read_to_string(path).map_err(|source| {
+                    BoardConfigError::TokenFileUnreadable {
+                        akh: akh.to_string(),
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                let token = raw.trim();
+                if token.is_empty() {
+                    return Err(BoardConfigError::TokenFileEmpty {
+                        akh: akh.to_string(),
+                        path: path.clone(),
+                    });
+                }
+                token.to_string()
+            }
+        };
+        if token.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return Err(BoardConfigError::InvalidToken {
+                akh: akh.to_string(),
+                source_name: self.describe(),
+            });
+        }
+        Ok(token)
+    }
+}
+
+/// An akh's own Agent Board identity (`[board]` in its workspace TOML).
+///
+/// ```toml
+/// [board]
+/// url = "https://board.lab.home"
+/// auth = { token_env = "ROMAN_BOARD_JANUS" }   # or { token_file = "/abs/janus.key" }
+/// agent_id = "019d…"                           # own board agent UUID, for inbox ingest
+/// ```
+///
+/// When absent the daemon falls back to the process-wide `DJEHUTY_BOARD_TOKEN`
+/// / `DJEHUTY_BOARD_URL` / `DJEHUTY_AGENT_ID` (and warns once per akh), so
+/// every akh on the host then reports as the same identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardConfig {
+    /// Board base URL (`https://…`; `http://` only for loopback or with
+    /// `allow_insecure_http`).
+    pub url: String,
+    /// Where this akh's bearer token lives.
+    pub auth: BoardAuth,
+    /// This akh's own board agent id. Required for inbox ingest (self-message
+    /// suppression); run reports and replies work without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<uuid::Uuid>,
+    /// Permit a non-loopback `http://` URL (the token then crosses the link
+    /// unencrypted). Default false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_insecure_http: bool,
+}
+
+impl BoardConfig {
+    /// Static checks run when the workspace TOML loads (no secret is read).
+    pub fn validate(&self, akh: &str) -> Result<(), BoardConfigError> {
+        let invalid_url = |reason: &'static str| BoardConfigError::InvalidUrl {
+            akh: akh.to_string(),
+            url: self.url.clone(),
+            reason,
+        };
+        let rest = self
+            .url
+            .strip_prefix("https://")
+            .or_else(|| self.url.strip_prefix("http://"))
+            .ok_or_else(|| invalid_url("the scheme must be http:// or https://"))?;
+        if rest.is_empty() || rest.starts_with('/') {
+            return Err(invalid_url("it has no host"));
+        }
+        if self.url.starts_with("http://")
+            && !self.allow_insecure_http
+            && !super::tools::mcp_config::is_loopback_authority(rest)
+        {
+            return Err(BoardConfigError::InsecureHttp {
+                akh: akh.to_string(),
+                url: self.url.clone(),
+            });
+        }
+        match &self.auth {
+            BoardAuth::TokenEnv(var)
+                if var.is_empty()
+                    || !var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') =>
+            {
+                Err(BoardConfigError::InvalidEnvVarName {
+                    akh: akh.to_string(),
+                    var: var.clone(),
+                })
+            }
+            BoardAuth::TokenFile(path) if !path.is_absolute() => {
+                Err(BoardConfigError::RelativeTokenFile {
+                    akh: akh.to_string(),
+                    path: path.clone(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Resolve into a client configuration, reading the token now.
+    pub fn client_config(&self, akh: &str) -> Result<DjehutyConfig, BoardConfigError> {
+        self.validate(akh)?;
+        Ok(DjehutyConfig::new(
+            self.auth.resolve(akh)?,
+            self.url.clone(),
+        ))
+    }
+
+    /// This akh's own agent id, when configured.
+    pub fn own_agent_id(&self) -> Option<DjehutyAgentId> {
+        self.agent_id.map(DjehutyAgentId)
+    }
+}
+
+/// A `[board]` table is invalid or its token cannot be read.
+#[derive(Debug, Error, Diagnostic)]
+pub enum BoardConfigError {
+    #[error("akh `{akh}` [board] url `{url}` is invalid: {reason}")]
+    #[diagnostic(
+        code(akh::board::config::invalid_url),
+        help("Set `url` to the board base URL, e.g. `https://board.lab.home`.")
+    )]
+    InvalidUrl {
+        akh: String,
+        url: String,
+        reason: &'static str,
+    },
+
+    #[error("akh `{akh}` [board] url `{url}` sends its token over plain http")]
+    #[diagnostic(
+        code(akh::board::config::insecure_http),
+        help(
+            "Use https://, a loopback host (localhost, 127.0.0.1, [::1]), or set \
+             `allow_insecure_http = true` in [board] for a trusted private link."
+        )
+    )]
+    InsecureHttp { akh: String, url: String },
+
+    #[error("akh `{akh}` [board] token_env `{var}` is not a valid variable name")]
+    #[diagnostic(
+        code(akh::board::config::env_name),
+        help(
+            "Name the variable, not its value: `auth = {{ token_env = \"ROMAN_BOARD_JANUS\" }}`."
+        )
+    )]
+    InvalidEnvVarName { akh: String, var: String },
+
+    #[error("akh `{akh}` [board] token_file `{path}` is not absolute")]
+    #[diagnostic(
+        code(akh::board::config::token_file),
+        help("Use an absolute path; akhomed's working directory is not stable.")
+    )]
+    RelativeTokenFile {
+        akh: String,
+        path: std::path::PathBuf,
+    },
+
+    #[error("akh `{akh}` board token: environment variable `{var}` is not set (or is empty)")]
+    #[diagnostic(
+        code(akh::board::auth::env_unset),
+        help(
+            "Export `{var}` in the akhomed service environment (the credential wrapper), \
+             then retry; it is read on every board call. Nothing is posted under another \
+             identity meanwhile."
+        )
+    )]
+    TokenEnvUnset { akh: String, var: String },
+
+    #[error("akh `{akh}` board token file `{path}` cannot be read")]
+    #[diagnostic(
+        code(akh::board::auth::file_unreadable),
+        help(
+            "Check the file exists and is readable by the akhomed user; it is re-read on every call."
+        )
+    )]
+    TokenFileUnreadable {
+        akh: String,
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("akh `{akh}` board token file `{path}` is empty")]
+    #[diagnostic(
+        code(akh::board::auth::file_empty),
+        help("Write the board bearer token into the file.")
+    )]
+    TokenFileEmpty {
+        akh: String,
+        path: std::path::PathBuf,
+    },
+
+    #[error("akh `{akh}` board token from {source_name} contains whitespace or control characters")]
+    #[diagnostic(
+        code(akh::board::auth::invalid_token),
+        help("Re-write the token as a single line without embedded whitespace.")
+    )]
+    InvalidToken { akh: String, source_name: String },
+}
+
+// ---------------------------------------------------------------------------
 // Typed models (mirror of the board's domain wire types)
 // ---------------------------------------------------------------------------
 
