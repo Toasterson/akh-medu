@@ -1,6 +1,39 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-09-15 (**52a.1 — Sokar MCP surface**: `sokard` also serves rmcp streamable-HTTP at `/mcp` on the API listener behind the same principal bearer auth (per-principal session managers, idle TTL `mcp.session_idle_secs`, MCP body limit), nine `sokar_*` tools (collection create-or-get, put/read text+base64 with idempotency keys, list/get/find/delete, absolute `content_url` via `[server] public_api_url`), chart 0.1.17 (`sokard.mcp.*`, `sokard.config.publicApiUrl`), ops guide `docs/ops/sokar.md`; fleet registration = Codex `bearer_token_env_var` + Claude `${VAR}` headers + akh-platform managed files, `scripts/mcp/`. Previous: 2026-09-14 (Phase 52a landed + 52b briefed.)
+> Last updated: 2026-09-24 (**Phase 53 — every akh runs fully featured**, [ADR
+> 113](decisions/113-full-akh-always.md), [plan](plans/2026-09-24-phase53-full-akh-always.md),
+> briefs [docs/ai/phases/phase-53/README.md](phases/phase-53/README.md)): the
+> `core-server` build profile is retired — `akhomed` has one `server` feature
+> profile in which the daemon loop, the in-process turn, the full tool registry
+> and ACP always run, and the `/v1` HTTP surface (`core_service`, feature
+> `core-api`) is additive, served only when `AKH_CORE_CONFIG` is set. New:
+> per-principal `ToolScope`-filtered `/v1/tools/call` and catalog resolving
+> against the akh's live `ToolRegistry`; `POST /v1/akhs/{akh}/events` admits
+> external events into the akh's own reactor (ADR 105 governance: required
+> `exit_condition`, board-routed status, no-progress trip-wire); scoped
+> delegation grants (`GrantAuthority`, `DerivationKind::DelegatedCall`) for
+> native-runtime workers; a per-akh daily token/turn budget
+> (`AutonomyGovernor`) gates LLM-cost background tasks, with `Harvest` now its
+> own pre-sleep-cycle task; `ExecdBackend` routes every side effect (the akh's
+> own and any delegate's) through `akhsbxd`/`akhexecd`, and an explicit
+> `deployment = "deployed"` mode refuses in-process execution and in-process
+> Codex/Claude runtimes; per-akh static MCP servers (`[[mcp.servers]]`,
+> `mcp__<server>__<tool>`). See "Core Service, Autonomy and Delegation" below.
+> 53j adds memory hygiene: schema packs declare predicate cardinality
+> (`single_valued`, `temporal`) and `aliases`; the engine supersedes older
+> values on write and stores alias spellings under the canonical relation;
+> the daemon's `memory_hygiene` sleep-tick task merges exact predicate-spelling
+> collisions, clears the single-valued backlog and repairs contradictions per
+> the per-akh `[memory] contradiction_policy` (`src/schema/{cardinality,canonical,hygiene}.rs`,
+> `DerivationKind::MemoryHygiene` tag 109, `kg_merge_predicates` +
+> `_akh/memory/{hygiene,merge_predicates}`; `kg_delete` is now live).
+> Slices 53a–53e, 53g step 1, 53h, 53i and 53j are implemented on `phase53/full-akh`;
+> 53f (the Roman cutover) is an operational runbook,
+> [`deploy/roman-mini/CUTOVER.md`](../../deploy/roman-mini/CUTOVER.md). Superseded by this: the `core-server` mentions
+> in `docs/wayfinder/agent-loops/implementation.md` and
+> `assets/daemon-boundaries.md` §1.
+
+> Previous update: 2026-09-15 (**52a.1 — Sokar MCP surface**: `sokard` also serves rmcp streamable-HTTP at `/mcp` on the API listener behind the same principal bearer auth (per-principal session managers, idle TTL `mcp.session_idle_secs`, MCP body limit), nine `sokar_*` tools (collection create-or-get, put/read text+base64 with idempotency keys, list/get/find/delete, absolute `content_url` via `[server] public_api_url`), chart 0.1.17 (`sokard.mcp.*`, `sokard.config.publicApiUrl`), ops guide `docs/ops/sokar.md`; fleet registration = Codex `bearer_token_env_var` + Claude `${VAR}` headers + akh-platform managed files, `scripts/mcp/`. Previous: 2026-09-14 (Phase 52a landed + 52b briefed.)
 
 > Previous update: 2026-09-14 (**Phase 52a landed + 52b briefed — Sokar artifact daemon**; 52a = `crates/sokar` + `crates/sokar-client` foundation reviewed over three Codex rounds ([review](phases/phase-52-sokar/52a-review.md), [report](phases/phase-52-sokar/52a-report.md)): store registry with probe-verified conditional copy, content-addressed blobs, UUID-keyed bucket manifests + `sokard reindex`, tombstone-first deletion, typed miette errors, ranged proxy delivery, service-bearer auth. Phase plan, [ADR 108](decisions/108-sokar-artifact-daemon.md), [plan](plans/2026-09-14-phase52-sokar-artifact-daemon.md): artifact storage leaves Anima for `crates/sokar` (`sokard`) — OpenDAL content-addressed blobs on S3/cloud stores + Postgres metadata, agent-managed access by scoped token / cookie session / OIDC claim rules (Barycenter, Keycloak), presign-or-proxy delivery with HMAC share links, sites on an isolated origin, A2UI v0.9 surfaces with a hosted Lit renderer as the canvas webview, akh `artifacts` tool + `_akh/artifacts/*` + per-session tokens + claim-match skillpacks; bucket-resident UUID-keyed manifests with Postgres as rebuildable index; Anima replacement is a separate later item.)
 
@@ -53,7 +86,7 @@ crates/seshat/          — Seshat's Archive service: pgvector schema (SeaORM), 
 crates/akh-egraph-bench/ — Phase 40 wake-path measurement harness (e-graph re-saturation / HNSW rebuild / fork arms; subprocess-per-cell; JSON + markdown reports) — permanent measurement infra per ADR 084
 ├── reason/              3 modules — e-graph language (AkhLang), rewrite rules, second-order quantification (Phase 9n), anti-unification (Phase 10h)
 ├── simd/                5 modules — runtime SIMD kernel dispatch (AVX2 / generic)
-├── schema/              3 modules — ADR 081 schema packs: portable JSON source parser/validator (schema.org subset + Obsidian value types + is-a subtyping + onto: shapes), confirm-time compiler → native-triple bincode blob (`CompiledSchemaPack`, registry-row seam `SchemaRegistry`), per-akh install as microtheory with the global-immutable-type-name guard; `akh schema compile/show` CLI; seed pack `data/schema-packs/schema-org-core.json`
+├── schema/              ADR 081 schema packs (+ Phase 53j cardinality/aliases, structural predicate keys `canonical`, bounded self-repair pass `hygiene`): portable JSON source parser/validator (schema.org subset + Obsidian value types + is-a subtyping + onto: shapes), confirm-time compiler → native-triple bincode blob (`CompiledSchemaPack`, registry-row seam `SchemaRegistry`), per-akh install as microtheory with the global-immutable-type-name guard; `akh schema compile/show` CLI; seed pack `data/schema-packs/schema-org-core.json`
 ├── skills/              1 module  — skillpack lifecycle (Cold/Warm/Hot)
 ├── store/               3 modules — tiered storage (hot/warm/cold)
 ├── thinking/           10 modules — Phase 41 Thinking Engine (ADR 052): unified ThinkingLoop over existing primitives, ThoughtState (HyperVec focus + DS hypotheses + faithful trace), ThinkingBudget, schedulers (round-robin/weighted/goal-shape), CompositeVerifier (contradiction + evidence + source reliability + convergence), VocBudgetController (Phase 11g), ThoughtPersistence seam (41d Postgres deferred), 41f scaling-law bench harness
@@ -141,6 +174,12 @@ All Phase 9 systems are wired into the engine's `add_triple()` and `remove_tripl
 1. Core KG + SPARQL removal
 2. **TMS retraction** — `TruthMaintenanceSystem::retract()` cascades to derived symbols
 3. Cascaded triples removed from KG + SPARQL
+
+`remove_triple_scoped(.., RetractionScope)` (Phase 53j) makes the reach explicit:
+`Symbol` is the cascade above, `ExactTriple` removes only the edge, and
+`CascadeIfOrphaned` cascades only when no other live edge still asserts the
+object. Memory hygiene (supersession, contradiction repair) uses
+`CascadeIfOrphaned`; predicate merge uses `ExactTriple`.
 
 **Inference integration** — `Engine::infer()` builds `InferPhase9Context`:
 - Hierarchy-aware spreading activation (specialization + inverse predicates)
@@ -341,6 +380,92 @@ control commands), discovered via the PID record's ACP socket/TCP endpoints.
   side-effecting tools at `ToolRegistry::execute`; a supervising client sets the
   mode via `_akh/permission/mode` and resolves interactive `Ask` decisions over
   `session/request_permission` (bridged across the spawn_blocking↔async boundary).
+
+## Core Service, Autonomy and Delegation (Phase 53, ADR 113)
+
+Phase 53 ([ADR 113](decisions/113-full-akh-always.md), plan
+[2026-09-24-phase53-full-akh-always](plans/2026-09-24-phase53-full-akh-always.md),
+briefs [docs/ai/phases/phase-53/README.md](phases/phase-53/README.md)) reversed
+the earlier `core-server` design: an akh is always fully featured, and the
+service split (`akhsessd`, `akhrtd`, `akhsbxd`, `akhexecd`, `akheventd`)
+contains execution and native runtimes only, never cognition. Slices 53a–53e,
+53g step 1, 53h and 53i are implemented on `phase53/full-akh`; 53f is the Roman
+cutover, an operational runbook in
+[`deploy/roman-mini/CUTOVER.md`](../../deploy/roman-mini/CUTOVER.md).
+
+- **`core_service` (`src/core_service.rs`, `src/core_service/`, feature
+  `core-api`, additive in the one `server` build profile)**: an axum `/v1` HTTP
+  surface served only when `AKH_CORE_CONFIG` is set — a missing variable means
+  no `/v1`, not a startup failure. Routes: `POST /v1/context`,
+  `POST /v1/tools/call`, `POST /v1/turns/accepted`, `POST /v1/spans/query`,
+  `GET/POST /v1/capabilities`, `GET /v1/akhs/{akh}/tools` (catalog) and
+  `POST /v1/akhs/{akh}/events` (53d, admission). Tool catalog and calls resolve
+  against the akh's live `ToolRegistry` (the same `Arc` the Agent uses),
+  filtered per principal by `ToolScope`: `LegacyCognitive` (default — the
+  previous nine tool names) or `Named { tools }` for a broader grant.
+  `read_only` is derived from `ToolManifest.danger`.
+- **Delegation grants (53e, `src/core_service/grants.rs`)**: when the akh
+  delegates to a contained native runtime (Codex/Claude/OpenCode under
+  `akhrtd`), `GrantAuthority::{mint, resolve, revoke}` issues a
+  `DelegationGrant` naming the principal, allowed tools and an expiry.
+  `CorePrincipal.grants: GrantPolicy` is `Optional` (default, falls back to the
+  legacy `ToolScope`) or `Required`. Every delegated call runs under
+  `DerivationKind::DelegatedCall` (tag 108) with the delegate's own provenance,
+  not the akh's. Minting/revoking/listing is exposed over ACP
+  `_akh/delegation/grant/{mint,revoke,list}`.
+- **Autonomy governor (53b, `src/agent/autonomy.rs`)**: autonomy is on by
+  default. `DaemonTask` is the typed registry of every background task (25
+  variants, including `Harvest`, `MemoryHygiene` (53j), `Reactor`,
+  `SleepCycle`, `IdleCycle`). The sleep tick runs `Harvest`, then
+  `MemoryHygiene`, then `SleepCycle`, each independent of the others' failure.
+  `AutonomyGovernor` enforces a per-akh daily `AutonomyBudget`
+  (`max_tokens_per_day = 250_000`, `max_turns_per_day = 40`, UTC day) in front
+  of LLM-cost tasks (librarian, reactor `LlmTurn`, knowledge extraction,
+  knowledge elicitation); reflection and goal generation make no LLM calls and
+  are free. Every task runs through one wrapper recording outcome
+  (`Ran|SkippedDisabled|SkippedBudget|SkippedContended|Failed`), duration, LLM
+  usage and fact deltas as OTLP metrics. `Harvest` runs as its own task on the
+  sleep tick, before and independent of `run_sleep_cycle`, so a sleep-cycle
+  error no longer silently skips harvest.
+- **`ExecdBackend` and deployment mode (53c, `src/backend/execd.rs`,
+  `src/deployment.rs`)**: `[exec] kind = "execd"` routes every side-effecting
+  tool call — the akh's own and any delegated native runtime's — through
+  `akhsbxd` (placement/leases) and `akhexecd` (file/search/edit/exec verbs with
+  receipts), never through the calling process's own address space.
+  `AkhomedConfig.deployment = "deployed"` or `AKH_DEPLOYMENT=deployed` puts the
+  process in `DeploymentMode::Deployed`, which refuses an in-process executor
+  and in-process `backend = "codex"`/`"claude"` runtimes (diagnostic
+  `akh::config::in_process_forbidden`); `LocalDrop`/`Remote` are admitted only
+  with `allow_legacy_exec = true` plus a warning. `Development` (the default)
+  admits everything, so tests are unaffected. Native runtimes default to
+  `Brokered` placement; `Colocated` is refused in deployed mode.
+- **Reactor event admission (53d, `src/agent/reactor.rs`,
+  `src/core_service/events.rs`)**: `akheventd` is a thin ingress adapter that
+  forwards typed events into the akh's own reactor via
+  `POST /v1/akhs/{akh}/events` (principal role `event`), returning
+  `EventAdmission { event_key, schedules_woken, duplicate }`. Admission wakes
+  every enabled `ScheduleRule::Event{source}` schedule matching
+  `"{source}/{event_type}"`. ADR 105 governance applies to every self-started
+  run: `ReactorAction::LlmTurn` requires an `exit_condition` when it allows
+  tools, reports `coordination/status@v1` to a `report_thread` via
+  `DjehutyClient`, and a 10-consecutive-no-progress trip-wire pauses the
+  schedule rather than looping forever.
+- **Per-akh static MCP servers (53i, `src/agent/tools/mcp_config.rs`,
+  `src/agent/tools/mcp_static.rs`)**: `[[mcp.servers]]` in the workspace TOML
+  (`name, url, auth, tools`) wires an `McpClient` into the akh's `ToolRegistry`
+  at init, registering each remote tool as `mcp__<server>__<tool>` (the Claude
+  convention). An unreachable server at init is a warning, retried lazily, and
+  never fatal. This unblocks the Roman cutover, where most of Minerva's tools
+  are external MCP servers.
+
+**Deployment topology (ADR 113):** every deployed akh — Mac-resident or
+cluster — is a full `akhomed`: daemon loop, in-process turn (psyche,
+communicative intelligence, thinking, context strategies), full tool registry
+and ACP always run. The service split (`akhsessd`, `akhrtd`, `akhsbxd`,
+`akhexecd`, `akheventd`) contains execution and native-runtime delegation only,
+never cognition. Mac-resident akhs stay on the standalone SQLite backing;
+cluster akhs use akh-pg (ADR 049). Every deployed artifact is built from
+`origin/main` (`.claude/rules/deploy-from-main.md`).
 
 ## Storage Architecture
 
@@ -640,7 +765,7 @@ results under `training/results/`.
 | Binary | Purpose | Features |
 |--------|---------|----------|
 | `akh` | CLI client + TUI (ACP) | default (includes `acp`) |
-| `akhomed` | ACP daemon (agent) | `server` (= `daemon` + `acp`) |
+| `akhomed` | ACP daemon (agent), always fully featured (Phase 53, ADR 113) | `server` (= `daemon, acp, postgres, tracing-otel, remote-executor, embedded-runtime, core-api, delegation, execd-executor`; `core-api`/`/v1` is additive and served only when `AKH_CORE_CONFIG` is set — see "Core Service, Autonomy and Delegation" above) |
 | `seshd` | Seshat's Archive MCP service | `embedding` (crate: `seshat`) |
 | `sokard` | Sokar artifact daemon — API (`/v1/*` + rmcp `/mcp`) + admin listeners (sites listener arrives in 52d); `--check`, `--check-stores`, `--migrate`, `reindex --store` | crate: `sokar` (ADR 108) |
 

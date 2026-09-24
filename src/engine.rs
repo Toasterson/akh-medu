@@ -94,16 +94,53 @@ impl Default for EngineConfig {
     }
 }
 
+/// Phase 53j: what a single-valued write does to the live values.
+enum SupersessionPlan {
+    /// Publish the incoming edge, then retract these older values.
+    Supersede(Vec<Triple>),
+    /// A live value is newer than the incoming write: record the incoming
+    /// write as superseded by it and do not publish it.
+    IncomingIsStale { newest: Triple },
+}
+
+/// Order two values of one single-valued `(subject, predicate)` newest
+/// first: later assertion time, then higher confidence, then the higher
+/// object symbol id (allocated later). Total and deterministic, so the
+/// hygiene backlog pass and insert-time supersession agree on the winner.
+pub fn newest_first(a: &Triple, b: &Triple) -> std::cmp::Ordering {
+    b.timestamp
+        .cmp(&a.timestamp)
+        .then_with(|| b.confidence.total_cmp(&a.confidence))
+        .then_with(|| b.object.cmp(&a.object))
+}
+
 /// How the engine handles detected contradictions during `add_triple`.
+///
+/// Per akh via the workspace TOML `[memory] contradiction_policy`
+/// (`"warn"`, `"replace"` or `"reject"`; Phase 53j).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ContradictionPolicy {
     /// Log a warning but insert anyway (default).
     #[default]
+    #[serde(rename = "warn", alias = "Warn")]
     Warn,
     /// Return an error and refuse to insert.
+    #[serde(rename = "reject", alias = "Reject")]
     Reject,
     /// Remove the conflicting existing triple, then insert the new one.
+    #[serde(rename = "replace", alias = "Replace")]
     Replace,
+}
+
+impl ContradictionPolicy {
+    /// Stable config / report name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ContradictionPolicy::Warn => "warn",
+            ContradictionPolicy::Reject => "reject",
+            ContradictionPolicy::Replace => "replace",
+        }
+    }
 }
 
 /// Configuration for Phase 9 (Cyc-inspired HOL) subsystems.
@@ -196,6 +233,9 @@ pub struct Engine {
     /// mode. Every successful assert/retract is recorded here (best-effort,
     /// non-blocking).
     mutation_sink: std::sync::OnceLock<Arc<dyn crate::mutation::MutationSink>>,
+    /// Phase 53b: fact-change counters bumped for every recorded mutation,
+    /// sink or not, so the daemon can report a per-task fact delta.
+    fact_counters: crate::mutation::FactCounters,
     /// ADR 091 decision 5: optional WAL body-paging reader, installed by the
     /// daemon binary alongside the `MutationSink` when a Postgres store is
     /// configured. Lets [`Engine::turn_body`] page a captured turn's raw text
@@ -650,6 +690,7 @@ impl Engine {
             mutation_lock: Mutex::new(()),
             mutations_quiesced: AtomicBool::new(false),
             mutation_sink: std::sync::OnceLock::new(),
+            fact_counters: crate::mutation::FactCounters::default(),
             turn_body_reader: std::sync::OnceLock::new(),
             inference_options: Arc::new(crate::inference_options::InferenceOptions::default()),
             identity_index: dashmap::DashMap::new(),
@@ -760,10 +801,18 @@ impl Engine {
         self.mutation_sink.set(sink)
     }
 
-    /// Record a mutation on the WAL sink if one is installed. Non-blocking; a
+    /// Monotonic fact-change totals since this engine was constructed
+    /// (Phase 53b). Counted for every recorded mutation, WAL sink or not.
+    pub fn fact_totals(&self) -> crate::mutation::FactTotals {
+        self.fact_counters.totals()
+    }
+
+    /// Record a mutation on the WAL sink if one is installed, after counting
+    /// it in [`Engine::fact_totals`]. Non-blocking; the sink hand-off is a
     /// no-op in local-only mode.
     #[inline]
     fn record_mutation(&self, kind: crate::mutation::MutationKind, payload: serde_json::Value) {
+        self.fact_counters.observe(kind, &payload);
         if let Some(sink) = self.mutation_sink.get() {
             sink.record(crate::mutation::MutationRecord::new(kind, payload));
         }
@@ -1020,6 +1069,20 @@ impl Engine {
     /// `add_triple` with the encompassing mutation lock already held.
     fn add_triple_locked(&self, triple: &Triple) -> AkhResult<()> {
         self.ensure_mutations_active()?;
+        // Phase 53j: a write under a declared alias spelling is stored under
+        // its canonical relation, so the alias never accumulates new facts.
+        let canonical_triple;
+        let triple = match crate::schema::cardinality::declared_alias_target(self, triple.predicate)
+        {
+            Some(canonical) => {
+                canonical_triple = Triple {
+                    predicate: canonical,
+                    ..triple.clone()
+                };
+                &canonical_triple
+            }
+            None => triple,
+        };
         // Construct the complete replay envelope before any subsystem is
         // mutated. In particular, ContradictionPolicy::Replace must not retract
         // a live edge and emit its WAL record only to discover later that the
@@ -1082,6 +1145,38 @@ impl Engine {
             }
         }
 
+        // --- Phase 53j: single-valued supersession plan ---
+        // A declared single-valued predicate holds one live object per
+        // (subject, compartment). Older values are expected supersession,
+        // not contradictions: they are retracted (`memory_hygiene`
+        // provenance + `RetractionScope::CascadeIfOrphaned`, so a value other
+        // subjects still hold is never cascaded) after the new edge is
+        // published. A write that is older than the live value is itself
+        // superseded and never published.
+        let cardinality =
+            crate::schema::cardinality::declared_cardinality(self, stored_triple.predicate);
+        let superseded = if cardinality.is_single_valued() {
+            match self.plan_single_valued_supersession(&stored_triple) {
+                SupersessionPlan::Supersede(priors) => priors,
+                SupersessionPlan::IncomingIsStale { newest } => {
+                    self.record_hygiene_provenance(
+                        &stored_triple,
+                        crate::provenance::HygieneAction::SingleValuedSupersede,
+                        newest.object,
+                        cardinality.is_temporal().then_some(newest.timestamp),
+                    );
+                    tracing::debug!(
+                        subject = %self.resolve_label(stored_triple.subject),
+                        predicate = %self.resolve_label(stored_triple.predicate),
+                        "single-valued write older than the live value; recorded as superseded"
+                    );
+                    return Ok(());
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
         // --- Phase 9 pre-insert: contradiction detection ---
         let mut replacement_retracts = Vec::new();
         if self.phase9_config.detect_contradictions {
@@ -1089,7 +1184,7 @@ impl Engine {
             let disj = self.disjointness_constraints.read().unwrap();
             let temp = self.temporal_registry.read().unwrap();
             let mv = self.multi_valued_predicates.read().unwrap();
-            let contradictions = crate::graph::contradiction::check_contradictions(
+            let mut contradictions = crate::graph::contradiction::check_contradictions(
                 self,
                 &stored_triple,
                 &func,
@@ -1097,6 +1192,14 @@ impl Engine {
                 Some(&temp),
                 Some(&mv),
             );
+            if cardinality.is_single_valued() {
+                // Same (subject, predicate), different object: that is the
+                // supersession planned above, not a contradiction.
+                contradictions.retain(|c| {
+                    c.existing.subject != stored_triple.subject
+                        || c.existing.predicate != stored_triple.predicate
+                });
+            }
 
             if !contradictions.is_empty() {
                 match self.phase9_config.contradiction_policy {
@@ -1281,7 +1384,194 @@ impl Engine {
             );
         }
 
+        // --- Phase 53j: retract the superseded single-valued values ---
+        // After publication, so a failed retraction leaves the pre-53j state
+        // (both values live, reported by hygiene) and never loses the new one.
+        let valid_until = cardinality.is_temporal().then_some(stored_triple.timestamp);
+        for prior in &superseded {
+            self.record_hygiene_provenance(
+                prior,
+                crate::provenance::HygieneAction::SingleValuedSupersede,
+                stored_triple.object,
+                valid_until,
+            );
+            if let Err(error) = self.remove_triple_scoped_locked(
+                prior.subject,
+                prior.predicate,
+                prior.object,
+                crate::tms::RetractionScope::CascadeIfOrphaned,
+            ) {
+                tracing::warn!(
+                    code = "akh::engine::supersession_retract",
+                    %error,
+                    subject = %self.resolve_label(prior.subject),
+                    predicate = %self.resolve_label(prior.predicate),
+                    "superseded single-valued value not retracted; the next memory-hygiene pass retries"
+                );
+            }
+        }
+
         Ok(())
+    }
+
+    /// Phase 53j: the live values a single-valued `incoming` supersedes, or
+    /// the newer live value that makes `incoming` itself stale.
+    ///
+    /// Only the same `(subject, predicate, compartment)` competes. Newest
+    /// wins by assertion time; an equal timestamp goes to the incoming write
+    /// (it arrived last).
+    fn plan_single_valued_supersession(&self, incoming: &Triple) -> SupersessionPlan {
+        let mut priors = Vec::new();
+        let mut newest: Option<Triple> = None;
+        for edge in self.knowledge_graph.triples_from(incoming.subject) {
+            if edge.predicate != incoming.predicate
+                || edge.object == incoming.object
+                || edge.compartment_id != incoming.compartment_id
+            {
+                continue;
+            }
+            if edge.timestamp > incoming.timestamp {
+                if newest
+                    .as_ref()
+                    .is_none_or(|n| newest_first(&edge, n).is_lt())
+                {
+                    newest = Some(edge);
+                }
+            } else {
+                priors.push(edge);
+            }
+        }
+        match newest {
+            Some(newest) => SupersessionPlan::IncomingIsStale { newest },
+            None => SupersessionPlan::Supersede(priors),
+        }
+    }
+
+    /// Store a `memory_hygiene` provenance record for `retracted` (derived
+    /// symbol = its object). Best-effort: an in-memory engine has no ledger,
+    /// and a ledger failure must not undo the graph transition it documents.
+    /// Returns whether a record was stored.
+    fn record_hygiene_provenance(
+        &self,
+        retracted: &Triple,
+        action: crate::provenance::HygieneAction,
+        successor: SymbolId,
+        valid_until: Option<u64>,
+    ) -> bool {
+        if self.provenance_ledger.is_none() {
+            return false;
+        }
+        let mut record = ProvenanceRecord::new(
+            retracted.object,
+            DerivationKind::MemoryHygiene {
+                action,
+                subject: retracted.subject,
+                predicate: retracted.predicate,
+                successor,
+                valid_until,
+            },
+        )
+        .with_sources(vec![retracted.subject, retracted.predicate, successor])
+        .with_confidence(0.0);
+        match self.store_provenance(&mut record) {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(
+                    code = "akh::engine::hygiene_provenance",
+                    %error,
+                    action = action.as_str(),
+                    "memory-hygiene provenance not recorded"
+                );
+                false
+            }
+        }
+    }
+
+    /// Phase 53j: retract a still-live `stale` edge because `successor`
+    /// replaces it (single-valued backlog, contradiction repair), with a
+    /// `memory_hygiene` provenance record stored first.
+    ///
+    /// Removes the edge with `RetractionScope::CascadeIfOrphaned`: the TMS
+    /// cascades through the stale object only when no other live edge still
+    /// asserts it. Superseding `(wi-1, status, resolved)` must not retract
+    /// `resolved` (or anything derived from it) while `(wi-2, status,
+    /// resolved)` holds. `kg_delete` keeps the unconditional symbol cascade.
+    ///
+    /// Returns `Ok(false)` when `stale` is no longer live (nothing to do),
+    /// so re-running a hygiene pass is idempotent.
+    pub fn supersede_triple(
+        &self,
+        stale: &Triple,
+        successor: &Triple,
+        action: crate::provenance::HygieneAction,
+        valid_until: Option<u64>,
+    ) -> AkhResult<bool> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_mutations_active()?;
+        let Some(live) = self
+            .knowledge_graph
+            .triple(stale.subject, stale.predicate, stale.object)
+        else {
+            return Ok(false);
+        };
+        self.record_hygiene_provenance(&live, action, successor.object, valid_until);
+        self.remove_triple_scoped_locked(
+            live.subject,
+            live.predicate,
+            live.object,
+            crate::tms::RetractionScope::CascadeIfOrphaned,
+        )?;
+        Ok(true)
+    }
+
+    /// Phase 53j: move a still-live edge from an alias predicate onto
+    /// `canonical` as one serialized transition: assert the re-spelled edge
+    /// (keeping confidence, timestamp, compartment and provenance link, and
+    /// honouring single-valued supersession), record `memory_hygiene`
+    /// provenance, then remove the alias edge exactly
+    /// (`RetractionScope::ExactTriple`).
+    ///
+    /// The alias edge is removed **without** a TMS cascade: the fact still
+    /// holds, only its predicate spelling changed, so its object must not be
+    /// marked retracted. Returns `Ok(false)` when `alias_edge` is no longer
+    /// live or already uses `canonical`.
+    pub fn rewrite_predicate(&self, alias_edge: &Triple, canonical: SymbolId) -> AkhResult<bool> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_mutations_active()?;
+        if alias_edge.predicate == canonical {
+            return Ok(false);
+        }
+        let Some(live) = self.knowledge_graph.triple(
+            alias_edge.subject,
+            alias_edge.predicate,
+            alias_edge.object,
+        ) else {
+            return Ok(false);
+        };
+        let respelled = Triple {
+            predicate: canonical,
+            ..live.clone()
+        };
+        self.add_triple_locked(&respelled)?;
+        self.record_hygiene_provenance(
+            &live,
+            crate::provenance::HygieneAction::PredicateMerge,
+            canonical,
+            None,
+        );
+        self.remove_triple_scoped_locked(
+            live.subject,
+            live.predicate,
+            live.object,
+            crate::tms::RetractionScope::ExactTriple,
+        )?;
+        Ok(true)
     }
 
     #[inline]
@@ -1554,13 +1844,81 @@ impl Engine {
     // -----------------------------------------------------------------------
 
     /// Store a provenance record in the ledger.
+    ///
+    /// Phase 53e (ADR 113 D9): while a delegate attribution is active on this
+    /// thread (a `/v1` tool call), a sibling `DelegatedCall` record for the
+    /// same symbol is stored too, so the write is the delegate's provenance.
     pub fn store_provenance(&self, record: &mut ProvenanceRecord) -> AkhResult<ProvenanceId> {
         validate_provenance_record_symbols(&self.registry, record)?;
         let ledger = self
             .provenance_ledger
             .as_ref()
             .ok_or(ProvenanceError::NoPersistence)?;
-        Ok(ledger.store(record)?)
+        let id = ledger.store(record)?;
+        Self::store_delegate_sibling(ledger, record)?;
+        Ok(id)
+    }
+
+    /// Record the active delegate attribution next to `record`.
+    ///
+    /// No-op when no attribution is active. At most one `DelegatedCall` record
+    /// is stored per `(call, derived symbol)`: a record that already is the
+    /// delegate's (`memory_write`) claims its symbol, and a second write to
+    /// the same symbol within one call adds no second sibling.
+    fn store_delegate_sibling(
+        ledger: &ProvenanceLedger,
+        record: &ProvenanceRecord,
+    ) -> AkhResult<()> {
+        let Some(attribution) = crate::provenance::claim_delegate_record(record.derived_id) else {
+            return Ok(());
+        };
+        if matches!(record.kind, DerivationKind::DelegatedCall { .. }) {
+            return Ok(());
+        }
+        let mut sibling = ProvenanceRecord::new(record.derived_id, attribution.derivation())
+            .with_confidence(record.confidence);
+        ledger.store(&mut sibling)?;
+        Ok(())
+    }
+
+    /// Record one call-level `DelegatedCall` for a `/v1` call whose tool wrote
+    /// without provenance of its own (`kg_mutate`, `core_memory_*`,
+    /// `task_list`, ...), so every delegated mutation is queryable as the
+    /// delegate's (Phase 53 review).
+    ///
+    /// The record derives the first symbol the tool reported touching (its
+    /// written subject, for `kg_mutate`), with the rest as sources. A call
+    /// that touched no symbol hangs off the stable per-delegate entity
+    /// [`DelegateAttribution::delegate_label`], so `provenance_of` that
+    /// entity lists them. Returns `None` on an engine without a provenance
+    /// ledger (in-memory), where there is nothing to record into.
+    ///
+    /// [`DelegateAttribution::delegate_label`]: crate::provenance::DelegateAttribution::delegate_label
+    pub fn record_delegated_call(
+        &self,
+        attribution: &crate::provenance::DelegateAttribution,
+        touched: &[SymbolId],
+    ) -> AkhResult<Option<ProvenanceId>> {
+        let Some(ledger) = self.provenance_ledger.as_ref() else {
+            return Ok(None);
+        };
+        let mut seen = std::collections::HashSet::new();
+        let touched: Vec<SymbolId> = touched
+            .iter()
+            .copied()
+            .filter(|symbol| self.registry.get(*symbol).is_some() && seen.insert(*symbol))
+            .collect();
+        let (derived, sources) = match touched.split_first() {
+            Some((first, rest)) => (*first, rest.to_vec()),
+            None => (
+                self.resolve_or_create_entity(&attribution.delegate_label())?,
+                Vec::new(),
+            ),
+        };
+        let mut record =
+            ProvenanceRecord::new(derived, attribution.derivation()).with_sources(sources);
+        validate_provenance_record_symbols(&self.registry, &record)?;
+        Ok(Some(ledger.store(&mut record)?))
     }
 
     /// Store one provenance record before publishing every triple it supports.
@@ -1585,7 +1943,11 @@ impl Engine {
         self.preflight_provenance_batch(triples, record)?;
 
         let provenance_id = match self.provenance_ledger.as_ref() {
-            Some(ledger) => Some(ledger.store(record)?),
+            Some(ledger) => {
+                let id = ledger.store(record)?;
+                Self::store_delegate_sibling(ledger, record)?;
+                Some(id)
+            }
             None => None,
         };
         for triple in triples {
@@ -2956,6 +3318,37 @@ impl Engine {
         self.remove_triple_locked(subject, predicate, object)
     }
 
+    /// Remove one triple with an explicit TMS reach (Phase 53j).
+    ///
+    /// [`Self::remove_triple`] is `RetractionScope::Symbol`: it retracts the
+    /// object *symbol* and cascades through every conclusion supported by
+    /// it, even when other subjects still assert that value. Removing one
+    /// superseded or contradicted value wants
+    /// [`RetractionScope::CascadeIfOrphaned`]; moving a fact to another
+    /// spelling wants [`RetractionScope::ExactTriple`]. All scopes commit
+    /// through the same exact-edge transition (KG, SPARQL, identity state,
+    /// replay-complete `RetractBatch` WAL record), and the planned TMS state
+    /// is published only after that transition succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the engine is quiesced or the transition cannot commit
+    /// (SPARQL failure restores every edge). A caller that can tolerate a
+    /// stale edge may log and let the next hygiene pass retry.
+    pub fn remove_triple_scoped(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+        scope: crate::tms::RetractionScope,
+    ) -> AkhResult<crate::tms::TripleRetraction> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.remove_triple_scoped_locked(subject, predicate, object, scope)
+    }
+
     /// `remove_triple` with the encompassing mutation checkpoint already held.
     /// Every bulk/cleanup API delegates here so TMS, SPARQL, identity state,
     /// and the replay-complete WAL transition cannot diverge.
@@ -2965,14 +3358,73 @@ impl Engine {
         predicate: SymbolId,
         object: SymbolId,
     ) -> AkhResult<crate::tms::RetractionResult> {
+        self.remove_triple_scoped_locked(
+            subject,
+            predicate,
+            object,
+            crate::tms::RetractionScope::Symbol,
+        )
+        .map(crate::tms::TripleRetraction::into_retraction_result)
+    }
+
+    /// Live edges other than `(subject, predicate, object)` that assert
+    /// `object` as their object.
+    fn other_assertions_of(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+    ) -> usize {
+        self.knowledge_graph
+            .triples_to(object)
+            .into_iter()
+            .filter(|t| t.subject != subject || t.predicate != predicate)
+            .count()
+    }
+
+    /// [`Self::remove_triple_scoped`] with the mutation checkpoint held.
+    fn remove_triple_scoped_locked(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+        scope: crate::tms::RetractionScope,
+    ) -> AkhResult<crate::tms::TripleRetraction> {
+        use crate::tms::{CascadeOutcome, RetractionScope, TripleRetraction};
+
         self.ensure_mutations_active()?;
         let Some(primary) = self.knowledge_graph.triple(subject, predicate, object) else {
-            return Ok(crate::tms::RetractionResult {
-                retracted: vec![],
-                re_evaluated: vec![],
-                cascade_depth: 0,
+            return Ok(TripleRetraction {
+                scope,
+                removed_edges: 0,
+                cascade: CascadeOutcome::NotLive,
             });
         };
+
+        // Decide the symbol-level reach before touching anything. A value
+        // still asserted by another edge is not retracted: the TMS tracks
+        // support per symbol, so cascading here would take down conclusions
+        // that other subjects' copies of the value still justify.
+        let exact_only = match scope {
+            RetractionScope::Symbol => None,
+            RetractionScope::ExactTriple => Some(CascadeOutcome::NotRequested),
+            RetractionScope::CascadeIfOrphaned => {
+                match self.other_assertions_of(subject, predicate, object) {
+                    0 => None,
+                    remaining_assertions => Some(CascadeOutcome::ObjectStillAsserted {
+                        remaining_assertions,
+                    }),
+                }
+            }
+        };
+        if let Some(outcome) = exact_only {
+            self.commit_exact_retractions_locked(std::slice::from_ref(&primary))?;
+            return Ok(TripleRetraction {
+                scope,
+                removed_edges: 1,
+                cascade: outcome,
+            });
+        }
 
         // Plan the TMS transition on a clone. The live TMS and every graph
         // projection remain untouched until the complete edge envelope has
@@ -3015,7 +3467,11 @@ impl Engine {
         if let Some(planned) = planned_tms {
             *self.tms.write().unwrap() = planned;
         }
-        Ok(result)
+        Ok(TripleRetraction {
+            scope,
+            removed_edges: removals.len(),
+            cascade: CascadeOutcome::Cascaded(result),
+        })
     }
 
     /// Host-only conservative invalidation for an isolated rule snapshot.
@@ -4995,6 +5451,116 @@ mod tests {
         assert!(!engine.has_triple(triples[2].subject, predicate, triples[2].object));
         assert!(!engine.has_triple(triples[3].subject, predicate, triples[3].object));
         assert!(!engine.has_triple(triples[4].subject, predicate, triples[4].object));
+    }
+
+    /// Phase 53j: `(wi-1, status, resolved)` + `(wi-2, status, resolved)`
+    /// plus a conclusion `closed` whose only support is `resolved`.
+    fn shared_value_engine() -> (Engine, tempfile::TempDir, [SymbolId; 6]) {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let wi1 = engine.resolve_or_create_entity("wi-1").unwrap();
+        let wi2 = engine.resolve_or_create_entity("wi-2").unwrap();
+        let status = engine.resolve_or_create_relation("status").unwrap();
+        let resolved = engine.resolve_or_create_entity("resolved").unwrap();
+        let implies = engine.resolve_or_create_relation("implies").unwrap();
+        let closed = engine.resolve_or_create_entity("closed").unwrap();
+        engine
+            .add_triple(&Triple::new(wi1, status, resolved))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(wi2, status, resolved))
+            .unwrap();
+        engine
+            .add_triple_with_support(
+                &Triple::new(resolved, implies, closed),
+                crate::tms::SupportSet::new(
+                    vec![resolved],
+                    crate::provenance::DerivationKind::Reasoned,
+                    1.0,
+                ),
+            )
+            .unwrap();
+        (engine, dir, [wi1, wi2, status, resolved, implies, closed])
+    }
+
+    #[test]
+    fn scoped_removal_cascades_only_as_far_as_the_scope_allows() {
+        use crate::tms::{CascadeOutcome, RetractionScope};
+
+        // ExactTriple: the edge goes, the TMS is untouched.
+        let (engine, _dir, [wi1, wi2, status, resolved, implies, closed]) = shared_value_engine();
+        let sink = Arc::new(RecordingSink::default());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
+        let sparql_before = engine.sparql().unwrap().len().unwrap();
+        let exact = engine
+            .remove_triple_scoped(wi1, status, resolved, RetractionScope::ExactTriple)
+            .unwrap();
+        assert!(matches!(exact.cascade, CascadeOutcome::NotRequested));
+        assert_eq!(exact.removed_edges, 1);
+        assert!(!engine.has_triple(wi1, status, resolved));
+        assert!(engine.has_triple(resolved, implies, closed));
+        assert!(!engine.tms().was_retracted(resolved));
+        assert_eq!(engine.sparql().unwrap().len().unwrap(), sparql_before - 1);
+        {
+            let records = sink.0.lock().unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].kind, crate::mutation::MutationKind::RetractBatch);
+            assert_eq!(records[0].payload["retracts"].as_array().unwrap().len(), 1);
+        }
+
+        // Not live any more: reported, nothing recorded.
+        let again = engine
+            .remove_triple_scoped(wi1, status, resolved, RetractionScope::Symbol)
+            .unwrap();
+        assert!(!again.removed());
+        assert_eq!(sink.0.lock().unwrap().len(), 1);
+
+        // CascadeIfOrphaned while wi-2 still asserts `resolved`: no cascade.
+        // (The derived `resolved implies closed` edge is outgoing, so it is
+        // not an assertion *of* `resolved`.)
+        let (engine, _dir, [wi1, _wi2, status, resolved, implies, closed]) = shared_value_engine();
+        let kept = engine
+            .remove_triple_scoped(wi1, status, resolved, RetractionScope::CascadeIfOrphaned)
+            .unwrap();
+        assert!(matches!(
+            kept.cascade,
+            CascadeOutcome::ObjectStillAsserted {
+                remaining_assertions: 1
+            }
+        ));
+        assert!(engine.has_triple(resolved, implies, closed));
+        assert!(!engine.tms().was_retracted(resolved));
+        assert!(!engine.tms().was_retracted(closed));
+
+        // ...and once the last assertion goes, the cascade runs.
+        let orphaned = engine
+            .remove_triple_scoped(wi2, status, resolved, RetractionScope::CascadeIfOrphaned)
+            .unwrap();
+        assert!(orphaned.cascaded());
+        assert_eq!(orphaned.removed_edges, 2);
+        assert!(!engine.has_triple(resolved, implies, closed));
+        assert!(engine.tms().was_retracted(resolved));
+        assert!(engine.tms().was_retracted(closed));
+
+        // Symbol keeps the historical kg_delete semantics even while wi-2
+        // still asserts the value.
+        let (engine, _dir, [wi1, wi2, status, resolved, implies, closed]) = shared_value_engine();
+        let symbol = engine
+            .remove_triple_scoped(wi1, status, resolved, RetractionScope::Symbol)
+            .unwrap();
+        assert!(symbol.cascaded());
+        assert!(!engine.has_triple(resolved, implies, closed));
+        assert!(engine.has_triple(wi2, status, resolved));
+        assert!(engine.tms().was_retracted(resolved));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Deterministic event ingress and transactional routing outbox. No model or session clock.
 use crate::{
-    config::{Config, Principal},
+    config::{Config, Principal, RouteTarget},
     http::Client,
     store::{Store, key},
     types::*,
@@ -12,13 +12,53 @@ use std::sync::Arc;
 pub struct Delivery {
     pub id: String,
     pub route: String,
+    /// The automation of an automation target (empty for akh targets).
+    /// Kept so deliveries recorded before Phase 53d still decode.
+    #[serde(default)]
     pub automation: String,
+    /// The route target resolved at ingest (Phase 53d). Absent on deliveries
+    /// recorded before it existed, which are automation deliveries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<RouteTarget>,
     pub request: InvokeAutomation,
     pub attempts: u32,
     pub next_attempt: u64,
     pub admission: Option<Admission>,
+    /// akhomed's answer for an akh target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_admission: Option<EventAdmission>,
     pub error: Option<Fault>,
     pub terminal: bool,
+}
+
+impl Delivery {
+    /// Where this delivery goes.
+    pub fn resolved_target(&self) -> RouteTarget {
+        self.target
+            .clone()
+            .unwrap_or_else(|| RouteTarget::Automation {
+                automation: self.automation.clone(),
+            })
+    }
+    /// The target accepted it (a session admission or an akh admission).
+    pub fn admitted(&self) -> bool {
+        self.admission.is_some() || self.event_admission.is_some()
+    }
+}
+
+/// Fault codes after which a delivery is never retried: the target refused
+/// it for a reason another attempt cannot change. Recorded on the delivery
+/// and logged, never dropped silently.
+fn is_terminal_fault(code: &str) -> bool {
+    matches!(
+        code,
+        "forbidden" | "invalid_request" | "conflict" | "expired" | "not_found"
+    ) || code == NO_SUBSCRIBER
+}
+/// A target's acceptance of one delivery.
+enum Accepted {
+    Session(Admission),
+    Akh(EventAdmission),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngressReceipt {
@@ -79,10 +119,15 @@ impl Events {
                 let id = crate::digest(
                     key("delivery", &[&event.source, &event.id, &route.id]).as_bytes(),
                 );
+                let target = route.resolved_target()?;
                 let delivery = Delivery {
                     id: id.clone(),
                     route: route.id.clone(),
-                    automation: route.automation.clone(),
+                    automation: match &target {
+                        RouteTarget::Automation { automation } => automation.clone(),
+                        RouteTarget::Akh { .. } => String::new(),
+                    },
+                    target: Some(target),
                     request: InvokeAutomation {
                         bootstrap_requirements: None,
                         occurrence_id: id.clone(),
@@ -91,6 +136,7 @@ impl Events {
                     attempts: 0,
                     next_attempt: now_ms(),
                     admission: None,
+                    event_admission: None,
                     error: None,
                     terminal: false,
                 };
@@ -106,9 +152,9 @@ impl Events {
         self.store.transaction(|tx| {
             let deliveries = tx.scan::<Delivery>("delivery/")?;
             for route in self.config.routes.iter().filter(|r| r.coalesce_pending) {
-                let Some(latest) = deliveries.iter().filter(|d| d.route == route.id && (!d.terminal || d.admission.is_some()))
+                let Some(latest) = deliveries.iter().filter(|d| d.route == route.id && (!d.terminal || d.admitted()))
                     .max_by_key(|d| (d.request.event.occurred_at, d.id.clone())) else { continue; };
-                for old in deliveries.iter().filter(|d| d.route == route.id && d.id != latest.id && !d.terminal && d.admission.is_none()) {
+                for old in deliveries.iter().filter(|d| d.route == route.id && d.id != latest.id && !d.terminal && !d.admitted()) {
                     // A transport failure may hide an admitted turn. Only
                     // supersede never-attempted or explicitly refused work.
                     if old.attempts != 0 && !old.error.as_ref().is_some_and(|e| e.code == "busy") { continue; }
@@ -131,29 +177,24 @@ impl Events {
             .filter(|d| !d.terminal && d.next_attempt <= now_ms())
             .take(64)
         {
-            let reply: Result<Admission> = self
-                .client
-                .post(
-                    "sessions",
-                    &format!(
-                        "/v1/automations/{}/invoke",
-                        crate::http::segment(&delivery.automation)
-                    ),
-                    &delivery.request,
-                )
-                .await;
+            let reply = self.deliver(&delivery).await;
             delivery.attempts = delivery.attempts.saturating_add(1);
             match reply {
-                Ok(admission) => {
+                Ok(Accepted::Session(admission)) => {
                     delivery.admission = Some(admission);
                     delivery.terminal = true;
                     delivery.error = None;
                 }
+                Ok(Accepted::Akh(admission)) => {
+                    delivery.event_admission = Some(admission);
+                    delivery.terminal = true;
+                    delivery.error = None;
+                }
                 Err(error) => {
-                    delivery.terminal = matches!(
-                        error.code.as_str(),
-                        "forbidden" | "invalid_request" | "conflict" | "expired" | "not_found"
-                    );
+                    delivery.terminal = is_terminal_fault(&error.code);
+                    if delivery.terminal {
+                        tracing::warn!(delivery=%delivery.id,route=%delivery.route,code=%error.code,message=%error.message,"event delivery refused; recorded as terminal, not retried");
+                    }
                     delivery.next_attempt = now_ms() + (1000u64 << delivery.attempts.min(8));
                     delivery.error = Some(error);
                 }
@@ -162,6 +203,40 @@ impl Events {
                 .transaction(|tx| tx.put(&key("delivery", &[&delivery.id]), &delivery))?;
         }
         Ok(())
+    }
+    /// Send one delivery to its target.
+    async fn deliver(&self, delivery: &Delivery) -> Result<Accepted> {
+        match delivery.resolved_target() {
+            RouteTarget::Automation { automation } => self
+                .client
+                .post(
+                    "sessions",
+                    &format!(
+                        "/v1/automations/{}/invoke",
+                        crate::http::segment(&automation)
+                    ),
+                    &delivery.request,
+                )
+                .await
+                .map(Accepted::Session),
+            RouteTarget::Akh {
+                endpoint,
+                akh,
+                token_file,
+            } => {
+                let path = format!("/v1/akhs/{}/events", crate::http::segment(&akh));
+                let event = &delivery.request.event;
+                match token_file {
+                    Some(file) => {
+                        self.client
+                            .post_with_token_file(&endpoint, &path, event, &file)
+                            .await
+                    }
+                    None => self.client.post(&endpoint, &path, event).await,
+                }
+                .map(Accepted::Akh)
+            }
+        }
     }
     pub fn sources(&self) {
         for source in self.config.djehuty_inboxes.clone() {
@@ -380,5 +455,195 @@ mod coalescing_tests {
                 assert_eq!(d.error.unwrap().code, "superseded");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod akh_target_tests {
+    use super::*;
+    use axum::{
+        Json, Router,
+        extract::{Path, State},
+        http::{HeaderMap, StatusCode},
+        routing::post,
+    };
+    use serde_json::{Value, json};
+    use std::sync::Mutex;
+
+    const ROUTE_TOKEN: &str = "core-event-principal-token-0123456789";
+
+    #[derive(Default)]
+    struct Core {
+        received: Vec<(String, String, Value)>,
+    }
+
+    async fn admit(
+        State(core): State<Arc<Mutex<Core>>>,
+        Path(akh): Path<String>,
+        headers: HeaderMap,
+        Json(event): Json<Value>,
+    ) -> std::result::Result<Json<EventAdmission>, (StatusCode, Json<Fault>)> {
+        let bearer = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let id = event["id"].as_str().unwrap_or_default().to_string();
+        core.lock().unwrap().received.push((akh, bearer, event));
+        match id.as_str() {
+            "no-subscriber" => Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(Fault::new(NO_SUBSCRIBER, "no enabled schedule subscribes")),
+            )),
+            "busy" => Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(Fault::new("unavailable", "akh is loading")),
+            )),
+            _ => Ok(Json(EventAdmission {
+                event_key: format!("roman-inbox-janus/djehuty.inbox#{id}"),
+                schedules_woken: vec!["janus-inbox".into()],
+                duplicate: false,
+            })),
+        }
+    }
+
+    fn config(dir: &std::path::Path, url: &str, target: Value) -> Config {
+        let token = dir.join("operator.token");
+        std::fs::write(&token, "operator-token-0123456789-abcdef").unwrap();
+        let route_token = dir.join("route.token");
+        std::fs::write(&route_token, ROUTE_TOKEN).unwrap();
+        let mut target = target;
+        if target.get("token_file").is_some() {
+            target["token_file"] = json!(route_token);
+        }
+        serde_json::from_value(json!({"service_id":"events","listen":"127.0.0.1:0",
+            "data_dir":dir,"principals":[{"id":"operator","token_file":token,"roles":["admin"]}],
+            "endpoints":{"core":{"url":url,"token_file":token}},
+            "routes":[{"id":"janus-inbox","source":"roman-inbox-janus","event_type":"djehuty.inbox",
+                "target":target}]}))
+        .unwrap()
+    }
+
+    fn event(id: &str) -> EventEnvelope {
+        serde_json::from_value(json!({"schema_version":1,"source":"roman-inbox-janus",
+            "type":"djehuty.inbox","id":id,"occurred_at":1,"data":{"summary":"please review"}}))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn akh_target_posts_the_envelope_and_records_admissions_and_refusals() {
+        let core = Arc::new(Mutex::new(Core::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let router = Router::new()
+            .route("/v1/akhs/{akh}/events", post(admit))
+            .with_state(core.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(
+            dir.path(),
+            &url,
+            json!({"kind":"akh","endpoint":"core","akh":"janus","token_file":"set-below"}),
+        );
+        config.validate().unwrap();
+        let events = Events::new(
+            Arc::new(config),
+            Store::open(&dir.path().join("events.redb")).unwrap(),
+        )
+        .unwrap();
+        let principal = events.source_principal("roman-inbox-janus");
+        let mut ids = std::collections::BTreeMap::new();
+        for id in ["admitted", "no-subscriber", "busy"] {
+            ids.insert(
+                id,
+                events.ingest(&principal, event(id)).unwrap().deliveries[0].clone(),
+            );
+        }
+        events.drain().await.unwrap();
+        let delivery = |id: &str| -> Delivery {
+            events
+                .store
+                .get(&key("delivery", &[&ids[id]]))
+                .unwrap()
+                .unwrap()
+        };
+
+        let admitted = delivery("admitted");
+        assert!(admitted.terminal && admitted.error.is_none());
+        assert_eq!(
+            admitted.event_admission.unwrap().schedules_woken,
+            ["janus-inbox"]
+        );
+        assert!(matches!(admitted.target, Some(RouteTarget::Akh { .. })));
+
+        // No subscriber: terminal, recorded with its code, never retried.
+        let refused = delivery("no-subscriber");
+        assert!(refused.terminal);
+        assert_eq!(refused.error.unwrap().code, NO_SUBSCRIBER);
+
+        // A transient refusal stays pending for a retry.
+        let busy = delivery("busy");
+        assert!(!busy.terminal);
+        assert_eq!(busy.error.unwrap().code, "unavailable");
+
+        let received = &core.lock().unwrap().received;
+        assert_eq!(received.len(), 3);
+        for (akh, bearer, body) in received {
+            assert_eq!(akh, "janus");
+            // The route's own principal token, not the endpoint's.
+            assert_eq!(bearer, &format!("Bearer {ROUTE_TOKEN}"));
+            assert_eq!(body["type"], "djehuty.inbox");
+            assert_eq!(body["data"]["summary"], "please review");
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn a_route_sets_exactly_one_of_automation_and_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = |route: Value| -> Config {
+            let token = dir.path().join("t");
+            std::fs::write(&token, "operator-token-0123456789-abcdef").unwrap();
+            serde_json::from_value(json!({"service_id":"events","listen":"127.0.0.1:0",
+                "data_dir":dir.path(),"principals":[{"id":"operator","token_file":token,"roles":["admin"]}],
+                "endpoints":{"core":{"url":"https://core.example","token_file":token}},
+                "routes":[route]}))
+            .unwrap()
+        };
+        let route = json!({"id":"r","source":"s","event_type":"t"});
+        let with = |extra: Value| {
+            let mut r = route.clone();
+            r.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            r
+        };
+        // Pre-53d shape still parses and validates.
+        base(with(json!({"automation":"janus"})))
+            .validate()
+            .unwrap();
+        base(with(
+            json!({"target":{"kind":"automation","automation":"janus"}}),
+        ))
+        .validate()
+        .unwrap();
+        base(with(
+            json!({"target":{"kind":"akh","endpoint":"core","akh":"janus"}}),
+        ))
+        .validate()
+        .unwrap();
+        for bad in [
+            json!({}),
+            json!({"automation":"janus","target":{"kind":"automation","automation":"janus"}}),
+            json!({"target":{"kind":"akh","endpoint":"missing","akh":"janus"}}),
+            json!({"target":{"kind":"akh","endpoint":"core","akh":"janus","token_file":"relative"}}),
+        ] {
+            assert!(base(with(bad.clone())).validate().is_err(), "{bad}");
+        }
+        let unknown: std::result::Result<Config, _> = serde_json::from_value(json!({
+            "service_id":"events","listen":"127.0.0.1:0","data_dir":dir.path(),"principals":[],
+            "routes":[with(json!({"target":{"kind":"akh","endpoint":"core","akh":"janus","extra":1}}))]
+        }));
+        assert!(unknown.is_err(), "target fields are deny_unknown_fields");
     }
 }

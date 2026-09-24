@@ -5,7 +5,191 @@
 //! from "genuinely slow generation" from "retry loop" from "thinking that never
 //! converges" (work item "Turns die quietly", asks 1–4).
 
+use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::time::Instant;
+
+// ── Usage metering (Phase 53b, ADR 113 decision 6) ─────────────────────────
+
+/// How one provider request ended, for metering.
+///
+/// Only a request that got a response from the model counts as a request
+/// (and so as budget spend). A request that never got one (the provider was
+/// unreachable, refused the connection or returned an HTTP error status) was
+/// not billed and must not charge the autonomy budget or look like a model
+/// turn to the ADR 105 trip-wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestOutcome {
+    /// No response arrived: a transport error, an HTTP error status, or a
+    /// missing credential. Logged, never metered.
+    NoResponse,
+    /// A response started but did not finish: the stream broke after some
+    /// chunks, or the body could not be decoded. Metered with whatever
+    /// token counts the provider reported (often none).
+    Partial,
+    /// The response finished.
+    Completed,
+}
+
+impl RequestOutcome {
+    /// The `outcome` log field and span attribute. `Partial` keeps the
+    /// historic `cancelled` label so existing dashboards still match.
+    pub const fn label(self) -> &'static str {
+        match self {
+            RequestOutcome::NoResponse => "no_response",
+            RequestOutcome::Partial => "cancelled",
+            RequestOutcome::Completed => "completed",
+        }
+    }
+
+    /// Whether the model produced (part of) a response, so the request is
+    /// metered.
+    pub const fn reached_model(self) -> bool {
+        !matches!(self, RequestOutcome::NoResponse)
+    }
+}
+
+/// Whether a unit of model work got a response from the model. Used where a
+/// backing does not meter its requests (native runtimes, Grug), so the
+/// caller must say whether a model turn really happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelContact {
+    /// The model was never reached: no backend, backend unavailable, or a
+    /// transport failure before any response. Free, and not a model outcome.
+    NotReached,
+    /// The model responded (even if the response was then rejected).
+    Responded,
+}
+
+impl ModelContact {
+    /// Whether the model responded.
+    pub const fn responded(self) -> bool {
+        matches!(self, ModelContact::Responded)
+    }
+}
+
+/// Model usage accumulated by a [`UsageScope`]: how many provider requests
+/// got a response and how many tokens they billed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LlmUsage {
+    /// Provider requests that got a response from the model
+    /// ([`RequestOutcome::Completed`] or [`RequestOutcome::Partial`]). A
+    /// request that failed before any response arrived
+    /// ([`RequestOutcome::NoResponse`]) is not counted: nothing was billed.
+    pub requests: u64,
+    /// Prompt (input) tokens the provider reported.
+    pub prompt_tokens: u64,
+    /// Completion (output) tokens the provider reported.
+    pub completion_tokens: u64,
+}
+
+impl LlmUsage {
+    /// Prompt plus completion tokens.
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens.saturating_add(self.completion_tokens)
+    }
+
+    /// Whether any model request was observed.
+    pub fn reached_model(&self) -> bool {
+        self.requests > 0
+    }
+
+    /// Add one request's worth of usage.
+    fn add(&mut self, prompt_tokens: u64, completion_tokens: u64) {
+        self.requests = self.requests.saturating_add(1);
+        self.prompt_tokens = self.prompt_tokens.saturating_add(prompt_tokens);
+        self.completion_tokens = self.completion_tokens.saturating_add(completion_tokens);
+    }
+}
+
+thread_local! {
+    /// Stack of open [`UsageScope`] accumulators on this thread. Every
+    /// recorded request is added to every open scope, so an outer scope
+    /// always includes the usage of scopes nested inside it.
+    static USAGE_SCOPES: RefCell<Vec<LlmUsage>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A thread-local meter for LLM usage. Every request logged on this thread
+/// through [`LlmRequestMetrics::log`] (or reported with [`record_usage`])
+/// while the scope is open is added to it.
+///
+/// The daemon opens one around each LLM-cost background task so the autonomy
+/// budget can charge the task's real token spend. The scope is `!Send` on
+/// purpose. A thread-local cannot follow a future across an `.await` onto
+/// another worker thread, so the type system keeps it out of async code.
+///
+/// Scopes nest. Dropping a scope without [`UsageScope::finish`] discards its
+/// total but still closes it. Scopes must be closed in LIFO order, which
+/// holds automatically for lexically nested scopes.
+#[must_use = "a usage scope meters only while it is alive; call `finish` to read the total"]
+pub struct UsageScope {
+    depth: usize,
+    closed: bool,
+    _not_send: PhantomData<*const ()>,
+}
+
+impl UsageScope {
+    /// Open a new metering scope on the current thread.
+    pub fn open() -> Self {
+        let depth = USAGE_SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            scopes.push(LlmUsage::default());
+            scopes.len()
+        });
+        Self {
+            depth,
+            closed: false,
+            _not_send: PhantomData,
+        }
+    }
+
+    /// Usage accumulated so far, without closing the scope.
+    pub fn usage(&self) -> LlmUsage {
+        USAGE_SCOPES.with(|scopes| {
+            scopes
+                .borrow()
+                .get(self.depth - 1)
+                .copied()
+                .unwrap_or_default()
+        })
+    }
+
+    /// Close the scope and return its total.
+    pub fn finish(mut self) -> LlmUsage {
+        let usage = self.usage();
+        self.close();
+        usage
+    }
+
+    fn close(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+        USAGE_SCOPES.with(|scopes| scopes.borrow_mut().truncate(self.depth - 1));
+    }
+}
+
+impl Drop for UsageScope {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// Report one finished provider request to every open [`UsageScope`] on this
+/// thread. A no-op when no scope is open.
+///
+/// [`LlmRequestMetrics::log`] calls this for the chat paths. Call it directly
+/// from LLM call sites that do not use `LlmRequestMetrics` (one-shot
+/// `generate` calls, the external extraction API) so the autonomy budget
+/// sees their spend too.
+pub fn record_usage(prompt_tokens: u64, completion_tokens: u64) {
+    USAGE_SCOPES.with(|scopes| {
+        for usage in scopes.borrow_mut().iter_mut() {
+            usage.add(prompt_tokens, completion_tokens);
+        }
+    });
+}
 
 /// Per-LLM-request metrics, accumulated across the lifetime of one `chat` /
 /// `chat_stream` call. Cheap counters only (no string allocations per chunk).
@@ -139,11 +323,28 @@ impl LlmRequestMetrics {
         }
     }
 
-    /// Structured log line for this request (one line per request, on completion
-    /// or cancellation). The `outcome` string is `"completed"` or `"cancelled"`.
-    pub fn log(&self, model: &str, outcome: &str) {
+    /// How a request that stopped early ended: [`RequestOutcome::Partial`]
+    /// when any chunk arrived, [`RequestOutcome::NoResponse`] otherwise.
+    pub fn interrupted_outcome(&self) -> RequestOutcome {
+        if self.chunks_received > 0 {
+            RequestOutcome::Partial
+        } else {
+            RequestOutcome::NoResponse
+        }
+    }
+
+    /// Structured log line for this request (one line per request, on every
+    /// exit path). Only an outcome that [reached the
+    /// model](RequestOutcome::reached_model) is metered into open
+    /// [`UsageScope`]s.
+    pub fn log(&self, model: &str, outcome: RequestOutcome) {
         let duration_secs = self.duration_secs();
-        self.record_on_span(outcome, duration_secs);
+        let label = outcome.label();
+        self.record_on_span(label, duration_secs);
+        if outcome.reached_model() {
+            record_usage(self.prompt_tokens, self.completion_tokens);
+        }
+        let outcome = label;
         tracing::info!(
             model,
             outcome,
@@ -195,5 +396,73 @@ impl TurnMetrics {
             total_requests = self.request_seq,
             "llm turn summary"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_scope_meters_logged_requests() {
+        let scope = UsageScope::open();
+        let mut request = LlmRequestMetrics::new(0);
+        request.set_tokens(120, 30);
+        request.log("test-model", RequestOutcome::Completed);
+        record_usage(10, 5);
+        let usage = scope.finish();
+        assert_eq!(usage.requests, 2);
+        assert_eq!(usage.prompt_tokens, 130);
+        assert_eq!(usage.completion_tokens, 35);
+        assert_eq!(usage.total_tokens(), 165);
+        assert!(usage.reached_model());
+    }
+
+    #[test]
+    fn requests_without_a_response_are_not_metered() {
+        let scope = UsageScope::open();
+        // Transport error before any byte: logged, never a request.
+        let refused = LlmRequestMetrics::new(0);
+        assert_eq!(refused.interrupted_outcome(), RequestOutcome::NoResponse);
+        refused.log("test-model", refused.interrupted_outcome());
+        // A stream that broke after some chunks did reach the model.
+        let mut broken = LlmRequestMetrics::new(1);
+        broken.note_chunk(12);
+        broken.set_tokens(40, 3);
+        assert_eq!(broken.interrupted_outcome(), RequestOutcome::Partial);
+        broken.log("test-model", broken.interrupted_outcome());
+        let usage = scope.finish();
+        assert_eq!(usage.requests, 1, "only the partial response counts");
+        assert_eq!(usage.total_tokens(), 43);
+        assert_eq!(RequestOutcome::NoResponse.label(), "no_response");
+        assert_eq!(RequestOutcome::Partial.label(), "cancelled");
+        assert!(!RequestOutcome::NoResponse.reached_model());
+        assert!(ModelContact::Responded.responded());
+        assert!(!ModelContact::NotReached.responded());
+    }
+
+    #[test]
+    fn nested_scopes_roll_up_into_the_outer_scope() {
+        let outer = UsageScope::open();
+        record_usage(1, 1);
+        let inner = UsageScope::open();
+        record_usage(2, 3);
+        assert_eq!(inner.finish().total_tokens(), 5);
+        record_usage(4, 0);
+        let total = outer.finish();
+        assert_eq!(total.requests, 3);
+        assert_eq!(total.total_tokens(), 11);
+    }
+
+    #[test]
+    fn recording_without_a_scope_is_a_noop_and_dropped_scopes_close() {
+        record_usage(99, 99);
+        {
+            let _dropped = UsageScope::open();
+            record_usage(1, 1);
+        }
+        let fresh = UsageScope::open();
+        assert_eq!(fresh.usage(), LlmUsage::default());
+        assert!(!fresh.finish().reached_model());
     }
 }

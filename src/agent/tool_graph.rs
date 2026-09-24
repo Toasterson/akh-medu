@@ -329,7 +329,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::agent::tool_manifest::{DangerInfo, DangerLevel, ToolSource};
+    use crate::agent::tool_manifest::{DangerInfo, DangerLevel, ToolEffect, ToolSource};
     use crate::engine::{Engine, EngineConfig};
 
     fn make_engine() -> Engine {
@@ -349,6 +349,7 @@ mod tests {
                 ToolParamSchema::optional("limit", "Max results."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([crate::agent::tool_manifest::Capability::ReadKg]),
                 description: "Read-only.".into(),

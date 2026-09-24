@@ -24,5 +24,5 @@
 | Pipeline | Implemented | `pipeline` | egg | Linear stage pipeline (Retrieve → Infer → Reason → Extract), built-in query/ingest pipelines |
 | Skills | Implemented | `skills` | egg, serde_json | MoE-style skillpacks with Cold/Warm/Hot lifecycle, memory budgets, dynamic rule compilation |
 | Graph analytics | Implemented | `graph::analytics` | petgraph | Degree centrality, PageRank, strongly connected components |
-| Agent | Implemented | `agent` | — | OODA loop, 9 tools, planning/reflection, session persistence, REPL mode |
+| Agent | Implemented | `agent` | — | OODA loop, planning/reflection, session persistence, REPL mode; ACP callers and `/v1` core-API callers (Phase 53, ADR 113) resolve tools from the akh's live `ToolRegistry` scoped per principal by `ToolScope` — `LegacyCognitive` (default: the previous nine tool names) or `Named { tools }` for a broader grant |
 | Autonomous cycle | Implemented | `autonomous` | — | Symbol grounding, superposition inference, confidence fusion, KG commit |

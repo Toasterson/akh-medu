@@ -104,7 +104,7 @@ pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result
         native::validate_device(&native.device)?;
     }
     if profile.kind != RuntimeKind::Internal
-        || profile.execution_mode != ExecutionMode::Brokered
+        || profile.execution_mode() != ExecutionMode::Brokered
         || profile.timeout_secs == 0
         || max_iterations == 0
         || max_iterations > 256
@@ -1060,7 +1060,7 @@ mod tests {
             revision: profile.revision.clone(),
             kind: profile.kind,
             model: Some(native.model.clone()),
-            execution_mode: profile.execution_mode,
+            execution_mode: profile.execution_mode(),
         };
         if cfg!(feature = "hip") {
             validate(profile, &request).unwrap();

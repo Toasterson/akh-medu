@@ -182,6 +182,14 @@ this first process slice.
   ACP listener or resident workspace agent loops. Session context is prepared
   before dispatch; completed turns reach a durable cognitive journal according
   to the existing transcript-capture policy.
+
+  **Superseded (Phase 53h, [ADR 113](../../ai/decisions/113-full-akh-always.md)):**
+  the `core-server` profile (and the stripped-akhomed shape it describes) was
+  removed in 53h. `akhomed` now has a single `server` build profile in which the
+  daemon loop, the in-process turn, the full tool registry and the ACP surface
+  always run; `/v1` (`core-api`) is additive and served only when
+  `AKH_CORE_CONFIG` is set. There is no longer a build that strips the daemon or
+  ACP out of `akhomed`.
 - The core build and its scoped-tool/transcript-opt-out test pass. Its normal
   dependency graph contains none of `akh-runtime`, `agent-client-protocol`,
   `russh`, or `akh-session-services`. Shared record storage moved to the small

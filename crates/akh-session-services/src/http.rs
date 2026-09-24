@@ -170,6 +170,38 @@ impl Client {
         path: &str,
         body: Option<Value>,
     ) -> Result<(T, HeaderMap)> {
+        self.send(service, method, path, body, None).await
+    }
+    /// POST to a configured endpoint as a different principal than the
+    /// endpoint's own credential (for example an akheventd route whose akh
+    /// target names its own core token file). The token never enters a record.
+    pub async fn post_with_token_file<T: DeserializeOwned>(
+        &self,
+        service: &str,
+        path: &str,
+        body: &impl Serialize,
+        token_file: &std::path::Path,
+    ) -> Result<T> {
+        let body = serde_json::to_value(body).map_err(|e| Fault::invalid(e.to_string()))?;
+        let token = crate::config::read_token(token_file)?;
+        self.send(
+            service,
+            reqwest::Method::POST,
+            path,
+            Some(body),
+            Some(token),
+        )
+        .await
+        .map(|(value, _)| value)
+    }
+    async fn send<T: DeserializeOwned>(
+        &self,
+        service: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        bearer: Option<String>,
+    ) -> Result<(T, HeaderMap)> {
         let endpoint = self.config.endpoint(service)?;
         let route = endpoint.route(path);
         let route = if route.contains("{sandbox}") {
@@ -187,7 +219,10 @@ impl Client {
             .get(service)
             .ok_or_else(|| Fault::invalid("service has no configured HTTP client"))?
             .request(method, route)
-            .bearer_auth(endpoint.token()?);
+            .bearer_auth(match bearer {
+                Some(token) => token,
+                None => endpoint.token()?,
+            });
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -214,6 +249,7 @@ impl Client {
             let code = match status.as_u16() {
                 404 => "not_found",
                 409 => "conflict",
+                422 => "invalid_request",
                 401 => "unauthorized",
                 403 => "forbidden",
                 429 => "busy",

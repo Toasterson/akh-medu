@@ -970,7 +970,7 @@ impl ChatBackend for CandleChatBackend {
         // the RAW (uncleaned) text — Gemma 4 puts its tool call in the thought channel, which the
         // answer-channel cleaning would strip before we can parse it.
         let raw = be.generate_raw(&prompt, 512).map_err(|e| {
-            metrics.log("candle", "cancelled");
+            metrics.log("candle", super::llm_metrics::RequestOutcome::NoResponse);
             ChatBackendError::TurnFailed {
                 backend: "candle".into(),
                 reason: e.to_string(),
@@ -1012,7 +1012,7 @@ impl ChatBackend for CandleChatBackend {
             metrics.note_tool_call_chunk();
         }
         // Candle doesn't report token counts; leave at 0.
-        metrics.log("candle", "completed");
+        metrics.log("candle", super::llm_metrics::RequestOutcome::Completed);
 
         Ok(AssistantTurn {
             content: if tool_calls.is_empty() {
@@ -1218,7 +1218,9 @@ mod prompt_isolation_tests {
     use super::*;
     use crate::agent::model_manager::{AgentModelManager, ModelManagerConfig};
     use crate::agent::ollama::OllamaConfig;
-    use crate::agent::tool_manifest::{DangerInfo, DangerLevel, ToolManifest, ToolSource};
+    use crate::agent::tool_manifest::{
+        DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolSource,
+    };
     use serde_json::json;
     use std::collections::HashSet;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -1231,6 +1233,7 @@ mod prompt_isolation_tests {
             description: description.into(),
             parameters: vec![],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::new(),
                 description: "test proxy".into(),

@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::agent::error::{AgentError, AgentResult};
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::config::AkhomedConfig;
 use crate::engine::Engine;
@@ -346,6 +346,7 @@ impl Tool for TriageDispatchTrapsTool {
                 ToolParamSchema::optional("dry_run", "If true, report findings without writing KG triples."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::Network, Capability::WriteKg]),
                 description:

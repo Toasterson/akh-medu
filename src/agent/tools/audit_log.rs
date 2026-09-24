@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::audit::{AuditEntry, AuditKind, LogLevel};
 use crate::engine::Engine;
@@ -75,6 +75,7 @@ impl Tool for AuditLogTool {
                 ToolParamSchema::optional("level", "Log level: info (default), warn, or debug."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::WriteKg]),
                 description: "Appends to the audit ledger (write-only, no read).".into(),

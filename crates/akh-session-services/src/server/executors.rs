@@ -152,7 +152,7 @@ async fn operation(
         http::role(&p, "session")?;
     }
     Ok(Json(
-        tokio::task::spawn_blocking(move || executor.operate(request))
+        tokio::task::spawn_blocking(move || executor.operate_as(request, Some(&p.id)))
             .await
             .map_err(|_| ApiError(Fault::new("executor", "operation worker failed")))??,
     ))
@@ -167,7 +167,7 @@ async fn publish_repository(
         return Err(Fault::invalid("expected Git publication operation").into());
     }
     Ok(Json(
-        tokio::task::spawn_blocking(move || executor.operate(request))
+        tokio::task::spawn_blocking(move || executor.operate_as(request, Some(&p.id)))
             .await
             .map_err(|_| ApiError(Fault::new("executor", "publication worker failed")))??,
     ))

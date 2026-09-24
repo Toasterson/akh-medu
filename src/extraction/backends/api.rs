@@ -64,6 +64,16 @@ impl ExternalApiBackend {
                     raw_output: String::new(),
                     reason: format!("failed to parse API response: {e}"),
                 })?;
+        // Phase 53b: meter this request for the autonomy budget (OpenAI-shaped
+        // `usage`; absent counts meter as a request with zero tokens).
+        let usage = resp_body.get("usage");
+        let count = |field: &str| {
+            usage
+                .and_then(|u| u.get(field))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        };
+        crate::agent::llm_metrics::record_usage(count("prompt_tokens"), count("completion_tokens"));
 
         // Extract the assistant's message content.
         let content = resp_body

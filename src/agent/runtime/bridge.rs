@@ -2,7 +2,31 @@
 use super::*;
 use akh_session_types as wire;
 
+/// The execution mode the in-process compatibility bridge may use.
+///
+/// The bridge runs the provider inside akhomed, next to the workspace, which is
+/// `Colocated` by construction. That is a development convenience only: a
+/// deployed akhomed refuses `backend = "codex" | "claude"` when the akh loads
+/// (`akh::config::in_process_forbidden`), and the bridge refuses again here so
+/// no path can run a colocated native runtime in deployed mode. Deployed
+/// native work is delegated to akhrtd, whose deployed profiles must state
+/// `execution_mode = "brokered"` explicitly (`akh::runtime::execution_mode_required`).
+pub(super) fn execution_mode(
+    mode: crate::deployment::DeploymentMode,
+) -> Result<wire::ExecutionMode, String> {
+    if mode.is_deployed() {
+        return Err(
+            "akh::config::in_process_forbidden: the in-process coding-runtime bridge is \
+             forbidden in deployed mode; delegate Codex/Claude work to akhrtd (brokered) \
+             instead"
+                .into(),
+        );
+    }
+    Ok(wire::ExecutionMode::Colocated)
+}
+
 pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
+    let execution_mode = execution_mode(crate::deployment::process_mode())?;
     let kind = match turn.runtime.kind {
         RuntimeKind::Codex => wire::RuntimeKind::Codex,
         RuntimeKind::Claude => wire::RuntimeKind::Claude,
@@ -25,7 +49,7 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
         environment: Default::default(),
         launcher: vec![],
         timeout_secs: turn.runtime.config.timeout_secs,
-        execution_mode: wire::ExecutionMode::Colocated,
+        execution_mode: Some(execution_mode),
         conformance_file: None,
         native_aliases: Default::default(),
         effort: turn.runtime.effort.clone(),
@@ -45,7 +69,7 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
             revision: config.revision.clone(),
             kind,
             model: turn.runtime.model.clone(),
-            execution_mode: wire::ExecutionMode::Colocated,
+            execution_mode,
         },
         workspace: wire::WorkspaceBinding {
             id: "embedded".into(),

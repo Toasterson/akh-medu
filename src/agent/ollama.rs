@@ -539,6 +539,9 @@ impl OllamaClient {
             response.into_json().map_err(|e| OllamaError::ParseFailed {
                 reason: format!("JSON decode failed: {e}"),
             })?;
+        // Phase 53b: meter one-shot generation (the Librarian's path) for the
+        // autonomy budget; chat paths meter through `LlmRequestMetrics::log`.
+        super::llm_metrics::record_usage(chat_resp.prompt_eval_count, chat_resp.eval_count);
 
         chat_resp
             .message
@@ -692,14 +695,20 @@ impl OllamaClient {
         })?;
 
         let chat_resp: ChatResponse = response.into_json().map_err(|e| {
-            metrics.log(&self.config.model, "cancelled");
+            metrics.log(
+                &self.config.model,
+                super::llm_metrics::RequestOutcome::Partial,
+            );
             OllamaError::ParseFailed {
                 reason: format!("JSON decode failed: {e}"),
             }
         })?;
 
         let msg = chat_resp.message.ok_or_else(|| {
-            metrics.log(&self.config.model, "cancelled");
+            metrics.log(
+                &self.config.model,
+                super::llm_metrics::RequestOutcome::Partial,
+            );
             OllamaError::ParseFailed {
                 reason: "Ollama chat response had no message".into(),
             }
@@ -715,7 +724,10 @@ impl OllamaClient {
             metrics.note_tool_call_chunk();
         }
         metrics.set_tokens(chat_resp.prompt_eval_count, chat_resp.eval_count);
-        metrics.log(&self.config.model, "completed");
+        metrics.log(
+            &self.config.model,
+            super::llm_metrics::RequestOutcome::Completed,
+        );
 
         Ok(AssistantTurn {
             content: msg.content.unwrap_or_default(),
@@ -945,7 +957,7 @@ impl OllamaClient {
                         // Signal heartbeat thread to stop before returning error.
                         request_alive.store(false, Ordering::Relaxed);
                         // Log metrics on cancellation path.
-                        metrics.log(&self.config.model, "cancelled");
+                        metrics.log(&self.config.model, metrics.interrupted_outcome());
                         OllamaError::Unreachable {
                             url: url.clone(),
                             reason: format!("stream read error: {e}"),
@@ -1050,7 +1062,10 @@ impl OllamaClient {
         }
 
         // Log metrics on successful completion.
-        metrics.log(&self.config.model, "completed");
+        metrics.log(
+            &self.config.model,
+            super::llm_metrics::RequestOutcome::Completed,
+        );
 
         Ok(AssistantTurn {
             content,

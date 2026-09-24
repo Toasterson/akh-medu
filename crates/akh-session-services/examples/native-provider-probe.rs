@@ -64,7 +64,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("probe input exceeds limit".into());
     }
     let probe: Probe = serde_json::from_slice(&bytes)?;
-    if probe.profile.execution_mode != ExecutionMode::Brokered || probe.profile.isolation.is_none()
+    if probe.profile.execution_mode() != ExecutionMode::Brokered
+        || probe.profile.isolation.is_none()
     {
         return Err("probe requires a private brokered profile".into());
     }

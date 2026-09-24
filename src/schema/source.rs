@@ -153,6 +153,35 @@ pub struct RelationDef {
     pub arg2_type: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// How many live objects a subject may hold for this relation
+    /// (Phase 53j). Defaults to [`Cardinality::Multi`].
+    #[serde(default)]
+    pub cardinality: Cardinality,
+    /// The relation records time-varying state (Phase 53j): a superseded
+    /// value is history that stopped holding when its successor was
+    /// asserted, not a correction. Only valid with
+    /// [`Cardinality::SingleValued`].
+    #[serde(default)]
+    pub temporal: bool,
+    /// Other spellings that mean this relation (Phase 53j). Writes under an
+    /// alias are stored under this relation, and `kg_merge_predicates`
+    /// rewrites existing alias triples onto it.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
+/// Declared cardinality of a relation (Phase 53j, ADR 113).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cardinality {
+    /// A subject may hold any number of objects (the default, and the
+    /// behaviour of every undeclared predicate).
+    #[default]
+    Multi,
+    /// A subject holds exactly one live object: the newest assertion
+    /// supersedes older ones (retracted through the TMS with
+    /// `memory_hygiene` provenance).
+    SingleValued,
 }
 
 fn default_arity() -> u64 {
@@ -182,7 +211,7 @@ pub fn parse_source(text: &str) -> SchemaResult<SchemaPackSource> {
     Ok(source)
 }
 
-fn is_reserved(name: &str) -> bool {
+pub(crate) fn is_reserved(name: &str) -> bool {
     RESERVED_NAMES.contains(&name) || RESERVED_PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
@@ -252,7 +281,35 @@ pub fn validate(source: &SchemaPackSource) -> SchemaResult<()> {
 
     // --- relations ---
     let mut rel_names = std::collections::HashSet::new();
+    let declared_relations: std::collections::HashSet<&str> =
+        source.relations.iter().map(|r| r.name.as_str()).collect();
+    let mut alias_owner: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for r in &source.relations {
+        if r.temporal && r.cardinality != Cardinality::SingleValued {
+            return Err(SchemaError::TemporalRequiresSingleValued {
+                relation: r.name.clone(),
+            });
+        }
+        for alias in &r.aliases {
+            if is_reserved(alias) {
+                return Err(SchemaError::ReservedName {
+                    name: alias.clone(),
+                });
+            }
+            if declared_relations.contains(alias.as_str()) {
+                return Err(SchemaError::AliasIsRelation {
+                    alias: alias.clone(),
+                    relation: r.name.clone(),
+                });
+            }
+            if let Some(previous) = alias_owner.insert(alias.as_str(), r.name.as_str()) {
+                return Err(SchemaError::DuplicateAlias {
+                    alias: alias.clone(),
+                    first: previous.to_string(),
+                    second: r.name.clone(),
+                });
+            }
+        }
         if is_reserved(&r.name) {
             return Err(SchemaError::ReservedName {
                 name: r.name.clone(),
@@ -302,6 +359,45 @@ mod tests {
         assert_eq!(src.pack.name, "core");
         assert_eq!(src.pack.scope, PackScope::Shared);
         assert_eq!(src.types.len(), 1);
+    }
+
+    #[test]
+    fn cardinality_and_aliases_parse_and_validate() {
+        let src = parse_source(
+            r#"{"pack": {"name": "p", "version": "1"},
+                "relations": [
+                  {"name": "next_check", "cardinality": "single_valued", "temporal": true,
+                   "aliases": ["next-check", "next check"]},
+                  {"name": "tag"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(src.relations[0].cardinality, Cardinality::SingleValued);
+        assert!(src.relations[0].temporal);
+        assert_eq!(src.relations[0].aliases.len(), 2);
+        assert_eq!(src.relations[1].cardinality, Cardinality::Multi);
+
+        let bad = |relations: &str| {
+            parse_source(&format!(
+                r#"{{"pack": {{"name": "p", "version": "1"}}, "relations": {relations}}}"#
+            ))
+        };
+        assert!(matches!(
+            bad(r#"[{"name": "a", "temporal": true}]"#),
+            Err(SchemaError::TemporalRequiresSingleValued { .. })
+        ));
+        assert!(matches!(
+            bad(r#"[{"name": "a", "aliases": ["b"]}, {"name": "b"}]"#),
+            Err(SchemaError::AliasIsRelation { .. })
+        ));
+        assert!(matches!(
+            bad(r#"[{"name": "a", "aliases": ["x"]}, {"name": "b", "aliases": ["x"]}]"#),
+            Err(SchemaError::DuplicateAlias { .. })
+        ));
+        assert!(matches!(
+            bad(r#"[{"name": "a", "aliases": ["is-a"]}]"#),
+            Err(SchemaError::ReservedName { .. })
+        ));
+        assert!(bad(r#"[{"name": "a", "cardinality": "several"}]"#).is_err());
     }
 
     #[test]

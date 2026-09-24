@@ -557,6 +557,7 @@ pub fn capture_snapshot_at_fence(
         agent.cycle_count,
     );
     let reactor_metadata = capture_reactor_metadata(engine)?;
+    let budget_ledger = capture_budget_ledger(engine);
     let extra = serde_json::json!({
         "provenance_snapshot_version": PROVENANCE_SNAPSHOT_VERSION,
         "audience": agent.audience,
@@ -567,6 +568,9 @@ pub fn capture_snapshot_at_fence(
         "reactor": {
             "version": REACTOR_SNAPSHOT_VERSION,
             "metadata": reactor_metadata,
+        },
+        "autonomy": {
+            "budget_ledger": budget_ledger,
         },
     });
 
@@ -966,6 +970,7 @@ pub async fn wake(
         }
         restore_extra(&store, state.extra.as_ref());
         restore_reactor_metadata(&store, state.extra.as_ref())?;
+        restore_budget_ledger(&store, state.extra.as_ref());
     }
 
     // 4. Open the engine over the reconstructed redb (registry + allocator come
@@ -1897,6 +1902,69 @@ fn restore_extra(store: &TieredStore, extra: Option<&serde_json::Value>) {
     }) {
         let index = crate::agent::contact_memory::PersonMemoryIndex::from_portable(portable);
         put_bincode(store, b"agent:person_memory", &index);
+    }
+}
+
+/// Capture the autonomy budget ledger (`autonomy:budget:v1`, Phase 53b) so
+/// a relocated or re-woken akh keeps today's spend instead of starting the
+/// day with a fresh budget. `None` when the akh has no ledger yet; an
+/// unreadable ledger is logged and left out (the daemon resets a bad ledger
+/// the same way, which grants at most one extra day of budget).
+fn capture_budget_ledger(engine: &Engine) -> Option<crate::agent::autonomy::BudgetLedger> {
+    use crate::agent::autonomy::{BUDGET_LEDGER_KEY, BudgetLedger};
+    match engine.store().get_meta(BUDGET_LEDGER_KEY) {
+        Ok(Some(bytes)) => match serde_json::from_slice::<BudgetLedger>(&bytes) {
+            Ok(ledger) => Some(ledger),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "snapshot: autonomy budget ledger is corrupt; not captured"
+                );
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "snapshot: autonomy budget ledger unreadable; not captured"
+            );
+            None
+        }
+    }
+}
+
+/// Restore the autonomy budget ledger captured by [`capture_budget_ledger`].
+/// An older snapshot without one leaves the store untouched; a malformed one
+/// is logged and skipped rather than failing the wake.
+fn restore_budget_ledger(store: &TieredStore, extra: Option<&serde_json::Value>) {
+    use crate::agent::autonomy::{BUDGET_LEDGER_KEY, BudgetLedger};
+    let Some(value) = extra
+        .and_then(|extra| extra.get("autonomy"))
+        .and_then(|autonomy| autonomy.get("budget_ledger"))
+        .filter(|value| !value.is_null())
+    else {
+        return;
+    };
+    let ledger = match serde_json::from_value::<BudgetLedger>(value.clone()) {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "wake: autonomy budget ledger in the snapshot is malformed; today's budget starts empty"
+            );
+            return;
+        }
+    };
+    let bytes = match serde_json::to_vec(&ledger) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(error = %error, "wake: autonomy budget ledger could not be encoded");
+            return;
+        }
+    };
+    if let Err(error) = store.put_meta(BUDGET_LEDGER_KEY, &bytes) {
+        tracing::warn!(error = %error, "wake: autonomy budget ledger not restored");
     }
 }
 
@@ -4243,6 +4311,59 @@ mod tests {
     }
 
     #[test]
+    fn budget_ledger_roundtrips_through_snapshot_extra() {
+        use crate::agent::autonomy::{BUDGET_LEDGER_KEY, BudgetLedger, UtcDay};
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..EngineConfig::default()
+        })
+        .unwrap();
+        assert_eq!(capture_budget_ledger(&engine), None, "no ledger yet");
+        let ledger = BudgetLedger {
+            day: UtcDay::from_unix_secs(1_790_251_200),
+            tokens_used: 12_345,
+            turns_used: 7,
+        };
+        engine
+            .store()
+            .put_meta(BUDGET_LEDGER_KEY, &serde_json::to_vec(&ledger).unwrap())
+            .unwrap();
+        let captured = capture_budget_ledger(&engine).expect("captured");
+        assert_eq!(captured, ledger);
+
+        let extra = serde_json::json!({ "autonomy": { "budget_ledger": captured } });
+        let restored_dir = tempfile::tempdir().unwrap();
+        let store = TieredStore::with_persistence(restored_dir.path(), "snapshot-ledger").unwrap();
+        restore_budget_ledger(&store, Some(&extra));
+        let bytes = store
+            .get_meta(BUDGET_LEDGER_KEY)
+            .unwrap()
+            .expect("restored");
+        assert_eq!(
+            serde_json::from_slice::<BudgetLedger>(&bytes).unwrap(),
+            ledger
+        );
+
+        // Older snapshots (no envelope, or a null ledger) leave the store alone;
+        // a malformed ledger is skipped, not fatal.
+        restore_budget_ledger(&store, Some(&serde_json::json!({})));
+        restore_budget_ledger(
+            &store,
+            Some(&serde_json::json!({ "autonomy": { "budget_ledger": null } })),
+        );
+        restore_budget_ledger(
+            &store,
+            Some(&serde_json::json!({ "autonomy": { "budget_ledger": "bogus" } })),
+        );
+        let bytes = store.get_meta(BUDGET_LEDGER_KEY).unwrap().expect("kept");
+        assert_eq!(
+            serde_json::from_slice::<BudgetLedger>(&bytes).unwrap(),
+            ledger
+        );
+    }
+
+    #[test]
     fn reactor_metadata_restore_rejects_keys_outside_allow_list() {
         let tmp = tempfile::tempdir().unwrap();
         let store = TieredStore::with_persistence(tmp.path(), "symbols").unwrap();
@@ -4336,6 +4457,8 @@ mod tests {
                 agent_id: None,
                 allow_tools: false,
                 require_mutation: false,
+                exit_condition: String::new(),
+                report_thread: None,
             },
             0,
         )

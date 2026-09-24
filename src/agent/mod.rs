@@ -14,6 +14,7 @@ pub mod active_inference;
 pub mod affect;
 pub mod agent;
 pub mod agentic_chat;
+pub mod autonomy;
 #[cfg(feature = "daemon")]
 pub mod board_reactor;
 pub mod calendar;
@@ -307,7 +308,9 @@ pub use temporal_experience::TemporalExperience;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
 pub use tool_execution_tracker::{ToolCallGuard, ToolExecutionTracker};
 pub use tool_graph::{ToolGraphPredicates, ToolGraphRegistrar};
-pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
+pub use tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolSource,
+};
 pub use trajectory::{DiscourseMode, DiscourseTrajectory, TurnRecord, classify_mode};
 pub use trigger::{Trigger, TriggerAction, TriggerCondition, TriggerStore};
 pub use vsa_decide::{DecideMode, VsaDecideConfig, VsaDecideDiagnostics};

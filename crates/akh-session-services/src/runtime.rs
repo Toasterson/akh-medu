@@ -65,7 +65,8 @@ pub fn validate_conformance(profile: &RuntimeProfile) -> Result<()> {
             "native aliases are implemented only by the Claude bridge",
         ));
     }
-    if profile.execution_mode != ExecutionMode::Brokered || profile.kind == RuntimeKind::Internal {
+    if profile.execution_mode() != ExecutionMode::Brokered || profile.kind == RuntimeKind::Internal
+    {
         return Ok(());
     }
     let path = profile.conformance_file.as_ref().ok_or_else(|| {
@@ -380,7 +381,7 @@ impl Runtime {
             .clone();
         if profile.revision != request.binding.revision
             || profile.kind != request.binding.kind
-            || profile.execution_mode != request.binding.execution_mode
+            || profile.execution_mode() != request.binding.execution_mode
         {
             return Err(Fault::conflict(
                 "installed runtime profile differs from session binding",
@@ -403,6 +404,18 @@ impl Runtime {
         // Scale runtime replicas with distinct service IDs for additional capacity.
         if !active.is_empty() {
             return Err(Fault::new("busy", "runtime capacity is occupied"));
+        }
+        // Configuration load already refused this; re-check at admission so an
+        // environment flip or a hot-swapped profile can never slip through.
+        if self.config.deployment_mode()?.is_deployed() {
+            let subject = format!("runtimes.{}", request.binding.profile);
+            match profile.execution_mode_setting() {
+                None => return Err(crate::config::execution_mode_required(&subject)),
+                Some(ExecutionMode::Colocated) => {
+                    return Err(crate::config::colocated_forbidden(&subject));
+                }
+                Some(ExecutionMode::Brokered) => {}
+            }
         }
         let profile_lease = crate::runtime_profile::acquire(&profile)?;
         validate_conformance(&profile)?;

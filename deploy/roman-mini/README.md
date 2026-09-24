@@ -70,9 +70,14 @@ require separately generated service credentials for protected operations.
 ## Installation and awakening
 
 `prepare.py` renders the four service configurations. `configure_core.py` renders
-the dedicated core, isolated XDG directories and a versioned binary path. Neither
-script starts launchd or invokes a model. The launchd definitions live under the
-deployment root until installed into `/Library/LaunchDaemons`.
+the core: since Phase 53 (ADR 113) that is one **full akh** akhomed hosting
+janus, minerva and vesta with their daemon loops, in-process turns (GLM-5.3 on
+Ollama Cloud), full tool registries, per-akh MCP servers (`[[mcp.servers]]`,
+tools named `mcp__<server>__<tool>`), reactors, ACP and the additive `/v1` core
+API. Neither script starts launchd or invokes a model. The launchd definitions
+live under the deployment root until installed into `/Library/LaunchDaemons`.
+The operator runbook for moving the live deployment onto the full akh is
+[CUTOVER.md](CUTOVER.md).
 
 `awakening.json` defines Roman archetypes. The offline `roman_awaken` example runs
 the actual `ritual_of_awakening`, publishes a fenced SeaORM snapshot, then recovers
@@ -80,11 +85,22 @@ the awakened psyche into a different cache. It refuses to replace an existing
 durable identity. The ritual may choose a Latin self-name different from the
 archetype; the service IDs remain janus/minerva/vesta.
 
-Build the core and helper with:
+Build only from a clean checkout of `origin/main`
+(`.claude/rules/deploy-from-main.md`); the stripped `core-server` profile was
+deleted in Phase 53h and `server` is the one akhomed profile:
 
 ```sh
-cargo build --locked --release --no-default-features --features core-server --bin akhomed --example roman_awaken
+git fetch origin && git switch --detach origin/main && git status --porcelain  # must be empty
+cargo build --release --locked --features server --bin akhomed --example roman_awaken
+cargo build --release --locked -p akh-session-services --features client --bin akh-acp
+python3 deploy/roman-mini/configure_core.py --root "$ROOT" --binaries target/release --repo .
 ```
+
+`configure_core.py` refuses unless the checkout is clean and `HEAD` is an
+ancestor of `origin/main`, installs `bin/akhomed-main-<sha>` (and
+`bin/akh-acp-main-<sha>`), and records the commit in `config/core-release.json`.
+The core plist execs through `daemon_credentials.py core`, which resolves the
+Ollama and MCP credentials into the environment and execs that binary.
 
 The helper takes `DATABASE_URL INPUT_JSON WORK_DIRECTORY`. Its work directory
 holds the initial/recovered caches and ritual evidence. No provider credentials

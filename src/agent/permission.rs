@@ -118,7 +118,7 @@ impl PermissionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::tool_manifest::{DangerInfo, ToolManifest, ToolSource};
+    use crate::agent::tool_manifest::{DangerInfo, ToolEffect, ToolManifest, ToolSource};
     use std::collections::HashSet;
 
     fn manifest(level: DangerLevel, caps: &[Capability]) -> ToolManifest {
@@ -127,6 +127,7 @@ mod tests {
             description: "t".into(),
             parameters: vec![],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level,
                 capabilities: caps.iter().copied().collect::<HashSet<_>>(),
                 description: "t".into(),

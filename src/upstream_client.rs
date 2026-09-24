@@ -104,6 +104,10 @@ pub struct UpstreamMcpClient {
     /// [`new`]: Self::new
     endpoint: String,
     auth_header: Option<String>,
+    /// Additional request headers sent on every MCP request (e.g. a
+    /// non-`Authorization` API-key header for a statically configured
+    /// per-akh MCP server, Phase 53i). Values may be secrets: never log them.
+    extra_headers: Vec<(String, String)>,
     agent: ureq::Agent,
 }
 
@@ -154,8 +158,18 @@ impl UpstreamMcpClient {
         Self {
             endpoint: endpoint.into(),
             auth_header,
+            extra_headers: Vec::new(),
             agent,
         }
+    }
+
+    /// Send an additional header on every request to this endpoint.
+    ///
+    /// Used for MCP servers that authenticate with a header other than
+    /// `Authorization`. The value may be a secret and is never logged.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra_headers.push((name.into(), value.into()));
+        self
     }
 
     /// Build a POST request to the resolved MCP endpoint with common MCP headers.
@@ -167,6 +181,9 @@ impl UpstreamMcpClient {
             .set("Accept", "application/json, text/event-stream");
         if let Some(ref auth) = self.auth_header {
             req = req.set("Authorization", auth);
+        }
+        for (name, value) in &self.extra_headers {
+            req = req.set(name, value);
         }
         req
     }
@@ -307,8 +324,20 @@ impl UpstreamMcpClient {
     /// Call a named tool on the upstream MCP endpoint.
     ///
     /// Returns the `content` array from the `CallToolResult`, or an empty vec if
-    /// the result contained no content items.
+    /// the result contained no content items. Note that a result flagged
+    /// `isError: true` is still returned as `Ok` here; callers that must tell
+    /// a remote tool failure apart from success use [`Self::call_tool_result`].
     pub fn call_tool(&self, tool_name: &str, arguments: Value) -> UpstreamResult<Vec<Value>> {
+        let result = self.call_tool_result(tool_name, arguments)?;
+        Ok(result["content"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// Call a named tool and return the whole `CallToolResult` object
+    /// (`content`, `structuredContent`, `isError`, …).
+    ///
+    /// A missing `result` member yields `Value::Null`, which callers treat as
+    /// an empty, non-error result.
+    pub fn call_tool_result(&self, tool_name: &str, arguments: Value) -> UpstreamResult<Value> {
         // Step 1: initialize session.
         let session_id = self.init_session();
 
@@ -331,12 +360,7 @@ impl UpstreamMcpClient {
         let (_, result_json) = self.send_rpc(req, tool_payload)?;
         check_rpc_error(&result_json)?;
 
-        let content = result_json["result"]["content"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-
-        Ok(content)
+        Ok(result_json.get("result").cloned().unwrap_or(Value::Null))
     }
 
     /// List tools advertised by the upstream MCP endpoint (name + description).

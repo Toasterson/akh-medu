@@ -55,8 +55,9 @@ pub enum AkhConfigError {
         code(akh::akh_config::parse),
         help(
             "Check akh.toml for TOML syntax errors and that field types match — e.g. \
-             `[ollama_endpoint]` needs `kind = \"local\"` or `kind = \"cloud\"`, and \
-             `path_mode` is `\"local\"` or `\"remote\"`."
+             `[ollama_endpoint]` needs `kind = \"local\"` or `kind = \"cloud\"`, \
+             `path_mode` is `\"local\"` or `\"remote\"`, and `[autonomy.budget]` accepts \
+             only `max_tokens_per_day` and `max_turns_per_day`."
         )
     )]
     Parse { path: String, message: String },
@@ -97,6 +98,14 @@ pub enum AkhConfigError {
         )
     )]
     MissingGrugModel { akh: String },
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    McpServers(#[from] crate::agent::tools::mcp_config::McpServersConfigError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Board(#[from] crate::agent::djehuty::BoardConfigError),
 }
 
 /// One unrecognized key found while loading an `akh.toml`, surfaced so the
@@ -178,7 +187,12 @@ impl Default for OllamaEndpoint {
 /// itself — the akh still has all its own tools. Default policy is therefore
 /// graceful degradation: a server that fails discovery is skipped (with a
 /// visible warning in the turn), not fatal to the session.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Also carries the akh's own **static** MCP servers (`[[mcp.servers]]`,
+/// Phase 53i / ADR 113 decision 9): external MCP servers whose tools are
+/// registered into the akh's persistent tool registry at agent init as
+/// `mcp__<server>__<tool>`. See [`crate::agent::tools::mcp_config`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpConfig {
     /// Opt-in "unsafe" stance: fail the whole turn if any client-pushed MCP
     /// server does not come back from discovery, instead of continuing with
@@ -188,17 +202,82 @@ pub struct McpConfig {
     /// this at the ACP layer regardless of what is set here.
     #[serde(default)]
     pub require_pushed_mcp: bool,
+
+    /// Static per-akh MCP servers (`[[mcp.servers]]`). Empty by default.
+    /// Declared after the scalar above so it serializes after it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<crate::agent::tools::mcp_config::McpServerSpec>,
 }
 
-/// Per-akh background-automation gating (consumed by P5).
+/// Per-akh memory hygiene (`[memory]`, Phase 53j, ADR 113).
 ///
-/// `enabled` is the master switch and defaults to **off** — a fresh akh runs no
-/// background tasks. When enabled, `tasks` provides per-task overrides keyed by
-/// the daemon task name (e.g. `"consolidation"`, `"reflection"`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AutonomyConfig {
-    /// Master switch. When false, no background automation runs (default).
+/// ```toml
+/// [memory]
+/// contradiction_policy = "warn"   # "warn" (default) | "replace" | "reject"
+/// hygiene_batch = 1000            # max graph mutations per hygiene pass
+/// ```
+///
+/// `contradiction_policy` sets what `add_triple` does with a detected
+/// contradiction (warn and insert, replace the conflicting edge, or refuse
+/// the write) and how the daemon's memory-hygiene pass repairs existing
+/// contradictions on functional predicates. Predicates a schema pack
+/// declares `single_valued` are never contradictions: the newest value
+/// supersedes the older ones under every policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryConfig {
+    /// Contradiction policy for this akh's engine and hygiene repair.
     #[serde(default)]
+    pub contradiction_policy: crate::engine::ContradictionPolicy,
+    /// Upper bound on graph mutations per memory-hygiene pass. `0` makes the
+    /// pass report-only.
+    #[serde(default = "default_hygiene_batch")]
+    pub hygiene_batch: usize,
+}
+
+fn default_hygiene_batch() -> usize {
+    crate::schema::DEFAULT_HYGIENE_BATCH
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            contradiction_policy: crate::engine::ContradictionPolicy::default(),
+            hygiene_batch: default_hygiene_batch(),
+        }
+    }
+}
+
+impl MemoryConfig {
+    /// Whether every field is at its default (the table is then omitted
+    /// when the config is saved).
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Per-akh background-automation gating (P5; defaults per ADR 113 decision 6).
+///
+/// `enabled` is the master switch and defaults to **on**: every akh runs its
+/// background tasks, and LLM-cost tasks are bounded by `budget` (Phase 53b).
+/// `tasks` provides per-task overrides keyed by the daemon task name
+/// ([`DaemonTask::as_str`](crate::agent::autonomy::DaemonTask::as_str), for
+/// example `"consolidation"` or `"reflection"`).
+///
+/// ```toml
+/// [autonomy]
+/// enabled = true
+/// tasks = { knowledge_elicitation = false }
+///
+/// [autonomy.budget]
+/// max_tokens_per_day = 250000
+/// max_turns_per_day = 40
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutonomyConfig {
+    /// Master switch. When false, only always-on infrastructure (session
+    /// persistence, triggers, reactor schedules) and explicitly enabled tasks
+    /// run. Defaults to true (ADR 113).
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Per-task enable/disable overrides keyed by daemon task name. An explicit
     /// override **always wins** over the master switch — so a single task can be
@@ -206,6 +285,27 @@ pub struct AutonomyConfig {
     /// or turned off with the master on.
     #[serde(default)]
     pub tasks: std::collections::BTreeMap<String, bool>,
+    /// Daily limits for LLM-cost background work (librarian, knowledge
+    /// elicitation, knowledge extraction via an external API, reactor model
+    /// turns). Defaults to 250 000 tokens and 40 turns per UTC day.
+    #[serde(default)]
+    pub budget: crate::agent::autonomy::AutonomyBudget,
+    /// Which tools the idle OODA cycle may choose on its own. Defaults to
+    /// `safe` (manifest `Safe`, not MCP-proxied). `all` takes effect only
+    /// together with an explicit `tasks.idle_cycle = true`.
+    #[serde(default)]
+    pub idle_cycle_tools: crate::agent::autonomy::IdleCycleTools,
+}
+
+impl Default for AutonomyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tasks: std::collections::BTreeMap::new(),
+            budget: crate::agent::autonomy::AutonomyBudget::default(),
+            idle_cycle_tools: crate::agent::autonomy::IdleCycleTools::default(),
+        }
+    }
 }
 
 /// Which execution backend an akh's executor-facing tools
@@ -323,6 +423,52 @@ pub enum ExecBackendConfig {
     /// kind = "none"
     /// ```
     None,
+    /// Run executor-facing tools in a sandbox workspace that akhsbxd
+    /// allocates and akhexecd operates
+    /// (`crate::backend::execd::ExecdBackend`, Phase 53c / ADR 113 decision
+    /// 3). This is the deployed-mode executor: no side effect runs in
+    /// akhomed's address space.
+    ///
+    /// ```toml
+    /// [exec]
+    /// kind = "execd"
+    /// sandbox_url = "https://akhsbxd.lab.internal"
+    /// sandbox_token_file = "/run/akh/credentials/akhsbxd-token"
+    /// profile = "rust-workspace"
+    /// principal = "janus"
+    /// # executor_url = "http://127.0.0.1:8413"      # default: akhsbxd gateway
+    /// # executor_token_file = "/run/akh/credentials/akhexecd-token"
+    /// # poll_wait_ms = 5000
+    /// # allow_insecure_http = false  # plain http only to loopback unless true
+    /// ```
+    Execd {
+        /// akhsbxd base URL.
+        sandbox_url: String,
+        /// Bearer token file for akhsbxd (principal with the `session` role).
+        sandbox_token_file: std::path::PathBuf,
+        /// akhexecd base URL for direct operations. Omit to use akhsbxd's
+        /// `/v1/executors/{sandbox}/…` gateway (the default; the token then
+        /// also needs the `executor_proxy` role at akhsbxd).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        executor_url: Option<String>,
+        /// Bearer token file for akhexecd operations (role `session` there).
+        /// Omit to reuse `sandbox_token_file`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        executor_token_file: Option<std::path::PathBuf>,
+        /// akhsbxd workspace profile to allocate from.
+        profile: String,
+        /// Principal the allocation is made for.
+        principal: String,
+        /// Server-side wait per `exec_poll`, 1..=10000 ms.
+        #[serde(default = "default_execd_poll_wait_ms")]
+        poll_wait_ms: u64,
+        /// Accept plain `http://` URLs to non-loopback hosts. The bearer
+        /// tokens then cross the link in clear text; set it only for a
+        /// trusted private link. Loopback (`localhost`, `127.0.0.1`, `[::1]`)
+        /// never needs it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_insecure_http: bool,
+    },
 }
 
 impl ExecBackendConfig {
@@ -399,10 +545,68 @@ impl ExecBackendConfig {
         }
         Some(cfg)
     }
+
+    /// Translate `kind = "execd"` into the config
+    /// [`crate::backend::execd::ExecdBackend::connect`] takes, minting a fresh
+    /// allocation session for `workspace`. `None` for other kinds.
+    #[cfg(feature = "execd-executor")]
+    pub fn to_execd_config(&self, workspace: &str) -> Option<crate::backend::execd::ExecdConfig> {
+        use crate::backend::execd::{ExecdConfig, ExecutorRoute};
+        let Self::Execd {
+            sandbox_url,
+            sandbox_token_file,
+            executor_url,
+            executor_token_file,
+            profile,
+            principal,
+            poll_wait_ms,
+            allow_insecure_http,
+        } = self
+        else {
+            return None;
+        };
+        let token_file = executor_token_file
+            .clone()
+            .unwrap_or_else(|| sandbox_token_file.clone());
+        let route = match executor_url {
+            Some(url) => ExecutorRoute::Direct {
+                url: url.clone(),
+                token_file,
+            },
+            None => ExecutorRoute::ViaSandbox { token_file },
+        };
+        Some(
+            ExecdConfig::new(
+                sandbox_url.clone(),
+                sandbox_token_file.clone(),
+                profile.clone(),
+                principal.clone(),
+                workspace,
+            )
+            .with_executor(route)
+            .with_poll_wait(std::time::Duration::from_millis(*poll_wait_ms))
+            .with_insecure_http(*allow_insecure_http),
+        )
+    }
+
+    /// Short, stable name of the variant for logs and diagnostics.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::InProcess => "in-process",
+            Self::LocalDrop { .. } => "local-drop",
+            Self::Remote { .. } => "remote",
+            Self::None => "none",
+            Self::Execd { .. } => "execd",
+        }
+    }
 }
 
 fn default_remote_port() -> u16 {
     22
+}
+
+fn default_execd_poll_wait_ms() -> u64 {
+    5_000
 }
 
 impl Default for ExecBackendConfig {
@@ -414,11 +618,73 @@ impl Default for ExecBackendConfig {
 impl AutonomyConfig {
     /// Whether a named daemon task should run. An explicit per-task override
     /// takes precedence; otherwise the task follows the master switch.
+    ///
+    /// This is the raw config rule. The daemon gates with
+    /// [`AutonomyConfig::gate`], which also applies the idle-cycle executor
+    /// default and the always-on infrastructure tasks.
     pub fn task_enabled(&self, task: &str) -> bool {
         match self.tasks.get(task) {
             Some(&v) => v,
             None => self.enabled,
         }
+    }
+
+    /// Resolve whether `task` runs for an akh whose effective executor is
+    /// `exec`.
+    ///
+    /// Order: always-on infrastructure runs; an explicit `tasks` override
+    /// wins; a task that follows another one (harvest follows the sleep
+    /// cycle) takes that task's gate; the master switch applies, except to
+    /// tasks that were only ever env-gated (librarian, OpenClaw sync); the
+    /// idle OODA cycle then defaults off while executor tools run in-process
+    /// (ADR 113 decision 4).
+    pub fn gate(
+        &self,
+        task: crate::agent::autonomy::DaemonTask,
+        exec: crate::agent::autonomy::ExecPlacement,
+    ) -> crate::agent::autonomy::TaskGate {
+        use crate::agent::autonomy::{
+            DaemonTask, DisabledReason, ExecPlacement, TaskGate, TaskGating,
+        };
+        let gating = task.gating();
+        if gating == TaskGating::AlwaysOn {
+            return TaskGate::Enabled;
+        }
+        match (self.tasks.get(task.as_str()), gating) {
+            (Some(true), _) => TaskGate::Enabled,
+            (Some(false), _) => TaskGate::Disabled(DisabledReason::ExplicitlyDisabled),
+            (None, TaskGating::FollowsTask(leader)) => match self.gate(leader, exec) {
+                TaskGate::Enabled => TaskGate::Enabled,
+                TaskGate::Disabled(reason) => TaskGate::Disabled(DisabledReason::FollowsTask {
+                    task: leader,
+                    reason: Box::new(reason),
+                }),
+            },
+            (None, TaskGating::IgnoresMasterSwitch) => TaskGate::Enabled,
+            (None, _) if !self.enabled => TaskGate::Disabled(DisabledReason::MasterSwitchOff),
+            (None, _) if task == DaemonTask::IdleCycle && exec == ExecPlacement::InProcess => {
+                TaskGate::Disabled(DisabledReason::InProcessExecutor)
+            }
+            (None, _) => TaskGate::Enabled,
+        }
+    }
+
+    /// The tool policy the idle OODA cycle runs with: safe-only unless
+    /// `idle_cycle_tools = "all"` *and* `tasks.idle_cycle = true` are both
+    /// set.
+    pub fn idle_cycle_candidate_policy(&self) -> crate::agent::ooda::ToolCandidatePolicy {
+        self.idle_cycle_tools
+            .candidate_policy(self.tasks.get("idle_cycle") == Some(&true))
+    }
+
+    /// `tasks` keys that name no [`DaemonTask`](crate::agent::autonomy::DaemonTask).
+    /// Such a key has no effect; the daemon warns about each one at start.
+    pub fn unknown_task_names(&self) -> Vec<&str> {
+        self.tasks
+            .keys()
+            .map(String::as_str)
+            .filter(|name| name.parse::<crate::agent::autonomy::DaemonTask>().is_err())
+            .collect()
     }
 }
 
@@ -646,7 +912,8 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_runtime: Option<crate::agent::runtime::RuntimeConfig>,
 
-    /// Background-automation gating (P5). Defaults to fully disabled.
+    /// Background-automation gating (P5). Defaults to enabled with a daily
+    /// LLM budget (ADR 113 decision 6).
     #[serde(default)]
     pub autonomy: AutonomyConfig,
 
@@ -654,6 +921,24 @@ pub struct AkhConfig {
     /// to graceful degradation (`require_pushed_mcp = false`).
     #[serde(default)]
     pub mcp: McpConfig,
+
+    /// This akh's own Agent Board identity (Phase 53): URL + token source (+
+    /// own agent id for inbox ingest). Reactor run reports, `DjehutyReply` and
+    /// board ingress use it; `None` falls back to the process-wide
+    /// `DJEHUTY_BOARD_*` environment (one identity for every akh on the host).
+    ///
+    /// ```toml
+    /// [board]
+    /// url = "https://board.lab.home"
+    /// auth = { token_env = "ROMAN_BOARD_JANUS" }
+    /// agent_id = "019d…"
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<crate::agent::djehuty::BoardConfig>,
+
+    /// Memory hygiene: contradiction policy and hygiene batch (Phase 53j).
+    #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
+    pub memory: MemoryConfig,
 
     /// Delegation / external scheduling (Phase 36). Parsed now; the
     /// `DelegationManager` is wired behind the `delegation` feature in its phase.
@@ -698,6 +983,8 @@ impl Default for AkhConfig {
             agent_runtime: None,
             autonomy: AutonomyConfig::default(),
             mcp: McpConfig::default(),
+            board: None,
+            memory: MemoryConfig::default(),
             delegation: None,
             exec: None,
         }
@@ -799,6 +1086,10 @@ impl AkhConfig {
             path: path.display().to_string(),
             message: e.to_string(),
         })?;
+        crate::agent::tools::mcp_config::validate_mcp_servers(&cfg.mcp.servers)?;
+        if let Some(board) = &cfg.board {
+            board.validate(cfg.name())?;
+        }
         Ok((cfg, Self::unknown_keys(&raw)))
     }
 
@@ -838,6 +1129,11 @@ impl AkhConfig {
     fn known_tables() -> &'static [(&'static str, &'static [&'static str])] {
         &[
             ("ollama_endpoint", &["kind", "base_url", "api_key"]),
+            // `[[mcp.servers]]` entries are checked by serde itself
+            // (`deny_unknown_fields` on `McpServerSpec`).
+            ("mcp", &["require_pushed_mcp", "servers"]),
+            // `auth` is checked by serde (`deny_unknown_fields` on `BoardAuth`).
+            ("board", &["url", "auth", "agent_id", "allow_insecure_http"]),
             (
                 "agent_runtime",
                 &[
@@ -859,7 +1155,11 @@ impl AkhConfig {
                     "temperature",
                 ],
             ),
-            ("autonomy", &["enabled", "tasks"]),
+            (
+                "autonomy",
+                &["enabled", "tasks", "budget", "idle_cycle_tools"],
+            ),
+            ("memory", &["contradiction_policy", "hygiene_batch"]),
             (
                 "delegation",
                 &[
@@ -868,7 +1168,7 @@ impl AkhConfig {
                     "daily_cost_budget_cents",
                     "per_task_max_cents",
                     "akhomed_url",
-                    "local",
+                    "native",
                     "remote",
                     "peers",
                 ],
@@ -885,6 +1185,13 @@ impl AkhConfig {
                     "workdir",
                     "shell",
                     "path",
+                    "sandbox_url",
+                    "sandbox_token_file",
+                    "executor_url",
+                    "executor_token_file",
+                    "profile",
+                    "principal",
+                    "poll_wait_ms",
                 ],
             ),
         ]
@@ -1156,7 +1463,17 @@ mod tests {
         let cfg = AkhConfig::default();
         assert!(cfg.is_main, "akh defaults to MAIN");
         assert_eq!(cfg.path_mode, PathMode::Local);
-        assert!(!cfg.autonomy.enabled, "automation is off by default");
+        assert!(
+            cfg.autonomy.enabled,
+            "automation is on by default (ADR 113 decision 6)"
+        );
+        assert_eq!(
+            cfg.autonomy.budget,
+            crate::agent::autonomy::AutonomyBudget {
+                max_tokens_per_day: 250_000,
+                max_turns_per_day: 40,
+            }
+        );
         assert_eq!(cfg.ollama_endpoint, OllamaEndpoint::default());
         assert!(cfg.model.is_none());
         assert!(cfg.system_prompt.is_none());
@@ -1204,8 +1521,11 @@ mod tests {
     #[test]
     fn autonomy_task_enabled_override_wins() {
         let mut a = AutonomyConfig::default();
-        // Master off (default) → every task off.
-        assert!(!a.enabled);
+        // Master on by default (ADR 113); switch it off to test overrides.
+        assert!(a.enabled);
+        assert!(a.task_enabled("reflection"));
+        a.enabled = false;
+        // Master off → every unlisted task off.
         assert!(!a.task_enabled("reflection"));
         // Explicit on with the master off → exactly that task runs.
         a.tasks.insert("goal_generation".into(), true);
@@ -1235,6 +1555,302 @@ mod tests {
     }
 
     #[test]
+    fn autonomy_gate_applies_decision_4_idle_cycle_default() {
+        use crate::agent::autonomy::{DaemonTask, DisabledReason, ExecPlacement, TaskGate};
+        let mut a = AutonomyConfig::default();
+        // In-process exec: idle OODA tool use is off, everything else on.
+        assert_eq!(
+            a.gate(DaemonTask::IdleCycle, ExecPlacement::InProcess),
+            TaskGate::Disabled(DisabledReason::InProcessExecutor)
+        );
+        assert_eq!(
+            a.gate(DaemonTask::Reflection, ExecPlacement::InProcess),
+            TaskGate::Enabled
+        );
+        // Contained or disabled exec: idle cycle on.
+        for exec in [ExecPlacement::Contained, ExecPlacement::Disabled] {
+            assert_eq!(a.gate(DaemonTask::IdleCycle, exec), TaskGate::Enabled);
+        }
+        // An explicit override wins over the executor default.
+        a.tasks.insert("idle_cycle".into(), true);
+        assert_eq!(
+            a.gate(DaemonTask::IdleCycle, ExecPlacement::InProcess),
+            TaskGate::Enabled
+        );
+        // Master off: gated tasks stop, infrastructure keeps running.
+        a.enabled = false;
+        assert_eq!(
+            a.gate(DaemonTask::Reflection, ExecPlacement::Contained),
+            TaskGate::Disabled(DisabledReason::MasterSwitchOff)
+        );
+        for infra in [
+            DaemonTask::Persist,
+            DaemonTask::TriggerEvaluation,
+            DaemonTask::Reactor,
+        ] {
+            assert_eq!(a.gate(infra, ExecPlacement::InProcess), TaskGate::Enabled);
+        }
+        a.tasks.insert("librarian".into(), false);
+        a.enabled = true;
+        assert_eq!(
+            a.gate(DaemonTask::Librarian, ExecPlacement::Contained),
+            TaskGate::Disabled(DisabledReason::ExplicitlyDisabled)
+        );
+    }
+
+    #[test]
+    fn board_table_parses_is_known_and_round_trips() {
+        let src = r#"
+            name = "janus"
+            model = "glm-5.3"
+            [board]
+            url = "https://board.lab.home"
+            auth = { token_env = "ROMAN_BOARD_JANUS" }
+            agent_id = "019d9844-ce74-7993-a9f0-c953b8f04a4e"
+        "#;
+        let cfg: AkhConfig = toml::from_str(src).expect("parse");
+        let board = cfg.board.as_ref().expect("[board] parsed");
+        assert_eq!(
+            board.auth,
+            crate::agent::djehuty::BoardAuth::TokenEnv("ROMAN_BOARD_JANUS".into())
+        );
+        assert!(board.own_agent_id().is_some());
+        board.validate("janus").expect("valid");
+        let raw: toml::Value = toml::from_str(src).unwrap();
+        assert!(
+            AkhConfig::unknown_keys(&raw).is_empty(),
+            "[board] keys are known"
+        );
+
+        // Saved configs keep `model` above the tables and re-load unchanged.
+        let saved = toml::to_string(&cfg).expect("serialize");
+        let reloaded: AkhConfig = toml::from_str(&saved).expect("reload");
+        assert_eq!(reloaded.board, cfg.board);
+        assert_eq!(reloaded.model.as_deref(), Some("glm-5.3"));
+
+        // A typo inside [board] and an unknown auth kind are refused.
+        assert!(
+            toml::from_str::<AkhConfig>(
+                "name = \"j\"\n[board]\nurl = \"https://b\"\nauth = { token_envv = \"X\" }\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn board_table_rejects_plain_http_and_relative_token_files() {
+        let insecure: AkhConfig = toml::from_str(
+            "name = \"j\"\n[board]\nurl = \"http://board.lab.home\"\nauth = { token_env = \"X\" }\n",
+        )
+        .unwrap();
+        let err = insecure.board.unwrap().validate("j").unwrap_err();
+        assert_eq!(
+            miette::Diagnostic::code(&err).unwrap().to_string(),
+            "akh::board::config::insecure_http"
+        );
+        let relative: AkhConfig = toml::from_str(
+            "name = \"j\"\n[board]\nurl = \"http://127.0.0.1:8080\"\nauth = { token_file = \"b.key\" }\n",
+        )
+        .unwrap();
+        let err = relative.board.unwrap().validate("j").unwrap_err();
+        assert_eq!(
+            miette::Diagnostic::code(&err).unwrap().to_string(),
+            "akh::board::config::token_file"
+        );
+    }
+
+    #[test]
+    fn master_switch_off_keeps_pre_53b_harvest_librarian_and_openclaw_behaviour() {
+        use crate::agent::autonomy::{DaemonTask, DisabledReason, ExecPlacement, TaskGate};
+        let exec = ExecPlacement::Contained;
+        // A pre-53b TOML: `[autonomy] enabled = false`.
+        let mut a = AutonomyConfig {
+            enabled: false,
+            ..AutonomyConfig::default()
+        };
+        // Harvest used to run inside the sleep cycle: it follows its gate.
+        assert_eq!(
+            a.gate(DaemonTask::Harvest, exec),
+            TaskGate::Disabled(DisabledReason::FollowsTask {
+                task: DaemonTask::SleepCycle,
+                reason: Box::new(DisabledReason::MasterSwitchOff),
+            })
+        );
+        a.tasks.insert("sleep_cycle".into(), true);
+        assert_eq!(a.gate(DaemonTask::Harvest, exec), TaskGate::Enabled);
+        // An explicit harvest override still wins.
+        a.tasks.insert("harvest".into(), false);
+        assert_eq!(
+            a.gate(DaemonTask::Harvest, exec),
+            TaskGate::Disabled(DisabledReason::ExplicitlyDisabled)
+        );
+        // Librarian and OpenClaw sync were only env-gated: the master switch
+        // does not turn them off (their env gates apply in the daemon).
+        assert_eq!(a.gate(DaemonTask::Librarian, exec), TaskGate::Enabled);
+        assert_eq!(a.gate(DaemonTask::OpenclawSync, exec), TaskGate::Enabled);
+        a.tasks.insert("openclaw_sync".into(), false);
+        assert_eq!(
+            a.gate(DaemonTask::OpenclawSync, exec),
+            TaskGate::Disabled(DisabledReason::ExplicitlyDisabled)
+        );
+        // Master on: harvest follows the (enabled) sleep cycle, or its own
+        // sleep-cycle opt-out.
+        let mut on = AutonomyConfig::default();
+        assert_eq!(on.gate(DaemonTask::Harvest, exec), TaskGate::Enabled);
+        on.tasks.insert("sleep_cycle".into(), false);
+        assert!(matches!(
+            on.gate(DaemonTask::Harvest, exec),
+            TaskGate::Disabled(DisabledReason::FollowsTask { .. })
+        ));
+    }
+
+    #[test]
+    fn idle_cycle_tools_default_safe_and_all_needs_an_explicit_idle_cycle() {
+        use crate::agent::autonomy::IdleCycleTools;
+        use crate::agent::ooda::ToolCandidatePolicy;
+        let cfg: AkhConfig = toml::from_str("name = \"a\"").unwrap();
+        assert_eq!(cfg.autonomy.idle_cycle_tools, IdleCycleTools::Safe);
+        assert_eq!(
+            cfg.autonomy.idle_cycle_candidate_policy(),
+            ToolCandidatePolicy::SafeNonMcp
+        );
+        // `all` alone is not enough: the cycle stays safe-only.
+        let src = r#"
+            name = "a"
+            [autonomy]
+            idle_cycle_tools = "all"
+        "#;
+        let cfg: AkhConfig = toml::from_str(src).unwrap();
+        assert_eq!(cfg.autonomy.idle_cycle_tools, IdleCycleTools::All);
+        assert_eq!(
+            cfg.autonomy.idle_cycle_candidate_policy(),
+            ToolCandidatePolicy::SafeNonMcp
+        );
+        let raw: toml::Value = toml::from_str(src).unwrap();
+        assert!(AkhConfig::unknown_keys(&raw).is_empty());
+        // `all` + explicit `tasks.idle_cycle = true` opts in.
+        let cfg: AkhConfig = toml::from_str(
+            r#"
+            name = "a"
+            [autonomy]
+            idle_cycle_tools = "all"
+            tasks = { idle_cycle = true }
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.autonomy.idle_cycle_candidate_policy(),
+            ToolCandidatePolicy::Unrestricted
+        );
+        assert!(
+            toml::from_str::<AkhConfig>("name = \"a\"\n[autonomy]\nidle_cycle_tools = \"most\"")
+                .is_err(),
+            "an unknown policy is refused"
+        );
+    }
+
+    #[test]
+    fn autonomy_budget_typos_are_refused() {
+        let src = r#"
+            name = "janus"
+            [autonomy.budget]
+            max_token_per_day = 1000
+        "#;
+        let error = toml::from_str::<AkhConfig>(src).unwrap_err().to_string();
+        assert!(
+            error.contains("max_token_per_day") && error.contains("max_tokens_per_day"),
+            "the error names the typo and the valid keys: {error}"
+        );
+    }
+
+    #[test]
+    fn autonomy_budget_parses_and_is_a_known_table_key() {
+        let src = r#"
+            name = "janus"
+            [autonomy]
+            enabled = true
+            tasks = { idle_cycle = false, seshat_curaton = true }
+            [autonomy.budget]
+            max_turns_per_day = 12
+        "#;
+        let cfg: AkhConfig = toml::from_str(src).expect("parse");
+        assert_eq!(cfg.autonomy.budget.max_turns_per_day, 12);
+        assert_eq!(
+            cfg.autonomy.budget.max_tokens_per_day,
+            crate::agent::autonomy::AutonomyBudget::DEFAULT_MAX_TOKENS_PER_DAY,
+            "an omitted limit keeps its default"
+        );
+        assert_eq!(cfg.autonomy.unknown_task_names(), vec!["seshat_curaton"]);
+        let raw: toml::Value = toml::from_str(src).unwrap();
+        assert!(
+            AkhConfig::unknown_keys(&raw).is_empty(),
+            "`budget` is a known [autonomy] key"
+        );
+        // Round-trips through serialization.
+        let back: AkhConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.autonomy, cfg.autonomy);
+    }
+
+    #[test]
+    fn memory_table_sets_the_contradiction_policy_per_akh() {
+        use crate::engine::ContradictionPolicy;
+
+        // Default: unchanged engine behaviour (warn), default batch.
+        let cfg: AkhConfig = toml::from_str(r#"name = "vesta""#).unwrap();
+        assert_eq!(cfg.memory, MemoryConfig::default());
+        assert_eq!(cfg.memory.contradiction_policy, ContradictionPolicy::Warn);
+        assert_eq!(
+            cfg.memory.hygiene_batch,
+            crate::schema::DEFAULT_HYGIENE_BATCH
+        );
+        assert!(
+            !toml::to_string(&cfg).unwrap().contains("[memory]"),
+            "a default [memory] is not written back"
+        );
+
+        for (value, policy) in [
+            ("warn", ContradictionPolicy::Warn),
+            ("replace", ContradictionPolicy::Replace),
+            ("reject", ContradictionPolicy::Reject),
+        ] {
+            let src = format!(
+                "name = \"vesta\"\n[memory]\ncontradiction_policy = \"{value}\"\nhygiene_batch = 50\n"
+            );
+            let cfg: AkhConfig = toml::from_str(&src).expect("parse");
+            assert_eq!(cfg.memory.contradiction_policy, policy);
+            assert_eq!(cfg.memory.hygiene_batch, 50);
+            let raw: toml::Value = toml::from_str(&src).unwrap();
+            assert!(AkhConfig::unknown_keys(&raw).is_empty());
+            let back: AkhConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.memory, cfg.memory);
+        }
+
+        // An unknown policy is a parse error, not a silent default.
+        assert!(
+            toml::from_str::<AkhConfig>(
+                "name = \"vesta\"\n[memory]\ncontradiction_policy = \"ignore\"\n"
+            )
+            .is_err()
+        );
+        // A typo inside [memory] is flagged; a top-level scalar misplaced
+        // under it is called out as the TOML-ordering footgun.
+        let raw: toml::Value = toml::from_str(
+            "name = \"vesta\"\n[memory]\ncontradiction_polcy = \"replace\"\nmodel = \"x\"\n",
+        )
+        .unwrap();
+        let unknown = AkhConfig::unknown_keys(&raw);
+        assert!(
+            unknown
+                .iter()
+                .any(|k| k.path == "memory.contradiction_polcy")
+        );
+        assert!(
+            unknown.iter().any(|k| k.path == "memory.model"
+                && k.misplaced_under_table.as_deref() == Some("memory"))
+        );
+    }
+
+    #[test]
     fn legacy_workspace_toml_loads_as_akh_config() {
         // A pre-pivot per-workspace TOML carries only WorkspaceConfig fields.
         let legacy = r#"
@@ -1252,7 +1868,9 @@ mod tests {
         assert!(cfg.system_prompt.is_none());
         assert!(cfg.related_workspaces.is_empty());
         assert_eq!(cfg.path_mode, PathMode::Local);
-        assert!(!cfg.autonomy.enabled);
+        // No [autonomy] table → the ADR 113 default (on, budgeted).
+        assert!(cfg.autonomy.enabled);
+        assert_eq!(cfg.autonomy, AutonomyConfig::default());
     }
 
     #[test]
@@ -1963,5 +2581,180 @@ workdir = "/Users/toasty/ws"
         assert!(!cfg.is_local_drop_exec());
         assert!(!cfg.is_remote_exec());
         assert!(cfg.to_local_drop_config().is_none());
+    }
+
+    // ── Phase 53i: static per-akh MCP servers ────────────────────────────────
+
+    const MCP_TOML: &str = r#"
+name = "minerva"
+model = "glm-5.3"
+
+[ollama_endpoint]
+kind = "local"
+
+[mcp]
+require_pushed_mcp = false
+
+[[mcp.servers]]
+name = "anima"
+url = "https://anima.wegmueller.it/mcp"
+auth = { token_env = "ROMAN_ANIMA_TOKEN" }
+
+[[mcp.servers]]
+name = "observer"
+url = "http://127.0.0.1:18436/mcp"
+tools = ["monitoring_snapshot"]
+timeout_secs = 60
+auth = { token_file = "/tmp/observer.key" }
+"#;
+
+    #[test]
+    fn mcp_servers_parse_with_no_unknown_keys() {
+        let cfg: AkhConfig = toml::from_str(MCP_TOML).expect("parse");
+        assert_eq!(cfg.mcp.servers.len(), 2);
+        assert_eq!(cfg.mcp.servers[0].name.as_str(), "anima");
+        assert_eq!(
+            cfg.mcp.servers[1].qualified_tool_name("monitoring_snapshot"),
+            "mcp__observer__monitoring_snapshot"
+        );
+        assert_eq!(cfg.model.as_deref(), Some("glm-5.3"));
+        let raw: toml::Value = toml::from_str(MCP_TOML).unwrap();
+        assert!(
+            AkhConfig::unknown_keys(&raw).is_empty(),
+            "{:?}",
+            AkhConfig::unknown_keys(&raw)
+        );
+    }
+
+    #[test]
+    fn mcp_servers_absent_means_none() {
+        let cfg: AkhConfig = toml::from_str("name = \"a\"\n").expect("parse");
+        assert!(cfg.mcp.servers.is_empty());
+        assert!(!cfg.mcp.require_pushed_mcp);
+    }
+
+    #[test]
+    fn mcp_unknown_table_key_is_reported() {
+        let raw: toml::Value = toml::from_str("name = \"a\"\n[mcp]\nservrs = []\n").expect("parse");
+        let unknown = AkhConfig::unknown_keys(&raw);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].path, "mcp.servrs");
+    }
+
+    #[test]
+    fn mcp_duplicate_servers_fail_load_with_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        std::fs::write(
+            &path,
+            "name = \"a\"\n\
+             [[mcp.servers]]\nname = \"board\"\nurl = \"http://127.0.0.1:1/mcp\"\n\
+             [[mcp.servers]]\nname = \"board\"\nurl = \"http://127.0.0.1:2/mcp\"\n",
+        )
+        .expect("write");
+        let err = AkhConfig::load_checked(&path).unwrap_err();
+        assert!(matches!(err, AkhConfigError::McpServers(_)), "{err:?}");
+        use miette::Diagnostic;
+        assert_eq!(
+            err.code().map(|c| c.to_string()).as_deref(),
+            Some("akh::mcp::config::invalid")
+        );
+        assert!(
+            err.related()
+                .is_some_and(|mut r| r.any(|d| d.to_string().contains("declared more than once")))
+        );
+    }
+
+    #[test]
+    fn mcp_bad_server_name_fails_parse() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        std::fs::write(
+            &path,
+            "name = \"a\"\n[[mcp.servers]]\nname = \"an ima\"\nurl = \"http://h/mcp\"\n",
+        )
+        .expect("write");
+        let err = AkhConfig::load_checked(&path).unwrap_err();
+        assert!(matches!(err, AkhConfigError::Parse { .. }), "{err:?}");
+        assert!(err.to_string().contains("invalid MCP server name"), "{err}");
+    }
+
+    #[test]
+    fn mcp_servers_round_trip_through_save_and_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        let cfg: AkhConfig = toml::from_str(MCP_TOML).expect("parse");
+        cfg.save(&path).expect("save");
+        let (loaded, unknown) = AkhConfig::load_checked(&path).expect("load");
+        // Scoped to `mcp`: a saved config also carries the flattened workspace
+        // `enabled` key, which the known-key list does not cover (pre-existing).
+        assert!(
+            !unknown.iter().any(|k| k.path.starts_with("mcp")),
+            "{unknown:?}"
+        );
+        assert_eq!(loaded.mcp, cfg.mcp);
+        assert_eq!(loaded.model, cfg.model);
+    }
+}
+
+#[cfg(all(test, feature = "execd-executor"))]
+mod execd_config_tests {
+    use super::*;
+    use crate::backend::execd::ExecutorRoute;
+
+    #[test]
+    fn execd_exec_table_parses_without_unknown_keys_and_translates() {
+        let raw = r#"
+name = "janus"
+[exec]
+kind = "execd"
+sandbox_url = "https://akhsbxd.lab"
+sandbox_token_file = "/run/akh/credentials/akhsbxd"
+profile = "rust-workspace"
+principal = "janus"
+"#;
+        let cfg: AkhConfig = toml::from_str(raw).unwrap();
+        assert!(AkhConfig::unknown_keys(&toml::from_str(raw).unwrap()).is_empty());
+        let exec = cfg.effective_exec(None);
+        assert_eq!(exec.kind_name(), "execd");
+        let execd = exec.to_execd_config("janus").unwrap();
+        assert_eq!(execd.profile, "rust-workspace");
+        assert_eq!(execd.poll_wait, std::time::Duration::from_millis(5_000));
+        assert!(execd.session_id.starts_with("akhomed-janus-"));
+        // Without executor_url/_token_file: the akhsbxd gateway with the sandbox token.
+        assert_eq!(
+            execd.executor,
+            ExecutorRoute::ViaSandbox {
+                token_file: "/run/akh/credentials/akhsbxd".into()
+            }
+        );
+        // Each translation mints a fresh allocation session.
+        assert_ne!(
+            exec.to_execd_config("janus").unwrap().session_id,
+            execd.session_id
+        );
+
+        let direct: AkhConfig = toml::from_str(&format!(
+            "{raw}executor_url = \"http://127.0.0.1:8413\"\n\
+             executor_token_file = \"/run/akh/credentials/akhexecd\"\npoll_wait_ms = 250\n"
+        ))
+        .unwrap();
+        let direct = direct
+            .effective_exec(None)
+            .to_execd_config("janus")
+            .unwrap();
+        assert_eq!(
+            direct.executor,
+            ExecutorRoute::Direct {
+                url: "http://127.0.0.1:8413".into(),
+                token_file: "/run/akh/credentials/akhexecd".into()
+            }
+        );
+        assert_eq!(direct.poll_wait, std::time::Duration::from_millis(250));
+        assert!(
+            ExecBackendConfig::InProcess
+                .to_execd_config("janus")
+                .is_none()
+        );
     }
 }

@@ -334,6 +334,28 @@ pub fn validate_checkout(request: &bootstrap::BootstrapRepository) -> Result<()>
     Ok(())
 }
 
+/// Where a routed event is delivered (Phase 53d, ADR 113 decision 4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RouteTarget {
+    /// Invoke an akhsessd automation (`POST /v1/automations/{automation}/invoke`
+    /// on the `sessions` endpoint). The pre-53d behaviour.
+    Automation { automation: String },
+    /// Admit the event into an akh's own reactor:
+    /// `POST {endpoints[endpoint].url}/v1/akhs/{akh}/events`. The akh wakes its
+    /// event schedules whose source is `<event source>/<event type>`.
+    Akh {
+        /// Name of a configured `endpoints` entry for akhomed's `/v1` API
+        /// (URL, CA and HTTPS policy come from there).
+        endpoint: String,
+        akh: String,
+        /// Bearer credential of the core principal holding the `event` role.
+        /// Absent = the endpoint's own credential.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_file: Option<PathBuf>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventRoute {
@@ -343,7 +365,30 @@ pub struct EventRoute {
     pub id: String,
     pub source: String,
     pub event_type: String,
-    pub automation: String,
+    /// Shorthand for `target = { kind = "automation", automation = ... }`,
+    /// kept so existing configs parse unchanged. Exactly one of `automation`
+    /// and `target` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<RouteTarget>,
+}
+
+impl EventRoute {
+    /// The resolved delivery target. Errors unless exactly one of
+    /// `automation` and `target` is set.
+    pub fn resolved_target(&self) -> Result<RouteTarget> {
+        match (&self.automation, &self.target) {
+            (Some(automation), None) => Ok(RouteTarget::Automation {
+                automation: automation.clone(),
+            }),
+            (None, Some(target)) => Ok(target.clone()),
+            _ => Err(Fault::invalid(format!(
+                "route {} must set exactly one of `automation` and `target`",
+                self.id
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -491,6 +536,10 @@ pub struct Config {
     pub git_publication: Vec<GitPublicationProfile>,
     #[serde(default = "unconfined")]
     pub confinement: String,
+    /// `deployed` refuses `Colocated` native runtimes (Phase 53 decision 7).
+    /// `AKH_DEPLOYMENT=deployed` has the same effect; see [`Config::deployment_mode`].
+    #[serde(default)]
+    pub deployment: DeploymentMode,
     /// How often akhsessd's dispatcher re-checks each session for stalled
     /// progress or a retirement that can now be finalized. Throttles the
     /// reconciliation *decision*, not the fast per-session dispatch retry.
@@ -511,6 +560,43 @@ pub struct Config {
 fn unconfined() -> String {
     "unconfined".into()
 }
+
+/// The fault a deployed service returns for a `Colocated` runtime. The message
+/// carries its own remedy because `Fault` has no separate help field.
+pub fn colocated_forbidden(subject: &str) -> Fault {
+    Fault::new(
+        "colocated_forbidden",
+        format!(
+            "{subject}: execution_mode \"colocated\" is forbidden in deployed mode; \
+             native runtime tools would run in the runtime's own address space. \
+             Set execution_mode = \"brokered\" with installed conformance \
+             evidence so workspace effects go through akhsbxd/akhexecd, or run this \
+             service with deployment = \"development\" and without AKH_DEPLOYMENT=deployed \
+             for local development only."
+        ),
+    )
+}
+/// Diagnostic code for a deployed runtime profile without an explicit
+/// `execution_mode`.
+pub const EXECUTION_MODE_REQUIRED: &str = "akh::runtime::execution_mode_required";
+
+/// The fault a deployed service returns for runtime profiles that omit
+/// `execution_mode`. The omitted value means `colocated` (the development
+/// default), so a deployed service will not guess: the operator states it.
+pub fn execution_mode_required(subject: &str) -> Fault {
+    Fault::new(
+        EXECUTION_MODE_REQUIRED,
+        format!(
+            "{subject}: execution_mode is not set, and deployed mode requires it explicitly \
+             (an omitted value means \"colocated\", which deployed services refuse). \
+             help: add execution_mode = \"brokered\" to {subject} and install its \
+             conformance evidence (akh-runtime-profile), so workspace effects go through \
+             akhsbxd/akhexecd; for local development only, run with deployment = \
+             \"development\" and without AKH_DEPLOYMENT=deployed."
+        ),
+    )
+}
+
 fn default_reconciliation_interval_ms() -> u64 {
     5 * 60_000
 }
@@ -532,8 +618,50 @@ impl Config {
         config.validate()?;
         Ok(config)
     }
+    /// The effective deployment mode: the configured value, made stricter by
+    /// `AKH_DEPLOYMENT=deployed` (the environment can never relax it).
+    pub fn deployment_mode(&self) -> Result<DeploymentMode> {
+        DeploymentMode::resolve_from_env(self.deployment)
+            .map_err(|error| Fault::invalid(error.to_string()))
+    }
+
+    /// Refuse runtime profiles and akh bindings that would execute workspace
+    /// effects in the runtime's own address space while deployed (ADR 113
+    /// decision 3). A development configuration is always accepted.
+    pub fn validate_deployment(&self, mode: DeploymentMode) -> Result<()> {
+        if !mode.is_deployed() {
+            return Ok(());
+        }
+        let omitted = self
+            .runtimes
+            .iter()
+            .filter(|(_, profile)| profile.execution_mode_setting().is_none())
+            .map(|(id, _)| format!("runtimes.{id}"))
+            .collect::<Vec<_>>();
+        if !omitted.is_empty() {
+            return Err(execution_mode_required(&omitted.join(", ")));
+        }
+        let colocated = self
+            .runtimes
+            .iter()
+            .filter(|(_, profile)| profile.execution_mode() == ExecutionMode::Colocated)
+            .map(|(id, _)| format!("runtimes.{id}"))
+            .chain(
+                self.akhs
+                    .iter()
+                    .filter(|(_, akh)| akh.runtime.execution_mode == ExecutionMode::Colocated)
+                    .map(|(id, _)| format!("akhs.{id}.runtime")),
+            )
+            .collect::<Vec<_>>();
+        if colocated.is_empty() {
+            return Ok(());
+        }
+        Err(colocated_forbidden(&colocated.join(", ")))
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_key(&self.service_id)?;
+        self.validate_deployment(self.deployment_mode()?)?;
         if let Some(StoreConfig::Postgres { url_env, schema }) = &self.store
             && (url_env.is_empty() || schema.is_empty())
         {
@@ -626,6 +754,29 @@ impl Config {
                 return Err(Fault::invalid(
                     "Djehuty inboxes require unique sources, protocols and positive bounded polling",
                 ));
+            }
+        }
+        let mut route_ids = std::collections::HashSet::new();
+        for route in &self.routes {
+            validate_key(&route.id)?;
+            validate_key(&route.source)?;
+            validate_key(&route.event_type)?;
+            if !route_ids.insert(&route.id) {
+                return Err(Fault::invalid("event route IDs must be unique"));
+            }
+            match route.resolved_target()? {
+                RouteTarget::Automation { automation } => validate_key(&automation)?,
+                RouteTarget::Akh {
+                    endpoint,
+                    akh,
+                    token_file,
+                } => {
+                    self.endpoint(&endpoint)?;
+                    validate_key(&akh)?;
+                    if token_file.as_ref().is_some_and(|path| !path.is_absolute()) {
+                        return Err(Fault::invalid("route target token_file must be absolute"));
+                    }
+                }
             }
         }
         for (id, automation) in &self.automations {
@@ -787,5 +938,75 @@ mod endpoint_tests {
             .unwrap();
         assert_eq!(response.text().await.unwrap(), "restored");
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod deployment_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn config(deployment: &str, mode: Option<&str>) -> Config {
+        let dir = std::env::temp_dir();
+        let mut runtime =
+            json!({"revision":"1","kind":"codex","working_dir":dir,"binary":"/usr/bin/true"});
+        if let Some(mode) = mode {
+            runtime["execution_mode"] = json!(mode);
+        }
+        serde_json::from_value(json!({
+            "service_id":"runtime","listen":"127.0.0.1:0","data_dir":dir,"deployment":deployment,
+            "principals":[{"id":"sessions","roles":["session"],"token_file":"/unused"}],
+            "runtimes":{"codex-worker":runtime}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn deployed_runtime_services_refuse_colocated_profiles() {
+        let colocated = config("deployed", Some("colocated"));
+        let fault = colocated
+            .validate_deployment(DeploymentMode::Deployed)
+            .unwrap_err();
+        assert_eq!(fault.code, "colocated_forbidden");
+        assert!(fault.message.contains("runtimes.codex-worker"), "{fault}");
+        // The same profile is accepted for development.
+        colocated
+            .validate_deployment(DeploymentMode::Development)
+            .unwrap();
+    }
+
+    #[test]
+    fn an_omitted_execution_mode_is_colocated_for_development_and_refused_when_deployed() {
+        let omitted = config("deployed", None);
+        let profile = &omitted.runtimes["codex-worker"];
+        assert_eq!(profile.execution_mode_setting(), None);
+        assert_eq!(profile.execution_mode(), ExecutionMode::Colocated);
+        let fault = omitted
+            .validate_deployment(DeploymentMode::Deployed)
+            .unwrap_err();
+        assert_eq!(fault.code, EXECUTION_MODE_REQUIRED);
+        assert!(fault.message.contains("runtimes.codex-worker"), "{fault}");
+        assert!(
+            fault.message.contains("execution_mode = \"brokered\""),
+            "{fault}"
+        );
+        // Development keeps the pre-Phase-53 meaning of an omitted mode.
+        let development = config("development", None);
+        assert_eq!(development.deployment, DeploymentMode::Development);
+        development
+            .validate_deployment(DeploymentMode::Development)
+            .unwrap();
+    }
+
+    #[test]
+    fn an_explicit_brokered_profile_passes_deployed_validation() {
+        let brokered = config("deployed", Some("brokered"));
+        assert_eq!(
+            brokered.runtimes["codex-worker"].execution_mode(),
+            ExecutionMode::Brokered
+        );
+        brokered
+            .validate_deployment(DeploymentMode::Deployed)
+            .unwrap();
     }
 }

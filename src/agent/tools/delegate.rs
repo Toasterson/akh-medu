@@ -1,8 +1,9 @@
-//! Delegate tool: dispatch a task to an external Claude Code worker or peer.
+//! Delegate tool: dispatch a task to a native-runtime session or a peer.
 //!
 //! This tool enables the OODA loop to offload tasks that require LLM-class
-//! capability (code generation, document synthesis, deep research) to an
-//! external Claude Code subprocess.
+//! capability (code generation, document synthesis, deep research) to a
+//! native runtime session brokered by akhsessd, carrying a per-delegation
+//! grant (Phase 53e).
 //!
 //! The tool is synchronous: it enqueues the task into the DelegationManager's
 //! pending queue. The daemon's delegation tick drains the queue and performs
@@ -13,7 +14,7 @@ use std::collections::HashSet;
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 
@@ -22,7 +23,7 @@ use crate::agent::delegation::DelegationTask;
 #[cfg(feature = "delegation")]
 use std::sync::{Arc, Mutex};
 
-/// Delegate a task to an external worker (Claude Code subprocess or peer).
+/// Delegate a task to an external worker (native-runtime session or peer).
 pub struct DelegateTool {
     /// Shared pending task queue; the daemon drains this on each delegation tick.
     #[cfg(feature = "delegation")]
@@ -49,7 +50,7 @@ impl Tool for DelegateTool {
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "delegate".into(),
-            description: "Delegate a task to an external Claude Code process or peer agent. \
+            description: "Delegate a task to a native-runtime session or a peer agent. \
                  The task will be executed asynchronously and results flow back \
                  through the delegation manager."
                 .into(),
@@ -61,8 +62,9 @@ impl Tool for DelegateTool {
                 },
                 ToolParam {
                     name: "target".into(),
-                    description: "Target hint: 'local' for Claude Code subprocess (default), \
-                         'remote' for cloud trigger, 'peer' for another akh-medu instance."
+                    description: "Target hint: 'native' for a native-runtime session \
+                         carrying a scoped grant (default), 'remote' for cloud trigger, \
+                         'peer' for another akh-medu instance."
                         .into(),
                     required: false,
                 },
@@ -106,20 +108,21 @@ impl Tool for DelegateTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "delegate".into(),
-            description: "Delegate a task to an external Claude Code process or peer agent.".into(),
+            description: "Delegate a task to a native-runtime session or peer agent.".into(),
             parameters: vec![
                 ToolParamSchema::required("task", "Description of the task to delegate"),
-                ToolParamSchema::optional("target", "Target hint: 'local', 'remote', or 'peer'"),
+                ToolParamSchema::optional("target", "Target hint: 'native', 'remote', or 'peer'"),
                 ToolParamSchema::optional(
                     "workspace",
                     "Target workspace for peer delegation (the peer's default when omitted)",
                 ),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Dangerous,
                 capabilities: HashSet::from([Capability::ProcessExec, Capability::Network]),
-                description: "Spawns an external Claude Code process that can read/write files \
-                     and query the knowledge graph."
+                description: "Starts an external native-runtime session that can read/write \
+                     files and call a granted subset of the akh's cognitive tools."
                     .into(),
                 shadow_triggers: vec![
                     "delegate".into(),

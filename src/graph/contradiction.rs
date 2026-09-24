@@ -167,6 +167,13 @@ impl FunctionalPredicates {
         self.predicates.len()
     }
 
+    /// Every declared functional predicate, in ascending symbol order.
+    pub fn sorted(&self) -> Vec<SymbolId> {
+        let mut predicates: Vec<SymbolId> = self.predicates.iter().copied().collect();
+        predicates.sort_unstable();
+        predicates
+    }
+
     /// Whether no functional predicates are declared.
     pub fn is_empty(&self) -> bool {
         self.predicates.is_empty()

@@ -79,6 +79,7 @@ impl Tool for Echo {
             parameters: vec![],
             source: ToolSource::Native,
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Safe,
                 capabilities: Default::default(),
                 description: "No side effects".into(),
@@ -400,4 +401,18 @@ fn live_installed_codex_session() {
 #[ignore = "requires Claude SDK dependencies and authentication; makes two small live model calls"]
 fn live_installed_claude_session() {
     live_runtime(RuntimeKind::Claude);
+}
+
+#[test]
+fn the_in_process_bridge_is_colocated_only_in_development() {
+    use crate::deployment::DeploymentMode;
+    assert_eq!(
+        bridge::execution_mode(DeploymentMode::Development).unwrap(),
+        akh_session_types::ExecutionMode::Colocated
+    );
+    let refused = bridge::execution_mode(DeploymentMode::Deployed).unwrap_err();
+    assert!(
+        refused.starts_with("akh::config::in_process_forbidden"),
+        "{refused}"
+    );
 }

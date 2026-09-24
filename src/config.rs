@@ -70,6 +70,18 @@ pub type ConfigResult<T> = std::result::Result<T, ConfigError>;
 /// Top-level akhomed configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AkhomedConfig {
+    /// `"deployed"` forbids in-process side effects (Phase 53 decision 6, see
+    /// [`crate::deployment`]); `"development"` (the default) allows them.
+    /// `AKH_DEPLOYMENT=deployed` has the same effect and cannot be relaxed by
+    /// the config. A scalar, so it stays above every `[table]` when saved.
+    #[serde(default, skip_serializing_if = "is_development")]
+    pub deployment: crate::deployment::DeploymentMode,
+
+    /// In deployed mode, admit the legacy `local-drop` / `remote` executors
+    /// (with a warning) instead of refusing them. Ignored in development.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_legacy_exec: bool,
+
     /// Daemon-related settings.
     #[serde(default)]
     pub daemon: DaemonSection,
@@ -134,6 +146,19 @@ pub struct AkhomedConfig {
 /// tcp_bind = "127.0.0.1"
 /// tcp_port = 8201
 /// # workspace = "default"   # default: first auto_start workspace, else "default"
+///
+/// # Per-akh TCP principals (Phase 53, ADR 113). When any are configured the
+/// # legacy AKHOMED_SHARED_SECRET is ignored for TCP ingress.
+/// [[acp.principals]]
+/// id = "t3-janus"
+/// token_file = "/secrets/t3-janus.key"   # absolute; one token (24+ chars) per line
+/// akhs = ["janus"]                       # ["*"] alone = every akh
+///
+/// [[acp.principals]]
+/// id = "operator"
+/// token_file = "/secrets/acp-operator.key"
+/// akhs = ["*"]
+/// control = true                         # server-wide `_akh/*` control plane
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcpSection {
@@ -153,6 +178,14 @@ pub struct AcpSection {
     /// workspace, falling back to `"default"`.
     #[serde(default)]
     pub workspace: Option<String>,
+    /// Per-akh TCP ingress principals. Empty (the default) keeps the legacy,
+    /// unscoped `AKHOMED_SHARED_SECRET[_FILE]`; see [`crate::acp::auth`].
+    /// Serialized last, as an array of tables below the scalars above.
+    /// Only exists with the `acp` feature (without it there is no ACP
+    /// listener to scope).
+    #[cfg(feature = "acp")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub principals: Vec<crate::acp::auth::AcpPrincipalConfig>,
 }
 
 impl Default for AcpSection {
@@ -163,6 +196,8 @@ impl Default for AcpSection {
             tcp_bind: None,
             tcp_port: None,
             workspace: None,
+            #[cfg(feature = "acp")]
+            principals: Vec::new(),
         }
     }
 }
@@ -491,6 +526,41 @@ impl DaemonSection {
     }
 }
 
+fn is_development(mode: &crate::deployment::DeploymentMode) -> bool {
+    !mode.is_deployed()
+}
+
+// ---------------------------------------------------------------------------
+// Deployment policy
+// ---------------------------------------------------------------------------
+
+impl AkhomedConfig {
+    /// The deployment policy this config selects, with `AKH_DEPLOYMENT`
+    /// applied (it can only make the process stricter).
+    pub fn exec_policy(
+        &self,
+    ) -> Result<crate::deployment::ExecPolicy, crate::deployment::DeploymentPolicyError> {
+        Ok(crate::deployment::ExecPolicy {
+            mode: crate::deployment::DeploymentMode::resolve_from_env(self.deployment)?,
+            allow_legacy_exec: self.allow_legacy_exec,
+        })
+    }
+
+    /// Startup check for deployed mode: the host-level `[exec]` must be
+    /// admissible on its own, so an akh without an override can never fall
+    /// back to in-process execution. Per-akh overrides and chat backings are
+    /// checked again when each akh loads.
+    pub fn check_deployment(
+        &self,
+    ) -> Result<crate::deployment::ExecPolicy, crate::deployment::DeploymentPolicyError> {
+        let policy = self.exec_policy()?;
+        let host_exec = self.exec.clone().unwrap_or_default();
+        let admission = policy.check_exec("host [exec]", &host_exec)?;
+        crate::deployment::warn_on_legacy("host [exec]", admission);
+        Ok(policy)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Load / Save
 // ---------------------------------------------------------------------------
@@ -679,6 +749,11 @@ pub fn env_var_registry() -> &'static [EnvVarSpec] {
             default: "\"compacting\"",
         },
         EnvVarSpec {
+            name: "AKH_DEPLOYMENT",
+            description: "\"deployed\" forbids in-process side effects (in-process exec, in-process Codex/Claude runtimes; legacy local-drop/remote need allow_legacy_exec). Can only make the config stricter.",
+            default: "unset: follows config.toml `deployment` (default \"development\")",
+        },
+        EnvVarSpec {
             name: "AKH_ENRICH_MEMORY",
             description: "Enable memory enrichment during goal generation.",
             default: "on by default; \"0\" disables",
@@ -823,6 +898,44 @@ pub fn env_var_registry() -> &'static [EnvVarSpec] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 53 fix-up: `[[acp.principals]]` parses under `[acp]`, round-trips
+    /// with the scalars kept above the array of tables, and rejects typos.
+    #[cfg(feature = "acp")]
+    #[test]
+    fn acp_principals_parse_and_round_trip() {
+        let src = r#"
+            [acp]
+            tcp_port = 8201
+
+            [[acp.principals]]
+            id = "t3-janus"
+            token_file = "/secrets/t3-janus.key"
+            akhs = ["janus"]
+
+            [[acp.principals]]
+            id = "operator"
+            token_file = "/secrets/operator.key"
+            akhs = ["*"]
+            control = true
+        "#;
+        let cfg: AkhomedConfig = toml::from_str(src).expect("parse");
+        assert_eq!(cfg.acp.tcp_port, Some(8201));
+        assert_eq!(cfg.acp.principals.len(), 2);
+        assert!(!cfg.acp.principals[0].control);
+        assert!(cfg.acp.principals[1].control);
+        let saved = toml::to_string(&cfg).expect("serialize");
+        let reloaded: AkhomedConfig = toml::from_str(&saved).expect("reload");
+        assert_eq!(reloaded.acp.principals, cfg.acp.principals);
+        assert_eq!(reloaded.acp.tcp_port, Some(8201));
+        assert!(
+            toml::from_str::<AkhomedConfig>(
+                "[[acp.principals]]\nid = \"x\"\ntoken_file = \"/x\"\nakh = [\"x\"]\n"
+            )
+            .is_err(),
+            "a typo'd principal key is refused, not dropped"
+        );
+    }
 
     #[test]
     fn default_config_round_trips() {
@@ -1028,5 +1141,63 @@ migrate_on_start = true
         let mut deduped = names.clone();
         deduped.dedup();
         assert_eq!(names, deduped, "env_var_registry has duplicate entries");
+    }
+}
+
+#[cfg(test)]
+mod deployment_config_tests {
+    use super::*;
+    use crate::deployment::{DeploymentMode, DeploymentPolicyError};
+
+    #[test]
+    fn deployment_defaults_to_development_and_is_not_written_back() {
+        let config = AkhomedConfig::default();
+        assert_eq!(config.deployment, DeploymentMode::Development);
+        assert!(!config.allow_legacy_exec);
+        let saved = toml::to_string_pretty(&config).unwrap();
+        assert!(!saved.contains("deployment"), "{saved}");
+        assert!(!saved.contains("allow_legacy_exec"), "{saved}");
+    }
+
+    #[test]
+    fn deployed_config_rejects_an_in_process_host_executor() {
+        // No [exec] means in-process, which a deployed host must refuse.
+        let config: AkhomedConfig = toml::from_str("deployment = \"deployed\"\n").unwrap();
+        assert_eq!(config.deployment, DeploymentMode::Deployed);
+        let error = config.check_deployment().unwrap_err();
+        assert_eq!(
+            error.code().unwrap().to_string(),
+            "akh::config::in_process_forbidden"
+        );
+        assert!(matches!(
+            error,
+            DeploymentPolicyError::InProcessForbidden { .. }
+        ));
+    }
+
+    #[test]
+    fn deployed_config_admits_execd_and_gates_local_drop_on_the_opt_in() {
+        let execd: AkhomedConfig = toml::from_str(
+            "deployment = \"deployed\"\n[exec]\nkind = \"execd\"\n\
+             sandbox_url = \"https://akhsbxd.lab\"\nsandbox_token_file = \"/run/akh/token\"\n\
+             profile = \"rust\"\nprincipal = \"janus\"\n",
+        )
+        .unwrap();
+        assert!(execd.check_deployment().unwrap().mode.is_deployed());
+
+        let legacy = "deployment = \"deployed\"\n[exec]\nkind = \"local-drop\"\nuser = \"akh\"\n";
+        let refused: AkhomedConfig = toml::from_str(legacy).unwrap();
+        assert!(matches!(
+            refused.check_deployment().unwrap_err(),
+            DeploymentPolicyError::LegacyExecForbidden { .. }
+        ));
+        let opted_in: AkhomedConfig =
+            toml::from_str(&format!("allow_legacy_exec = true\n{legacy}")).unwrap();
+        opted_in.check_deployment().unwrap();
+        // The opt-in survives a save/load round trip, above the [exec] table.
+        let saved = toml::to_string_pretty(&opted_in).unwrap();
+        let reloaded: AkhomedConfig = toml::from_str(&saved).unwrap();
+        assert!(reloaded.allow_legacy_exec);
+        assert_eq!(reloaded.deployment, DeploymentMode::Deployed);
     }
 }

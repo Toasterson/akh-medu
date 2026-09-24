@@ -15,7 +15,7 @@ use crate::agent::agent::AgentPredicates;
 use crate::agent::error::{AgentError, AgentResult};
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use crate::graph::Triple;
@@ -176,8 +176,12 @@ impl Tool for MemoryWriteTool {
             mem_type_sym,
         ));
 
-        // Provenance: attribute self-imports distinctly so they're queryable/dedupable.
-        let kind = if origin.eq_ignore_ascii_case("openclaw") {
+        // Provenance: a delegate's write (Phase 53e, a `/v1` call under an
+        // active attribution) is the delegate's provenance; self-imports are
+        // attributed distinctly so they're queryable/dedupable.
+        let kind = if let Some(attribution) = crate::provenance::current_delegate_attribution() {
+            attribution.derivation()
+        } else if origin.eq_ignore_ascii_case("openclaw") {
             DerivationKind::OpenClawImport {
                 source_path: source.clone(),
                 kind: "journal".into(),
@@ -234,6 +238,7 @@ impl Tool for MemoryWriteTool {
                 ),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::WriteKg, Capability::MemoryAccess]),
                 description: "Writes an episodic memory entry to the knowledge graph.".into(),
@@ -382,6 +387,78 @@ mod tests {
         assert!(!recent.is_empty(), "episode should be recallable");
     }
 
+    /// Phase 53j: once a schema pack declares `status` single-valued, a
+    /// status update through `memory_write` supersedes the previous value
+    /// (retracted, with `memory_hygiene` provenance) instead of piling up as
+    /// a contradiction; an alias spelling lands on the canonical predicate.
+    #[test]
+    fn single_valued_status_update_supersedes_with_provenance() {
+        use crate::provenance::{DerivationKind, HygieneAction};
+
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap();
+        let pack = crate::schema::compile(
+            r#"{"pack": {"name": "mw-status", "version": "1"},
+                "relations": [{"name": "status", "cardinality": "single_valued",
+                               "temporal": true, "aliases": ["has-status"]}]}"#,
+        )
+        .unwrap();
+        crate::schema::install_pack(&engine, &pack).unwrap();
+        let tool = MemoryWriteTool::new(AgentPredicates::init(&engine).unwrap());
+        let write = |summary: &str, predicate: &str, object: &str| {
+            let out = tool
+                .execute(
+                    &engine,
+                    ToolInput::new().with_value("summary", summary).with_value(
+                        "facts",
+                        json!([{"subject": "alert-7", "predicate": predicate, "object": object}]),
+                    ),
+                )
+                .unwrap();
+            assert!(out.success, "{}", out.result);
+        };
+        write("alert opened", "status", "firing");
+        write("alert resolved", "has-status", "resolved");
+
+        let alert = engine.lookup_symbol("alert-7").unwrap();
+        let status = engine.lookup_symbol("status").unwrap();
+        let live: Vec<String> = engine
+            .triples_from(alert)
+            .into_iter()
+            .filter(|t| t.predicate == status)
+            .map(|t| engine.resolve_label(t.object))
+            .collect();
+        assert_eq!(live, vec!["resolved"]);
+        let has_status = engine.lookup_symbol("has-status").unwrap();
+        assert!(engine.triples_with_predicate(has_status).is_empty());
+
+        let firing = engine.lookup_symbol("firing").unwrap();
+        let resolved = engine.lookup_symbol("resolved").unwrap();
+        assert!(engine.tms().was_retracted(firing));
+        let records = engine.provenance_of(firing).unwrap();
+        assert!(records.iter().any(|r| matches!(
+            r.kind,
+            DerivationKind::MemoryHygiene {
+                action: HygieneAction::SingleValuedSupersede,
+                successor,
+                valid_until: Some(_),
+                ..
+            } if successor == resolved
+        )));
+        // No contradiction is left for the old value.
+        assert!(
+            engine
+                .check_contradictions(&crate::graph::Triple::new(alert, status, resolved))
+                .iter()
+                .all(|c| c.existing.object != firing)
+        );
+    }
+
     #[test]
     fn re_running_same_source_is_idempotent() {
         let engine = test_engine();
@@ -392,6 +469,45 @@ mod tests {
         let second = tool.execute(&engine, sample_input()).unwrap();
         // Same deterministic episode entity reused (first symbol is the episode).
         assert_eq!(first.symbols_involved[0], second.symbols_involved[0]);
+    }
+
+    #[test]
+    fn a_delegated_write_is_the_delegates_provenance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(tmp.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap();
+        let predicates = AgentPredicates::init(&engine).unwrap();
+        let tool = MemoryWriteTool::new(predicates);
+        let attribution = crate::provenance::DelegateAttribution {
+            principal: "native:claude".into(),
+            grant_id: Some("grant-7".into()),
+            tool: "memory_write".into(),
+            session_id: "session-7".into(),
+            request_id: "request-7".into(),
+        };
+        let out = crate::provenance::with_delegate_attribution(attribution.clone(), || {
+            tool.execute(&engine, sample_input()).unwrap()
+        });
+        assert!(out.success, "{}", out.result);
+        let records = engine
+            .provenance_by_kind(&attribution.derivation())
+            .unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "exactly the delegate's record: {records:?}"
+        );
+        assert_eq!(records[0].kind, attribution.derivation());
+        assert_eq!(records[0].derived_id, out.symbols_involved[0]);
+        // No second (sibling) record: the write already is the delegate's.
+        assert!(engine.all_provenance().unwrap().iter().all(|r| !matches!(
+            r.kind,
+            DerivationKind::AgentConsolidation { .. } | DerivationKind::OpenClawImport { .. }
+        )));
     }
 
     #[test]

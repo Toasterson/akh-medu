@@ -24,9 +24,15 @@ pub mod http_fetch;
 pub mod infer_rules;
 pub mod inference_config;
 pub mod kg_delete;
+pub mod kg_merge_predicates;
 pub mod kg_mutate;
 pub mod kg_query;
 pub mod mcp;
+pub mod mcp_config;
+// Static per-akh MCP servers (Phase 53i) proxy through
+// `crate::upstream_client::UpstreamMcpClient`, which is `daemon`-gated.
+#[cfg(feature = "daemon")]
+pub mod mcp_static;
 pub mod memory_recall;
 pub mod memory_write;
 pub mod openclaw_discover;
@@ -53,7 +59,7 @@ pub mod trigger_manage;
 
 pub use agent_management::{AgentListTool, AgentMessageTool, AgentRetireTool, AgentSpawnTool};
 pub use audit_log::AuditLogTool;
-pub use code_gen::CodeGenTool;
+pub use code_gen::{CodeGenTool, RustFormatter};
 pub use code_ingest::CodeIngestTool;
 pub use code_predicates::CodePredicates;
 pub use compile_feedback::CompileFeedbackTool;
@@ -73,9 +79,21 @@ pub use http_fetch::HttpFetchTool;
 pub use infer_rules::InferRulesTool;
 pub use inference_config::InferenceConfigTool;
 pub use kg_delete::KgDeleteTool;
+pub use kg_merge_predicates::KgMergePredicatesTool;
 pub use kg_mutate::KgMutateTool;
 pub use kg_query::KgQueryTool;
-pub use mcp::{McpCallTool, McpClient, McpDiscoverTool, McpError, McpServerConfig};
+pub use mcp::{
+    McpCallTool, McpClient, McpDiscoverTool, McpError, McpServerConfig, McpToolDescriptor,
+};
+pub use mcp_config::{
+    McpAuthError, McpRemoteToolName, McpServerAuth, McpServerConfigProblem, McpServerName,
+    McpServerSpec, McpServersConfigError,
+};
+#[cfg(feature = "daemon")]
+pub use mcp_static::{
+    McpAttachReport, McpRetryPolicy, McpServerAttachOutcome, RegistryChangedHook, StaticMcpError,
+    attach_static_mcp_servers,
+};
 pub use memory_recall::MemoryRecallTool;
 pub use memory_write::MemoryWriteTool;
 pub use openclaw_discover::OpenClawDiscoverTool;

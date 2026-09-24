@@ -186,6 +186,7 @@ impl Projection {
                     akh: app.config.akh.clone(),
                     workspace_profile: profile.clone(),
                     conversation_key: Some(conversation.clone()),
+                    grant: None,
                 })
                 .send()
                 .await

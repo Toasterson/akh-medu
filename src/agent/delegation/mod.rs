@@ -1,4 +1,5 @@
-//! Delegation subsystem: dispatch tasks to external workers (Claude Code, peers).
+//! Delegation subsystem: dispatch tasks to external workers (native-runtime
+//! sessions via akhsessd, peers, remote triggers).
 //!
 //! The [`DelegationManager`] is the central coordinator that selects a target,
 //! enforces cost budgets via [`CostGuard`], and tracks active delegations.
@@ -14,8 +15,7 @@
 //! for each one.  This decouples the synchronous tool context from the async
 //! subprocess machinery.
 
-#[cfg(feature = "daemon")]
-pub mod local_claude;
+pub mod native_session;
 pub mod peer;
 pub mod remote_trigger;
 
@@ -23,6 +23,7 @@ mod error;
 mod types;
 
 pub use error::{DelegationError, DelegationResult};
+pub use native_session::{DelegationGrantIssuer, GrantRequest, IssuedGrant, NativeSessionError};
 pub use types::*;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -173,6 +174,9 @@ pub struct DelegationManager {
     result_rx: Mutex<tokio::sync::mpsc::Receiver<DelegationResult<DelegationOutcome>>>,
     /// Known peer registry.
     peer_registry: peer::PeerRegistry,
+    /// Mints per-delegation grants for native sessions (Phase 53e). `None`
+    /// when the `/v1` core API is not wired, which disables that target.
+    grant_issuer: Option<Arc<dyn DelegationGrantIssuer>>,
 }
 
 impl DelegationManager {
@@ -191,6 +195,7 @@ impl DelegationManager {
             result_tx: tx,
             result_rx: Mutex::new(rx),
             peer_registry,
+            grant_issuer: None,
         }
     }
 
@@ -206,6 +211,30 @@ impl DelegationManager {
             next_id: AtomicU64::new(1),
             pending_tasks: Arc::new(Mutex::new(Vec::new())),
             peer_registry,
+            grant_issuer: None,
+        }
+    }
+
+    /// Attach the grant issuer native-session delegation mints through.
+    pub fn with_grant_issuer(mut self, issuer: Arc<dyn DelegationGrantIssuer>) -> Self {
+        self.grant_issuer = Some(issuer);
+        self
+    }
+
+    /// Whether native-session delegation can run: enabled, with an issuer
+    /// that can mint **now** (its `/v1` grant authority is published).
+    pub fn native_available(&self) -> bool {
+        self.config.native.enabled
+            && self
+                .grant_issuer
+                .as_ref()
+                .is_some_and(|issuer| issuer.is_available())
+    }
+
+    fn native_target(&self) -> DelegationTargetKind {
+        DelegationTargetKind::NativeSession {
+            service: self.config.native.service.clone(),
+            workspace_profile: self.config.native.workspace_profile.clone(),
         }
     }
 
@@ -349,7 +378,10 @@ impl DelegationManager {
     // -----------------------------------------------------------------------
 
     /// Select the best target for a task based on config, capabilities, and
-    /// the sovereignty gradient (local → peer → remote).
+    /// the sovereignty gradient (native session → peer → remote).
+    ///
+    /// `native` (alias `local`, kept for prompts written before Phase 53e)
+    /// requires `[delegation.native] enabled` and a wired grant issuer.
     pub fn select_target(
         &self,
         required_capabilities: &[String],
@@ -358,16 +390,12 @@ impl DelegationManager {
         // Honour explicit hint first.
         if let Some(hint) = target_hint {
             return match hint {
-                "local" => {
-                    if self.config.local.enabled {
-                        Ok(DelegationTargetKind::LocalClaude {
-                            model: self.config.local.model.clone(),
-                            allowed_tools: self.config.local.allowed_tools.clone(),
-                            working_dir: self.config.local.working_dir.clone(),
-                        })
+                "native" | "local" => {
+                    if self.native_available() {
+                        Ok(self.native_target())
                     } else {
                         Err(DelegationError::NoTarget {
-                            required: vec!["local".to_string()],
+                            required: vec!["native".to_string()],
                         })
                     }
                 }
@@ -398,19 +426,15 @@ impl DelegationManager {
             };
         }
 
-        // Sovereignty gradient: local → peer → remote.
-        if self.config.local.enabled {
-            return Ok(DelegationTargetKind::LocalClaude {
-                model: self.config.local.model.clone(),
-                allowed_tools: self.config.local.allowed_tools.clone(),
-                working_dir: self.config.local.working_dir.clone(),
-            });
+        // Sovereignty gradient: native session → peer → remote.
+        if self.native_available() {
+            return Ok(self.native_target());
         }
 
-        if self.config.peers.enabled {
-            if let Some(endpoint) = self.peer_registry.best_peer(required_capabilities) {
-                return Ok(DelegationTargetKind::AkhMeduPeer { endpoint });
-            }
+        if self.config.peers.enabled
+            && let Some(endpoint) = self.peer_registry.best_peer(required_capabilities)
+        {
+            return Ok(DelegationTargetKind::AkhMeduPeer { endpoint });
         }
 
         if self.config.remote.enabled && !self.cost_guard.is_local_only() {
@@ -453,13 +477,29 @@ impl DelegationManager {
         let target = self.select_target(&task.required_capabilities, hint)?;
 
         let model = match &target {
-            DelegationTargetKind::LocalClaude { model, .. } => model.clone(),
             DelegationTargetKind::RemoteTrigger { model, .. } => model.clone(),
-            DelegationTargetKind::AkhMeduPeer { .. } => String::new(), // peer is free
+            // Native sessions bill against their runtime profile, peers are free.
+            DelegationTargetKind::NativeSession { .. }
+            | DelegationTargetKind::AkhMeduPeer { .. } => String::new(),
         };
 
-        // Budget check — local subprocess is free (Max plan), peers are free;
-        // only remote triggers incur API cost.
+        // Native sessions: resolve everything that can fail before tracking.
+        let native = match &target {
+            DelegationTargetKind::NativeSession { .. } => {
+                let issuer =
+                    self.grant_issuer
+                        .clone()
+                        .ok_or_else(|| DelegationError::GrantUnavailable {
+                            reason: "no grant issuer is wired for this akh".into(),
+                        })?;
+                let client = native_session::NativeSessionClient::from_config(&self.config.native)?;
+                Some((issuer, client))
+            }
+            _ => None,
+        };
+
+        // Budget check — native sessions and peers are free here; only remote
+        // triggers incur API cost.
         let is_paid = matches!(target, DelegationTargetKind::RemoteTrigger { .. });
         if is_paid {
             let estimated_tokens = 4_000u64;
@@ -473,7 +513,7 @@ impl DelegationManager {
 
         let id = self.next_id();
         let timeout_secs = match &target {
-            DelegationTargetKind::LocalClaude { .. } => self.config.local.timeout_seconds,
+            DelegationTargetKind::NativeSession { .. } => self.config.native.timeout_seconds,
             DelegationTargetKind::RemoteTrigger { .. } => 300, // 5 min for remote
             DelegationTargetKind::AkhMeduPeer { .. } => 60,
         };
@@ -490,23 +530,24 @@ impl DelegationManager {
         self.track(delegation);
 
         match target.clone() {
-            DelegationTargetKind::LocalClaude {
-                model: m,
-                allowed_tools,
-                working_dir,
-            } => {
-                let worker = local_claude::LocalClaudeWorker::new(
-                    &self.config.local,
-                    self.config.akhomed_url.clone(),
-                );
+            DelegationTargetKind::NativeSession { .. } => {
+                let (issuer, client) = native.expect("resolved above for a native target");
+                let config = self.config.native.clone();
                 let tx = self.result_sender();
                 let task_clone = task;
                 let id_clone = id;
                 let target_clone = target;
-                tokio::spawn(async move {
-                    let result = worker
-                        .execute(&task_clone, &m, &allowed_tools, working_dir.as_deref())
-                        .await;
+                let handle = tokio::runtime::Handle::current();
+                // ureq is blocking: run the whole session on a blocking thread
+                // and hand the outcome back through the async channel.
+                tokio::task::spawn_blocking(move || {
+                    let result = native_session::run_native_delegation(
+                        &client,
+                        issuer.as_ref(),
+                        &config,
+                        &task_clone,
+                        id_clone,
+                    );
                     let outcome = match result {
                         Ok(mut outcome) => {
                             outcome.target = Some(target_clone);
@@ -525,7 +566,9 @@ impl DelegationManager {
                             target: Some(target_clone),
                         },
                     };
-                    let _ = tx.send(Ok(outcome)).await;
+                    handle.block_on(async move {
+                        let _ = tx.send(Ok(outcome)).await;
+                    });
                 });
             }
             DelegationTargetKind::RemoteTrigger {
@@ -569,27 +612,37 @@ impl DelegationManager {
                 let task_clone = task;
                 let id_clone = id;
                 let target_clone = target;
-                tokio::spawn(async move {
-                    let result = peer::delegate_to_peer(&endpoint, &task_clone, id_clone).await;
-                    let outcome = match result {
-                        Ok(mut outcome) => {
-                            outcome.target = Some(target_clone);
-                            outcome
-                        }
-                        Err(e) => DelegationOutcome {
-                            id: id_clone,
-                            stdout: String::new(),
-                            structured: None,
-                            wall_time: Duration::ZERO,
-                            tokens_consumed: None,
-                            cost_usd: None,
-                            exit_code: None,
-                            goal_id: task_clone.goal_id,
-                            error: Some(e.to_string()),
-                            target: Some(target_clone),
-                        },
-                    };
-                    let _ = tx.send(Ok(outcome)).await;
+                // Phase 53a: `delegation` joined the `server` profile and this
+                // arm failed to compile — the ACP client's async-closure future
+                // (`chat_over_unix`/`chat_over_tcp`) is not provably `Send` for
+                // all lifetimes (higher-ranked inference limitation), so it
+                // cannot be a `tokio::spawn` task. Drive it on a blocking thread
+                // through the runtime handle instead; `Handle::block_on` has no
+                // `Send` bound, and the captured values are all `Send`.
+                let handle = tokio::runtime::Handle::current();
+                tokio::task::spawn_blocking(move || {
+                    handle.block_on(async move {
+                        let result = peer::delegate_to_peer(&endpoint, &task_clone, id_clone).await;
+                        let outcome = match result {
+                            Ok(mut outcome) => {
+                                outcome.target = Some(target_clone);
+                                outcome
+                            }
+                            Err(e) => DelegationOutcome {
+                                id: id_clone,
+                                stdout: String::new(),
+                                structured: None,
+                                wall_time: Duration::ZERO,
+                                tokens_consumed: None,
+                                cost_usd: None,
+                                exit_code: None,
+                                goal_id: task_clone.goal_id,
+                                error: Some(e.to_string()),
+                                target: Some(target_clone),
+                            },
+                        };
+                        let _ = tx.send(Ok(outcome)).await;
+                    })
                 });
             }
         }
@@ -618,4 +671,109 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoopIssuer;
+    impl DelegationGrantIssuer for NoopIssuer {
+        fn issue(&self, _: &GrantRequest) -> DelegationResult<IssuedGrant> {
+            Err(DelegationError::GrantUnavailable {
+                reason: "test".into(),
+            })
+        }
+        fn bind_session(&self, _: &str, _: &str) -> DelegationResult<()> {
+            Ok(())
+        }
+        fn revoke(&self, _: &str) -> DelegationResult<()> {
+            Ok(())
+        }
+    }
+
+    /// An issuer whose grant authority is not published (no `/v1`).
+    struct UnpublishedIssuer;
+    impl DelegationGrantIssuer for UnpublishedIssuer {
+        fn is_available(&self) -> bool {
+            false
+        }
+        fn issue(&self, _: &GrantRequest) -> DelegationResult<IssuedGrant> {
+            unreachable!("an unavailable issuer is never asked to mint")
+        }
+        fn bind_session(&self, _: &str, _: &str) -> DelegationResult<()> {
+            unreachable!()
+        }
+        fn revoke(&self, _: &str) -> DelegationResult<()> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn an_issuer_without_a_published_authority_is_not_a_native_target() {
+        let mut config = native_config();
+        config.remote.enabled = true;
+        config.remote.akhomed_public_url = "https://akh.example".into();
+        config.daily_cost_budget_cents = 100;
+        let manager = DelegationManager::new(config).with_grant_issuer(Arc::new(UnpublishedIssuer));
+        assert!(!manager.native_available());
+        assert!(matches!(
+            manager.select_target(&[], Some("native")),
+            Err(DelegationError::NoTarget { .. })
+        ));
+        // The gradient falls through to the next target instead.
+        assert!(matches!(
+            manager.select_target(&[], None).unwrap(),
+            DelegationTargetKind::RemoteTrigger { .. }
+        ));
+    }
+
+    fn native_config() -> DelegationConfig {
+        let mut config = DelegationConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        config.native.enabled = true;
+        config.native.workspace_profile = "code".into();
+        config
+    }
+
+    #[test]
+    fn native_sessions_need_a_grant_issuer() {
+        let manager = DelegationManager::new(native_config());
+        assert!(matches!(
+            manager.select_target(&[], Some("native")),
+            Err(DelegationError::NoTarget { .. })
+        ));
+        assert!(manager.select_target(&[], None).is_err());
+
+        let manager =
+            DelegationManager::new(native_config()).with_grant_issuer(Arc::new(NoopIssuer));
+        let expected = DelegationTargetKind::NativeSession {
+            service: "akhsessd".into(),
+            workspace_profile: "code".into(),
+        };
+        assert_eq!(manager.select_target(&[], None).unwrap(), expected);
+        // `local` is the pre-53e hint; it now means a native session.
+        assert_eq!(manager.select_target(&[], Some("local")).unwrap(), expected);
+        assert_eq!(expected.to_string(), "native-session:akhsessd/code");
+    }
+
+    #[test]
+    fn a_partial_delegation_table_parses_with_defaults() {
+        let config: DelegationConfig = toml::from_str(
+            "enabled = true\n[native]\nenabled = true\nurl = \"http://127.0.0.1:9\"\n\
+             grant_tools = { kind = \"explicit\", tools = [\"kg_query\"] }\n",
+        )
+        .unwrap();
+        assert!(config.enabled && config.native.enabled);
+        assert_eq!(config.native.core_principal, "sessions");
+        assert_eq!(
+            config.native.grant_tools,
+            GrantTools::Explicit {
+                tools: ["kg_query".to_string()].into()
+            }
+        );
+        assert_eq!(config.max_concurrent, 3);
+    }
 }

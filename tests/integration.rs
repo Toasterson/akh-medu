@@ -978,6 +978,7 @@ fn tool_registry_crud() {
                 description: "A custom tool".into(),
                 parameters: vec![],
                 danger: akh_medu::agent::DangerInfo {
+                    effect: akh_medu::agent::ToolEffect::Mutating,
                     level: akh_medu::agent::DangerLevel::Safe,
                     capabilities: HashSet::new(),
                     description: "safe custom tool".into(),

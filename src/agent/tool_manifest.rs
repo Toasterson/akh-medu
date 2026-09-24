@@ -51,9 +51,38 @@ pub enum Capability {
     MemoryAccess,
 }
 
+/// Whether invoking a tool can change state.
+///
+/// Read-only is an explicit declaration, never an inference from the danger
+/// level or capability set: a tool that says nothing is [`ToolEffect::Mutating`].
+/// The `/v1` core API derives its `read_only` catalog flag and the default
+/// delegation grant from this (Phase 53 review, ADR 113), so a `Safe` tool
+/// with only read capabilities that quietly writes (a scratchpad, a shared
+/// checklist, a process-wide option) can never slip into a read-only set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffect {
+    /// May change akh, session, process or external state. The default.
+    #[default]
+    Mutating,
+    /// Declared to change no state at all: every call is a pure read.
+    ReadOnly,
+}
+
+impl ToolEffect {
+    /// Whether the tool declared itself read-only.
+    pub fn is_read_only(self) -> bool {
+        matches!(self, Self::ReadOnly)
+    }
+}
+
 /// Danger metadata attached to every tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DangerInfo {
+    /// Whether the tool changes state. Absent in older serialized manifests,
+    /// which therefore read as [`ToolEffect::Mutating`].
+    #[serde(default)]
+    pub effect: ToolEffect,
     /// Overall danger level.
     pub level: DangerLevel,
     /// Capabilities this tool exercises.
@@ -205,6 +234,7 @@ mod tests {
     #[test]
     fn danger_info_serialization_roundtrip() {
         let info = DangerInfo {
+            effect: ToolEffect::Mutating,
             level: DangerLevel::Cautious,
             capabilities: HashSet::from([Capability::ReadKg, Capability::WriteKg]),
             description: "test".into(),
@@ -214,5 +244,15 @@ mod tests {
         let back: DangerInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back.level, DangerLevel::Cautious);
         assert!(back.capabilities.contains(&Capability::ReadKg));
+        assert_eq!(back.effect, ToolEffect::Mutating);
+    }
+
+    #[test]
+    fn danger_info_without_effect_reads_as_mutating() {
+        let json =
+            r#"{"level":"Safe","capabilities":["ReadKg"],"description":"","shadow_triggers":[]}"#;
+        let info: DangerInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.effect, ToolEffect::Mutating);
+        assert!(!info.effect.is_read_only());
     }
 }

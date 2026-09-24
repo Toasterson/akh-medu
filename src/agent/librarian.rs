@@ -768,6 +768,44 @@ pub struct LibrarianReport {
     /// nothing advanced, e.g. an empty `sources` slice — "no new material"
     /// is a no-op).
     pub last_seq: i64,
+    /// Set when the [`SpendGuard`] stopped the pass before every source was
+    /// processed. The unprocessed sources stay above the watermark and are
+    /// picked up by a later pass.
+    pub stopped: Option<SpendStop>,
+}
+
+/// Asked before each model call of a Librarian pass. The daemon wires the
+/// autonomy budget in here, so one pass over up to 256 sources cannot spend
+/// far past the daily token limit.
+pub trait SpendGuard {
+    /// `Ok` to make the next model call; `Err` stops the pass cleanly.
+    fn may_spend(&self) -> Result<(), SpendStop>;
+}
+
+/// A [`SpendGuard`] that never stops a pass (tests, operator runs).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Unlimited;
+
+impl SpendGuard for Unlimited {
+    fn may_spend(&self) -> Result<(), SpendStop> {
+        Ok(())
+    }
+}
+
+impl<F: Fn() -> Result<(), SpendStop>> SpendGuard for F {
+    fn may_spend(&self) -> Result<(), SpendStop> {
+        self()
+    }
+}
+
+/// Why a [`SpendGuard`] stopped a pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpendStop {
+    /// Human-readable reason, for logs (for example the rendered
+    /// `BudgetExhausted`).
+    pub reason: String,
+    /// Sources left unprocessed when the pass stopped.
+    pub sources_remaining: usize,
 }
 
 /// One batch processed in this pass, logged for family-grouping observability.
@@ -1005,12 +1043,19 @@ fn assert_candidate(
 /// (already processed in an earlier pass) — an empty `sources` slice, or a
 /// slice containing only such already-processed sources, is a no-op that
 /// still returns `Ok` without advancing the watermark.
+///
+/// `guard` is asked before each source that would call the model. When it
+/// refuses, the pass stops cleanly: it returns `Ok` with
+/// [`LibrarianReport::stopped`] set, and the watermark advances only past
+/// sources that were processed (never past a skipped one, whatever the
+/// order of `sources`).
 pub fn run_librarian_pass(
     engine: &Engine,
     model: &dyn LibrarianModel,
     watermark: &dyn LibrarianWatermarkStore,
     sources: &[LibrarianSource],
     config: &LibrarianConfig,
+    guard: &dyn SpendGuard,
 ) -> AgentResult<LibrarianReport> {
     let current_watermark = watermark.get()?;
 
@@ -1028,11 +1073,40 @@ pub fn run_librarian_pass(
     };
     let mut max_seq = current_watermark;
 
-    for source in sources {
+    for (index, source) in sources.iter().enumerate() {
         if let Some(seq) = source.seq
             && seq <= current_watermark
         {
             continue; // already processed in an earlier pass
+        }
+
+        // Budget guard before each model call (empty sources cost nothing).
+        if !source.text.trim().is_empty()
+            && let Err(mut stop) = guard.may_spend()
+        {
+            let remaining = &sources[index..];
+            stop.sources_remaining = remaining
+                .iter()
+                .filter(|s| s.seq.is_none_or(|seq| seq > current_watermark))
+                .count();
+            // Never advance past an unprocessed source, even if `sources`
+            // is not sorted by seq.
+            if let Some(first_unprocessed) = remaining
+                .iter()
+                .filter_map(|s| s.seq)
+                .filter(|seq| *seq > current_watermark)
+                .min()
+            {
+                max_seq = max_seq.min(first_unprocessed - 1);
+            }
+            tracing::info!(
+                reason = %stop.reason,
+                sources_remaining = stop.sources_remaining,
+                sources_processed = report.sources_processed,
+                "librarian pass stopped by its spend guard; the rest waits for a later pass"
+            );
+            report.stopped = Some(stop);
+            break;
         }
 
         let outcome = extract_and_assert_source(engine, model, source, &digest, config)?;
@@ -1056,6 +1130,13 @@ pub fn run_librarian_pass(
     if max_seq > current_watermark {
         watermark.advance(max_seq)?;
         report.last_seq = max_seq;
+    }
+    if report.stopped.is_some() {
+        info!(
+            librarian_sources_processed = report.sources_processed,
+            librarian_last_seq = report.last_seq,
+            "librarian pass stopped early"
+        );
     }
 
     // G5 item 4: per-cycle projection deltas as structured telemetry.
@@ -1114,6 +1195,7 @@ pub fn run_librarian_pass_over_wal(
     akh_id: akhomed_store::uuid::Uuid,
     notes: &[crate::library::note::Note],
     config: &LibrarianConfig,
+    guard: &dyn SpendGuard,
 ) -> AgentResult<LibrarianReport> {
     let handle = tokio::runtime::Handle::current();
     let watermark_seq = handle.block_on(akhomed_store::get_librarian_watermark(db, akh_id))?;
@@ -1128,7 +1210,7 @@ pub fn run_librarian_pass_over_wal(
     sources.extend(notes.iter().filter_map(note_to_source));
 
     let watermark = PgLibrarianWatermark { db, akh_id };
-    run_librarian_pass(engine, model, &watermark, &sources, config)
+    run_librarian_pass(engine, model, &watermark, &sources, config, guard)
 }
 
 // ---------------------------------------------------------------------------
@@ -1205,6 +1287,7 @@ mod tests {
             &watermark,
             &sources,
             &LibrarianConfig::default(),
+            &Unlimited,
         )
         .unwrap();
 
@@ -1256,6 +1339,7 @@ mod tests {
             &watermark,
             &sources,
             &LibrarianConfig::default(),
+            &Unlimited,
         )
         .unwrap();
 
@@ -1297,6 +1381,7 @@ mod tests {
             &watermark,
             &sources,
             &LibrarianConfig::default(),
+            &Unlimited,
         )
         .unwrap();
 
@@ -1324,6 +1409,7 @@ mod tests {
             &watermark,
             &sources,
             &LibrarianConfig::default(),
+            &Unlimited,
         )
         .unwrap();
         let triple_count_after_first = engine
@@ -1338,6 +1424,7 @@ mod tests {
             &watermark,
             &sources,
             &LibrarianConfig::default(),
+            &Unlimited,
         )
         .unwrap();
 
@@ -1355,6 +1442,7 @@ mod tests {
             &watermark,
             &[],
             &LibrarianConfig::default(),
+            &Unlimited,
         )
         .unwrap();
         assert_eq!(empty_report.last_seq, 1);
@@ -1374,6 +1462,7 @@ mod tests {
             &watermark,
             &sources,
             &LibrarianConfig::default(),
+            &Unlimited,
         );
 
         assert!(matches!(result, Err(AgentError::Librarian { .. })));
@@ -1404,12 +1493,89 @@ mod tests {
             &watermark,
             &sources,
             &LibrarianConfig::default(),
+            &Unlimited,
         )
         .unwrap();
 
         assert_eq!(report.sources_skipped_empty, 1);
         assert_eq!(report.sources_processed, 0);
         assert_eq!(watermark.get().unwrap(), 1);
+    }
+
+    #[test]
+    fn spend_guard_stops_the_pass_and_the_watermark_stays_before_unprocessed_sources() {
+        use std::cell::Cell;
+        let (_dir, engine) = test_engine();
+        install_seed(&engine);
+        let model = FakeLibrarianModel::new()
+            .with_extraction("turn:1", vec![])
+            .with_extraction("turn:2", vec![])
+            .with_extraction("turn:3", vec![]);
+        let watermark = InMemoryWatermark::new(0);
+        let sources = vec![
+            source("turn:1", 1),
+            source("turn:2", 2),
+            source("turn:3", 3),
+        ];
+        // Allow exactly two model calls, then report the budget spent.
+        let calls = Cell::new(0usize);
+        let guard = || {
+            calls.set(calls.get() + 1);
+            if calls.get() <= 2 {
+                Ok(())
+            } else {
+                Err(SpendStop {
+                    reason: "autonomy budget exhausted".into(),
+                    sources_remaining: 0,
+                })
+            }
+        };
+
+        let report = run_librarian_pass(
+            &engine,
+            &model,
+            &watermark,
+            &sources,
+            &LibrarianConfig::default(),
+            &guard,
+        )
+        .unwrap();
+
+        assert_eq!(report.sources_processed, 2);
+        let stop = report.stopped.expect("the guard stopped the pass");
+        assert_eq!(stop.sources_remaining, 1);
+        assert_eq!(
+            watermark.get().unwrap(),
+            2,
+            "only processed sources advance"
+        );
+        assert_eq!(report.last_seq, 2);
+
+        // Unsorted input: the watermark never skips an unprocessed lower seq.
+        let watermark = InMemoryWatermark::new(0);
+        let unsorted = vec![source("turn:3", 3), source("turn:1", 1)];
+        let refuse_second = Cell::new(0usize);
+        let guard = || {
+            refuse_second.set(refuse_second.get() + 1);
+            if refuse_second.get() == 1 {
+                Ok(())
+            } else {
+                Err(SpendStop {
+                    reason: "spent".into(),
+                    sources_remaining: 0,
+                })
+            }
+        };
+        run_librarian_pass(
+            &engine,
+            &model,
+            &watermark,
+            &unsorted,
+            &LibrarianConfig::default(),
+            &guard,
+        )
+        .unwrap();
+        assert_eq!(watermark.get().unwrap(), 0, "seq 1 is still pending");
     }
 
     #[test]

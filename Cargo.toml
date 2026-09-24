@@ -254,14 +254,20 @@ base64 = { version = "0.22.1", optional = true }
 default = ["acp", "embedded-runtime"]
 # Compatibility for existing embedded chat; specialized core builds omit providers.
 embedded-runtime = ["dep:akh-runtime"]
-# Cognitive/config/storage owner only: no client ACP, external provider or executor dependency.
-core-server = ["daemon", "postgres", "tracing-otel", "dep:axum", "dep:akh-service-store"]
+# Phase 53a (ADR 113): the scoped `/v1` cognitive core API is ADDITIVE. It is
+# served only when `AKH_CORE_CONFIG` is set and never removes daemon or ACP
+# behaviour. Part of `server`; the stripped core-only profile is gone.
+# Phase 53e: `base64` encodes delegation-grant secrets (base64url).
+core-api = ["daemon", "dep:axum", "dep:akh-service-store", "dep:base64"]
 daemon = ["tokio", "dep:chrono", "dep:cron"]
 # `server` = the akhomed daemon feature set: workspace daemons + the ACP
 # inbound transport. (Pre-ADR-061 it pulled axum/tower-http for REST/WS;
 # those surfaces are gone, so it now just means daemon + acp.) Phase 38 folds
 # in the Postgres backing store.
-server = ["daemon", "acp", "postgres", "tracing-otel", "remote-executor", "embedded-runtime"]
+# Phase 53a (ADR 113): one full akhomed profile — `core-api` (the additive `/v1`
+# surface) and `delegation` are part of it, so a stripped akh cannot be built.
+# Phase 53c: `execd-executor` routes side effects through akhsbxd/akhexecd.
+server = ["daemon", "acp", "postgres", "tracing-otel", "remote-executor", "embedded-runtime", "core-api", "delegation", "execd-executor"]
 # Phase 38i: OTLP tracing skeleton. Default-on under `server` so akhomed
 # gets the OTLP layer; the lean `akh` client binary (no `server`) stays lean.
 tracing-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:opentelemetry-semantic-conventions"]
@@ -331,6 +337,11 @@ client = ["acp"]
 # `tokio` for the internal runtime the sync trait methods block on. Off by
 # default — in-process/local-drop backends need no SSH dependency at all.
 remote-executor = ["dep:russh", "dep:base64", "tokio"]
+# Phase 53c (ADR 113 decision 3): `ExecdBackend` (src/backend/execd.rs) routes
+# executor-facing tools through akhsbxd allocation + akhexecd operations over
+# the blocking `ureq` client. No extra dependencies; the gate only keeps the
+# lean `akh` client from carrying it.
+execd-executor = []
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

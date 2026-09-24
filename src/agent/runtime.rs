@@ -21,7 +21,9 @@ use serde_json::{Value, json};
 
 use super::completion_controller::{CompletionController, CompletionDecision};
 use super::tool::{ToolInput, ToolRegistry};
-use super::tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
+use super::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolSource,
+};
 use super::{Agent, agentic_chat::AgenticTurnOutcome, conversation::ConversationState};
 use crate::{
     engine::Engine,
@@ -207,6 +209,7 @@ impl Turn<'_> {
             description: "Approval requested by the coding-agent runtime".into(),
             parameters: vec![],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Critical,
                 capabilities: [Capability::ProcessExec, Capability::WriteFilesystem]
                     .into_iter()

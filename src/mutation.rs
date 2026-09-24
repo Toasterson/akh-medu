@@ -115,6 +115,91 @@ impl MutationKind {
     }
 }
 
+/// Monotonic counts of fact changes seen at the engine's mutation boundary
+/// (Phase 53b). They are bumped for every recorded mutation, whether or not a
+/// WAL sink is installed, so local-only engines count too.
+///
+/// The daemon snapshots these before and after each background task to
+/// report a per-task [`FactTotals`] delta. The counters are engine-wide, so a
+/// live turn that mutates the KG while a task runs is attributed to that
+/// task as well.
+#[derive(Debug, Default)]
+pub struct FactCounters {
+    asserted: std::sync::atomic::AtomicU64,
+    retracted: std::sync::atomic::AtomicU64,
+}
+
+/// A point-in-time reading of [`FactCounters`], or the difference between
+/// two readings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FactTotals {
+    /// Triples asserted, including confidence updates and the new edge of a
+    /// contradiction replacement.
+    pub asserted: u64,
+    /// Triples retracted, including edges displaced by a replacement and
+    /// every edge of a TMS cascade.
+    pub retracted: u64,
+}
+
+impl FactTotals {
+    /// `self - earlier`, saturating at zero.
+    pub fn since(self, earlier: FactTotals) -> FactTotals {
+        FactTotals {
+            asserted: self.asserted.saturating_sub(earlier.asserted),
+            retracted: self.retracted.saturating_sub(earlier.retracted),
+        }
+    }
+
+    /// Whether nothing changed.
+    pub fn is_empty(&self) -> bool {
+        self.asserted == 0 && self.retracted == 0
+    }
+}
+
+impl FactCounters {
+    /// Count one mutation. The payload is only read for compound kinds, to
+    /// learn how many edges they retract.
+    pub fn observe(&self, kind: MutationKind, payload: &serde_json::Value) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let retracts_in = |payload: &serde_json::Value| {
+            payload
+                .get("retracts")
+                .and_then(serde_json::Value::as_array)
+                .map_or(1, |edges| edges.len() as u64)
+        };
+        match kind {
+            MutationKind::Assert => {
+                self.asserted.fetch_add(1, Relaxed);
+            }
+            MutationKind::Replace => {
+                self.asserted.fetch_add(1, Relaxed);
+                self.retracted.fetch_add(retracts_in(payload), Relaxed);
+            }
+            MutationKind::Retract => {
+                self.retracted.fetch_add(1, Relaxed);
+            }
+            MutationKind::RetractBatch => {
+                self.retracted.fetch_add(retracts_in(payload), Relaxed);
+            }
+            MutationKind::MicrotheoryLoad
+            | MutationKind::MicrotheoryUnload
+            | MutationKind::CompartmentCreate
+            | MutationKind::CompartmentDestroy
+            | MutationKind::Turn
+            | MutationKind::SymbolMerge => {}
+        }
+    }
+
+    /// The current totals.
+    pub fn totals(&self) -> FactTotals {
+        use std::sync::atomic::Ordering::Relaxed;
+        FactTotals {
+            asserted: self.asserted.load(Relaxed),
+            retracted: self.retracted.load(Relaxed),
+        }
+    }
+}
+
 /// Receives mutations as they happen at the engine boundary.
 ///
 /// Implementations **must not block** and must not surface errors to the

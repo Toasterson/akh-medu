@@ -21,7 +21,7 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
         "cwd":turn.cwd,"model":turn.request.binding.model,"effort":turn.config.effort,
         "binary":turn.config.binary,"resume":turn.session.as_ref(),
         "plan":turn.request.approval_policy == ApprovalPolicy::ReadOnly,
-        "tools":turn.tools,"brokered":turn.config.execution_mode == ExecutionMode::Brokered,"aliases":turn.config.native_aliases}),
+        "tools":turn.tools,"brokered":turn.config.execution_mode() == ExecutionMode::Brokered,"aliases":turn.config.native_aliases}),
     )?;
     let mut answer = String::new();
     loop {

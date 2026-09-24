@@ -189,34 +189,186 @@ impl TurnStop {
     }
 }
 
-/// Read-only repository evidence for shell-based edits. Disable external diff
-/// drivers so verification cannot execute repository-configured commands.
-fn repository_witness(cwd: &std::path::Path) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .output()
-            .ok()?;
-        out.status.success().then_some(out.stdout)
-    };
+/// Why the repository witness is not taken for a deployed agent.
+///
+/// Phase 53 decision 6 / ADR 113: a deployed akhomed runs no side effect in
+/// its own address space. `git` honours repository configuration
+/// (`core.fsmonitor`, hooks, filters), so spawning it in akhomed against an
+/// agent-edited checkout could execute a repository-chosen command inside
+/// akhomed. Without a backend route the witness is skipped instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum WitnessUnavailable {
+    /// `exec kind = "none"`: there is no executor to run `git` in.
+    #[error("deployed mode with exec kind = \"none\": no executor to run git in")]
+    NoExecutor,
+    /// Only the in-process backend is wired, so `git` would run in akhomed.
+    #[error("deployed mode with the in-process backend: git would run inside akhomed")]
+    InProcessOnly,
+}
+
+/// Where the autonomous-dispatch completion check runs `git` to witness
+/// shell-made repository changes.
+#[derive(Clone)]
+pub(crate) enum WitnessRoute {
+    /// Development: spawn `git` in akhomed (historic behaviour).
+    InProcess,
+    /// Deployed with a configured executor: run `git` through
+    /// [`Backend::exec`](crate::backend::Backend::exec), i.e. in the sandbox.
+    Backend(std::sync::Arc<dyn crate::backend::Backend>),
+    /// Deployed with no sandboxed route: take no witness.
+    Unavailable(WitnessUnavailable),
+}
+
+impl std::fmt::Debug for WitnessRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InProcess => f.write_str("InProcess"),
+            Self::Backend(backend) => f
+                .debug_tuple("Backend")
+                .field(&backend.locus().backend)
+                .finish(),
+            Self::Unavailable(reason) => f.debug_tuple("Unavailable").field(reason).finish(),
+        }
+    }
+}
+
+impl WitnessRoute {
+    /// Resolve the route for an agent from its deployment mode and exec wiring.
+    pub(crate) fn resolve(
+        mode: crate::deployment::DeploymentMode,
+        wiring: &super::agent::ExecToolWiring,
+    ) -> Self {
+        use super::agent::ExecToolWiring;
+        if !mode.is_deployed() {
+            return Self::InProcess;
+        }
+        match wiring {
+            ExecToolWiring::Backend(backend) => Self::Backend(backend.clone()),
+            ExecToolWiring::Default => Self::Unavailable(WitnessUnavailable::InProcessOnly),
+            ExecToolWiring::None => Self::Unavailable(WitnessUnavailable::NoExecutor),
+        }
+    }
+
+    /// Hash the repository state at `cwd`, or `None` when it cannot be
+    /// witnessed (not a repository, a `git` failure, or no route).
+    pub(crate) fn witness(&self, cwd: &std::path::Path) -> Option<u64> {
+        match self {
+            Self::InProcess => repository_witness(cwd),
+            Self::Backend(backend) => backend_repository_witness(backend.as_ref(), cwd),
+            Self::Unavailable(reason) => {
+                tracing::debug!(
+                    cwd = %cwd.display(),
+                    reason = %reason,
+                    "repository witness skipped"
+                );
+                None
+            }
+        }
+    }
+}
+
+/// `git` arguments shared by both witness routes. External diff drivers and
+/// textconv are disabled so verification cannot execute
+/// repository-configured commands through them.
+const WITNESS_HEAD: &[&str] = &["rev-parse", "HEAD"];
+const WITNESS_DIFF: &[&str] = &["diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD"];
+const WITNESS_UNTRACKED: &[&str] = &["ls-files", "--others", "--exclude-standard", "-z"];
+
+/// Shared witness algorithm: `git` runs through `git`, and `untracked` hashes
+/// per-file metadata for each untracked path.
+fn witness_with(
+    mut git: impl FnMut(&[&str]) -> Option<Vec<u8>>,
+    mut untracked: impl FnMut(&str, &mut DefaultHasher) -> Option<()>,
+) -> Option<u64> {
     let mut hash = DefaultHasher::new();
-    git(&["rev-parse", "HEAD"])?.hash(&mut hash);
-    git(&["diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD"])?.hash(&mut hash);
-    let untracked = git(&["ls-files", "--others", "--exclude-standard", "-z"])?;
-    for name in untracked.split(|b| *b == 0).filter(|name| !name.is_empty()) {
+    git(WITNESS_HEAD)?.hash(&mut hash);
+    git(WITNESS_DIFF)?.hash(&mut hash);
+    let names = git(WITNESS_UNTRACKED)?;
+    for name in names.split(|b| *b == 0).filter(|name| !name.is_empty()) {
         let name = std::str::from_utf8(name).ok()?;
         name.hash(&mut hash);
-        // Do not follow symlinks or read arbitrary untracked datasets/devices.
-        // Metadata is sufficient to distinguish an untouched checkout from a
-        // new or modified candidate; Anima still validates the actual diff.
-        let metadata = std::fs::symlink_metadata(cwd.join(name)).ok()?;
-        metadata.len().hash(&mut hash);
-        metadata.modified().ok()?.hash(&mut hash);
+        untracked(name, &mut hash)?;
     }
     Some(hash.finish())
+}
+
+/// Read-only repository evidence for shell-based edits, taken by spawning
+/// `git` in this process. Development mode only; see [`WitnessRoute`].
+fn repository_witness(cwd: &std::path::Path) -> Option<u64> {
+    witness_with(
+        |args| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .output()
+                .ok()?;
+            out.status.success().then_some(out.stdout)
+        },
+        |name, hash| {
+            // Do not follow symlinks or read arbitrary untracked
+            // datasets/devices. Metadata is sufficient to distinguish an
+            // untouched checkout from a new or modified candidate; Anima still
+            // validates the actual diff.
+            let metadata = std::fs::symlink_metadata(cwd.join(name)).ok()?;
+            metadata.len().hash(hash);
+            metadata.modified().ok()?.hash(hash);
+            Some(())
+        },
+    )
+}
+
+/// Deadline for each `git` call of the backend-routed witness.
+const BACKEND_WITNESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Read-only repository evidence taken through the configured executor
+/// backend, so `git` (and any repository configuration it honours) runs in
+/// the sandbox, never in akhomed. Untracked files contribute their name and
+/// size as reported by the backend's [`Filesystem`](crate::fs::Filesystem);
+/// symlinks are not followed and unreadable entries hash a fixed marker, so
+/// additions and removals still change the witness.
+fn backend_repository_witness(
+    backend: &dyn crate::backend::Backend,
+    cwd: &std::path::Path,
+) -> Option<u64> {
+    witness_with(
+        |args| {
+            let request = crate::backend::ExecRequest::shell(
+                format!("git {}", args.join(" ")),
+                BACKEND_WITNESS_TIMEOUT,
+            )
+            .with_cwd(cwd)
+            .with_env("GIT_OPTIONAL_LOCKS", "0");
+            match backend.exec(request) {
+                Ok(outcome) if outcome.success => Some(outcome.stdout),
+                Ok(outcome) => {
+                    tracing::debug!(
+                        cwd = %cwd.display(),
+                        exit_code = outcome.exit_code,
+                        "repository witness: git failed in the executor backend"
+                    );
+                    None
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        cwd = %cwd.display(),
+                        %error,
+                        "repository witness: executor backend exec failed"
+                    );
+                    None
+                }
+            }
+        },
+        |name, hash| {
+            let path = cwd.join(name);
+            if backend.is_symlink(&path) {
+                "symlink".hash(hash);
+            } else {
+                backend.file_size(&path).unwrap_or(u64::MAX).hash(hash);
+            }
+            Some(())
+        },
+    )
 }
 
 fn verified_write(tool: &str, args: &Value, success: bool) -> bool {
@@ -818,7 +970,10 @@ impl Agent {
         } else {
             None
         };
-        let initial_worktree = work_cwd.as_deref().and_then(repository_witness);
+        let witness_route = self.witness_route.clone();
+        let initial_worktree = work_cwd
+            .as_deref()
+            .and_then(|cwd| witness_route.witness(cwd));
         // Full results are retained only for this turn's provenance gate. A
         // study-note write may cite a successful evidence result from a prior
         // model round, never another parallel call emitted in the same round.
@@ -1041,7 +1196,11 @@ impl Agent {
                     });
                     let shell_changed_tree = shell_ran
                         && initial_worktree
-                            .zip(work_cwd.as_deref().and_then(repository_witness))
+                            .zip(
+                                work_cwd
+                                    .as_deref()
+                                    .and_then(|cwd| witness_route.witness(cwd)),
+                            )
                             .is_some_and(|(before, after)| before != after);
                     let has_mutating_calls = explicit_write || shell_changed_tree;
 
@@ -2173,7 +2332,7 @@ mod tests {
     use crate::agent::error::AgentResult;
     use crate::agent::tool::{Tool, ToolOutput, ToolSignature};
     use crate::agent::tool_manifest::{
-        DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+        DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
     };
     use std::collections::HashSet;
 
@@ -2480,6 +2639,7 @@ mod tests {
                 description: "test archival evidence".into(),
                 parameters: vec![ToolParamSchema::required("query", "query")],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Safe,
                     capabilities: HashSet::new(),
                     description: String::new(),
@@ -3097,6 +3257,179 @@ mod tests {
         assert_ne!(Some(after), repository_witness(dir.path()));
     }
 
+    /// A backend that records every exec request and delegates to an
+    /// in-process backend over a sandbox rooted at the test repository.
+    struct RecordingExecBackend {
+        inner: crate::backend::InProcessBackend,
+        requests: std::sync::Mutex<Vec<crate::backend::ExecRequest>>,
+    }
+
+    impl RecordingExecBackend {
+        fn new(root: &std::path::Path) -> Self {
+            Self {
+                inner: crate::backend::InProcessBackend::new(std::sync::Arc::new(
+                    crate::fs::LocalFs::new(vec![root.to_path_buf()], vec![]),
+                )),
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<crate::backend::ExecRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::fs::Filesystem for RecordingExecBackend {
+        fn read_to_string(&self, path: &std::path::Path) -> crate::fs::FsResult<String> {
+            self.inner.read_to_string(path)
+        }
+        fn write(&self, path: &std::path::Path, contents: &str) -> crate::fs::FsResult<()> {
+            self.inner.write(path, contents)
+        }
+        fn read_dir(&self, path: &std::path::Path) -> crate::fs::FsResult<Vec<std::path::PathBuf>> {
+            self.inner.read_dir(path)
+        }
+        fn exists(&self, path: &std::path::Path) -> bool {
+            self.inner.exists(path)
+        }
+        fn read_roots(&self) -> &[std::path::PathBuf] {
+            self.inner.read_roots()
+        }
+        fn is_writable(&self) -> bool {
+            self.inner.is_writable()
+        }
+        fn file_size(&self, path: &std::path::Path) -> crate::fs::FsResult<u64> {
+            self.inner.file_size(path)
+        }
+        fn is_symlink(&self, path: &std::path::Path) -> bool {
+            self.inner.is_symlink(path)
+        }
+    }
+
+    impl crate::backend::Backend for RecordingExecBackend {
+        fn exec(
+            &self,
+            request: crate::backend::ExecRequest,
+        ) -> crate::backend::ExecResult<crate::backend::ExecOutcome> {
+            self.requests.lock().unwrap().push(request.clone());
+            self.inner.exec(request)
+        }
+        fn handshake(&self) -> crate::backend::Posture {
+            self.inner.handshake()
+        }
+        fn locus(&self) -> crate::backend::ExecLocus {
+            self.inner.locus()
+        }
+    }
+
+    fn init_witness_repo(dir: &std::path::Path) {
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            )
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(dir.join("tracked.rs"), "base").unwrap();
+        git(&["add", "tracked.rs"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@local",
+            "commit",
+            "-m",
+            "base",
+        ]);
+    }
+
+    #[test]
+    fn witness_route_resolves_from_deployment_mode_and_wiring() {
+        use crate::agent::ExecToolWiring;
+        use crate::deployment::DeploymentMode;
+        let backend: std::sync::Arc<dyn crate::backend::Backend> =
+            std::sync::Arc::new(crate::backend::InProcessBackend::exec_only());
+        for wiring in [
+            ExecToolWiring::Default,
+            ExecToolWiring::None,
+            ExecToolWiring::Backend(backend.clone()),
+        ] {
+            assert!(matches!(
+                WitnessRoute::resolve(DeploymentMode::Development, &wiring),
+                WitnessRoute::InProcess
+            ));
+        }
+        assert!(matches!(
+            WitnessRoute::resolve(DeploymentMode::Deployed, &ExecToolWiring::Backend(backend)),
+            WitnessRoute::Backend(_)
+        ));
+        assert!(matches!(
+            WitnessRoute::resolve(DeploymentMode::Deployed, &ExecToolWiring::Default),
+            WitnessRoute::Unavailable(WitnessUnavailable::InProcessOnly)
+        ));
+        assert!(matches!(
+            WitnessRoute::resolve(DeploymentMode::Deployed, &ExecToolWiring::None),
+            WitnessRoute::Unavailable(WitnessUnavailable::NoExecutor)
+        ));
+    }
+
+    #[test]
+    fn deployed_witness_runs_git_through_the_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        init_witness_repo(dir.path());
+        let backend = std::sync::Arc::new(RecordingExecBackend::new(dir.path()));
+        let route = WitnessRoute::Backend(backend.clone());
+
+        let before = route.witness(dir.path()).unwrap();
+        assert_eq!(Some(before), route.witness(dir.path()));
+
+        // Every git call went through Backend::exec, in the checkout, with
+        // optional locks disabled.
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 6, "three git calls per witness");
+        for request in &requests {
+            assert!(request.command.starts_with("git "), "{}", request.command);
+            assert_eq!(request.cwd.as_deref(), Some(dir.path()));
+            assert!(
+                request
+                    .env
+                    .contains(&("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string()))
+            );
+        }
+        assert!(requests[1].command.contains("--no-ext-diff"));
+        assert!(requests[1].command.contains("--no-textconv"));
+
+        // An untracked file, then a growing one, then a tracked edit all move
+        // the witness.
+        std::fs::write(dir.path().join("code.rs"), "partial work").unwrap();
+        let untracked = route.witness(dir.path()).unwrap();
+        assert_ne!(before, untracked);
+        std::fs::write(dir.path().join("code.rs"), "more partial work").unwrap();
+        let grown = route.witness(dir.path()).unwrap();
+        assert_ne!(untracked, grown);
+        std::fs::write(dir.path().join("tracked.rs"), "edited").unwrap();
+        assert_ne!(Some(grown), route.witness(dir.path()));
+    }
+
+    #[test]
+    fn unavailable_witness_is_skipped_without_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        init_witness_repo(dir.path());
+        for reason in [
+            WitnessUnavailable::NoExecutor,
+            WitnessUnavailable::InProcessOnly,
+        ] {
+            assert_eq!(WitnessRoute::Unavailable(reason).witness(dir.path()), None);
+        }
+        // Development still witnesses in-process.
+        assert!(WitnessRoute::InProcess.witness(dir.path()).is_some());
+    }
+
     #[test]
     fn round_budget_scales_cap_to_context_window() {
         assert_eq!(RoundBudget::new(Some(1_000_000)).hard_max, 30); // GLM-class
@@ -3188,6 +3521,7 @@ mod tests {
                 description: "Echo the text back".into(),
                 parameters: vec![ToolParamSchema::required("text", "text to echo")],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Safe,
                     capabilities: HashSet::new(),
                     description: String::new(),
@@ -3431,6 +3765,7 @@ mod tests {
                     schema: None,
                 }],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Safe,
                     capabilities: HashSet::new(),
                     description: String::new(),
@@ -4157,6 +4492,7 @@ mod tests {
                 description: "Fake file I/O for testing".into(),
                 parameters: vec![],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Safe,
                     capabilities: std::collections::HashSet::new(),
                     description: "Fake tool for testing".into(),
@@ -4224,6 +4560,7 @@ mod tests {
                 description: format!("test evidence producer {}", self.0),
                 parameters: vec![],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Safe,
                     capabilities: HashSet::new(),
                     description: String::new(),

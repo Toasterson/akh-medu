@@ -8,7 +8,7 @@
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use std::collections::HashSet;
@@ -125,6 +125,7 @@ impl Tool for HttpFetchTool {
                 ToolParamSchema::optional("timeout", "Timeout in seconds (default: 10)."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::Network]),
                 description: "Fetches URLs via HTTP GET — network access.".into(),
