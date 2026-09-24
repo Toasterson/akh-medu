@@ -74,6 +74,8 @@ class Observer:
         self.anima_headers = None
         self.grafana_headers = None
         self.grafana_context = None
+        from laya_controller import enabled
+        self.event_only = enabled(root)
 
     def get(self, key, default=None):
         row = self.db.execute('select value from state where key=?', (key,)).fetchone()
@@ -128,7 +130,7 @@ class Observer:
         if state.get('busy') or state.get('pending') or int(time.time())-state.get('last_finished',0)<rest:return False
         for raw, in self.db.execute('select event from outbox where accepted=0'):
             typ=json.loads(raw)['type']
-            if typ in ('schedule.'+role,'anima.'+role+'.changed') or (role=='vesta' and typ=='monitoring.changed'):return False
+            if typ in ('schedule.'+role,'anima.'+role+'.changed','laya.'+role+'.intervention') or (role=='vesta' and typ=='monitoring.changed'):return False
         return True
 
     def provider_blocked(self,role):
@@ -167,7 +169,12 @@ class Observer:
         submitted=0
         for ident, raw in self.db.execute('select id,event from outbox where accepted=0 order by rowid'):
             event=json.loads(raw);kind=event['type']
-            role=next((r for r in ROLES if kind in ('schedule.'+r,'anima.'+r+'.changed') or (r=='vesta' and kind=='monitoring.changed')),None)
+            if self.event_only and kind.startswith('schedule.'):
+                # Stop replaying old scheduled occurrences. Already admitted
+                # server deliveries retain their ownership and finish normally.
+                with self.db:self.db.execute('update outbox set accepted=2 where id=?', (ident,))
+                continue
+            role=next((r for r in ROLES if kind in ('schedule.'+r,'anima.'+r+'.changed','laya.'+r+'.intervention') or (r=='vesta' and kind=='monitoring.changed')),None)
             if role and self.provider_blocked(role):continue
             if submitted>=32:break
             submitted+=1
@@ -179,6 +186,7 @@ class Observer:
                 self.db.execute('update outbox set accepted=1 where id=?', (ident,))
                 for delivery in result['deliveries']:
                     self.db.execute('insert or ignore into deliveries values (?,?,?)',(delivery,'pending',None))
+                self.put('event_deliveries:'+ident, result['deliveries'])
 
     def watch_deliveries(self):
         token=(self.root/'secrets/operator.key').read_text().strip()
@@ -233,8 +241,14 @@ class Observer:
             if baseline and previous != item and (previous is not None or notify_new):
                 change = {'kind':kind,'project_id':project,'id':item['id'],
                           'previous':previous,'current':item}
-                for role in ('janus','minerva'):
-                    self.db.execute('insert or replace into pending values (?,?,?)', (role,ident,encoded(change)))
+                if self.event_only:
+                    from laya_controller import Queue
+                    queue = Queue(self.root)
+                    try: queue.observe(change)
+                    finally: queue.close()
+                else:
+                    for role in ('janus','minerva'):
+                        self.db.execute('insert or replace into pending values (?,?,?)', (role,ident,encoded(change)))
             self.put(ident, item)
         # Missing rows are never interpreted as deletions: MCP work-item lists
         # may be capped below the requested page size and expose no cursor.
@@ -309,6 +323,17 @@ class Observer:
                 self.put('project_offset',(offset+i+1)%len(projects))
         with self.db:
             self.put('anima_status',{'ok':True,'at':now,'projects':len(projects)})
+            if self.event_only:
+                # Preserve queued changes while transferring to the decision
+                # queue. Its idempotent upsert makes interruption replay-safe.
+                from laya_controller import Queue
+                queue = Queue(self.root)
+                try:
+                    for entity,value in self.db.execute('select entity,value from pending').fetchall():
+                        queue.observe(json.loads(value))
+                        self.db.execute('delete from pending where entity=?', (entity,))
+                finally: queue.close()
+                return
             for role in ('janus','minerva'):
                 if now-self.get('last_change:'+role,0)<CHANGE_INTERVALS[role] or not self.role_ready(role):continue
                 rows=self.db.execute('select entity,value from pending where role=? order by rowid limit 40',(role,)).fetchall()
@@ -359,6 +384,7 @@ class Observer:
                 self.put('monitoring_pending',None)
 
     def schedules(self):
+        if self.event_only: return
         now=int(time.time())
         with self.db:
             for role,interval in INTERVALS.items():
@@ -378,10 +404,15 @@ class Observer:
                 'activity_available':self.get('role_activity',{}).get('ok'),
                 'latest_workflow_failure':failure,
                 'provider_availability':{r:s for r,s in self.get('provider_availability',{}).items() if s.get('failure_class')}}
+        if self.event_only:
+            laya = self.get('laya_status', {})
+            signal['laya_controller_available'] = bool(laya.get('ok')) and time.time()-laya.get('at', 0) < 180
+            signal['laya_attention'] = laya.get('attention', [])
         if signal!=self.get('watchdog_signal'):
             notice=self.get('watchdog_notice')
             if notice is None:
                 degraded=any(v!='up' for v in (signal['local_services'] or {}).values()) or any(signal[k] is False for k in ('grafana_available','metrics_available','anima_available','activity_available')) or failure is not None or bool(signal['provider_availability'])
+                degraded = degraded or signal.get('laya_controller_available') is False or bool(signal.get('laya_attention'))
                 notice={'message_type':'coordination/status@v1','payload':{'state':'blocked' if degraded else 'complete',
                         'detail':'Deterministic Roman watchdog evidence (does not imply model task completion): '+encoded(signal)},
                         'summary':'Roman workflow and monitoring availability changed',
@@ -445,7 +476,7 @@ def serve(root):
                 elif method=='tools/list':result={'tools':[{'name':'monitoring_snapshot','description':'Read latest alert, daemon-health, Anima-observer and coverage evidence, including observation times. Unavailable feeds mean unknown state. No filesystem access.','inputSchema':{'type':'object','properties':{},'additionalProperties':False},'annotations':{'readOnlyHint':True}}]}
                 elif method=='tools/call' and q['params']['name']=='monitoring_snapshot' and q['params'].get('arguments',{})=={}:
                     c=sqlite3.connect('file:'+str(root/'state/observer.sqlite3')+'?mode=ro',uri=True)
-                    data={k:json.loads(v) for k,v in c.execute("select key,value from state where key in ('monitoring','monitoring_at','anima_status','coverage','heartbeat','workflow_counts','role_activity','workflow_failure','provider_availability','ingress_status','delivery_watch_status','board_watchdog_status')")};c.close()
+                    data={k:json.loads(v) for k,v in c.execute("select key,value from state where key in ('monitoring','monitoring_at','anima_status','coverage','heartbeat','workflow_counts','role_activity','workflow_failure','provider_availability','ingress_status','delivery_watch_status','board_watchdog_status','laya_status')")};c.close()
                     data['read_at']=int(time.time());data['read_at_utc']=datetime.now(timezone.utc).isoformat();result={'content':[{'type':'text','text':json.dumps(data)}]}
                 else:return self.reply(200,{'jsonrpc':'2.0','id':ident,'error':{'code':-32601,'message':'Unsupported read-only observer request'}})
                 self.reply(200,{'jsonrpc':'2.0','id':ident,'result':result})
