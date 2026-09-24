@@ -342,8 +342,28 @@ pub struct AgentDaemon {
     #[cfg(feature = "postgres")]
     heka_warned_unembedded: AtomicBool,
     /// Agent Board client for reactor run reports (ADR 105). `None` builds
-    /// one from `DJEHUTY_BOARD_TOKEN` / `DJEHUTY_BOARD_URL` per report.
+    /// one from this akh's board identity (see [`Self::board_identity`]) per
+    /// report. Tests inject a stub here.
     board: Option<Arc<dyn super::board_reactor::DjehutyBoardApi + Send + Sync>>,
+    /// This akh's own `[board]` identity (Phase 53). `None` falls back to the
+    /// process-wide `DJEHUTY_BOARD_*` environment.
+    board_config: Option<super::djehuty::BoardConfig>,
+    /// Whether the "no per-akh [board], using the process env" warning was
+    /// already logged for this akh.
+    board_env_warned: AtomicBool,
+    /// Whether the "[board] has no agent_id, inbox ingest disabled" warning
+    /// was already logged for this akh.
+    board_ingest_warned: AtomicBool,
+}
+
+/// One akh's resolved Agent Board identity.
+struct BoardIdentity {
+    config: super::djehuty::DjehutyConfig,
+    /// From `[board] agent_id`; `None` on the process-env fallback, where
+    /// ingress reads `DJEHUTY_AGENT_ID` itself.
+    own_agent_id: Option<super::djehuty::DjehutyAgentId>,
+    /// Whether this came from the akh's own `[board]`.
+    per_akh: bool,
 }
 
 impl AgentDaemon {
@@ -374,7 +394,54 @@ impl AgentDaemon {
             #[cfg(feature = "postgres")]
             heka_warned_unembedded: AtomicBool::new(false),
             board: None,
+            board_config: None,
+            board_env_warned: AtomicBool::new(false),
+            board_ingest_warned: AtomicBool::new(false),
         }
+    }
+
+    /// Use this akh's own Agent Board identity (`[board]` in its workspace
+    /// TOML) for run reports, `DjehutyReply` and board ingress. `None` keeps
+    /// the process-wide `DJEHUTY_BOARD_*` fallback.
+    pub fn with_board_config(mut self, board: Option<super::djehuty::BoardConfig>) -> Self {
+        self.board_config = board;
+        self
+    }
+
+    /// This akh's board client configuration and own agent id.
+    ///
+    /// - `[board]` configured: its URL and token, read now. A token that
+    ///   cannot be read is an error — never a silent fallback to the shared
+    ///   process identity, which would post under the wrong name.
+    /// - absent: `DJEHUTY_BOARD_TOKEN` / `DJEHUTY_BOARD_URL` /
+    ///   `DJEHUTY_AGENT_ID`, with a one-time warning per akh.
+    /// - neither: `Ok(None)` (board participation disabled).
+    fn board_identity(&self) -> Result<Option<BoardIdentity>, super::djehuty::BoardConfigError> {
+        if let Some(board) = &self.board_config {
+            return board.client_config(&self.workspace).map(|config| {
+                Some(BoardIdentity {
+                    config,
+                    own_agent_id: board.own_agent_id(),
+                    per_akh: true,
+                })
+            });
+        }
+        let Some(config) = super::djehuty::DjehutyConfig::from_env() else {
+            return Ok(None);
+        };
+        if !self.board_env_warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                workspace = %self.workspace,
+                "no [board] in this akh's config; using the process-wide DJEHUTY_BOARD_TOKEN, \
+                 so this akh posts to the Agent Board as the shared identity. Add \
+                 `[board] url = …, auth = {{ token_env = … }}` to its workspace TOML"
+            );
+        }
+        Ok(Some(BoardIdentity {
+            config,
+            own_agent_id: None,
+            per_akh: false,
+        }))
     }
 
     /// Use `board` for reactor run reports instead of the environment's
@@ -1877,7 +1944,37 @@ impl AgentDaemon {
                 return TaskRun::Contended;
             }
         };
-        match super::board_reactor::ingest_board_events_from_env(&engine, now) {
+        let ingress = match self.board_identity() {
+            Ok(Some(BoardIdentity {
+                config,
+                own_agent_id: Some(own),
+                ..
+            })) => super::board_reactor::ingest_board_events(
+                &engine,
+                &super::djehuty::DjehutyClient::new(config),
+                own,
+                now,
+            ),
+            Ok(Some(BoardIdentity { per_akh: true, .. })) => {
+                if !self.board_ingest_warned.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        workspace = %self.workspace,
+                        "[board] has no agent_id, so board inbox ingest is disabled for this akh \
+                         (self-message suppression needs it); run reports and replies still post"
+                    );
+                }
+                Ok(Default::default())
+            }
+            // Process-env fallback: the legacy path reads DJEHUTY_AGENT_ID
+            // and fails closed without it.
+            Ok(Some(_)) => super::board_reactor::ingest_board_events_from_env(&engine, now),
+            Ok(None) => Ok(Default::default()),
+            Err(error) => Err(super::error::AgentError::ToolExecution {
+                tool_name: "djehuty_board_reactor".into(),
+                message: error.to_string(),
+            }),
+        };
+        match ingress {
             Ok(report) => {
                 if report.events_queued > 0 {
                     tracing::info!(
@@ -2107,8 +2204,24 @@ impl AgentDaemon {
                             message: "agent lock contended; retrying board reply".into(),
                         }
                     })?;
-                    super::board_reactor::execute_board_reply_from_env(&guard, &claim)
-                        .map(|summary| (summary, true))
+                    let identity = self
+                        .board_identity()
+                        .map_err(|error| super::error::AgentError::ToolExecution {
+                            tool_name: "djehuty_board_reactor".into(),
+                            message: error.to_string(),
+                        })?
+                        .ok_or_else(|| super::error::AgentError::ToolExecution {
+                            tool_name: "djehuty_board_reactor".into(),
+                            message: "board replies need [board] in the akh config or \
+                                      DJEHUTY_BOARD_TOKEN"
+                                .into(),
+                        })?;
+                    super::board_reactor::execute_board_reply(
+                        &guard,
+                        &super::djehuty::DjehutyClient::new(identity.config),
+                        &claim,
+                    )
+                    .map(|summary| (summary, true))
                 })(),
                 ReactorAction::Trigger { action } => (|| {
                     let mut guard = self.agent.try_write().map_err(|_| {
@@ -2290,17 +2403,26 @@ impl AgentDaemon {
     fn report_run(&self, thread: &str, report: &super::board_reactor::RunReport) {
         let posted = match &self.board {
             Some(board) => super::board_reactor::post_run_report(board.as_ref(), thread, report),
-            None => match super::djehuty::DjehutyConfig::from_env() {
-                Some(config) => super::board_reactor::post_run_report(
-                    &super::djehuty::DjehutyClient::new(config),
+            None => match self.board_identity() {
+                Ok(Some(identity)) => super::board_reactor::post_run_report(
+                    &super::djehuty::DjehutyClient::new(identity.config),
                     thread,
                     report,
                 ),
-                None => {
+                Ok(None) => {
                     tracing::warn!(
                         schedule = %report.schedule_id,
                         thread,
-                        "daemon: reactor report_thread is set but DJEHUTY_BOARD_TOKEN is not; the run report stays in the episode log"
+                        "daemon: reactor report_thread is set but neither [board] nor DJEHUTY_BOARD_TOKEN is configured; the run report stays in the episode log"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        schedule = %report.schedule_id,
+                        thread,
+                        error = ?miette::Report::new(error),
+                        "daemon: this akh's [board] identity is unusable; the run report stays in the episode log"
                     );
                     return;
                 }
@@ -3902,6 +4024,137 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("no_progress_trip_wire")
+        );
+    }
+
+    // ── Phase 53 fix-up: per-akh Board identity ──
+
+    /// A one-request-per-connection HTTP stub that records each request's
+    /// `Authorization` header and answers a posted board message.
+    fn board_stub(requests: usize) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let handle = std::thread::spawn(move || {
+            let mut bearers = Vec::new();
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.eq_ignore_ascii_case("content-length")
+                                    .then(|| v.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&request).to_string();
+                bearers.push(
+                    text.lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("authorization")
+                                .then(|| v.trim().to_string())
+                        })
+                        .unwrap_or_default(),
+                );
+                let body = format!(
+                    r#"{{"id":"{}","author_id":"{}","message_type":"coordination/status@v1","payload":{{}},"summary":"s","created_at":"2026-09-24T10:00:00Z"}}"#,
+                    uuid::Uuid::now_v7(),
+                    uuid::Uuid::now_v7()
+                );
+                let response = format!(
+                    "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            bearers
+        });
+        (url, handle)
+    }
+
+    fn board_for(
+        dir: &std::path::Path,
+        akh: &str,
+        token: &str,
+        url: &str,
+    ) -> super::super::djehuty::BoardConfig {
+        let token_file = dir.join(format!("{akh}.board"));
+        std::fs::write(&token_file, format!("{token}\n")).unwrap();
+        super::super::djehuty::BoardConfig {
+            url: url.to_string(),
+            auth: super::super::djehuty::BoardAuth::TokenFile(token_file),
+            agent_id: None,
+            allow_insecure_http: false,
+        }
+    }
+
+    fn sample_report() -> super::super::board_reactor::RunReport {
+        super::super::board_reactor::RunReport {
+            schedule_id: "sched".into(),
+            schedule_name: "status".into(),
+            run_key: "run-1".into(),
+            state: super::super::board_reactor::RunReportState::Complete,
+            exit_condition: "done".into(),
+            outcome: "ok".into(),
+            pause: None,
+        }
+    }
+
+    #[test]
+    fn each_akh_reports_to_the_board_under_its_own_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, stub) = board_stub(2);
+        let thread = uuid::Uuid::now_v7().to_string();
+        for (akh, token) in [
+            ("janus", "janus-board-token"),
+            ("vesta", "vesta-board-token"),
+        ] {
+            let daemon = AgentDaemon::new(test_shared_agent(), DaemonConfig::default())
+                .with_workspace(akh)
+                .with_board_config(Some(board_for(dir.path(), akh, token, &url)));
+            daemon.report_run(&thread, &sample_report());
+        }
+        assert_eq!(
+            stub.join().unwrap(),
+            vec![
+                "Bearer janus-board-token".to_string(),
+                "Bearer vesta-board-token".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn unusable_per_akh_board_token_never_falls_back_to_the_process_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut board = board_for(dir.path(), "minerva", "t", "http://127.0.0.1:9");
+        board.auth = super::super::djehuty::BoardAuth::TokenFile(dir.path().join("missing"));
+        let daemon = AgentDaemon::new(test_shared_agent(), DaemonConfig::default())
+            .with_workspace("minerva")
+            .with_board_config(Some(board));
+        let error = match daemon.board_identity() {
+            Err(error) => error,
+            Ok(_) => panic!("a missing token file must be an error, not a fallback"),
+        };
+        assert_eq!(
+            miette::Diagnostic::code(&error).unwrap().to_string(),
+            "akh::board::auth::file_unreadable"
         );
     }
 }

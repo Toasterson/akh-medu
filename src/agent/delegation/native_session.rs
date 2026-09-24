@@ -9,7 +9,13 @@
 //! 2. creates an akhsessd session carrying the grant (`NewSession.grant`) and
 //!    binds the grant to that session;
 //! 3. submits the task and polls the session until the turn ends;
-//! 4. revokes the grant, whatever happened.
+//! 4. revokes the grant, whatever happened;
+//! 5. closes the session, whatever happened: `POST /v1/sessions/{id}/archive`,
+//!    or `…/retire` when akhsessd refuses to archive (a turn still running
+//!    after a timeout or a poll failure). Retirement cancels the outstanding
+//!    turns and akhsessd's reconciliation sweep then archives the session.
+//!    Either way the session's 0600 grant slot is removed by the archive
+//!    sweep instead of lingering until something else closes the session.
 //!
 //! The runtime's cognitive tool calls reach the core through akhsessd's broker
 //! with the grant attached, so they are checked against the grant's tool list
@@ -23,7 +29,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use akh_session_types::{Fault, GrantToken, NewSession, SubmitInput, TurnStatus};
+use akh_session_types::{Fault, GrantToken, NewSession, RetireSession, SubmitInput, TurnStatus};
 use miette::Diagnostic;
 use serde::Deserialize;
 use thiserror::Error;
@@ -234,6 +240,53 @@ impl NativeSessionClient {
         )
     }
 
+    /// `POST /v1/sessions/{id}/archive`: close a session whose turns are all
+    /// terminal. akhsessd answers 409 while a turn is still outstanding.
+    pub fn archive(&self, session_id: &str) -> Result<SessionView, NativeSessionError> {
+        self.send::<(), _>(
+            "POST",
+            &format!("/v1/sessions/{}/archive", segment(session_id)),
+            None,
+        )
+    }
+
+    /// `POST /v1/sessions/{id}/retire`: cancel outstanding turns and let
+    /// akhsessd's reconciliation sweep archive the session once they end.
+    pub fn retire(
+        &self,
+        session_id: &str,
+        request: &RetireSession,
+    ) -> Result<serde_json::Value, NativeSessionError> {
+        self.send(
+            "POST",
+            &format!("/v1/sessions/{}/retire", segment(session_id)),
+            Some(request),
+        )
+    }
+
+    /// Close a delegation session, best effort: archive it, or retire it when
+    /// akhsessd refuses the archive. Returns how it ended.
+    pub fn close_session(&self, session_id: &str) -> Result<SessionClosure, NativeSessionError> {
+        match self.archive(session_id) {
+            Ok(_) => Ok(SessionClosure::Archived),
+            Err(archive_error) => {
+                tracing::debug!(
+                    target: "akh::delegation",
+                    session_id, error = %archive_error,
+                    "delegation session not archivable yet; retiring it instead"
+                );
+                self.retire(
+                    session_id,
+                    &RetireSession {
+                        request_id: format!("akh-delegation-close-{}", uuid::Uuid::now_v7()),
+                        reason: "the akh's delegation ended; the grant was revoked".into(),
+                    },
+                )
+                .map(|_| SessionClosure::Retired)
+            }
+        }
+    }
+
     fn send<B: serde::Serialize, T: serde::de::DeserializeOwned>(
         &self,
         method: &str,
@@ -280,6 +333,16 @@ impl NativeSessionClient {
             }),
         }
     }
+}
+
+/// How a delegation session was closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionClosure {
+    /// Archived now (every turn was terminal).
+    Archived,
+    /// Retirement requested: akhsessd cancels the outstanding turns and its
+    /// reconciliation sweep archives the session.
+    Retired,
 }
 
 /// Percent-encode one path segment (session ids are UUIDs; this is defence).
@@ -346,9 +409,11 @@ pub fn run_native_delegation(
         // and is revoked explicitly when the delegation ends.
         ttl: (timeout + Duration::from_secs(300)).min(Duration::from_secs(24 * 60 * 60)),
     })?;
-    let revoke = RevokeOnDrop {
+    let mut cleanup = DelegationCleanup {
         issuer,
         grant_id: grant.id.clone(),
+        client,
+        session_id: None,
     };
     let started = Instant::now();
     let request_id = format!("akh-delegation-{}", uuid::Uuid::now_v7());
@@ -358,6 +423,7 @@ pub fn run_native_delegation(
         &request_id,
         grant.token.clone(),
     ))?;
+    cleanup.session_id = Some(session.id.clone());
     issuer.bind_session(&grant.id, &session.id)?;
     let turn = client.submit(
         &session.id,
@@ -386,7 +452,7 @@ pub fn run_native_delegation(
         }
         std::thread::sleep(poll);
     };
-    drop(revoke);
+    drop(cleanup);
     if finished.status != TurnStatus::Completed {
         return Err(NativeSessionError::TurnFailed {
             session_id: session.id,
@@ -414,13 +480,19 @@ pub fn run_native_delegation(
     })
 }
 
-/// Revokes the delegation's grant when the delegation ends, on every path.
-struct RevokeOnDrop<'a> {
+/// Ends a delegation on every exit path: revokes the grant first (so the
+/// runtime loses the akh's tools at once), then closes the akhsessd session
+/// if one was created. Both steps are best effort and log a warning on
+/// failure; neither can mask the delegation's own result.
+struct DelegationCleanup<'a> {
     issuer: &'a dyn DelegationGrantIssuer,
     grant_id: String,
+    client: &'a NativeSessionClient,
+    /// Set once akhsessd created the session.
+    session_id: Option<String>,
 }
 
-impl Drop for RevokeOnDrop<'_> {
+impl Drop for DelegationCleanup<'_> {
     fn drop(&mut self) {
         if let Err(error) = self.issuer.revoke(&self.grant_id) {
             tracing::warn!(
@@ -428,6 +500,23 @@ impl Drop for RevokeOnDrop<'_> {
                 grant_id = %self.grant_id, %error,
                 "failed to revoke delegation grant; it still expires on its TTL"
             );
+        }
+        let Some(session_id) = self.session_id.take() else {
+            return;
+        };
+        match self.client.close_session(&session_id) {
+            Ok(closure) => tracing::debug!(
+                target: "akh::delegation",
+                session_id = %session_id, ?closure,
+                "delegation session closed"
+            ),
+            Err(error) => tracing::warn!(
+                target: "akh::delegation",
+                session_id = %session_id,
+                error = ?miette::Report::new(error),
+                "failed to archive or retire the delegation session; its grant slot stays \
+                 until akhsessd archives it (the grant itself is already revoked)"
+            ),
         }
     }
 }
@@ -569,12 +658,17 @@ mod tests {
     /// A stub akhsessd: answers each request from `script` in order and logs
     /// every raw request.
     fn stub_akhsessd(script: Vec<&'static str>) -> (String, Arc<Mutex<Vec<String>>>) {
+        stub_akhsessd_status(script.into_iter().map(|body| (200, body)).collect())
+    }
+
+    /// Like [`stub_akhsessd`], with an explicit HTTP status per response.
+    fn stub_akhsessd_status(script: Vec<(u16, &'static str)>) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let log = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&log);
         std::thread::spawn(move || {
-            for body in script {
+            for (status, body) in script {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
@@ -610,7 +704,7 @@ mod tests {
                     .unwrap()
                     .push(String::from_utf8_lossy(&request).to_string());
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = stream.write_all(response.as_bytes());
@@ -628,6 +722,7 @@ mod tests {
             "{\"id\":\"sess-1\",\"turns\":[{\"id\":\"turn-1\",\"status\":\"completed\",\
              \"output\":\"done\\n```akh-result\\n{\\\"status\\\":\\\"success\\\",\
              \\\"summary\\\":\\\"ok\\\"}\\n```\\n\"}]}",
+            r#"{"id":"sess-1","turns":[{"id":"turn-1","status":"completed"}]}"#,
         ]);
         let client = NativeSessionClient::new(url, "akhsessd-token-long-enough-000");
         let issuer = RecordingIssuer::default();
@@ -665,6 +760,12 @@ mod tests {
         assert!(requests[1].starts_with("POST /v1/sessions/sess-1/inputs "));
         assert!(requests[1].contains("summarise the incident"));
         assert!(requests[2].starts_with("GET /v1/sessions/sess-1 "));
+        let archive = requests.last().unwrap();
+        assert!(
+            archive.starts_with("POST /v1/sessions/sess-1/archive "),
+            "the finished delegation's session is archived: {archive}"
+        );
+        assert_eq!(requests.len(), 5, "archived directly, no retirement");
 
         assert_eq!(
             *issuer.calls.lock().unwrap(),
@@ -702,5 +803,57 @@ mod tests {
             *issuer.calls.lock().unwrap(),
             vec!["issue", "revoke grant-1"]
         );
+    }
+
+    #[test]
+    fn a_failed_poll_revokes_the_grant_and_retires_the_unarchivable_session() {
+        let (url, log) = stub_akhsessd_status(vec![
+            (200, r#"{"id":"sess-2","turns":[]}"#),
+            (200, r#"{"id":"turn-2","status":"queued"}"#),
+            (200, "not json"),
+            (
+                409,
+                r#"{"code":"conflict","message":"cancel or reconcile outstanding turns before archiving"}"#,
+            ),
+            (
+                200,
+                r#"{"request":{"request_id":"r","reason":"x"},"principal":"p","at":1}"#,
+            ),
+        ]);
+        let client = NativeSessionClient::new(url, "akhsessd-token-long-enough-000");
+        let issuer = RecordingIssuer::default();
+        let config = NativeDelegationConfig {
+            enabled: true,
+            workspace_profile: "code".into(),
+            poll_interval_ms: 10,
+            ..Default::default()
+        };
+        let error = run_native_delegation(
+            &client,
+            &issuer,
+            &config,
+            &DelegationTask::new("x"),
+            DelegationId(2),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                DelegationError::NativeSession(NativeSessionError::Decode { .. })
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            *issuer.calls.lock().unwrap(),
+            vec!["issue", "bind grant-1 sess-2", "revoke grant-1"]
+        );
+        let requests = log.lock().unwrap().clone();
+        assert_eq!(requests.len(), 5, "{requests:#?}");
+        assert!(requests[3].starts_with("POST /v1/sessions/sess-2/archive "));
+        assert!(requests[4].starts_with("POST /v1/sessions/sess-2/retire "));
+        let body: RetireSession =
+            serde_json::from_str(requests[4].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert!(body.request_id.starts_with("akh-delegation-close-"));
+        assert!(!body.reason.is_empty());
     }
 }

@@ -86,8 +86,12 @@ use crate::chat::{ChatProcessor, SessionContext};
 use crate::engine::Engine;
 use crate::message::{AkhMessage, MessageSink};
 
+pub mod auth;
 pub mod control;
 pub mod mcp_bridge;
+pub use auth::{
+    AcpAccess, AcpAuthError, AcpGrant, AcpIngressAuth, AcpPrincipalConfig, AkhScope, PrincipalAuth,
+};
 pub use control::{
     CONTROL_METHODS, ControlFuture, EngineHandle, ResolveEngineFuture, ResolveFuture,
     ServerControl, WorkspaceHandles, is_control_method,
@@ -558,7 +562,12 @@ pub struct AkhAcpAgent {
     client_caps: Arc<Mutex<Option<ClientCapabilities>>>,
     /// When set, every connection must authenticate in its initialize request
     /// before any capabilities or session state are accepted.
-    ingress_auth: Option<SharedSecretAuth>,
+    ingress_auth: Option<AcpIngressAuth>,
+    /// What *this connection* may do, set by a successful authenticated
+    /// `initialize`. [`build_connection`] gives every connection a fresh slot
+    /// (the rest of the agent is shared across connections), so one client's
+    /// principal never leaks to another. Unused when `ingress_auth` is `None`.
+    connection_access: Arc<Mutex<Option<AcpAccess>>>,
     /// Server-level control-plane backend (akhomed's `ServerState`). Handles the
     /// `_akh/{workspace,daemon,config}/*` methods that span the whole daemon
     /// rather than one workspace. `None` for in-process single-workspace setups
@@ -749,6 +758,7 @@ impl AkhAcpAgent {
             name: "akh-medu".to_string(),
             client_caps: Arc::new(Mutex::new(None)),
             ingress_auth: None,
+            connection_access: Arc::new(Mutex::new(None)),
             control: None,
             turn_idle_timeout: turn_idle_timeout_from_env(),
             socket_read_timeout: socket_read_timeout_from_env(),
@@ -781,6 +791,7 @@ impl AkhAcpAgent {
             session_active_turns: Arc::new(Mutex::new(std::collections::HashSet::new())),
             client_caps: Arc::new(Mutex::new(None)),
             ingress_auth: None,
+            connection_access: Arc::new(Mutex::new(None)),
             control: Some(control),
             turn_idle_timeout: turn_idle_timeout_from_env(),
             socket_read_timeout: socket_read_timeout_from_env(),
@@ -806,11 +817,62 @@ impl AkhAcpAgent {
         self
     }
 
-    /// Require shared-secret authentication during ACP initialization.
+    /// Require authentication during ACP initialization: the legacy shared
+    /// secret ([`SharedSecretAuth`], unscoped) or per-akh principals
+    /// ([`PrincipalAuth`]).
     #[must_use]
-    pub fn with_ingress_auth(mut self, auth: SharedSecretAuth) -> Self {
-        self.ingress_auth = Some(auth);
+    pub fn with_ingress_auth(mut self, auth: impl Into<AcpIngressAuth>) -> Self {
+        self.ingress_auth = Some(auth.into());
         self
+    }
+
+    /// A clone of this agent with a fresh, unauthenticated per-connection
+    /// access slot. Called once per accepted connection.
+    fn for_connection(&self) -> Self {
+        let mut me = self.clone();
+        me.connection_access = Arc::new(Mutex::new(None));
+        me
+    }
+
+    /// What the current connection may do. Without ingress auth (Unix socket,
+    /// in-process embeds) everything is allowed; with it, only after a
+    /// successful `initialize`.
+    fn access(&self) -> Result<AcpAccess, AcpAuthError> {
+        if self.ingress_auth.is_none() {
+            return Ok(AcpAccess::Unrestricted);
+        }
+        self.connection_access
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or(AcpAuthError::Unauthenticated)
+    }
+
+    /// Refuse `workspace` unless this connection's principal is granted it.
+    fn authorize_workspace(&self, workspace: &str) -> Result<(), AcpAuthError> {
+        let result = self.access()?.authorize_workspace(workspace);
+        if let Err(error) = &result {
+            tracing::warn!(workspace, error = %error, "ACP request refused: akh not granted");
+        }
+        result
+    }
+
+    /// Refuse a control-plane `method` unless this connection may use it.
+    fn authorize_control(&self, method: &str) -> Result<(), AcpAuthError> {
+        let result = self.access()?.authorize_control(method);
+        if let Err(error) = &result {
+            tracing::warn!(method, error = %error, "ACP request refused: control plane not granted");
+        }
+        result
+    }
+
+    /// The workspace a tracked session routes to, if the session exists.
+    fn session_workspace_of(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .cloned()
     }
 
     /// Override the agent name advertised during `initialize`. In held
@@ -846,6 +908,8 @@ impl AkhAcpAgent {
         ),
         String,
     > {
+        self.authorize_workspace(workspace)
+            .map_err(|e| format!("{e} ({})", e.code_str()))?;
         if let Some(ctrl) = &self.control {
             match ctrl.resolve(workspace).await {
                 Ok(h) => return Ok((h.engine, h.agent, h.processor, h.require_pushed_mcp)),
@@ -873,6 +937,8 @@ impl AkhAcpAgent {
     /// skills, health). Falls back to the held engine when no control backend
     /// is wired (same pattern as `resolve_handles`).
     async fn resolve_engine_only_handles(&self, workspace: &str) -> Result<Arc<Engine>, String> {
+        self.authorize_workspace(workspace)
+            .map_err(|e| format!("{e} ({})", e.code_str()))?;
         if let Some(ctrl) = &self.control {
             match ctrl.resolve_engine_only(workspace).await {
                 Ok(h) => return Ok(h.engine),
@@ -4630,6 +4696,7 @@ fn permission_mode_str(mode: crate::agent::permission::PermissionMode) -> &'stat
 }
 
 fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Client> {
+    let me = me.for_connection();
     AcpRole
         .builder()
         .name("akh-medu-acp")
@@ -4659,16 +4726,26 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                                         .data(serde_json::json!({"status": 403})),
                                 );
                             };
-                            match auth.authorizes(token) {
-                                Ok(true) => {}
-                                Ok(false) => {
+                            match auth.authenticate(token) {
+                                Ok(access) => {
+                                    if let AcpAccess::Scoped(grant) = &access {
+                                        tracing::info!(
+                                            principal = %grant.principal,
+                                            "ACP connection authenticated"
+                                        );
+                                    }
+                                    *me.connection_access
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner()) = Some(access);
+                                }
+                                Err(auth::IngressDenial::InvalidCredentials) => {
                                     return responder.respond_with_error(
                                         agent_client_protocol::Error::new(403, "invalid credentials")
                                             .data(serde_json::json!({"status": 403})),
                                     );
                                 }
-                                Err(error) => {
-                                    tracing::error!(%error, "shared-secret source unavailable; denying ACP initialize");
+                                Err(auth::IngressDenial::Unavailable(error)) => {
+                                    tracing::error!(%error, "ACP credential source unavailable; denying initialize");
                                     return responder.respond_with_error(
                                         agent_client_protocol::Error::new(503, "authentication unavailable")
                                             .data(serde_json::json!({"status": 503})),
@@ -4749,6 +4826,13 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                             "session/new: cwd + _meta observed"
                         );
                         let workspace = resolve_session_workspace(req.meta.as_ref(), &req.cwd);
+                        // Per-akh scoping: the effective workspace (the
+                        // daemon default when none is named) must be granted
+                        // to this connection's principal.
+                        let effective = workspace.as_deref().unwrap_or(&me.default_ws);
+                        if let Err(error) = me.authorize_workspace(effective) {
+                            return responder.respond_with_error(error.rpc_error());
+                        }
                         // WI-280: Detect dispatch mode from the session cwd. Anima
                         // dispatches work from worktree paths matching the pattern
                         // `/var/lib/anima-runner/worktrees/<UUID>`. The env var
@@ -4828,6 +4912,16 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                     let me = me.clone();
                     async move {
                         let session_key = req.session_id.to_string();
+                        let granted = match me.session_workspace_of(&session_key) {
+                            Some(ws) => me.authorize_workspace(&ws),
+                            // Unknown ids still need an authenticated
+                            // connection; `load_retained_session` then
+                            // reports them as unknown.
+                            None => me.access().map(|_| ()),
+                        };
+                        if let Err(error) = granted {
+                            return responder.respond_with_error(error.rpc_error());
+                        }
                         match me.load_retained_session(&session_key) {
                             Ok(()) => {
                                 tracing::info!(
@@ -4918,6 +5012,9 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                             }
                         };
                         let ws = session_lease.workspace.clone();
+                        if let Err(error) = me.authorize_workspace(&ws) {
+                            return responder.respond_with_error(error.rpc_error());
+                        }
                         let idle = me.turn_idle_timeout;
 
                         // Busy fail-fast (turn-wedge fix, part b): if an
@@ -5574,6 +5671,9 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                                     // daemon). Routed to the ServerControl
                                     // backend before the per-workspace data-plane.
                                     if is_control_method(method) {
+                                        if let Err(error) = me.authorize_control(method) {
+                                            return responder.respond_with_error(error.rpc_error());
+                                        }
                                         return match &control {
                                             Some(ctrl) => match ctrl
                                                 .dispatch(&req.method, &req.params)
@@ -5607,6 +5707,9 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                                         .and_then(serde_json::Value::as_str)
                                         .map(str::to_string)
                                         .unwrap_or_else(|| default_ws.clone());
+                                    if let Err(error) = me.authorize_workspace(&workspace) {
+                                        return responder.respond_with_error(error.rpc_error());
+                                    }
 
                                     // ADR-049 split-brain guard: read-only
                                     // engine methods must not trigger lazy agent
@@ -5877,6 +5980,11 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                     let me = me.clone();
                     async move {
                         let session_id = n.session_id.to_string();
+                        if let Some(ws) = me.session_workspace_of(&session_id)
+                            && me.authorize_workspace(&ws).is_err()
+                        {
+                            return Ok(());
+                        }
                         let found = me
                             .session_cancels
                             .lock()
@@ -9580,7 +9688,7 @@ tags = []
     }
 
     async fn authenticated_tcp_initialize(
-        auth: SharedSecretAuth,
+        auth: impl Into<AcpIngressAuth>,
         bearer: Option<&str>,
     ) -> Result<(), agent_client_protocol::Error> {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
@@ -9647,6 +9755,223 @@ tags = []
             .await
             .expect_err("retired token must stop working after the file update");
         assert_eq!(i32::from(retired.code), 403);
+    }
+
+    /// Outcome of one scoped-ACP probe: `initialize`, then one `session/new`
+    /// per workspace, then one `_akh/workspace/status` per workspace.
+    struct ScopedProbe {
+        sessions: Vec<Result<(), agent_client_protocol::Error>>,
+        status: Vec<Result<(), agent_client_protocol::Error>>,
+        control: Result<(), agent_client_protocol::Error>,
+    }
+
+    async fn scoped_tcp_probe(
+        auth: impl Into<AcpIngressAuth>,
+        bearer: &str,
+        workspaces: &[&str],
+    ) -> Result<ScopedProbe, agent_client_protocol::Error> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+        let addr = listener.local_addr().expect("local addr");
+        let me = workspace().with_ingress_auth(auth);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_tcp_loop(me, listener, shutdown_rx).await });
+
+        let stream = TcpStream::connect(addr).await.expect("connect tcp");
+        let (read_half, write_half) = stream.into_split();
+        let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+        let bearer = bearer.to_string();
+        let workspaces: Vec<String> = workspaces.iter().map(|w| (*w).to_string()).collect();
+        let result = Client
+            .builder()
+            .name("akh-scoped-test-client")
+            .connect_with(transport, async move |cx| {
+                let mut meta = Meta::new();
+                meta.insert(AUTH_META_KEY.into(), format!("Bearer {bearer}").into());
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1).meta(meta))
+                    .block_task()
+                    .await?;
+                let mut sessions = Vec::new();
+                let mut status = Vec::new();
+                for ws in &workspaces {
+                    let mut request = NewSessionRequest::new(PathBuf::from("/tmp"));
+                    let mut meta = Meta::new();
+                    meta.insert("akh/workspace".into(), ws.clone().into());
+                    request = request.meta(meta);
+                    sessions.push(cx.send_request(request).block_task().await.map(|_| ()));
+                    status.push(
+                        cx.send_request(AkhExtRequest {
+                            method: "_akh/workspace/status".into(),
+                            params: serde_json::json!({ "workspace": ws }),
+                        })
+                        .block_task()
+                        .await
+                        .map(|_| ()),
+                    );
+                }
+                let control = cx
+                    .send_request(AkhExtRequest {
+                        method: "_akh/workspace/list".into(),
+                        params: serde_json::json!({}),
+                    })
+                    .block_task()
+                    .await
+                    .map(|_| ());
+                Ok(ScopedProbe {
+                    sessions,
+                    status,
+                    control,
+                })
+            })
+            .await;
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        result
+    }
+
+    fn error_code(error: &agent_client_protocol::Error) -> Option<String> {
+        error
+            .data
+            .as_ref()
+            .and_then(|d| d.get("code"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    }
+
+    const JANUS_TOKEN: &str = "janus-token-aaaaaaaaaaaaaaaaaaaa";
+    const VESTA_TOKEN: &str = "vesta-token-bbbbbbbbbbbbbbbbbbbb";
+
+    fn janus_vesta_principals(dir: &Path) -> PrincipalAuth {
+        let janus = dir.join("janus.key");
+        let vesta = dir.join("vesta.key");
+        std::fs::write(&janus, format!("{JANUS_TOKEN}\n")).unwrap();
+        std::fs::write(&vesta, format!("{VESTA_TOKEN}\n")).unwrap();
+        PrincipalAuth::from_config(&[
+            AcpPrincipalConfig {
+                id: "t3-janus".into(),
+                token_file: janus,
+                akhs: vec!["janus".into()],
+                control: false,
+            },
+            AcpPrincipalConfig {
+                id: "t3-vesta".into(),
+                token_file: vesta,
+                akhs: vec!["vesta".into()],
+                control: false,
+            },
+        ])
+        .unwrap()
+    }
+
+    /// Phase 53 fix-up: token A opens akh A and is refused on akh B, for
+    /// `session/new`, the `_akh/*` data plane and the control plane.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_tcp_principal_is_scoped_to_its_akhs() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = janus_vesta_principals(dir.path());
+        let probe = scoped_tcp_probe(auth, JANUS_TOKEN, &["janus", "vesta"])
+            .await
+            .expect("janus token initializes");
+        probe.sessions[0]
+            .as_ref()
+            .expect("janus token opens a janus session");
+        let refused = probe.sessions[1]
+            .as_ref()
+            .expect_err("janus token must not open a vesta session");
+        assert_eq!(i32::from(refused.code), 403);
+        assert_eq!(
+            error_code(refused).as_deref(),
+            Some("akh::acp::workspace_not_granted")
+        );
+        probe.status[0]
+            .as_ref()
+            .expect("janus data plane on janus is allowed");
+        let refused = probe.status[1]
+            .as_ref()
+            .expect_err("janus token must not read vesta's data plane");
+        assert_eq!(
+            error_code(refused).as_deref(),
+            Some("akh::acp::workspace_not_granted")
+        );
+        let control = probe
+            .control
+            .expect_err("control plane needs control = true");
+        assert_eq!(
+            error_code(&control).as_deref(),
+            Some("akh::acp::control_not_granted")
+        );
+    }
+
+    /// An unknown token is refused at `initialize`, even with principals set.
+    #[tokio::test]
+    async fn acp_tcp_principal_refuses_unknown_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = janus_vesta_principals(dir.path());
+        let refused = authenticated_tcp_initialize(
+            auth.clone(),
+            Some("Bearer unknown-token-cccccccccccccccccc"),
+        )
+        .await
+        .expect_err("unknown token must fail");
+        assert_eq!(i32::from(refused.code), 403);
+        authenticated_tcp_initialize(auth, Some(&format!("Bearer {VESTA_TOKEN}")))
+            .await
+            .expect("known token initializes");
+    }
+
+    /// The legacy shared secret (no principals) stays unscoped: one token
+    /// opens sessions on every akh and reaches the control plane's router.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_tcp_legacy_shared_secret_grants_every_akh() {
+        let auth = SharedSecretAuth::from_inline("legacy-shared-secret-token").unwrap();
+        let probe = scoped_tcp_probe(auth, "legacy-shared-secret-token", &["janus", "vesta"])
+            .await
+            .expect("legacy token initializes");
+        for (session, status) in probe.sessions.iter().zip(&probe.status) {
+            session.as_ref().expect("legacy token opens any akh");
+            status.as_ref().expect("legacy token reads any akh");
+        }
+        if let Err(error) = &probe.control {
+            // No ServerControl is wired in the held test workspace, so the
+            // router answers "no backend" — but never a scoping refusal.
+            assert_ne!(
+                error_code(error).as_deref(),
+                Some("akh::acp::control_not_granted")
+            );
+        }
+    }
+
+    /// A request before `initialize` on an authenticated listener is refused.
+    #[tokio::test]
+    async fn acp_tcp_requests_before_initialize_are_unauthenticated() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+        let addr = listener.local_addr().expect("local addr");
+        let me = workspace().with_ingress_auth(janus_vesta_principals(dir.path()));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept tcp");
+            serve_tcp_stream(me, stream).await
+        });
+        let stream = TcpStream::connect(addr).await.expect("connect tcp");
+        let (read_half, write_half) = stream.into_split();
+        let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+        let result = Client
+            .builder()
+            .name("akh-unauth-test-client")
+            .connect_with(transport, async move |cx| {
+                let mut meta = Meta::new();
+                meta.insert("akh/workspace".into(), "janus".into());
+                cx.send_request(NewSessionRequest::new(PathBuf::from("/tmp")).meta(meta))
+                    .block_task()
+                    .await
+                    .map(|_| ())
+            })
+            .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        let error = result.expect_err("session/new before initialize must be refused");
+        assert_eq!(
+            error_code(&error).as_deref(),
+            Some("akh::acp::unauthenticated")
+        );
     }
 
     /// Same prompt turn as the Unix test, but over a real **TCP** socket —

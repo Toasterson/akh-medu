@@ -503,3 +503,100 @@ numbers before editing, because they drift.
   - the CLAUDE.md roadmap (Phase 53 line; already added on `docs/full-akh-always`).
 - Add a CI step: `cargo test --lib --features server core_service`.
 - Leave the historical research and plan docs as they are.
+
+## Integration fix-ups (branch `phase53/fixups`, 2026-09-24)
+
+Three gaps found while integrating 53a–53e, 53g and 53i.
+
+### 1. ACP TCP tokens are scoped per akh
+
+akhomed's ACP TCP listener used to accept any `AKHOMED_SHARED_SECRET` token for
+every akh (akhsessd scoped each principal to its akhs). Principals now live in
+the **host config** (`config.toml`, `[acp]`), not in `core.json`: the ACP
+listener runs whenever `[acp] tcp_port` is set, while `/v1` exists only with
+`AKH_CORE_CONFIG`, so tying ACP auth to `core.json` would make it depend on an
+unrelated surface and feature.
+
+```toml
+[acp]
+tcp_bind = "127.0.0.1"
+tcp_port = 8201
+
+[[acp.principals]]
+id = "t3-janus"
+token_file = "/abs/path/secrets/t3-janus.key"  # absolute; one 24+ char token per line
+akhs = ["janus"]                               # ["*"] alone = every akh
+
+[[acp.principals]]
+id = "operator"
+token_file = "/abs/path/secrets/acp-operator.key"
+akhs = ["*"]
+control = true                                 # server-wide _akh/* control plane; default false
+```
+
+- A token maps to exactly one principal. Token files are re-read on every
+  `initialize` (so rotation can overlap old and new lines), every comparison is
+  constant-time, and two principals may not share a token.
+- `session/new` (the effective workspace, including the default), `session/load`,
+  `session/prompt`, `session/cancel` and every `_akh/*` data-plane request are
+  checked against the principal's `akhs`. A refusal is JSON-RPC 403 with
+  `data.code = "akh::acp::workspace_not_granted"` plus `help`.
+- Control-plane methods (`CONTROL_METHODS`) need `control = true`
+  (`akh::acp::control_not_granted`).
+- Requests before a successful `initialize` are refused (`akh::acp::unauthenticated`).
+- **Legacy:** with no principals configured, `AKHOMED_SHARED_SECRET[_FILE]` keeps
+  working, grants every akh and the control plane, and startup logs a `warn` that
+  it is unscoped. With principals configured the shared secret is ignored for TCP
+  (a `warn` says so if it is set). The Unix socket is unchanged (local, unauthenticated).
+- `akh-acp --akhomed` needs no change: `--token-file` must hold the token of a
+  principal whose `akhs` include `--akh`.
+- Code: `src/acp/auth.rs` (`AcpPrincipalConfig`, `AcpIngressAuth`,
+  `PrincipalAuth`, `AcpAccess`, `AcpAuthError`); `AcpSection.principals` in
+  `src/config.rs` (present only with the `acp` feature).
+
+### 2. Each akh posts to the Agent Board as itself
+
+53d built one process-wide `DjehutyClient` from `DJEHUTY_BOARD_TOKEN`, so all
+akhs reported as one identity. The workspace TOML now carries a `[board]` table,
+resolved per akh by the daemon for `coordination/status@v1` run reports,
+`DjehutyReply` and board ingress:
+
+```toml
+# workspaces/janus.toml — keep every scalar above the first [table]
+model = "glm-5.3"
+
+[board]
+url = "https://board.lab.home"                # http:// only for loopback or allow_insecure_http = true
+auth = { token_env = "ROMAN_BOARD_JANUS" }    # or { token_file = "/abs/path/janus-board.key" }
+agent_id = "<janus board agent UUID>"         # needed for inbox ingest (self-message suppression)
+```
+
+- `board` is a known table (`url`, `auth`, `agent_id`, `allow_insecure_http`);
+  `auth` and the table itself use `deny_unknown_fields`. The URL, env-var name and
+  absolute token path are validated at load (`akh::board::config::*`).
+- The token is read on every use. If a configured `[board]` token cannot be read
+  (`akh::board::auth::*`), the report is **not** posted; there is no silent fallback
+  to the shared identity.
+- Without `[board]` the daemon falls back to `DJEHUTY_BOARD_TOKEN` /
+  `DJEHUTY_BOARD_URL` / `DJEHUTY_AGENT_ID` and warns once per akh.
+- A `[board]` without `agent_id` still posts reports and replies. Inbox ingest is
+  disabled for that akh, with a one-time warning.
+
+### 3. Delegated native sessions are closed
+
+`NativeSession` delegation now ends through one guard on every exit path. The guard
+first revokes the grant and then closes the akhsessd session:
+`POST /v1/sessions/{id}/archive`. If akhsessd refuses to archive because a turn is
+still outstanding (after a timeout or a poll failure), the guard calls
+`POST /v1/sessions/{id}/retire` instead. Retiring cancels the turns, and the
+reconciliation sweep then archives the session. Archiving removes the 0600 grant
+slot. A failure to close is logged at `warn` and never masks the delegation's result.
+
+### Cutover implications (53f)
+
+- Add `[[acp.principals]]` for the three T3 keys (`akhs = ["janus"]` etc.) and an
+  operator principal if the ACP control plane over TCP is needed. Once principals
+  exist, `AKHOMED_SHARED_SECRET_FILE` no longer opens TCP ACP.
+- Add `[board]` to `janus.toml`, `minerva.toml` and `vesta.toml` with
+  `token_env = "ROMAN_BOARD_JANUS|MINERVA|VESTA"`. `daemon_credentials.py`'s `core`
+  role must export those three variables into akhomed's environment.

@@ -146,6 +146,19 @@ pub struct AkhomedConfig {
 /// tcp_bind = "127.0.0.1"
 /// tcp_port = 8201
 /// # workspace = "default"   # default: first auto_start workspace, else "default"
+///
+/// # Per-akh TCP principals (Phase 53, ADR 113). When any are configured the
+/// # legacy AKHOMED_SHARED_SECRET is ignored for TCP ingress.
+/// [[acp.principals]]
+/// id = "t3-janus"
+/// token_file = "/secrets/t3-janus.key"   # absolute; one token (24+ chars) per line
+/// akhs = ["janus"]                       # ["*"] alone = every akh
+///
+/// [[acp.principals]]
+/// id = "operator"
+/// token_file = "/secrets/acp-operator.key"
+/// akhs = ["*"]
+/// control = true                         # server-wide `_akh/*` control plane
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcpSection {
@@ -165,6 +178,14 @@ pub struct AcpSection {
     /// workspace, falling back to `"default"`.
     #[serde(default)]
     pub workspace: Option<String>,
+    /// Per-akh TCP ingress principals. Empty (the default) keeps the legacy,
+    /// unscoped `AKHOMED_SHARED_SECRET[_FILE]`; see [`crate::acp::auth`].
+    /// Serialized last, as an array of tables below the scalars above.
+    /// Only exists with the `acp` feature (without it there is no ACP
+    /// listener to scope).
+    #[cfg(feature = "acp")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub principals: Vec<crate::acp::auth::AcpPrincipalConfig>,
 }
 
 impl Default for AcpSection {
@@ -175,6 +196,8 @@ impl Default for AcpSection {
             tcp_bind: None,
             tcp_port: None,
             workspace: None,
+            #[cfg(feature = "acp")]
+            principals: Vec::new(),
         }
     }
 }
@@ -875,6 +898,44 @@ pub fn env_var_registry() -> &'static [EnvVarSpec] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 53 fix-up: `[[acp.principals]]` parses under `[acp]`, round-trips
+    /// with the scalars kept above the array of tables, and rejects typos.
+    #[cfg(feature = "acp")]
+    #[test]
+    fn acp_principals_parse_and_round_trip() {
+        let src = r#"
+            [acp]
+            tcp_port = 8201
+
+            [[acp.principals]]
+            id = "t3-janus"
+            token_file = "/secrets/t3-janus.key"
+            akhs = ["janus"]
+
+            [[acp.principals]]
+            id = "operator"
+            token_file = "/secrets/operator.key"
+            akhs = ["*"]
+            control = true
+        "#;
+        let cfg: AkhomedConfig = toml::from_str(src).expect("parse");
+        assert_eq!(cfg.acp.tcp_port, Some(8201));
+        assert_eq!(cfg.acp.principals.len(), 2);
+        assert!(!cfg.acp.principals[0].control);
+        assert!(cfg.acp.principals[1].control);
+        let saved = toml::to_string(&cfg).expect("serialize");
+        let reloaded: AkhomedConfig = toml::from_str(&saved).expect("reload");
+        assert_eq!(reloaded.acp.principals, cfg.acp.principals);
+        assert_eq!(reloaded.acp.tcp_port, Some(8201));
+        assert!(
+            toml::from_str::<AkhomedConfig>(
+                "[[acp.principals]]\nid = \"x\"\ntoken_file = \"/x\"\nakh = [\"x\"]\n"
+            )
+            .is_err(),
+            "a typo'd principal key is refused, not dropped"
+        );
+    }
 
     #[test]
     fn default_config_round_trips() {

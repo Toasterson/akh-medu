@@ -9,9 +9,13 @@
 //! - **akhomed** (`--akhomed`, Phase 53d): stdio to akhomed's own ACP TCP
 //!   listener (`tcp://host:port`, newline-delimited JSON-RPC). akhomed does not
 //!   read `_meta.akh`: it authenticates `initialize` by
-//!   `_meta.authorization = "Bearer <token>"` (its `AKHOMED_SHARED_SECRET`)
-//!   and routes a session by `_meta["akh/workspace"]`. The bridge injects both,
-//!   so a T3 entrypoint only swaps `--endpoint` and adds `--akhomed`.
+//!   `_meta.authorization = "Bearer <token>"` and routes a session by
+//!   `_meta["akh/workspace"]`. The bridge injects both, so a T3 entrypoint only
+//!   swaps `--endpoint` and adds `--akhomed`. The token is the one of an
+//!   `[[acp.principals]]` entry whose `akhs` include `--akh` (a scoped
+//!   principal is refused with `akh::acp::workspace_not_granted` on any other
+//!   akh), or the legacy unscoped `AKHOMED_SHARED_SECRET` when akhomed has no
+//!   principals configured.
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
