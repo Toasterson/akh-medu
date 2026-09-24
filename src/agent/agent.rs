@@ -1980,6 +1980,42 @@ impl Agent {
     }
 
     pub(crate) fn sync_live_tools(&self) {
+        let registry = self.tool_registry_handle();
+        Self::publish_live_tools(&self.engine, &registry);
+    }
+
+    /// Static per-akh MCP servers (Phase 53i, ADR 113 D9): connect every
+    /// `[[mcp.servers]]` entry and register its allowed tools into this
+    /// agent's persistent registry as `mcp__<server>__<tool>` — the same
+    /// registry the agentic turn, the daemon and `/v1` read.
+    ///
+    /// Blocking network I/O (bounded by one discovery timeout for all
+    /// servers together): call from a blocking context. Never fails; an
+    /// unreachable server is retried lazily and in the background, and tools
+    /// registered later refresh the engine's live-tool view through a hook.
+    #[cfg(feature = "daemon")]
+    pub fn attach_mcp_servers(&self, servers: &[tools::McpServerSpec]) -> tools::McpAttachReport {
+        if servers.is_empty() {
+            return tools::McpAttachReport::default();
+        }
+        let registry = self.tool_registry_handle();
+        let engine = Arc::downgrade(&self.engine);
+        let hook: tools::RegistryChangedHook = Arc::new(move |registry| {
+            if let Some(engine) = engine.upgrade() {
+                Self::publish_live_tools(&engine, registry);
+            }
+        });
+        let report = tools::attach_static_mcp_servers(
+            &registry,
+            servers,
+            Some(hook),
+            tools::McpRetryPolicy::default(),
+        );
+        self.sync_live_tools();
+        report
+    }
+
+    fn publish_live_tools(engine: &Engine, registry: &ToolRegistry) {
         use super::tool_manifest::ToolSource;
         // Coarse origin tag for display. A `ToolSource::Mcp { .. }` manifest is
         // the primary signal; the `mcp__` name prefix remains a fallback for
@@ -1995,10 +2031,7 @@ impl Agent {
                 ToolSource::Mcp { .. } => "mcp".into(),
             }
         }
-        let tools = self
-            .tool_registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        let tools = registry
             .list_manifests()
             .into_iter()
             .map(|m| crate::engine::LiveTool {
@@ -2007,7 +2040,7 @@ impl Agent {
                 origin: origin(&m.name, &m.source),
             })
             .collect();
-        self.engine.set_live_tools(tools);
+        engine.set_live_tools(tools);
     }
 
     /// List all registered tool signatures.

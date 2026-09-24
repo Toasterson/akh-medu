@@ -97,6 +97,10 @@ pub enum AkhConfigError {
         )
     )]
     MissingGrugModel { akh: String },
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    McpServers(#[from] crate::agent::tools::mcp_config::McpServersConfigError),
 }
 
 /// One unrecognized key found while loading an `akh.toml`, surfaced so the
@@ -178,7 +182,12 @@ impl Default for OllamaEndpoint {
 /// itself — the akh still has all its own tools. Default policy is therefore
 /// graceful degradation: a server that fails discovery is skipped (with a
 /// visible warning in the turn), not fatal to the session.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Also carries the akh's own **static** MCP servers (`[[mcp.servers]]`,
+/// Phase 53i / ADR 113 decision 9): external MCP servers whose tools are
+/// registered into the akh's persistent tool registry at agent init as
+/// `mcp__<server>__<tool>`. See [`crate::agent::tools::mcp_config`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpConfig {
     /// Opt-in "unsafe" stance: fail the whole turn if any client-pushed MCP
     /// server does not come back from discovery, instead of continuing with
@@ -188,6 +197,11 @@ pub struct McpConfig {
     /// this at the ACP layer regardless of what is set here.
     #[serde(default)]
     pub require_pushed_mcp: bool,
+
+    /// Static per-akh MCP servers (`[[mcp.servers]]`). Empty by default.
+    /// Declared after the scalar above so it serializes after it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<crate::agent::tools::mcp_config::McpServerSpec>,
 }
 
 /// Per-akh background-automation gating (P5; defaults per ADR 113 decision 6).
@@ -871,6 +885,7 @@ impl AkhConfig {
             path: path.display().to_string(),
             message: e.to_string(),
         })?;
+        crate::agent::tools::mcp_config::validate_mcp_servers(&cfg.mcp.servers)?;
         Ok((cfg, Self::unknown_keys(&raw)))
     }
 
@@ -910,6 +925,9 @@ impl AkhConfig {
     fn known_tables() -> &'static [(&'static str, &'static [&'static str])] {
         &[
             ("ollama_endpoint", &["kind", "base_url", "api_key"]),
+            // `[[mcp.servers]]` entries are checked by serde itself
+            // (`deny_unknown_fields` on `McpServerSpec`).
+            ("mcp", &["require_pushed_mcp", "servers"]),
             (
                 "agent_runtime",
                 &[
@@ -2122,5 +2140,118 @@ workdir = "/Users/toasty/ws"
         assert!(!cfg.is_local_drop_exec());
         assert!(!cfg.is_remote_exec());
         assert!(cfg.to_local_drop_config().is_none());
+    }
+
+    // ── Phase 53i: static per-akh MCP servers ────────────────────────────────
+
+    const MCP_TOML: &str = r#"
+name = "minerva"
+model = "glm-5.3"
+
+[ollama_endpoint]
+kind = "local"
+
+[mcp]
+require_pushed_mcp = false
+
+[[mcp.servers]]
+name = "anima"
+url = "https://anima.wegmueller.it/mcp"
+auth = { token_env = "ROMAN_ANIMA_TOKEN" }
+
+[[mcp.servers]]
+name = "observer"
+url = "http://127.0.0.1:18436/mcp"
+tools = ["monitoring_snapshot"]
+timeout_secs = 60
+auth = { token_file = "/tmp/observer.key" }
+"#;
+
+    #[test]
+    fn mcp_servers_parse_with_no_unknown_keys() {
+        let cfg: AkhConfig = toml::from_str(MCP_TOML).expect("parse");
+        assert_eq!(cfg.mcp.servers.len(), 2);
+        assert_eq!(cfg.mcp.servers[0].name.as_str(), "anima");
+        assert_eq!(
+            cfg.mcp.servers[1].qualified_tool_name("monitoring_snapshot"),
+            "mcp__observer__monitoring_snapshot"
+        );
+        assert_eq!(cfg.model.as_deref(), Some("glm-5.3"));
+        let raw: toml::Value = toml::from_str(MCP_TOML).unwrap();
+        assert!(
+            AkhConfig::unknown_keys(&raw).is_empty(),
+            "{:?}",
+            AkhConfig::unknown_keys(&raw)
+        );
+    }
+
+    #[test]
+    fn mcp_servers_absent_means_none() {
+        let cfg: AkhConfig = toml::from_str("name = \"a\"\n").expect("parse");
+        assert!(cfg.mcp.servers.is_empty());
+        assert!(!cfg.mcp.require_pushed_mcp);
+    }
+
+    #[test]
+    fn mcp_unknown_table_key_is_reported() {
+        let raw: toml::Value = toml::from_str("name = \"a\"\n[mcp]\nservrs = []\n").expect("parse");
+        let unknown = AkhConfig::unknown_keys(&raw);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].path, "mcp.servrs");
+    }
+
+    #[test]
+    fn mcp_duplicate_servers_fail_load_with_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        std::fs::write(
+            &path,
+            "name = \"a\"\n\
+             [[mcp.servers]]\nname = \"board\"\nurl = \"http://127.0.0.1:1/mcp\"\n\
+             [[mcp.servers]]\nname = \"board\"\nurl = \"http://127.0.0.1:2/mcp\"\n",
+        )
+        .expect("write");
+        let err = AkhConfig::load_checked(&path).unwrap_err();
+        assert!(matches!(err, AkhConfigError::McpServers(_)), "{err:?}");
+        use miette::Diagnostic;
+        assert_eq!(
+            err.code().map(|c| c.to_string()).as_deref(),
+            Some("akh::mcp::config::invalid")
+        );
+        assert!(
+            err.related()
+                .is_some_and(|mut r| r.any(|d| d.to_string().contains("declared more than once")))
+        );
+    }
+
+    #[test]
+    fn mcp_bad_server_name_fails_parse() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        std::fs::write(
+            &path,
+            "name = \"a\"\n[[mcp.servers]]\nname = \"an ima\"\nurl = \"http://h/mcp\"\n",
+        )
+        .expect("write");
+        let err = AkhConfig::load_checked(&path).unwrap_err();
+        assert!(matches!(err, AkhConfigError::Parse { .. }), "{err:?}");
+        assert!(err.to_string().contains("invalid MCP server name"), "{err}");
+    }
+
+    #[test]
+    fn mcp_servers_round_trip_through_save_and_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        let cfg: AkhConfig = toml::from_str(MCP_TOML).expect("parse");
+        cfg.save(&path).expect("save");
+        let (loaded, unknown) = AkhConfig::load_checked(&path).expect("load");
+        // Scoped to `mcp`: a saved config also carries the flattened workspace
+        // `enabled` key, which the known-key list does not cover (pre-existing).
+        assert!(
+            !unknown.iter().any(|k| k.path.starts_with("mcp")),
+            "{unknown:?}"
+        );
+        assert_eq!(loaded.mcp, cfg.mcp);
+        assert_eq!(loaded.model, cfg.model);
     }
 }
