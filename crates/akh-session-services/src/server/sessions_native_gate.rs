@@ -174,6 +174,7 @@ pub(super) async fn run(
                 akh: "test".into(),
                 workspace_profile: "local".into(),
                 conversation_key: None,
+                grant: None,
             },
         )
         .unwrap();

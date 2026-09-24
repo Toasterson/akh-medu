@@ -170,6 +170,32 @@ pub enum ApprovalPolicy {
     ReadOnly,
 }
 
+/// A per-delegation grant secret (Phase 53e, ADR 113 decision 9).
+///
+/// The akh mints it; the session service keeps it privately (never in a
+/// `SessionRecord`) and presents it on every cognitive tool call of the
+/// delegated session. On the wire it is a bare string. `Debug` is redacted so
+/// the secret cannot leak through a derived `Debug` of a request.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct GrantToken(String);
+
+impl GrantToken {
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
+    }
+    /// The raw secret. Only hash it or send it; never log or persist it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for GrantToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GrantToken(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NewSession {
@@ -178,6 +204,11 @@ pub struct NewSession {
     pub workspace_profile: String,
     #[serde(default)]
     pub conversation_key: Option<String>,
+    /// Delegation grant the session presents on its cognitive tool calls
+    /// (Phase 53e). Absent on the wire when `None`, so a session service that
+    /// predates the field still accepts grant-less requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<GrantToken>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -486,6 +517,10 @@ pub struct CognitiveToolCall {
     pub akh: String,
     pub tool: String,
     pub arguments: Value,
+    /// The session's delegation grant (Phase 53e). Absent on the wire when
+    /// `None`, so a core that predates the field still accepts the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<GrantToken>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -754,6 +789,43 @@ pub fn validate_key(key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grant_fields_are_absent_when_none_and_round_trip_when_set() {
+        let call = CognitiveToolCall {
+            request_id: "r".into(),
+            session_id: "s".into(),
+            akh: "a".into(),
+            tool: "kg_query".into(),
+            arguments: serde_json::json!({}),
+            grant: None,
+        };
+        let json = serde_json::to_value(&call).unwrap();
+        // A core that predates 53e uses deny_unknown_fields: absent, not null.
+        assert!(!json.as_object().unwrap().contains_key("grant"), "{json}");
+        let granted = CognitiveToolCall {
+            grant: Some(GrantToken::new("secret-value")),
+            ..call
+        };
+        let json = serde_json::to_value(&granted).unwrap();
+        assert_eq!(json["grant"], "secret-value");
+        assert_eq!(
+            serde_json::from_value::<CognitiveToolCall>(json).unwrap(),
+            granted
+        );
+        // The secret never shows up in Debug output.
+        assert!(!format!("{granted:?}").contains("secret-value"));
+
+        let session = NewSession {
+            request_id: "r".into(),
+            akh: "a".into(),
+            workspace_profile: "p".into(),
+            conversation_key: None,
+            grant: None,
+        };
+        let json = serde_json::to_value(&session).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("grant"), "{json}");
+    }
 
     #[test]
     fn a_context_request_without_assembly_serializes_exactly_as_before() {

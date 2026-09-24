@@ -14,6 +14,7 @@ use crate::{
     },
     akh_config::AkhConfig,
     engine::Engine,
+    provenance::DelegateAttribution,
 };
 use akh_service_store::{Store, key};
 use akh_session_types::*;
@@ -37,6 +38,15 @@ use std::{
     sync::Arc,
 };
 use thiserror::Error;
+
+mod grants;
+#[cfg(feature = "delegation")]
+pub use grants::CoreGrantIssuer;
+pub use grants::{
+    DEFAULT_GRANT_TTL, DelegationGrant, GrantAuthority, GrantAuthoritySlot, GrantClock, GrantError,
+    GrantPolicy, GrantPresentation, GrantSecret, GrantTools, MAX_GRANT_TTL, MintGrant, MintedGrant,
+    SystemClock, authority_in,
+};
 
 pub type CoreFuture<'a, T> =
     Pin<Box<dyn Future<Output = std::result::Result<T, String>> + Send + 'a>>;
@@ -103,6 +113,10 @@ pub struct CorePrincipal {
     /// Tool surface of this principal (Phase 53a). Absent = legacy nine.
     #[serde(default)]
     pub tools: ToolScope,
+    /// Whether calls must present a delegation grant (Phase 53e). Absent =
+    /// `optional`: a presented grant is honoured, otherwise `tools` applies.
+    #[serde(default)]
+    pub grants: GrantPolicy,
 }
 
 /// Errors of the `/v1` core API (Phase 53a).
@@ -181,15 +195,25 @@ impl CoreApiError {
     /// not a transport error: HTTP 200, `success:false`, `data {code, help}`.
     pub fn into_tool_result(self, receipt: Option<String>) -> ToolResult {
         ToolResult {
-            success: false,
-            text: self.to_string(),
-            data: Some(json!({
-                "code": self.wire_code(),
-                "help": self.help_text(),
-                "executed": false,
-            })),
             receipt,
+            ..denial(&self, self.wire_code())
         }
+    }
+}
+
+/// A refused tool call as the caller reads it: `success:false` and the
+/// diagnostic (wire code, miette code, help). Nothing ran.
+fn denial(error: &dyn Diagnostic, code: &str) -> ToolResult {
+    ToolResult {
+        success: false,
+        text: error.to_string(),
+        data: Some(json!({
+            "code": code,
+            "diagnostic": error.code().map(|c| c.to_string()),
+            "help": error.help().map(|h| h.to_string()),
+            "executed": false,
+        })),
+        receipt: None,
     }
 }
 
@@ -287,15 +311,19 @@ pub struct CoreApp {
     pub config: Arc<CoreConfig>,
     pub backend: Arc<dyn CoreBackend>,
     pub store: Store,
+    /// Delegation grants (Phase 53e), kept in the same operations store.
+    pub grants: GrantAuthority,
 }
 impl CoreApp {
     pub fn new(config: CoreConfig, backend: Arc<dyn CoreBackend>) -> Result<Self> {
+        let store = if config.sqlite {
+            Store::open_sqlite(&config.data_dir.join("core-operations.sqlite3"))?
+        } else {
+            Store::open(&config.data_dir.join("core-operations.redb"))?
+        };
         Ok(Self {
-            store: if config.sqlite {
-                Store::open_sqlite(&config.data_dir.join("core-operations.sqlite3"))?
-            } else {
-                Store::open(&config.data_dir.join("core-operations.redb"))?
-            },
+            grants: GrantAuthority::new(store.clone()),
+            store,
             config: Arc::new(config),
             backend,
         })
@@ -639,24 +667,95 @@ fn finish_with(
     })?;
     Ok(result)
 }
+/// What authorized a `/v1` tool call (Phase 53e enforcement order:
+/// authenticate → authorize akh → resolve grant or scope → permit).
+enum CallAuthority {
+    /// The principal's [`ToolScope`] (no grant presented, policy optional).
+    Scope,
+    /// A resolved delegation grant.
+    Grant(DelegationGrant),
+}
+
+impl CallAuthority {
+    fn attribution(&self, p: &CorePrincipal, call: &CognitiveToolCall) -> DelegateAttribution {
+        let (principal, grant_id) = match self {
+            Self::Scope => (p.id.clone(), None),
+            Self::Grant(grant) => (grant.principal.clone(), Some(grant.id.to_string())),
+        };
+        DelegateAttribution {
+            principal,
+            grant_id,
+            tool: call.tool.clone(),
+            session_id: call.session_id.clone(),
+            request_id: call.request_id.clone(),
+        }
+    }
+}
+
+/// Resolve what authorizes `call`, or the denial to answer with.
+fn authorize_call(
+    app: &CoreApp,
+    p: &CorePrincipal,
+    call: &CognitiveToolCall,
+) -> std::result::Result<CallAuthority, ToolResult> {
+    match (&call.grant, p.grants) {
+        (Some(token), _) => {
+            let grant = app
+                .grants
+                .resolve(
+                    token,
+                    GrantPresentation {
+                        akh: &call.akh,
+                        presenter: &p.id,
+                        session_id: &call.session_id,
+                    },
+                )
+                .and_then(|grant| grant.permit(&call.tool).map(|()| grant))
+                .map_err(GrantError::into_tool_result)?;
+            Ok(CallAuthority::Grant(grant))
+        }
+        (None, GrantPolicy::Required) => Err(GrantError::Missing {
+            principal: p.id.clone(),
+        }
+        .into_tool_result()),
+        (None, GrantPolicy::Optional) if p.tools.permits(&call.tool) => Ok(CallAuthority::Scope),
+        (None, GrantPolicy::Optional) => Err(CoreApiError::ToolOutOfScope {
+            principal: p.id.clone(),
+            tool: call.tool.clone(),
+            allowed: p.tools.names().join(", "),
+        }
+        .into_tool_result(None)),
+    }
+}
+
+/// The approval a `/v1` call carries: the caller's scope or grant **is** the
+/// approval for exactly the authorized tool (Phase 53e). The akh's own
+/// permission policy is otherwise untouched: `Ask` for this tool resolves to
+/// approved, `Deny` (plan mode) still denies, and any other tool still asks
+/// nobody and fails closed. Installed only for the duration of one `/v1`
+/// call, never on the in-process agentic turn.
+struct AuthorizedCallApproval {
+    tool: String,
+}
+
+impl crate::agent::permission::PermissionAsker for AuthorizedCallApproval {
+    fn ask(&self, manifest: &ToolManifest, _summary: &str) -> bool {
+        manifest.name == self.tool
+    }
+}
+
 async fn tool_call(
     State(app): State<CoreApp>,
     Extension(p): Extension<CorePrincipal>,
     Json(request): Json<CognitiveToolCall>,
 ) -> Api<ToolResult> {
     authorize(&p, &request.akh)?;
-    // Scope first: an out-of-scope call never loads anything or begins an
+    // Grant or scope first: a refused call never loads anything or begins an
     // operation, and it is answered as an ordinary tool failure (HTTP 200).
-    if !p.tools.permits(&request.tool) {
-        return Ok(Json(
-            CoreApiError::ToolOutOfScope {
-                principal: p.id.clone(),
-                tool: request.tool.clone(),
-                allowed: p.tools.names().join(", "),
-            }
-            .into_tool_result(None),
-        ));
-    }
+    let authority = match authorize_call(&app, &p, &request) {
+        Ok(authority) => authority,
+        Err(denied) => return Ok(Json(denied)),
+    };
     let engine = app.backend.engine(&request.akh).await.map_err(error)?;
     let registry = live_tools(&app, &request.akh).await.map_err(Fault::from)?;
     if !registry
@@ -664,24 +763,40 @@ async fn tool_call(
         .iter()
         .any(|m| m.name == request.tool)
     {
-        // In scope but the akh does not have it (e.g. exec kind = "none").
+        // Authorized but the akh does not have it (e.g. exec kind = "none").
         return Ok(Json(ToolResult::denied(&request.tool, None)));
     }
     if !request.arguments.is_object() {
         return Err(Fault::invalid("cognitive tool arguments must be an object").into());
     }
-    if let Some(result) = begin(&app, &p, &request.request_id, &request)? {
+    // The grant secret is not part of the operation's identity: a retry
+    // under a re-issued grant is the same operation.
+    let identity = CognitiveToolCall {
+        grant: None,
+        ..request.clone()
+    };
+    if let Some(result) = begin(&app, &p, &request.request_id, &identity)? {
         return Ok(Json(result));
     }
-    let copy = request.clone();
+    let attribution = authority.attribution(&p, &request);
+    let copy = identity.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let output = registry.execute(
-            &copy.tool,
-            ToolInput {
-                params: copy.arguments.as_object().unwrap().clone(),
-            },
-            &engine,
-        );
+        let approval: Arc<dyn crate::agent::permission::PermissionAsker> =
+            Arc::new(AuthorizedCallApproval {
+                tool: copy.tool.clone(),
+            });
+        let output = {
+            let _approved = registry.session_scope(Some(approval), None);
+            crate::provenance::with_delegate_attribution(attribution, || {
+                registry.execute(
+                    &copy.tool,
+                    ToolInput {
+                        params: copy.arguments.as_object().unwrap().clone(),
+                    },
+                    &engine,
+                )
+            })
+        };
         engine.persist().map_err(error)?;
         Ok::<_, Fault>(match output {
             Ok(output) => ToolResult {
@@ -704,7 +819,7 @@ async fn tool_call(
         &app,
         &p,
         &request.request_id,
-        &request,
+        &identity,
         result,
     )?))
 }
@@ -1016,6 +1131,15 @@ mod tests {
     }
 
     fn scoped_app(dir: &Path, backend: Arc<Backend>, scope: ToolScope) -> CoreApp {
+        policy_app(dir, backend, scope, GrantPolicy::Optional)
+    }
+
+    fn policy_app(
+        dir: &Path,
+        backend: Arc<Backend>,
+        scope: ToolScope,
+        grants: GrantPolicy,
+    ) -> CoreApp {
         let token_file = dir.join("token");
         std::fs::write(&token_file, "core-test-credential-long-enough").unwrap();
         CoreApp::new(
@@ -1028,6 +1152,7 @@ mod tests {
                     token_file,
                     akhs: vec!["test".into()],
                     tools: scope,
+                    grants,
                 }],
             },
             backend,
@@ -1066,6 +1191,7 @@ mod tests {
                         token_file,
                         akhs: vec!["test".into()],
                         tools: ToolScope::default(),
+                        grants: GrantPolicy::default(),
                     }],
                 },
                 Arc::new(Backend {
@@ -1330,6 +1456,509 @@ mod tests {
         assert!(!principal.tools.permits("kg_query"));
         assert!(ToolScope::default().permits("kg_query"));
         assert!(!ToolScope::default().permits("agent_spawn"));
+    }
+
+    // ── Phase 53e: delegation grants ───────────────────────────────────
+
+    /// A manual clock for expiry tests.
+    struct ManualClock(std::sync::atomic::AtomicU64);
+    impl GrantClock for ManualClock {
+        fn now_ms(&self) -> u64 {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// A live backend over a **persistent** engine, so provenance is stored.
+    fn persistent_backend(dir: &Path) -> Arc<Backend> {
+        let engine = Arc::new(
+            Engine::new(crate::engine::EngineConfig {
+                data_dir: Some(dir.join("kg")),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let agent =
+            crate::agent::Agent::new(Arc::clone(&engine), crate::agent::AgentConfig::default())
+                .unwrap();
+        let tools = agent.tool_registry_handle();
+        Arc::new(Backend {
+            engine,
+            config: Arc::new(AkhConfig::default()),
+            tools,
+        })
+    }
+
+    fn mint(app: &CoreApp, backend: &Backend, tools: GrantTools) -> MintedGrant {
+        mint_with(app, backend, tools, "test", None, Duration::from_secs(600))
+    }
+
+    fn mint_with(
+        app: &CoreApp,
+        backend: &Backend,
+        tools: GrantTools,
+        akh: &str,
+        session_id: Option<&str>,
+        ttl: Duration,
+    ) -> MintedGrant {
+        app.grants
+            .mint(
+                MintGrant {
+                    akh: akh.into(),
+                    principal: "native:claude/code".into(),
+                    service_principal: "sessions".into(),
+                    tools,
+                    session_id: session_id.map(str::to_string),
+                    ttl,
+                },
+                &backend.tools,
+            )
+            .unwrap()
+    }
+
+    async fn call_tool(
+        app: &CoreApp,
+        request_id: &str,
+        tool: &str,
+        arguments: Value,
+        grant: Option<&GrantSecret>,
+    ) -> Value {
+        let mut body = json!({"request_id": request_id, "session_id": "session", "akh": "test",
+            "tool": tool, "arguments": arguments});
+        if let Some(grant) = grant {
+            body["grant"] = json!(grant.expose());
+        }
+        let (status, value) = post(app, "/v1/tools/call", body).await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        value
+    }
+
+    fn memory_write_args() -> Value {
+        json!({"summary": "cedar is the word",
+            "facts": [{"subject": "word", "predicate": "is", "object": "cedar"}]})
+    }
+
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn a_required_policy_without_a_grant_is_denied_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = policy_app(
+            dir.path(),
+            live_backend(false),
+            ToolScope::default(),
+            GrantPolicy::Required,
+        );
+        // Even a tool the legacy scope admits needs the grant now.
+        let denied = call_tool(&app, "q", "kg_query", json!({"symbol": "x"}), None).await;
+        assert_eq!(denied["success"], false);
+        assert_eq!(denied["data"]["code"], "grant_missing", "{denied}");
+        assert_eq!(
+            denied["data"]["diagnostic"],
+            "akh::core_api::grant::missing"
+        );
+        assert!(
+            denied["data"]["help"]
+                .as_str()
+                .unwrap()
+                .contains("required")
+        );
+        assert!(
+            app.store
+                .scan::<Value>("core_operation/")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_outside_the_grant_is_not_granted_and_the_help_lists_the_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = live_backend(false);
+        let app = policy_app(
+            dir.path(),
+            backend.clone(),
+            ToolScope::default(),
+            GrantPolicy::Required,
+        );
+        let minted = mint(&app, &backend, GrantTools::ReadOnlyPlusMemoryWrite);
+        // The default grant: read-only cognitive tools plus memory_write.
+        assert!(minted.grant.permits("kg_query"));
+        assert!(minted.grant.permits("memory_write"));
+        assert!(!minted.grant.permits("kg_mutate"));
+        assert!(!minted.grant.permits("shell_exec"));
+        // kg_mutate is in the principal's legacy scope, but the grant decides.
+        let denied = call_tool(
+            &app,
+            "mutate",
+            "kg_mutate",
+            json!({"subject": "a", "predicate": "b", "object": "c"}),
+            Some(&minted.secret),
+        )
+        .await;
+        assert_eq!(denied["success"], false);
+        assert_eq!(denied["data"]["code"], "tool_not_granted", "{denied}");
+        let help = denied["data"]["help"].as_str().unwrap();
+        assert!(
+            help.contains("memory_write") && help.contains("kg_query"),
+            "{help}"
+        );
+        assert!(
+            app.store
+                .scan::<Value>("core_operation/")
+                .unwrap()
+                .is_empty()
+        );
+        // A granted read tool runs.
+        let read = call_tool(
+            &app,
+            "read",
+            "kg_query",
+            json!({"symbol": "x"}),
+            Some(&minted.secret),
+        )
+        .await;
+        assert_ne!(read["data"]["code"], "tool_not_granted", "{read}");
+        assert_eq!(read["receipt"], "read");
+    }
+
+    #[tokio::test]
+    async fn a_granted_memory_write_is_the_delegates_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = persistent_backend(dir.path());
+        let app = policy_app(
+            dir.path(),
+            backend.clone(),
+            ToolScope::default(),
+            GrantPolicy::Required,
+        );
+        let minted = mint(&app, &backend, GrantTools::default());
+        let written = call_tool(
+            &app,
+            "write",
+            "memory_write",
+            memory_write_args(),
+            Some(&minted.secret),
+        )
+        .await;
+        assert_eq!(written["success"], true, "{written}");
+        let records = backend
+            .engine
+            .provenance_by_kind_tags(&[DerivationKind::tag_for_name("delegated_call").unwrap()])
+            .unwrap();
+        assert!(!records.is_empty(), "no DelegatedCall provenance");
+        for record in &records {
+            let DerivationKind::DelegatedCall {
+                principal,
+                grant_id,
+                tool,
+                session_id,
+                request_id,
+            } = &record.kind
+            else {
+                panic!("unexpected kind {:?}", record.kind);
+            };
+            assert_eq!(principal, "native:claude/code");
+            assert_eq!(
+                grant_id.as_deref(),
+                Some(minted.grant.id.to_string().as_str())
+            );
+            assert_eq!(tool, "memory_write");
+            assert_eq!(session_id, "session");
+            assert_eq!(request_id, "write");
+        }
+        // Nothing of that write was recorded as the akh's own consolidation.
+        assert!(
+            backend
+                .engine
+                .all_provenance()
+                .unwrap()
+                .iter()
+                .all(|r| !matches!(r.kind, DerivationKind::AgentConsolidation { .. }))
+        );
+    }
+
+    use crate::provenance::DerivationKind;
+
+    #[tokio::test]
+    async fn expired_wrong_akh_wrong_presenter_and_session_mismatch_are_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = live_backend(false);
+        let mut app = policy_app(
+            dir.path(),
+            backend.clone(),
+            ToolScope::default(),
+            GrantPolicy::Optional,
+        );
+        let clock = Arc::new(ManualClock(std::sync::atomic::AtomicU64::new(1_000_000)));
+        app.grants = app.grants.clone().with_clock(clock.clone());
+        let read = GrantTools::ReadOnlyPlusMemoryWrite;
+
+        // Expired: the injected clock moves past the TTL.
+        let short = mint_with(
+            &app,
+            &backend,
+            read.clone(),
+            "test",
+            None,
+            Duration::from_secs(60),
+        );
+        let args = json!({"symbol": "x"});
+        let ok = call_tool(&app, "live", "kg_query", args.clone(), Some(&short.secret)).await;
+        assert_ne!(ok["data"]["code"], "grant_expired", "{ok}");
+        clock
+            .0
+            .store(1_000_000 + 60_000, std::sync::atomic::Ordering::SeqCst);
+        let expired = call_tool(&app, "late", "kg_query", args.clone(), Some(&short.secret)).await;
+        assert_eq!(expired["data"]["code"], "grant_expired", "{expired}");
+
+        // Wrong akh: minted for another akh the principal also cannot use.
+        let other = mint_with(
+            &app,
+            &backend,
+            read.clone(),
+            "other",
+            None,
+            Duration::from_secs(600),
+        );
+        let wrong_akh = call_tool(&app, "akh", "kg_query", args.clone(), Some(&other.secret)).await;
+        assert_eq!(wrong_akh["data"]["code"], "grant_wrong_akh", "{wrong_akh}");
+
+        // Session mismatch: bound to another session.
+        let bound = mint_with(
+            &app,
+            &backend,
+            read.clone(),
+            "test",
+            Some("another-session"),
+            Duration::from_secs(600),
+        );
+        let mismatch = call_tool(&app, "sess", "kg_query", args.clone(), Some(&bound.secret)).await;
+        assert_eq!(
+            mismatch["data"]["code"], "grant_session_mismatch",
+            "{mismatch}"
+        );
+
+        // Wrong presenter: a grant for another service principal.
+        let foreign = app
+            .grants
+            .mint(
+                MintGrant {
+                    akh: "test".into(),
+                    principal: "native:claude/code".into(),
+                    service_principal: "someone-else".into(),
+                    tools: read.clone(),
+                    session_id: None,
+                    ttl: Duration::from_secs(600),
+                },
+                &backend.tools,
+            )
+            .unwrap();
+        let presenter = call_tool(
+            &app,
+            "pres",
+            "kg_query",
+            args.clone(),
+            Some(&foreign.secret),
+        )
+        .await;
+        assert_eq!(
+            presenter["data"]["code"], "grant_wrong_presenter",
+            "{presenter}"
+        );
+
+        // Unknown and revoked.
+        let unknown = call_tool(
+            &app,
+            "unk",
+            "kg_query",
+            args.clone(),
+            Some(&GrantSecret::generate()),
+        )
+        .await;
+        assert_eq!(unknown["data"]["code"], "grant_unknown", "{unknown}");
+        let revoked = mint_with(&app, &backend, read, "test", None, Duration::from_secs(600));
+        app.grants.revoke(revoked.grant.id).unwrap();
+        let gone = call_tool(&app, "rev", "kg_query", args, Some(&revoked.secret)).await;
+        assert_eq!(gone["data"]["code"], "grant_unknown", "{gone}");
+
+        // None of the denials began an operation.
+        let begun = app.store.scan::<Value>("core_operation/").unwrap();
+        assert_eq!(begun.len(), 1, "only the live call began: {begun:?}");
+    }
+
+    #[tokio::test]
+    async fn the_secret_never_reaches_the_store_and_is_not_part_of_the_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = live_backend(false);
+        let app = policy_app(
+            dir.path(),
+            backend.clone(),
+            ToolScope::default(),
+            GrantPolicy::Required,
+        );
+        let first = mint(&app, &backend, GrantTools::default());
+        let second = mint(&app, &backend, GrantTools::default());
+        let args = json!({"symbol": "x"});
+        let original = call_tool(&app, "same", "kg_query", args.clone(), Some(&first.secret)).await;
+        // A retry of the same operation under a re-issued grant replays it
+        // instead of conflicting: the grant is not part of its identity.
+        let replay = call_tool(&app, "same", "kg_query", args, Some(&second.secret)).await;
+        assert_eq!(original, replay);
+
+        let everything = serde_json::to_string(&app.store.scan::<Value>("").unwrap()).unwrap();
+        for secret in [&first.secret, &second.secret] {
+            assert!(
+                !everything.contains(secret.expose()),
+                "secret stored in plain text"
+            );
+        }
+        assert!(
+            everything.contains(&first.grant.id.to_string()),
+            "grant itself is stored"
+        );
+        assert_eq!(app.grants.list(Some("test")).unwrap().len(), 2);
+        assert!(!format!("{:?}", first.secret).contains(first.secret.expose()));
+    }
+
+    #[test]
+    fn grant_ttl_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = live_backend(false);
+        let app = scoped_app(dir.path(), backend.clone(), ToolScope::default());
+        let error = app
+            .grants
+            .mint(
+                MintGrant {
+                    akh: "test".into(),
+                    principal: "p".into(),
+                    service_principal: "sessions".into(),
+                    tools: GrantTools::default(),
+                    session_id: None,
+                    ttl: MAX_GRANT_TTL + Duration::from_secs(1),
+                },
+                &backend.tools,
+            )
+            .unwrap_err();
+        assert!(matches!(error, GrantError::TtlTooLong { .. }), "{error:?}");
+        let minted = mint(&app, &backend, GrantTools::default());
+        app.grants.bind_session(minted.grant.id, "s1").unwrap();
+        app.grants.bind_session(minted.grant.id, "s1").unwrap();
+        assert!(matches!(
+            app.grants.bind_session(minted.grant.id, "s2").unwrap_err(),
+            GrantError::SessionMismatch { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_callers_scope_is_the_approval_on_v1_and_only_there() {
+        use crate::agent::permission::PermissionMode;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = persistent_backend(dir.path());
+        // The akh runs in Standard mode: side-effecting tools need approval
+        // and there is no interactive asker.
+        backend.tools.set_permission_mode(PermissionMode::Standard);
+        let app = scoped_app(dir.path(), backend.clone(), ToolScope::default());
+
+        let written = call_tool(&app, "write", "memory_write", memory_write_args(), None).await;
+        assert_eq!(written["success"], true, "{written}");
+        // Scope-authorized calls are attributed to the core principal.
+        let records = backend
+            .engine
+            .provenance_by_kind_tags(&[DerivationKind::tag_for_name("delegated_call").unwrap()])
+            .unwrap();
+        assert!(records.iter().all(|r| matches!(&r.kind,
+            DerivationKind::DelegatedCall { principal, grant_id: None, .. } if principal == "sessions")));
+        assert!(!records.is_empty());
+
+        // Out of scope stays denied; nothing is approved beyond the scope.
+        let shell = call_tool(
+            &app,
+            "shell",
+            "shell_exec",
+            json!({"command": "true"}),
+            None,
+        )
+        .await;
+        assert_eq!(shell["data"]["code"], "tool_out_of_scope", "{shell}");
+
+        // The akh's own (in-process) path is unchanged: no approval, no run.
+        let direct = backend
+            .tools
+            .execute(
+                "memory_write",
+                ToolInput {
+                    params: memory_write_args().as_object().unwrap().clone(),
+                },
+                &backend.engine,
+            )
+            .unwrap();
+        assert!(!direct.success, "{}", direct.result);
+        assert!(
+            direct.result.contains("permission required"),
+            "{}",
+            direct.result
+        );
+    }
+
+    #[test]
+    fn store_provenance_records_a_delegate_sibling_while_attributed() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(crate::engine::EngineConfig {
+            data_dir: Some(dir.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap();
+        let symbol = engine.resolve_or_create_entity("fact").unwrap();
+        let attribution = DelegateAttribution {
+            principal: "native:codex/code".into(),
+            grant_id: Some("g".into()),
+            tool: "kg_mutate".into(),
+            session_id: "s".into(),
+            request_id: "r".into(),
+        };
+        crate::provenance::with_delegate_attribution(attribution.clone(), || {
+            let mut record =
+                crate::provenance::ProvenanceRecord::new(symbol, DerivationKind::Extracted);
+            engine.store_provenance(&mut record).unwrap();
+        });
+        let mut outside =
+            crate::provenance::ProvenanceRecord::new(symbol, DerivationKind::Extracted);
+        engine.store_provenance(&mut outside).unwrap();
+        let kinds: Vec<DerivationKind> = engine
+            .provenance_of(symbol)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.kind)
+            .collect();
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == attribution.derivation())
+                .count(),
+            1,
+            "{kinds:?}"
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == DerivationKind::Extracted)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn grant_policy_serde_defaults_to_optional_and_reads_required() {
+        let principal: CorePrincipal = serde_json::from_value(json!({
+            "id": "sessions", "token_file": "/t", "akhs": ["a"]
+        }))
+        .unwrap();
+        assert_eq!(principal.grants, GrantPolicy::Optional);
+        let principal: CorePrincipal = serde_json::from_value(json!({
+            "id": "sessions", "token_file": "/t", "akhs": ["a"], "grants": "required"
+        }))
+        .unwrap();
+        assert_eq!(principal.grants, GrantPolicy::Required);
     }
 
     #[test]

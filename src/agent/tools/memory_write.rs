@@ -176,8 +176,12 @@ impl Tool for MemoryWriteTool {
             mem_type_sym,
         ));
 
-        // Provenance: attribute self-imports distinctly so they're queryable/dedupable.
-        let kind = if origin.eq_ignore_ascii_case("openclaw") {
+        // Provenance: a delegate's write (Phase 53e, a `/v1` call under an
+        // active attribution) is the delegate's provenance; self-imports are
+        // attributed distinctly so they're queryable/dedupable.
+        let kind = if let Some(attribution) = crate::provenance::current_delegate_attribution() {
+            attribution.derivation()
+        } else if origin.eq_ignore_ascii_case("openclaw") {
             DerivationKind::OpenClawImport {
                 source_path: source.clone(),
                 kind: "journal".into(),
@@ -392,6 +396,45 @@ mod tests {
         let second = tool.execute(&engine, sample_input()).unwrap();
         // Same deterministic episode entity reused (first symbol is the episode).
         assert_eq!(first.symbols_involved[0], second.symbols_involved[0]);
+    }
+
+    #[test]
+    fn a_delegated_write_is_the_delegates_provenance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(tmp.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap();
+        let predicates = AgentPredicates::init(&engine).unwrap();
+        let tool = MemoryWriteTool::new(predicates);
+        let attribution = crate::provenance::DelegateAttribution {
+            principal: "native:claude".into(),
+            grant_id: Some("grant-7".into()),
+            tool: "memory_write".into(),
+            session_id: "session-7".into(),
+            request_id: "request-7".into(),
+        };
+        let out = crate::provenance::with_delegate_attribution(attribution.clone(), || {
+            tool.execute(&engine, sample_input()).unwrap()
+        });
+        assert!(out.success, "{}", out.result);
+        let records = engine
+            .provenance_by_kind(&attribution.derivation())
+            .unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "exactly the delegate's record: {records:?}"
+        );
+        assert_eq!(records[0].kind, attribution.derivation());
+        assert_eq!(records[0].derived_id, out.symbols_involved[0]);
+        // No second (sibling) record: the write already is the delegate's.
+        assert!(engine.all_provenance().unwrap().iter().all(|r| !matches!(
+            r.kind,
+            DerivationKind::AgentConsolidation { .. } | DerivationKind::OpenClawImport { .. }
+        )));
     }
 
     #[test]

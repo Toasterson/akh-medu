@@ -264,6 +264,7 @@ impl Connection {
                         conversation_key: params["_meta"]["conversationKey"]
                             .as_str()
                             .map(str::to_owned),
+                        grant: None,
                     },
                 )?;
                 self.app

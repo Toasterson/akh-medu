@@ -52,6 +52,8 @@ pub mod session_bootstrap;
 #[cfg(feature = "session")]
 pub mod session_credentials;
 #[cfg(feature = "session")]
+pub mod session_grants;
+#[cfg(feature = "session")]
 mod session_publication;
 #[cfg(feature = "session")]
 mod session_snapshot;

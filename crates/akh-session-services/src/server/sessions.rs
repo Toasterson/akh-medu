@@ -1596,6 +1596,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -1637,6 +1638,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -1776,6 +1778,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -2137,6 +2140,7 @@ mod lifecycle_tests {
                     token_file: token.clone(),
                     akhs: vec!["test".into()],
                     tools: Default::default(),
+                    grants: Default::default(),
                 }],
             },
             Arc::new(Backend(Arc::new(Engine::new(Default::default()).unwrap()))),
@@ -2270,6 +2274,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -2406,6 +2411,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -2461,6 +2467,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -2557,6 +2564,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -2682,6 +2690,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -2769,6 +2778,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();

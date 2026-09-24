@@ -670,6 +670,7 @@ async fn verify_session_snapshots(
                 akh: "test".into(),
                 workspace_profile: "git".into(),
                 conversation_key: None,
+                grant: None,
             },
         )
         .unwrap();
@@ -966,6 +967,7 @@ async fn verify_native_completion(
                 akh: "test".into(),
                 workspace_profile: "git".into(),
                 conversation_key: None,
+                grant: None,
             },
         )
         .unwrap();

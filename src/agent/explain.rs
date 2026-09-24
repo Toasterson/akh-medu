@@ -1207,6 +1207,18 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 source.get()
             )
         }
+        DerivationKind::DelegatedCall {
+            principal,
+            grant_id,
+            tool,
+            session_id,
+            ..
+        } => match grant_id {
+            Some(grant) => format!(
+                "delegated call: {principal} via {tool} under grant {grant} (session {session_id})"
+            ),
+            None => format!("delegated call: {principal} via {tool} (session {session_id})"),
+        },
     }
 }
 

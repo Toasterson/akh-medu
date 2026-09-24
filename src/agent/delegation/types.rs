@@ -26,7 +26,11 @@ impl std::fmt::Display for DelegationId {
 // ---------------------------------------------------------------------------
 
 /// Top-level delegation configuration.
+///
+/// Every field has a default, so `[delegation]` only needs the keys it
+/// changes (Phase 53e).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DelegationConfig {
     /// Master switch for the delegation subsystem.
     pub enabled: bool,
@@ -36,10 +40,11 @@ pub struct DelegationConfig {
     pub daily_cost_budget_cents: u64,
     /// Maximum cost per individual task in cents.
     pub per_task_max_cents: u64,
-    /// URL of the running akhomed server (for MCP callback config).
+    /// URL of the running akhomed server (remote-trigger callbacks).
     pub akhomed_url: String,
-    /// Local Claude Code subprocess settings.
-    pub local: LocalDelegationConfig,
+    /// Native-runtime sessions brokered by akhsessd, each carrying a
+    /// per-delegation grant (Phase 53e, ADR 113 decision 9).
+    pub native: NativeDelegationConfig,
     /// Remote trigger settings (claude.ai API).
     pub remote: RemoteDelegationConfig,
     /// Peer akh-medu instance settings.
@@ -54,43 +59,67 @@ impl Default for DelegationConfig {
             daily_cost_budget_cents: 0,
             per_task_max_cents: 10,
             akhomed_url: "http://localhost:3001".into(),
-            local: LocalDelegationConfig::default(),
+            native: NativeDelegationConfig::default(),
             remote: RemoteDelegationConfig::default(),
             peers: PeerDelegationConfig::default(),
         }
     }
 }
 
-/// Configuration for local Claude Code subprocess delegation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocalDelegationConfig {
-    /// Whether local delegation is enabled.
-    pub enabled: bool,
-    /// Model to use (e.g., "sonnet", "haiku", "opus").
-    pub model: String,
-    /// Tools the subprocess is allowed to use.
-    pub allowed_tools: Vec<String>,
-    /// Timeout in seconds for a single delegation.
-    pub timeout_seconds: u64,
-    /// Working directory for the subprocess (defaults to akhomed's cwd).
-    pub working_dir: Option<PathBuf>,
+/// Which cognitive tools a delegation grant names (Phase 53e). Resolved
+/// against the akh's live tool registry when the grant is minted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GrantTools {
+    /// Every read-only cognitive tool the akh has, plus `memory_write`
+    /// (the ADR 113 D9 default).
+    #[default]
+    ReadOnlyPlusMemoryWrite,
+    /// Exactly these tools.
+    Explicit {
+        tools: std::collections::BTreeSet<String>,
+    },
 }
 
-impl Default for LocalDelegationConfig {
+/// Delegation to a native runtime (Codex, Claude, ...) through an akhsessd
+/// session (Phase 53e). The akh mints a grant per delegation and creates the
+/// session with it; the runtime's cognitive tool calls then run under the
+/// grant and are recorded as the delegate's provenance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NativeDelegationConfig {
+    /// Whether native-session delegation is enabled.
+    pub enabled: bool,
+    /// Name of the session service (a label for targets and provenance).
+    pub service: String,
+    /// Base URL of akhsessd (e.g. `http://127.0.0.1:18431`).
+    pub url: String,
+    /// File holding akhsessd's bearer token for this akh (role `client`).
+    pub token_file: Option<PathBuf>,
+    /// akhsessd workspace profile the delegated session runs in.
+    pub workspace_profile: String,
+    /// The `/v1` core principal akhsessd presents the grant as.
+    pub core_principal: String,
+    /// Tools the grant names.
+    pub grant_tools: GrantTools,
+    /// How long one delegated turn may run.
+    pub timeout_seconds: u64,
+    /// Interval between session polls while the turn runs.
+    pub poll_interval_ms: u64,
+}
+
+impl Default for NativeDelegationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            model: "sonnet".into(),
-            allowed_tools: vec![
-                "Read".into(),
-                "Write".into(),
-                "Edit".into(),
-                "Bash".into(),
-                "Grep".into(),
-                "Glob".into(),
-            ],
-            timeout_seconds: 120,
-            working_dir: None,
+            service: "akhsessd".into(),
+            url: "http://127.0.0.1:18431".into(),
+            token_file: None,
+            workspace_profile: "default".into(),
+            core_principal: "sessions".into(),
+            grant_tools: GrantTools::default(),
+            timeout_seconds: 600,
+            poll_interval_ms: 2_000,
         }
     }
 }
@@ -146,13 +175,16 @@ impl Default for PeerDelegationConfig {
 // ---------------------------------------------------------------------------
 
 /// What kind of target a delegation is sent to.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Phase 53e removed `LocalClaude`: it spawned `claude --print` pointed at
+/// akhomed's `/mcp`, which ADR 061 retired. Native runtimes are reached
+/// through [`Self::NativeSession`] instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DelegationTargetKind {
-    /// Local Claude Code subprocess — uses `claude --print`.
-    LocalClaude {
-        model: String,
-        allowed_tools: Vec<String>,
-        working_dir: Option<PathBuf>,
+    /// A native-runtime session brokered by akhsessd, carrying a grant.
+    NativeSession {
+        service: String,
+        workspace_profile: String,
     },
     /// Remote trigger via claude.ai API — survives restarts.
     RemoteTrigger {
@@ -166,7 +198,10 @@ pub enum DelegationTargetKind {
 impl std::fmt::Display for DelegationTargetKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::LocalClaude { model, .. } => write!(f, "local-claude:{model}"),
+            Self::NativeSession {
+                service,
+                workspace_profile,
+            } => write!(f, "native-session:{service}/{workspace_profile}"),
             Self::RemoteTrigger {
                 akhomed_public_url,
                 model,

@@ -115,6 +115,10 @@ struct ServerState {
     engine_load_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Likewise for `get_agent` — avoids a wasted concurrent heavy `Agent::resume`.
     agent_load_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Phase 53e: the `/v1` delegation-grant authority, published once the
+    /// core API is up. Empty = grants unavailable (`core_api_disabled`).
+    #[cfg(feature = "core-api")]
+    grant_authority: akh_medu::core_service::GrantAuthoritySlot,
 }
 
 /// Fetch (creating if needed) the per-workspace load lock from `locks`.
@@ -474,6 +478,8 @@ impl ServerState {
             hydrated_wakes: Arc::new(Mutex::new(std::collections::HashSet::new())),
             engine_load_locks: RwLock::new(HashMap::new()),
             agent_load_locks: RwLock::new(HashMap::new()),
+            #[cfg(feature = "core-api")]
+            grant_authority: Arc::default(),
         }
     }
 
@@ -2368,6 +2374,109 @@ impl ServerState {
     }
 
     /// `_akh/goal/list` — list all goals with status, timestamps, and parent chain.
+    /// `_akh/delegation/grant/mint` (Phase 53e): mint a grant for `workspace`.
+    ///
+    /// Params: `workspace`, `principal` (the delegate), `service_principal`
+    /// (the core principal that will present it, e.g. `sessions`), optional
+    /// `tools` (`{"kind":"read_only_plus_memory_write"}` default, or
+    /// `{"kind":"explicit","tools":[...]}`), `session_id`, `ttl_secs`
+    /// (default 3600, max 86400). Returns the grant and its secret — the only
+    /// time the secret is ever shown.
+    #[cfg(feature = "core-api")]
+    async fn grant_mint(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        use akh_medu::core_service::{GrantTools, MintGrant, authority_in};
+        let field = |name: &str| {
+            params
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| format!("missing required param: {name}"))
+        };
+        let workspace = field("workspace")?;
+        let request = MintGrant {
+            akh: workspace.clone(),
+            principal: field("principal")?,
+            service_principal: field("service_principal")?,
+            tools: match params.get("tools") {
+                None | Some(serde_json::Value::Null) => GrantTools::default(),
+                Some(tools) => serde_json::from_value(tools.clone())
+                    .map_err(|e| format!("invalid param tools: {e}"))?,
+            },
+            session_id: params
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            ttl: params
+                .get("ttl_secs")
+                .and_then(serde_json::Value::as_u64)
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(akh_medu::core_service::DEFAULT_GRANT_TTL),
+        };
+        let authority = authority_in(&self.grant_authority)
+            .map_err(render_grant_error)?
+            .clone();
+        let registry = self
+            .get_agent(&workspace)
+            .await?
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .tool_registry_handle();
+        let minted = tokio::task::spawn_blocking(move || authority.mint(request, &registry))
+            .await
+            .map_err(|e| format!("grant mint task failed: {e}"))?
+            .map_err(render_grant_error)?;
+        Ok(serde_json::json!({
+            "grant": minted.grant,
+            "secret": minted.secret.expose(),
+        }))
+    }
+
+    /// `_akh/delegation/grant/revoke` (Phase 53e). Params: `id`.
+    #[cfg(feature = "core-api")]
+    async fn grant_revoke(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let id = params
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: id".to_string())?;
+        let id = uuid::Uuid::parse_str(id).map_err(|e| format!("invalid param id: {e}"))?;
+        let authority = akh_medu::core_service::authority_in(&self.grant_authority)
+            .map_err(render_grant_error)?
+            .clone();
+        let grant = tokio::task::spawn_blocking(move || authority.revoke(id))
+            .await
+            .map_err(|e| format!("grant revoke task failed: {e}"))?
+            .map_err(render_grant_error)?;
+        Ok(serde_json::json!({ "grant": grant }))
+    }
+
+    /// `_akh/delegation/grant/list` (Phase 53e). Params: optional `workspace`.
+    /// Secrets are never listed (they are not stored).
+    #[cfg(feature = "core-api")]
+    async fn grant_list(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let workspace = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let authority = akh_medu::core_service::authority_in(&self.grant_authority)
+            .map_err(render_grant_error)?
+            .clone();
+        let grants = tokio::task::spawn_blocking(move || {
+            authority.list(workspace.as_deref()).map(|grants| {
+                grants
+                    .into_iter()
+                    .map(|grant| {
+                        let live = authority.is_live(&grant);
+                        serde_json::json!({ "grant": grant, "live": live })
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .await
+        .map_err(|e| format!("grant list task failed: {e}"))?
+        .map_err(render_grant_error)?;
+        Ok(serde_json::json!({ "count": grants.len(), "grants": grants }))
+    }
+
     async fn goal_list(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
         let ws = params
             .get("workspace")
@@ -2845,6 +2954,23 @@ impl ServerState {
                 name,
             )));
             tracing::info!(workspace = %name, "OpenClaw self-import surface enabled");
+        }
+
+        // Phase 53e (ADR 113 D9): the akh's `[delegation]` config, with
+        // native-session delegation minting its grants through `/v1`.
+        #[cfg(all(feature = "delegation", feature = "core-api"))]
+        if let Some(delegation) = akh_config.delegation.clone() {
+            let native = delegation.native.enabled;
+            let issuer = Arc::new(akh_medu::core_service::CoreGrantIssuer::new(
+                Arc::clone(&self.grant_authority),
+                name,
+                agent.tool_registry_handle(),
+            ));
+            agent.set_delegation_manager(
+                akh_medu::agent::delegation::DelegationManager::new(delegation)
+                    .with_grant_issuer(issuer),
+            );
+            tracing::info!(workspace = %name, native, "delegation configured from akh.toml");
         }
 
         // ADR 070: if this akh is Candle-backed, load a local GGUF model and
@@ -4025,6 +4151,14 @@ impl akh_medu::acp::ServerControl for ServerState {
                 "goal/cancel" => self.goal_cancel(params).await,
                 "goal/prioritize" => self.goal_prioritize(params).await,
 
+                // ── delegation grants (Phase 53e, ADR 113 D9) ─────────────
+                #[cfg(feature = "core-api")]
+                "delegation/grant/mint" => self.grant_mint(params).await,
+                #[cfg(feature = "core-api")]
+                "delegation/grant/revoke" => self.grant_revoke(params).await,
+                #[cfg(feature = "core-api")]
+                "delegation/grant/list" => self.grant_list(params).await,
+
                 other => Err(format!("unknown control-plane method: _akh/{other}")),
             }
         })
@@ -4863,6 +4997,19 @@ fn resolve_auto_start(
     merged
 }
 
+/// Render a grant error for the ACP control plane: code, message and help.
+#[cfg(feature = "core-api")]
+fn render_grant_error(error: akh_medu::core_service::GrantError) -> String {
+    let code = error
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| error.wire_code().to_string());
+    match error.help() {
+        Some(help) => format!("{code}: {error} (help: {help})"),
+        None => format!("{code}: {error}"),
+    }
+}
+
 /// Bind and serve the `/v1` core API (Phase 53a) — last in the startup order,
 /// after the workspace daemons and ACP. Returns the shutdown sender and the
 /// serving task.
@@ -4880,11 +5027,14 @@ async fn start_core_api(
     use akh_medu::core_service::{CoreApiError, CoreApp, CoreBackend, router};
     let address = core.listen;
     let data_dir = core.data_dir.clone();
+    let grant_slot = Arc::clone(&state.grant_authority);
     let backend: Arc<dyn CoreBackend> = state;
     let app = CoreApp::new(core, backend).map_err(|fault| CoreApiError::Config {
         path: data_dir,
         message: format!("core operations store: {}", fault.message),
     })?;
+    // Phase 53e: ACP grant methods and native-session delegation mint here.
+    let _ = grant_slot.set(app.grants.clone());
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(|source| CoreApiError::Bind { address, source })?;
@@ -4933,6 +5083,76 @@ mod control_plane_tests {
         paths.ensure_dirs().expect("ensure dirs");
         let state = ServerState::new(paths, AkhomedConfig::default(), None);
         (tmp, state)
+    }
+
+    /// Phase 53e: `_akh/delegation/grant/*` over the ACP control plane.
+    #[cfg(feature = "core-api")]
+    #[tokio::test]
+    async fn delegation_grant_methods_mint_list_and_revoke() {
+        let (tmp, state) = temp_state();
+        // Without the /v1 core API there is no grant authority.
+        let disabled = state
+            .dispatch("_akh/delegation/grant/list", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(disabled.contains("core_api_disabled"), "{disabled}");
+
+        let store =
+            akh_service_store::Store::open(&tmp.path().join("core-operations.redb")).unwrap();
+        state
+            .grant_authority
+            .set(akh_medu::core_service::GrantAuthority::new(store))
+            .unwrap();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "alpha" }))
+            .await
+            .unwrap();
+        let minted = state
+            .dispatch(
+                "_akh/delegation/grant/mint",
+                &json!({"workspace": "alpha", "principal": "native:codex/code",
+                    "service_principal": "sessions",
+                    "tools": {"kind": "explicit", "tools": ["kg_query"]}, "ttl_secs": 60}),
+            )
+            .await
+            .unwrap();
+        let secret = minted["secret"].as_str().unwrap().to_string();
+        assert_eq!(secret.len(), 43, "32 bytes base64url without padding");
+        assert_eq!(minted["grant"]["tools"], json!(["kg_query"]));
+        assert_eq!(minted["grant"]["akh"], "alpha");
+        let id = minted["grant"]["id"].as_str().unwrap().to_string();
+
+        let listed = state
+            .dispatch("_akh/delegation/grant/list", &json!({"workspace": "alpha"}))
+            .await
+            .unwrap();
+        assert_eq!(listed["count"], 1);
+        assert_eq!(listed["grants"][0]["live"], true);
+        assert!(
+            !listed.to_string().contains(&secret),
+            "list must not reveal secrets"
+        );
+
+        let revoked = state
+            .dispatch("_akh/delegation/grant/revoke", &json!({"id": id}))
+            .await
+            .unwrap();
+        assert_eq!(revoked["grant"]["revoked"], true);
+        let listed = state
+            .dispatch("_akh/delegation/grant/list", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(listed["grants"][0]["live"], false);
+
+        let too_long = state
+            .dispatch(
+                "_akh/delegation/grant/mint",
+                &json!({"workspace": "alpha", "principal": "p",
+                    "service_principal": "sessions", "ttl_secs": 999_999}),
+            )
+            .await
+            .unwrap_err();
+        assert!(too_long.contains("ttl_too_long"), "{too_long}");
     }
 
     #[tokio::test]

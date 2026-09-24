@@ -278,6 +278,13 @@ impl Broker {
         } else {
             None
         };
+        // Phase 53e: resolve the session's delegation grant before marking the
+        // call sent, exactly like an MCP capability.
+        let grant = if matches!(tool.destination, ToolDestination::Cognitive { .. }) {
+            self.sessions.delegation_grant(&session.id)?
+        } else {
+            None
+        };
         let was_sent = record.sent;
         record.sent = true;
         self.sessions.store.transaction(|tx| tx.put(&k, &record))?;
@@ -296,7 +303,7 @@ impl Broker {
                 else { return Ok(CallbackReply { result: None, response: None, pending: true }); }
             }
             ToolDestination::Cognitive { service, tool } => {
-                self.client.post(service, "/v1/tools/call", &json!({"request_id":record.operation_id,"session_id":session.id,"akh":session.akh,"tool":tool,"arguments":call.arguments})).await
+                self.client.post(service, "/v1/tools/call", &CognitiveToolCall { request_id: record.operation_id.clone(), session_id: session.id.clone(), akh: session.akh.clone(), tool: tool.clone(), arguments: call.arguments.clone(), grant }).await
             }
             ToolDestination::Mcp { service, tool } => {
                 if was_sent { return self.mcp_uncertain(k, record, "previous response unavailable"); }

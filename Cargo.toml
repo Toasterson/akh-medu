@@ -257,7 +257,8 @@ embedded-runtime = ["dep:akh-runtime"]
 # Phase 53a (ADR 113): the scoped `/v1` cognitive core API is ADDITIVE. It is
 # served only when `AKH_CORE_CONFIG` is set and never removes daemon or ACP
 # behaviour. Part of `server`; the stripped core-only profile is gone.
-core-api = ["daemon", "dep:axum", "dep:akh-service-store"]
+# Phase 53e: `base64` encodes delegation-grant secrets (base64url).
+core-api = ["daemon", "dep:axum", "dep:akh-service-store", "dep:base64"]
 # DEPRECATED (ADR 113): alias of `server`, kept only so existing build lines keep
 # working during the Phase 53 cutover. Deleted in 53h — build `--features server`.
 core-server = ["server"]
