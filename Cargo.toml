@@ -259,9 +259,6 @@ embedded-runtime = ["dep:akh-runtime"]
 # behaviour. Part of `server`; the stripped core-only profile is gone.
 # Phase 53e: `base64` encodes delegation-grant secrets (base64url).
 core-api = ["daemon", "dep:axum", "dep:akh-service-store", "dep:base64"]
-# DEPRECATED (ADR 113): alias of `server`, kept only so existing build lines keep
-# working during the Phase 53 cutover. Deleted in 53h — build `--features server`.
-core-server = ["server"]
 daemon = ["tokio", "dep:chrono", "dep:cron"]
 # `server` = the akhomed daemon feature set: workspace daemons + the ACP
 # inbound transport. (Pre-ADR-061 it pulled axum/tower-http for REST/WS;

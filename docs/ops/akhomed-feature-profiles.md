@@ -10,9 +10,22 @@ and which get the lean one (`server`), per WI-339 scope items 1 and 5.
 
 ## The two daemon profiles
 
+**Phase 53h ([ADR 113](../ai/decisions/113-full-akh-always.md)):** there is exactly
+one akhomed build profile, `server`. It now expands to `daemon, acp, postgres,
+tracing-otel, remote-executor, embedded-runtime, core-api, delegation,
+execd-executor` — the daemon loop, the in-process turn, the full tool registry
+and ACP always run; `core-api` (the `/v1` HTTP surface) is additive on top of
+that same full build and is served only when `AKH_CORE_CONFIG` is set at
+runtime (no config, no `/v1`; never a startup failure). The formerly separate
+`core-server` profile — a stripped akhomed with no daemon loop and no ACP,
+built with `--no-default-features --features core-server` — was a deprecated
+alias of `server` through 53a and was deleted in 53h. There is no longer a way
+to build a stripped akhomed. The root `default` feature set (used by the `akh`
+CLI binary, not `akhomed`) stays lean and unrelated to this table.
+
 | Profile | Expands to | Local Candle inference | Use for |
 |---------|-----------|------------------------|---------|
-| `server` | `daemon + acp + postgres + tracing-otel + remote-executor` | **no** — candle/tokenizers/safetensors absent | Akhs whose chat/agentic backing is remote (`backend = "ollama"` or `"openai"`). The everyday/build-CI artifact. |
+| `server` | `daemon, acp, postgres, tracing-otel, remote-executor, embedded-runtime, core-api, delegation, execd-executor` | **no** — candle/tokenizers/safetensors absent | Akhs whose chat/agentic backing is remote (`backend = "ollama"` or `"openai"`). The everyday/build-CI artifact. |
 | `server-candle` | `server + candle-backend` | **yes** — in-process GGUF + Candle token counter | Any host that serves a `backend = "candle"` akh. The release-equivalent artifact. |
 
 Optional GPU acceleration layers onto `server-candle`:
@@ -58,7 +71,8 @@ the `cfg(not(feature = "candle-backend"))` arm in `src/bin/akhomed.rs`.
 ## Where each profile is set
 
 * Root feature definitions: `Cargo.toml` `[features]` (`server`, `server-candle`,
-  `candle-backend`, `metal`, `rocm`, `hip`).
+  `candle-backend`, `metal`, `rocm`, `hip`, plus the additive `core-api` that
+  `server` now includes; the deprecated `core-server` alias no longer exists).
 * Container image: `docker/akhomed.Dockerfile` `ARG FEATURES` (default includes
   `nlu-candle`; the `:cloud` lean variant overrides it).
 * Release pipeline: `.forgejo/workflows/release.yml` (illumos `server-candle` +

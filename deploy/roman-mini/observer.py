@@ -204,8 +204,18 @@ class Observer:
                         'status':status,'error':turn.get('error'),'output':turn.get('output'),
                         'created_at':turn.get('created_at'),
                         'finished_at':self.get('terminal_seen',{}).get(turn['id'],session['last_progress_at']//1000)}
+            elif delivery.get('event_admission'):
+                # Phase 53d/53f: an akh-targeted route hands the event to the akh's
+                # own reactor. akhomed owns the resulting turn (budget, ADR 105
+                # exit condition and trip-wire), so admission is this delivery's
+                # successful end; there is no akhsessd session to follow.
+                admitted=delivery['event_admission'];status='admitted'
+                detail={'akh':(delivery.get('target') or {}).get('akh'),'event_key':admitted.get('event_key'),
+                        'schedules_woken':admitted.get('schedules_woken'),'duplicate':admitted.get('duplicate')}
             elif delivery['terminal']:
-                status='superseded' if (delivery.get('error') or {}).get('code')=='superseded' else 'rejected';detail={'error':delivery.get('error'),'automation':delivery['automation']}
+                status='superseded' if (delivery.get('error') or {}).get('code')=='superseded' else 'rejected'
+                detail={'error':delivery.get('error'),'automation':delivery.get('automation'),
+                        'akh':(delivery.get('target') or {}).get('akh')}
             else:continue
             with self.db:
                 self.db.execute('update deliveries set state=?,detail=? where id=?',(status,encoded(detail),ident))

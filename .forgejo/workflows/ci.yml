@@ -220,6 +220,11 @@ jobs:
           # The remote log collector otherwise outlives this suite by many minutes.
           sh .forgejo/scripts/run-logged.sh library-tests cargo test --quiet --features postgres --lib
           sh .forgejo/scripts/run-logged.sh shell-cwd-tests cargo test --quiet --features postgres --test shell_exec_cwd -- --test-threads=1
+          # Phase 53 (ADR 113): the additive `/v1` core API (tool scopes, event
+          # admission, delegation grants) only compiles under the full `server`
+          # profile. `--lib` keeps the enormous akhomed binary out of the link;
+          # capture is unset so the suite never writes transcript files.
+          sh .forgejo/scripts/run-logged.sh core-service-tests env -u AKH_TRANSCRIPT_CAPTURE cargo test --quiet --features server --lib core_service -- --test-threads=1
 
   docker-seshd:
     runs-on: rust

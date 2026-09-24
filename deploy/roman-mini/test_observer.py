@@ -88,6 +88,19 @@ class DurableEvents(unittest.TestCase):
         b['grafana']['alerts'][0]['status']['state']='suppressed'
         self.assertNotEqual(m.monitoring_signature(a),m.monitoring_signature(b))
 
+    def test_akh_admission_is_a_successful_end_and_no_subscriber_alerts(self):
+        with self.o.db:
+            self.o.db.execute("insert into deliveries values ('d-ok','pending',null)")
+            self.o.db.execute("insert into deliveries values ('d-none','pending',null)")
+        target={'kind':'akh','endpoint':'core','akh':'minerva'}
+        replies={'http://127.0.0.1:18435/v1/deliveries/d-ok':{'terminal':True,'automation':'','target':target,'admission':None,
+                    'event_admission':{'event_key':'roman-inbox-minerva/djehuty.inbox#1','schedules_woken':['roman-minerva-djehuty.inbox'],'duplicate':False}},
+                 'http://127.0.0.1:18435/v1/deliveries/d-none':{'terminal':True,'automation':'','target':target,'admission':None,
+                    'error':{'code':'no_subscriber','message':'nothing subscribes'}}}
+        with patch.object(m,'fetch',side_effect=lambda url,headers,data=None:replies[url]):self.o.watch_deliveries()
+        states=dict(self.o.db.execute('select id,state from deliveries'))
+        self.assertEqual(states,{'d-ok':'admitted','d-none':'rejected'})
+        self.assertEqual(self.o.get('workflow_failure')['akh'],'minerva')
     def test_unrouted_event_is_retained_for_operator_repair(self):
         with self.o.db:self.o.event('roman-clock','schedule.janus',{})
         with patch.object(m,'fetch',return_value={'deliveries':[]}):
