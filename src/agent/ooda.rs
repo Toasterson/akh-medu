@@ -2444,6 +2444,7 @@ mod tests {
                 capabilities: Default::default(),
                 description: String::new(),
                 shadow_triggers: Vec::new(),
+                effect: Default::default(),
             },
             source,
         }

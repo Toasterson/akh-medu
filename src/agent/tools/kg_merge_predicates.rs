@@ -171,6 +171,7 @@ impl Tool for KgMergePredicatesTool {
                      predicate; superseded single-valued values are retracted."
                     .into(),
                 shadow_triggers: Vec::new(),
+                effect: crate::agent::tool_manifest::ToolEffect::Mutating,
             },
             source: ToolSource::Native,
         }

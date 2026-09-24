@@ -600,7 +600,6 @@ slot. A failure to close is logged at `warn` and never masks the delegation's re
 - Add `[board]` to `janus.toml`, `minerva.toml` and `vesta.toml` with
   `token_env = "ROMAN_BOARD_JANUS|MINERVA|VESTA"`. `daemon_credentials.py`'s `core`
   role must export those three variables into akhomed's environment.
-<<<<<<< HEAD
 
 ## 53j — memory hygiene (as built, 2026-09-24)
 
@@ -718,9 +717,6 @@ warning, and one predicate accumulated under several spellings (`next_check`,
   1–3 s; wake dominates the run at 50–150 s.
 
 
-||||||| 1bac6f2b
-
-=======
 
 ## Review fixes, core (branch `phase53/rfA-core`, 2026-09-24)
 
@@ -798,5 +794,3 @@ Roll back in the reverse order. The operator runbook is
   - The SET forms of `_akh/permission/mode` (a `mode` param) and
     `_akh/psyche/archetypes` (any weight) need `control`. The GET forms stay
     per-akh.
-
->>>>>>> phase53/rfA-core
