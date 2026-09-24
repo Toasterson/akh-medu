@@ -970,7 +970,7 @@ impl ChatBackend for CandleChatBackend {
         // the RAW (uncleaned) text — Gemma 4 puts its tool call in the thought channel, which the
         // answer-channel cleaning would strip before we can parse it.
         let raw = be.generate_raw(&prompt, 512).map_err(|e| {
-            metrics.log("candle", "cancelled");
+            metrics.log("candle", super::llm_metrics::RequestOutcome::NoResponse);
             ChatBackendError::TurnFailed {
                 backend: "candle".into(),
                 reason: e.to_string(),
@@ -1012,7 +1012,7 @@ impl ChatBackend for CandleChatBackend {
             metrics.note_tool_call_chunk();
         }
         // Candle doesn't report token counts; leave at 0.
-        metrics.log("candle", "completed");
+        metrics.log("candle", super::llm_metrics::RequestOutcome::Completed);
 
         Ok(AssistantTurn {
             content: if tool_calls.is_empty() {

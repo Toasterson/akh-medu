@@ -11,13 +11,71 @@ use std::time::Instant;
 
 // ── Usage metering (Phase 53b, ADR 113 decision 6) ─────────────────────────
 
+/// How one provider request ended, for metering.
+///
+/// Only a request that got a response from the model counts as a request
+/// (and so as budget spend). A request that never got one (the provider was
+/// unreachable, refused the connection or returned an HTTP error status) was
+/// not billed and must not charge the autonomy budget or look like a model
+/// turn to the ADR 105 trip-wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestOutcome {
+    /// No response arrived: a transport error, an HTTP error status, or a
+    /// missing credential. Logged, never metered.
+    NoResponse,
+    /// A response started but did not finish: the stream broke after some
+    /// chunks, or the body could not be decoded. Metered with whatever
+    /// token counts the provider reported (often none).
+    Partial,
+    /// The response finished.
+    Completed,
+}
+
+impl RequestOutcome {
+    /// The `outcome` log field and span attribute. `Partial` keeps the
+    /// historic `cancelled` label so existing dashboards still match.
+    pub const fn label(self) -> &'static str {
+        match self {
+            RequestOutcome::NoResponse => "no_response",
+            RequestOutcome::Partial => "cancelled",
+            RequestOutcome::Completed => "completed",
+        }
+    }
+
+    /// Whether the model produced (part of) a response, so the request is
+    /// metered.
+    pub const fn reached_model(self) -> bool {
+        !matches!(self, RequestOutcome::NoResponse)
+    }
+}
+
+/// Whether a unit of model work got a response from the model. Used where a
+/// backing does not meter its requests (native runtimes, Grug), so the
+/// caller must say whether a model turn really happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelContact {
+    /// The model was never reached: no backend, backend unavailable, or a
+    /// transport failure before any response. Free, and not a model outcome.
+    NotReached,
+    /// The model responded (even if the response was then rejected).
+    Responded,
+}
+
+impl ModelContact {
+    /// Whether the model responded.
+    pub const fn responded(self) -> bool {
+        matches!(self, ModelContact::Responded)
+    }
+}
+
 /// Model usage accumulated by a [`UsageScope`]: how many provider requests
-/// finished and how many tokens they billed.
+/// got a response and how many tokens they billed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LlmUsage {
-    /// Provider requests that reached a model and returned (completed or
-    /// cancelled mid-stream). A request that failed before any response
-    /// arrived is not counted, because nothing was billed.
+    /// Provider requests that got a response from the model
+    /// ([`RequestOutcome::Completed`] or [`RequestOutcome::Partial`]). A
+    /// request that failed before any response arrived
+    /// ([`RequestOutcome::NoResponse`]) is not counted: nothing was billed.
     pub requests: u64,
     /// Prompt (input) tokens the provider reported.
     pub prompt_tokens: u64,
@@ -265,12 +323,28 @@ impl LlmRequestMetrics {
         }
     }
 
-    /// Structured log line for this request (one line per request, on completion
-    /// or cancellation). The `outcome` string is `"completed"` or `"cancelled"`.
-    pub fn log(&self, model: &str, outcome: &str) {
+    /// How a request that stopped early ended: [`RequestOutcome::Partial`]
+    /// when any chunk arrived, [`RequestOutcome::NoResponse`] otherwise.
+    pub fn interrupted_outcome(&self) -> RequestOutcome {
+        if self.chunks_received > 0 {
+            RequestOutcome::Partial
+        } else {
+            RequestOutcome::NoResponse
+        }
+    }
+
+    /// Structured log line for this request (one line per request, on every
+    /// exit path). Only an outcome that [reached the
+    /// model](RequestOutcome::reached_model) is metered into open
+    /// [`UsageScope`]s.
+    pub fn log(&self, model: &str, outcome: RequestOutcome) {
         let duration_secs = self.duration_secs();
-        self.record_on_span(outcome, duration_secs);
-        record_usage(self.prompt_tokens, self.completion_tokens);
+        let label = outcome.label();
+        self.record_on_span(label, duration_secs);
+        if outcome.reached_model() {
+            record_usage(self.prompt_tokens, self.completion_tokens);
+        }
+        let outcome = label;
         tracing::info!(
             model,
             outcome,
@@ -334,7 +408,7 @@ mod tests {
         let scope = UsageScope::open();
         let mut request = LlmRequestMetrics::new(0);
         request.set_tokens(120, 30);
-        request.log("test-model", "completed");
+        request.log("test-model", RequestOutcome::Completed);
         record_usage(10, 5);
         let usage = scope.finish();
         assert_eq!(usage.requests, 2);
@@ -342,6 +416,29 @@ mod tests {
         assert_eq!(usage.completion_tokens, 35);
         assert_eq!(usage.total_tokens(), 165);
         assert!(usage.reached_model());
+    }
+
+    #[test]
+    fn requests_without_a_response_are_not_metered() {
+        let scope = UsageScope::open();
+        // Transport error before any byte: logged, never a request.
+        let refused = LlmRequestMetrics::new(0);
+        assert_eq!(refused.interrupted_outcome(), RequestOutcome::NoResponse);
+        refused.log("test-model", refused.interrupted_outcome());
+        // A stream that broke after some chunks did reach the model.
+        let mut broken = LlmRequestMetrics::new(1);
+        broken.note_chunk(12);
+        broken.set_tokens(40, 3);
+        assert_eq!(broken.interrupted_outcome(), RequestOutcome::Partial);
+        broken.log("test-model", broken.interrupted_outcome());
+        let usage = scope.finish();
+        assert_eq!(usage.requests, 1, "only the partial response counts");
+        assert_eq!(usage.total_tokens(), 43);
+        assert_eq!(RequestOutcome::NoResponse.label(), "no_response");
+        assert_eq!(RequestOutcome::Partial.label(), "cancelled");
+        assert!(!RequestOutcome::NoResponse.reached_model());
+        assert!(ModelContact::Responded.responded());
+        assert!(!ModelContact::NotReached.responded());
     }
 
     #[test]

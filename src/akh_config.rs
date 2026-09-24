@@ -55,8 +55,9 @@ pub enum AkhConfigError {
         code(akh::akh_config::parse),
         help(
             "Check akh.toml for TOML syntax errors and that field types match — e.g. \
-             `[ollama_endpoint]` needs `kind = \"local\"` or `kind = \"cloud\"`, and \
-             `path_mode` is `\"local\"` or `\"remote\"`."
+             `[ollama_endpoint]` needs `kind = \"local\"` or `kind = \"cloud\"`, \
+             `path_mode` is `\"local\"` or `\"remote\"`, and `[autonomy.budget]` accepts \
+             only `max_tokens_per_day` and `max_turns_per_day`."
         )
     )]
     Parse { path: String, message: String },
@@ -289,6 +290,11 @@ pub struct AutonomyConfig {
     /// turns). Defaults to 250 000 tokens and 40 turns per UTC day.
     #[serde(default)]
     pub budget: crate::agent::autonomy::AutonomyBudget,
+    /// Which tools the idle OODA cycle may choose on its own. Defaults to
+    /// `safe` (manifest `Safe`, not MCP-proxied). `all` takes effect only
+    /// together with an explicit `tasks.idle_cycle = true`.
+    #[serde(default)]
+    pub idle_cycle_tools: crate::agent::autonomy::IdleCycleTools,
 }
 
 impl Default for AutonomyConfig {
@@ -297,6 +303,7 @@ impl Default for AutonomyConfig {
             enabled: true,
             tasks: std::collections::BTreeMap::new(),
             budget: crate::agent::autonomy::AutonomyBudget::default(),
+            idle_cycle_tools: crate::agent::autonomy::IdleCycleTools::default(),
         }
     }
 }
@@ -617,8 +624,11 @@ impl AutonomyConfig {
     /// `exec`.
     ///
     /// Order: always-on infrastructure runs; an explicit `tasks` override
-    /// wins; the master switch applies; the idle OODA cycle then defaults
-    /// off while executor tools run in-process (ADR 113 decision 4).
+    /// wins; a task that follows another one (harvest follows the sleep
+    /// cycle) takes that task's gate; the master switch applies, except to
+    /// tasks that were only ever env-gated (librarian, OpenClaw sync); the
+    /// idle OODA cycle then defaults off while executor tools run in-process
+    /// (ADR 113 decision 4).
     pub fn gate(
         &self,
         task: crate::agent::autonomy::DaemonTask,
@@ -627,18 +637,35 @@ impl AutonomyConfig {
         use crate::agent::autonomy::{
             DaemonTask, DisabledReason, ExecPlacement, TaskGate, TaskGating,
         };
-        if task.gating() == TaskGating::AlwaysOn {
+        let gating = task.gating();
+        if gating == TaskGating::AlwaysOn {
             return TaskGate::Enabled;
         }
-        match self.tasks.get(task.as_str()) {
-            Some(true) => TaskGate::Enabled,
-            Some(false) => TaskGate::Disabled(DisabledReason::ExplicitlyDisabled),
-            None if !self.enabled => TaskGate::Disabled(DisabledReason::MasterSwitchOff),
-            None if task == DaemonTask::IdleCycle && exec == ExecPlacement::InProcess => {
+        match (self.tasks.get(task.as_str()), gating) {
+            (Some(true), _) => TaskGate::Enabled,
+            (Some(false), _) => TaskGate::Disabled(DisabledReason::ExplicitlyDisabled),
+            (None, TaskGating::FollowsTask(leader)) => match self.gate(leader, exec) {
+                TaskGate::Enabled => TaskGate::Enabled,
+                TaskGate::Disabled(reason) => TaskGate::Disabled(DisabledReason::FollowsTask {
+                    task: leader,
+                    reason: Box::new(reason),
+                }),
+            },
+            (None, TaskGating::IgnoresMasterSwitch) => TaskGate::Enabled,
+            (None, _) if !self.enabled => TaskGate::Disabled(DisabledReason::MasterSwitchOff),
+            (None, _) if task == DaemonTask::IdleCycle && exec == ExecPlacement::InProcess => {
                 TaskGate::Disabled(DisabledReason::InProcessExecutor)
             }
-            None => TaskGate::Enabled,
+            (None, _) => TaskGate::Enabled,
         }
+    }
+
+    /// The tool policy the idle OODA cycle runs with: safe-only unless
+    /// `idle_cycle_tools = "all"` *and* `tasks.idle_cycle = true` are both
+    /// set.
+    pub fn idle_cycle_candidate_policy(&self) -> crate::agent::ooda::ToolCandidatePolicy {
+        self.idle_cycle_tools
+            .candidate_policy(self.tasks.get("idle_cycle") == Some(&true))
     }
 
     /// `tasks` keys that name no [`DaemonTask`](crate::agent::autonomy::DaemonTask).
@@ -1119,7 +1146,10 @@ impl AkhConfig {
                     "temperature",
                 ],
             ),
-            ("autonomy", &["enabled", "tasks", "budget"]),
+            (
+                "autonomy",
+                &["enabled", "tasks", "budget", "idle_cycle_tools"],
+            ),
             ("memory", &["contradiction_policy", "hygiene_batch"]),
             (
                 "delegation",
@@ -1541,7 +1571,7 @@ mod tests {
         // Master off: gated tasks stop, infrastructure keeps running.
         a.enabled = false;
         assert_eq!(
-            a.gate(DaemonTask::Harvest, ExecPlacement::Contained),
+            a.gate(DaemonTask::Reflection, ExecPlacement::Contained),
             TaskGate::Disabled(DisabledReason::MasterSwitchOff)
         );
         for infra in [
@@ -1617,6 +1647,110 @@ mod tests {
         assert_eq!(
             miette::Diagnostic::code(&err).unwrap().to_string(),
             "akh::board::config::token_file"
+        );
+    }
+
+    #[test]
+    fn master_switch_off_keeps_pre_53b_harvest_librarian_and_openclaw_behaviour() {
+        use crate::agent::autonomy::{DaemonTask, DisabledReason, ExecPlacement, TaskGate};
+        let exec = ExecPlacement::Contained;
+        // A pre-53b TOML: `[autonomy] enabled = false`.
+        let mut a = AutonomyConfig {
+            enabled: false,
+            ..AutonomyConfig::default()
+        };
+        // Harvest used to run inside the sleep cycle: it follows its gate.
+        assert_eq!(
+            a.gate(DaemonTask::Harvest, exec),
+            TaskGate::Disabled(DisabledReason::FollowsTask {
+                task: DaemonTask::SleepCycle,
+                reason: Box::new(DisabledReason::MasterSwitchOff),
+            })
+        );
+        a.tasks.insert("sleep_cycle".into(), true);
+        assert_eq!(a.gate(DaemonTask::Harvest, exec), TaskGate::Enabled);
+        // An explicit harvest override still wins.
+        a.tasks.insert("harvest".into(), false);
+        assert_eq!(
+            a.gate(DaemonTask::Harvest, exec),
+            TaskGate::Disabled(DisabledReason::ExplicitlyDisabled)
+        );
+        // Librarian and OpenClaw sync were only env-gated: the master switch
+        // does not turn them off (their env gates apply in the daemon).
+        assert_eq!(a.gate(DaemonTask::Librarian, exec), TaskGate::Enabled);
+        assert_eq!(a.gate(DaemonTask::OpenclawSync, exec), TaskGate::Enabled);
+        a.tasks.insert("openclaw_sync".into(), false);
+        assert_eq!(
+            a.gate(DaemonTask::OpenclawSync, exec),
+            TaskGate::Disabled(DisabledReason::ExplicitlyDisabled)
+        );
+        // Master on: harvest follows the (enabled) sleep cycle, or its own
+        // sleep-cycle opt-out.
+        let mut on = AutonomyConfig::default();
+        assert_eq!(on.gate(DaemonTask::Harvest, exec), TaskGate::Enabled);
+        on.tasks.insert("sleep_cycle".into(), false);
+        assert!(matches!(
+            on.gate(DaemonTask::Harvest, exec),
+            TaskGate::Disabled(DisabledReason::FollowsTask { .. })
+        ));
+    }
+
+    #[test]
+    fn idle_cycle_tools_default_safe_and_all_needs_an_explicit_idle_cycle() {
+        use crate::agent::autonomy::IdleCycleTools;
+        use crate::agent::ooda::ToolCandidatePolicy;
+        let cfg: AkhConfig = toml::from_str("name = \"a\"").unwrap();
+        assert_eq!(cfg.autonomy.idle_cycle_tools, IdleCycleTools::Safe);
+        assert_eq!(
+            cfg.autonomy.idle_cycle_candidate_policy(),
+            ToolCandidatePolicy::SafeNonMcp
+        );
+        // `all` alone is not enough: the cycle stays safe-only.
+        let src = r#"
+            name = "a"
+            [autonomy]
+            idle_cycle_tools = "all"
+        "#;
+        let cfg: AkhConfig = toml::from_str(src).unwrap();
+        assert_eq!(cfg.autonomy.idle_cycle_tools, IdleCycleTools::All);
+        assert_eq!(
+            cfg.autonomy.idle_cycle_candidate_policy(),
+            ToolCandidatePolicy::SafeNonMcp
+        );
+        let raw: toml::Value = toml::from_str(src).unwrap();
+        assert!(AkhConfig::unknown_keys(&raw).is_empty());
+        // `all` + explicit `tasks.idle_cycle = true` opts in.
+        let cfg: AkhConfig = toml::from_str(
+            r#"
+            name = "a"
+            [autonomy]
+            idle_cycle_tools = "all"
+            tasks = { idle_cycle = true }
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.autonomy.idle_cycle_candidate_policy(),
+            ToolCandidatePolicy::Unrestricted
+        );
+        assert!(
+            toml::from_str::<AkhConfig>("name = \"a\"\n[autonomy]\nidle_cycle_tools = \"most\"")
+                .is_err(),
+            "an unknown policy is refused"
+        );
+    }
+
+    #[test]
+    fn autonomy_budget_typos_are_refused() {
+        let src = r#"
+            name = "janus"
+            [autonomy.budget]
+            max_token_per_day = 1000
+        "#;
+        let error = toml::from_str::<AkhConfig>(src).unwrap_err().to_string();
+        assert!(
+            error.contains("max_token_per_day") && error.contains("max_tokens_per_day"),
+            "the error names the typo and the valid keys: {error}"
         );
     }
 

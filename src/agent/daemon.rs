@@ -21,12 +21,26 @@ use super::autonomy::{
     TaskOutcome, TaskRun,
 };
 use super::error::AgentResult;
-use super::llm_metrics::{LlmUsage, UsageScope};
+use super::llm_metrics::{LlmUsage, ModelContact, UsageScope};
 use crate::akh_config::{AutonomyConfig, MemoryConfig};
 use crate::client::DaemonStatus;
 use crate::config::UpstreamEndpointConfig;
 use crate::engine::Engine;
 use crate::message::AkhMessage;
+
+/// A ticker for `task` every `period` (Phase 53 review).
+///
+/// The first tick follows [`DaemonTask::first_tick`]: cheap infrastructure
+/// fires at once, the sleep tick after a short startup delay, everything
+/// else after one period, so a start or wake does not run every task at
+/// once. Missed ticks (a long task, a suspended host) are delayed rather
+/// than replayed in a burst.
+fn task_interval(task: DaemonTask, period: Duration) -> tokio::time::Interval {
+    let start = tokio::time::Instant::now() + task.first_tick().delay(period);
+    let mut ticker = tokio::time::interval_at(start, period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker
+}
 
 /// Current unix timestamp in seconds.
 fn now_secs() -> u64 {
@@ -364,6 +378,11 @@ pub struct AgentDaemon {
     /// Whether the "[board] has no agent_id, inbox ingest disabled" warning
     /// was already logged for this akh.
     board_ingest_warned: AtomicBool,
+    /// Whether the "this akh's [board] identity is unusable" warning was
+    /// already logged. The reactor ticks every few seconds, so an unreadable
+    /// token warns once per breakage (reset when it becomes readable again)
+    /// and logs at `debug` in between.
+    board_identity_warned: AtomicBool,
 }
 
 /// One akh's resolved Agent Board identity.
@@ -408,6 +427,7 @@ impl AgentDaemon {
             board_config: None,
             board_env_warned: AtomicBool::new(false),
             board_ingest_warned: AtomicBool::new(false),
+            board_identity_warned: AtomicBool::new(false),
         }
     }
 
@@ -760,6 +780,31 @@ impl AgentDaemon {
                 "unknown [autonomy] tasks key has no effect; see DaemonTask for valid names"
             );
         }
+        if !self.autonomy.enabled {
+            // Pre-53b TOMLs: keep what `enabled = false` used to mean.
+            tracing::info!(
+                target: "akh::autonomy",
+                workspace = %self.workspace,
+                harvest = ?self.task_gate(DaemonTask::Harvest),
+                librarian = ?self.task_gate(DaemonTask::Librarian),
+                openclaw_sync = ?self.task_gate(DaemonTask::OpenclawSync),
+                "[autonomy] enabled = false: harvest follows sleep_cycle (it used to run inside it); \
+                 librarian and openclaw_sync ignore the master switch and stay gated by \
+                 AKH_LIBRARIAN=1 / OPENCLAW_API_KEY (the librarian is still budgeted). Set \
+                 [autonomy] tasks.<name> = false to turn one off"
+            );
+        }
+        let idle_policy = self.autonomy.idle_cycle_candidate_policy();
+        if self.autonomy.idle_cycle_tools == super::autonomy::IdleCycleTools::All
+            && idle_policy != super::ooda::ToolCandidatePolicy::Unrestricted
+        {
+            tracing::warn!(
+                target: "akh::autonomy",
+                workspace = %self.workspace,
+                "[autonomy] idle_cycle_tools = \"all\" has no effect without an explicit \
+                 tasks.idle_cycle = true; the idle OODA cycle stays on safe, non-MCP tools"
+            );
+        }
         let mut disabled = Vec::new();
         for task in DaemonTask::ALL {
             if let TaskGate::Disabled(reason) = self.task_gate(task) {
@@ -789,6 +834,7 @@ impl AgentDaemon {
             tokens_used = ledger.tokens_used,
             turns_used = ledger.turns_used,
             ledger_durable = self.governor.is_durable(),
+            idle_cycle_tools = ?idle_policy,
             "daemon autonomy plan"
         );
     }
@@ -912,31 +958,52 @@ impl AgentDaemon {
     /// `tokio::task::block_in_place`, which signals Tokio to migrate waiting
     /// async tasks to other threads before this thread blocks.
     pub async fn run(&mut self) -> AgentResult<()> {
-        use tokio::time::interval;
-
-        let mut equivalence_tick = interval(self.config.equivalence_interval);
-        let mut reflection_tick = interval(self.config.reflection_interval);
-        let mut consolidation_tick = interval(self.config.consolidation_interval);
-        let mut schema_tick = interval(self.config.schema_discovery_interval);
-        let mut rules_tick = interval(self.config.rule_inference_interval);
-        let mut gaps_tick = interval(self.config.gap_analysis_interval);
-        let mut persist_tick = interval(self.config.persist_interval);
-        let mut idle_cycle_tick = interval(self.config.idle_cycle_interval);
-        let mut continuous_learning_tick = interval(self.config.continuous_learning_interval);
-        let mut goal_gen_tick = interval(self.config.goal_generation_interval);
-        let mut sleep_tick = interval(self.config.sleep_cycle_interval);
-        let mut trigger_tick = interval(self.config.trigger_evaluation_interval);
-        let mut reactor_tick = interval(self.config.reactor_evaluation_interval);
-        let mut extraction_tick = interval(self.config.knowledge_extraction_interval);
-        let mut bridge_training_tick = interval(self.config.bridge_training_interval);
-        let mut openclaw_sync_tick = interval(self.config.openclaw_sync_interval);
-        let mut elicitation_tick = interval(self.config.knowledge_elicitation_interval);
-        let mut kg_compaction_tick = interval(self.config.kg_compaction_interval);
-        let mut delegation_tick = interval(self.config.delegation_interval);
-        let mut relation_enrichment_tick = interval(self.config.relation_enrichment_interval);
-        let mut librarian_tick = interval(self.config.librarian_interval);
-        let mut seshat_curation_tick = interval(self.config.seshat_curation_interval);
-        let mut heka_curation_tick = interval(self.config.heka_curation_interval);
+        let c = &self.config;
+        let mut equivalence_tick = task_interval(DaemonTask::Equivalence, c.equivalence_interval);
+        let mut reflection_tick = task_interval(DaemonTask::Reflection, c.reflection_interval);
+        let mut consolidation_tick =
+            task_interval(DaemonTask::Consolidation, c.consolidation_interval);
+        let mut schema_tick =
+            task_interval(DaemonTask::SchemaDiscovery, c.schema_discovery_interval);
+        let mut rules_tick = task_interval(DaemonTask::RuleInference, c.rule_inference_interval);
+        let mut gaps_tick = task_interval(DaemonTask::GapAnalysis, c.gap_analysis_interval);
+        let mut persist_tick = task_interval(DaemonTask::Persist, c.persist_interval);
+        let mut idle_cycle_tick = task_interval(DaemonTask::IdleCycle, c.idle_cycle_interval);
+        let mut continuous_learning_tick = task_interval(
+            DaemonTask::ContinuousLearning,
+            c.continuous_learning_interval,
+        );
+        let mut goal_gen_tick =
+            task_interval(DaemonTask::GoalGeneration, c.goal_generation_interval);
+        // The sleep tick runs harvest, then the sleep cycle.
+        let mut sleep_tick = task_interval(DaemonTask::SleepCycle, c.sleep_cycle_interval);
+        let mut trigger_tick =
+            task_interval(DaemonTask::TriggerEvaluation, c.trigger_evaluation_interval);
+        let mut reactor_tick = task_interval(DaemonTask::Reactor, c.reactor_evaluation_interval);
+        let mut extraction_tick = task_interval(
+            DaemonTask::KnowledgeExtraction,
+            c.knowledge_extraction_interval,
+        );
+        let mut bridge_training_tick =
+            task_interval(DaemonTask::BridgeTraining, c.bridge_training_interval);
+        let mut openclaw_sync_tick =
+            task_interval(DaemonTask::OpenclawSync, c.openclaw_sync_interval);
+        let mut elicitation_tick = task_interval(
+            DaemonTask::KnowledgeElicitation,
+            c.knowledge_elicitation_interval,
+        );
+        let mut kg_compaction_tick =
+            task_interval(DaemonTask::KgCompaction, c.kg_compaction_interval);
+        let mut delegation_tick = task_interval(DaemonTask::Delegation, c.delegation_interval);
+        let mut relation_enrichment_tick = task_interval(
+            DaemonTask::RelationEnrichment,
+            c.relation_enrichment_interval,
+        );
+        let mut librarian_tick = task_interval(DaemonTask::Librarian, c.librarian_interval);
+        let mut seshat_curation_tick =
+            task_interval(DaemonTask::SeshatCuration, c.seshat_curation_interval);
+        let mut heka_curation_tick =
+            task_interval(DaemonTask::HekaCuration, c.heka_curation_interval);
 
         tokio::task::block_in_place(|| {
             self.lock_agent().sink().emit(&AkhMessage::system(
@@ -952,8 +1019,10 @@ impl AgentDaemon {
         // Continuous learning is deliberately NOT run at startup — it holds the
         // agent mutex for 30-120s (network I/O + ingestion), blocking handlers.
         if self.task_gate(DaemonTask::GoalGeneration) == TaskGate::Enabled {
-            self.bootstrap_causal_schemas();
+            // Takes the agent write lock: off the async worker, and a
+            // poisoned lock is recovered rather than panicking.
             tokio::task::block_in_place(|| {
+                self.bootstrap_causal_schemas();
                 self.run_task(DaemonTask::GoalGeneration, |d| d.run_goal_generation())
             });
         }
@@ -1135,7 +1204,7 @@ impl AgentDaemon {
         tokio::task::block_in_place(|| {
             self.agent
                 .read()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .sink()
                 .emit(&AkhMessage::system("daemon stopped"));
         });
@@ -1691,6 +1760,18 @@ impl AgentDaemon {
 
         let model = super::librarian::OllamaLibrarianModel::from_env();
         let config = super::librarian::LibrarianConfig::default();
+        // One pass may call the model once per source (up to 256). Check the
+        // day's token budget, including what this pass has spent so far,
+        // before each call; stop cleanly when it is spent.
+        let pass_scope = UsageScope::open();
+        let guard = || {
+            self.governor
+                .check_in_flight(DaemonTask::Librarian, pass_scope.usage())
+                .map_err(|exhausted| super::librarian::SpendStop {
+                    reason: exhausted.to_string(),
+                    sources_remaining: 0,
+                })
+        };
 
         // No notes supplied yet — the Note carrier (ADR 081 P1) has no
         // durable "all notes since X" catalog query today, so this daemon
@@ -1704,8 +1785,20 @@ impl AgentDaemon {
             *akh_id,
             &[],
             &config,
+            &guard,
         ) {
             Ok(report) => {
+                if let Some(stop) = &report.stopped {
+                    tracing::info!(
+                        target: "akh::autonomy",
+                        workspace = %self.workspace,
+                        task = DaemonTask::Librarian.as_str(),
+                        reason = %stop.reason,
+                        sources_remaining = stop.sources_remaining,
+                        last_seq = report.last_seq,
+                        "librarian pass stopped: autonomy budget exhausted; the rest waits for the reset"
+                    );
+                }
                 if report.typed_triples_asserted > 0 || report.frontier_triples_asserted > 0 {
                     if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
@@ -2020,7 +2113,11 @@ impl AgentDaemon {
                 return TaskRun::Contended;
             }
         };
-        let ingress = match self.board_identity() {
+        let identity = self.board_identity();
+        if identity.is_ok() {
+            self.board_identity_warned.store(false, Ordering::Relaxed);
+        }
+        let ingress = match identity {
             Ok(Some(BoardIdentity {
                 config,
                 own_agent_id: Some(own),
@@ -2045,10 +2142,10 @@ impl AgentDaemon {
             // and fails closed without it.
             Ok(Some(_)) => super::board_reactor::ingest_board_events_from_env(&engine, now),
             Ok(None) => Ok(Default::default()),
-            Err(error) => Err(super::error::AgentError::ToolExecution {
-                tool_name: "djehuty_board_reactor".into(),
-                message: error.to_string(),
-            }),
+            Err(error) => {
+                self.note_unusable_board_identity(error);
+                Ok(Default::default())
+            }
         };
         match ingress {
             Ok(report) => {
@@ -2132,27 +2229,20 @@ impl AgentDaemon {
 
         for claim in poll.claims {
             let schedule_tag = format!("reactor_schedule_{}", claim.schedule.id);
-            // Phase 53b: occurrences that run a model turn are admitted
-            // against the daily budget one by one. An exhausted budget DEFERS
-            // the occurrence to the budget reset through the same path as
-            // lock contention: the claim survives and no retry is consumed.
-            let spends_llm = matches!(
-                &claim.schedule.action,
-                ReactorAction::LlmTurn { .. } | ReactorAction::DjehutyReply { .. }
-            );
-            let ticket = if spends_llm {
-                match self.governor.admit(DaemonTask::Reactor) {
-                    Admission::Admitted(ticket) => Some(ticket),
-                    Admission::Exhausted(exhausted) => {
-                        self.defer_claim_for_budget(&engine, &predicates, &claim, &exhausted);
-                        continue;
-                    }
-                }
-            } else {
-                None
-            };
-            let occurrence_scope = ticket.as_ref().map(|_| UsageScope::open());
-            let mut ran_model_turn = false;
+            // Phase 53b: a model turn is admitted against the daily budget
+            // lazily, right before the model call (after the cached-result
+            // check and the board reply's message-type filter), so an
+            // exhausted budget never defers work that makes no model call.
+            // A refused admission DEFERS the occurrence to the budget reset
+            // through the same path as lock contention: the claim survives
+            // and no retry is consumed.
+            let occurrence_scope = UsageScope::open();
+            let mut ticket: Option<BudgetTicket> = None;
+            // Whether this attempt got a response from the model. Only then
+            // is it charged as a turn and fed to the ADR 105 trip-wire;
+            // an absent/unavailable backend or a transport failure is
+            // infrastructure, not a model outcome.
+            let mut contact = ModelContact::NotReached;
             let start_key = format!("reactor:{}:attempt:{}:started", claim.run_id, claim.attempt);
             let start_summary = format!(
                 "reactor schedule {} started run {} attempt {} scheduled_for={} trigger={}",
@@ -2189,7 +2279,7 @@ impl AgentDaemon {
             // ADR 105: the classified outcome of a model turn, for the
             // no-progress trip-wire.
             let mut run_outcome: Option<super::reactor::RunOutcome> = None;
-            let result: AgentResult<(String, bool)> = match &claim.schedule.action {
+            let result: Result<(String, bool), OccurrenceStop> = match &claim.schedule.action {
                 ReactorAction::LlmTurn {
                     agent_id,
                     allow_tools,
@@ -2213,9 +2303,14 @@ impl AgentDaemon {
                         {
                             return Ok((cached, true));
                         }
-                        ran_model_turn = true;
+                        ticket = Some(admit_model_turn(&self.governor)?);
                         let reply =
-                            super::board_reactor::run_tool_free_turn(&guard, agent_id, prompt)?;
+                            super::board_reactor::run_tool_free_turn(&guard, agent_id, prompt)
+                                .map_err(|failure| {
+                                    contact = failure.contact;
+                                    failure.error
+                                })?;
+                        contact = ModelContact::Responded;
                         run_outcome = Some(super::reactor::RunOutcome {
                             progress: false,
                             fingerprint: format!("reply:{}", short_digest(reply.trim())),
@@ -2227,8 +2322,8 @@ impl AgentDaemon {
                         ReactorStore::new(&engine).cache_llm_result(&claim.run_id, &summary)?;
                         return Ok((summary, true));
                     }
-                    ran_model_turn = true;
-                    match guard.run_agentic_turn_with_conversation_state(
+                    ticket = Some(admit_model_turn(&self.governor)?);
+                    let turn = guard.run_agentic_turn_with_conversation_state(
                         &engine,
                         agent_id,
                         prompt,
@@ -2236,7 +2331,9 @@ impl AgentDaemon {
                         &cancel,
                         *require_mutation,
                         &guard.conversation_state,
-                    ) {
+                    );
+                    contact = agentic_turn_contact(turn.as_ref(), occurrence_scope.usage());
+                    match turn {
                         Some(super::agentic_chat::AgenticTurnOutcome::Completed) => {
                             let messages = sink.messages();
                             let mutation_completed = messages.iter().any(|message| {
@@ -2252,7 +2349,7 @@ impl AgentDaemon {
                                 Err(super::error::AgentError::ToolExecution {
                                     tool_name: "reactor_llm_turn".into(),
                                     message: "scheduled LLM turn completed without the required successful mutation".into(),
-                                })
+                                }.into())
                             } else {
                                 Ok((
                                     format!(
@@ -2266,20 +2363,31 @@ impl AgentDaemon {
                         Some(outcome) => Err(super::error::AgentError::ToolExecution {
                             tool_name: "reactor_llm_turn".into(),
                             message: format!("scheduled LLM turn did not complete: {outcome:?}"),
-                        }),
+                        }
+                        .into()),
                         None => Err(super::error::AgentError::ToolExecution {
                             tool_name: "reactor_llm_turn".into(),
                             message: "configured LLM backend is absent or unavailable".into(),
-                        }),
+                        }
+                        .into()),
                     }
                 })(),
                 ReactorAction::DjehutyReply { .. } => (|| {
+                    use super::board_reactor::{
+                        BoardReplyPlan, plan_board_reply, post_board_reply,
+                    };
                     let guard = self.agent.try_read().map_err(|_| {
                         super::error::AgentError::ToolExecution {
                             tool_name: "djehuty_board_reactor".into(),
                             message: "agent lock contended; retrying board reply".into(),
                         }
                     })?;
+                    // A filtered message type needs no model turn, so it
+                    // is never admitted against (or deferred by) the budget.
+                    let prepared = match plan_board_reply(&guard, &claim)? {
+                        BoardReplyPlan::Ignore(summary) => return Ok((summary, true)),
+                        BoardReplyPlan::Reply(prepared) => prepared,
+                    };
                     let identity = self
                         .board_identity()
                         .map_err(|error| super::error::AgentError::ToolExecution {
@@ -2292,12 +2400,21 @@ impl AgentDaemon {
                                       DJEHUTY_BOARD_TOKEN"
                                 .into(),
                         })?;
-                    super::board_reactor::execute_board_reply(
+                    ticket = Some(admit_model_turn(&self.governor)?);
+                    match post_board_reply(
                         &guard,
                         &super::djehuty::DjehutyClient::new(identity.config),
-                        &claim,
-                    )
-                    .map(|summary| (summary, true))
+                        prepared,
+                    ) {
+                        Ok(summary) => {
+                            contact = ModelContact::Responded;
+                            Ok((summary, true))
+                        }
+                        Err(failure) => {
+                            contact = failure.contact;
+                            Err(failure.error.into())
+                        }
+                    }
                 })(),
                 ReactorAction::Trigger { action } => (|| {
                     let mut guard = self.agent.try_write().map_err(|_| {
@@ -2314,8 +2431,8 @@ impl AgentDaemon {
                         enabled: true,
                         last_fired: 0,
                     };
-                    super::trigger::execute_trigger(&trigger, &mut guard)
-                        .map(|summary| (summary, true))
+                    Ok(super::trigger::execute_trigger(&trigger, &mut guard)
+                        .map(|summary| (summary, true))?)
                 })(),
                 ReactorAction::TrainingMonitor {
                     run_id,
@@ -2335,18 +2452,29 @@ impl AgentDaemon {
                     config.checkpoint_and_stop_on_stall = *checkpoint_and_stop_on_stall;
                     super::training_monitor::inspect_training(&engine, &config, now)
                         .map(|observation| (observation.summary, observation.changed))
+                        .map_err(OccurrenceStop::from)
                 }
             };
 
+            let mut usage = occurrence_scope.finish();
             if let Some(ticket) = ticket {
-                let mut usage = occurrence_scope.map(UsageScope::finish).unwrap_or_default();
-                // A model turn is one turn even when its backing does not
-                // meter requests (native runtimes, Grug).
-                if ran_model_turn && !usage.reached_model() {
+                // A model turn that got a response is one turn even when its
+                // backing does not meter requests (native runtimes, Grug).
+                // One that never reached the model is free.
+                if contact.responded() && !usage.reached_model() {
                     usage.requests = 1;
                 }
                 self.settle_ticket(ticket, usage);
             }
+
+            let result = match result {
+                Ok(done) => Ok(done),
+                Err(OccurrenceStop::Failed(error)) => Err(error),
+                Err(OccurrenceStop::BudgetExhausted(exhausted)) => {
+                    self.defer_claim_for_budget(&engine, &predicates, &claim, &exhausted);
+                    continue;
+                }
+            };
 
             let lock_contention = matches!(
                 &result,
@@ -2396,25 +2524,38 @@ impl AgentDaemon {
                 ..
             } = &claim.schedule.action
             {
-                let classified = match (&run_outcome, success) {
-                    (Some(classified), true) => classified.clone(),
-                    // A failed run never counts as progress; identical
-                    // failures share their message.
-                    _ => super::reactor::RunOutcome {
-                        progress: false,
-                        fingerprint: format!("failed:{}", short_digest(&outcome_summary)),
-                    },
-                };
-                let pause = match ReactorStore::new(&engine).record_outcome(
-                    &claim.schedule.id,
-                    &classified,
-                    finished_at,
-                ) {
-                    Ok(pause) => pause,
-                    Err(error) => {
-                        tracing::warn!(error = %error, run_id = %claim.run_id, "daemon: reactor trip-wire state not recorded");
-                        None
+                // Only a terminal model outcome feeds the trip-wire. An
+                // attempt that never reached the model (backend absent or
+                // unavailable, transport failure) or replayed a cached
+                // result is infrastructure: it neither counts toward nor
+                // resets the no-progress streak.
+                let pause = if contact.responded() {
+                    let classified = match (&run_outcome, success) {
+                        (Some(classified), true) => classified.clone(),
+                        // A failed run never counts as progress; identical
+                        // failures share their message.
+                        _ => super::reactor::RunOutcome {
+                            progress: false,
+                            fingerprint: format!("failed:{}", short_digest(&outcome_summary)),
+                        },
+                    };
+                    match ReactorStore::new(&engine).record_outcome(
+                        &claim.schedule.id,
+                        &classified,
+                        finished_at,
+                    ) {
+                        Ok(pause) => pause,
+                        Err(error) => {
+                            tracing::warn!(error = %error, run_id = %claim.run_id, "daemon: reactor trip-wire state not recorded");
+                            None
+                        }
                     }
+                } else {
+                    tracing::debug!(
+                        run_id = %claim.run_id,
+                        "daemon: reactor attempt did not reach the model; trip-wire unchanged"
+                    );
+                    None
                 };
                 if let Some(pause) = &pause {
                     tracing::warn!(
@@ -2472,6 +2613,27 @@ impl AgentDaemon {
             }
         }
         TaskRun::Ran
+    }
+
+    /// Log an unusable per-akh `[board]` identity: `warn` once per
+    /// breakage, `debug` on every later reactor tick until it is readable
+    /// again. Board ingress is skipped meanwhile; nothing falls back to the
+    /// shared process identity.
+    fn note_unusable_board_identity(&self, error: super::djehuty::BoardConfigError) {
+        if self.board_identity_warned.swap(true, Ordering::Relaxed) {
+            tracing::debug!(
+                workspace = %self.workspace,
+                error = %error,
+                "daemon: [board] identity still unusable; board ingress skipped"
+            );
+        } else {
+            tracing::warn!(
+                workspace = %self.workspace,
+                error = ?miette::Report::new(error),
+                "daemon: this akh's [board] identity is unusable; board ingress is skipped until \
+                 it is fixed (logged once; later ticks log at debug)"
+            );
+        }
     }
 
     /// Post a reactor run report to its board thread (ADR 105 rule 3). A
@@ -2600,7 +2762,11 @@ impl AgentDaemon {
             return TaskRun::Ran;
         }
 
-        let run = match agent.run_cycle() {
+        // Unattended: the Decide phase may only pick tools the configured
+        // candidate policy allows (safe, non-MCP by default).
+        let policy = self.autonomy.idle_cycle_candidate_policy();
+        let cycle = super::ooda::with_tool_candidate_policy(policy, || agent.run_cycle());
+        let run = match cycle {
             Ok(result) => {
                 self.total_cycles += 1;
                 agent.sink().emit(&AkhMessage::system(format!(
@@ -3099,7 +3265,7 @@ impl AgentDaemon {
     /// immediately reflected in the world model.  Existing schemas are not
     /// overwritten, so learned success rates are preserved.
     fn bootstrap_causal_schemas(&mut self) {
-        let mut agent = self.agent.write().unwrap();
+        let mut agent = self.lock_agent();
         let signatures = agent
             .tool_registry
             .lock()
@@ -3298,6 +3464,47 @@ impl AgentDaemon {
 ///
 /// Uses the longest common word among all seeds, falling back to `None`.
 /// Short stable digest used in trip-wire fingerprints.
+/// Why a reactor occurrence stopped without a result.
+enum OccurrenceStop {
+    /// The action failed (lock contention included; the caller defers it).
+    Failed(super::error::AgentError),
+    /// The daily budget refused the model turn; the occurrence is deferred
+    /// to the reset.
+    BudgetExhausted(BudgetExhausted),
+}
+
+impl From<super::error::AgentError> for OccurrenceStop {
+    fn from(error: super::error::AgentError) -> Self {
+        OccurrenceStop::Failed(error)
+    }
+}
+
+/// Admit one reactor model turn against the daily budget.
+fn admit_model_turn(governor: &AutonomyGovernor) -> Result<BudgetTicket, OccurrenceStop> {
+    match governor.admit(DaemonTask::Reactor) {
+        Admission::Admitted(ticket) => Ok(ticket),
+        Admission::Exhausted(exhausted) => Err(OccurrenceStop::BudgetExhausted(exhausted)),
+    }
+}
+
+/// Whether an agentic turn got a response from the model. `None` (no or
+/// unavailable backend) never did. A completed turn did, even on a backing
+/// that meters nothing. Any other outcome did only if a response was
+/// metered: a transport failure on the first request reports
+/// [`AgenticTurnOutcome::Refused`](super::agentic_chat::AgenticTurnOutcome)
+/// without one.
+fn agentic_turn_contact(
+    turn: Option<&super::agentic_chat::AgenticTurnOutcome>,
+    metered: LlmUsage,
+) -> ModelContact {
+    match turn {
+        None => ModelContact::NotReached,
+        Some(super::agentic_chat::AgenticTurnOutcome::Completed) => ModelContact::Responded,
+        Some(_) if metered.reached_model() => ModelContact::Responded,
+        Some(_) => ModelContact::NotReached,
+    }
+}
+
 fn short_digest(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex()[..16].to_string()
 }
@@ -3746,6 +3953,305 @@ mod tests {
             "deferred to the budget reset"
         );
         assert!(schedule.state.active_scheduled_for.is_some());
+    }
+
+    // ── Phase 53 review: honest metering, lazy admission, staggered start ──
+
+    /// A backend that never produces a response: either unavailable, or
+    /// available but failing every request before a response (a transport
+    /// error), without metering anything.
+    struct DeadBackend {
+        available: bool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for DeadBackend {
+        fn label(&self) -> &str {
+            "dead"
+        }
+        fn available(&self) -> bool {
+            self.available
+        }
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            _conversation: &[serde_json::Value],
+            _tools: &[serde_json::Value],
+            request_seq: usize,
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            // What a real backend does on a refused connection: log the
+            // request as having got no response.
+            crate::agent::llm_metrics::LlmRequestMetrics::new(request_seq).log(
+                "dead",
+                crate::agent::llm_metrics::RequestOutcome::NoResponse,
+            );
+            Err(crate::agent::chat_backend::ChatBackendError::TurnFailed {
+                backend: "dead".into(),
+                reason: "connection refused".into(),
+            })
+        }
+    }
+
+    fn woken_event_turn(shared: &Arc<RwLock<Agent>>, id: &str) {
+        use crate::agent::reactor::{ReactorEvent, ReactorStore};
+        let agent = shared.read().unwrap();
+        let store = ReactorStore::new(&agent.engine);
+        store.put(&event_turn_schedule(id, None)).unwrap();
+        store
+            .wake(
+                id,
+                ReactorEvent {
+                    source: "board/delegation".into(),
+                    id: "evt-1".into(),
+                    observed_at: 1,
+                    payload: "{}".into(),
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_model_turn_that_never_reached_the_model_is_free_and_leaves_the_trip_wire_alone() {
+        use crate::agent::reactor::ReactorStore;
+        for available in [false, true] {
+            let shared = test_shared_agent();
+            let backend = Arc::new(DeadBackend {
+                available,
+                calls: Default::default(),
+            });
+            shared.write().unwrap().set_chat_backend(backend.clone());
+            woken_event_turn(&shared, "dead-turn");
+
+            let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+            let report = daemon.run_task(DaemonTask::Reactor, |d| d.run_reactor_evaluation());
+            assert_eq!(report.outcome, TaskOutcome::Ran);
+            assert_eq!(report.usage.requests, 0, "available={available}");
+            assert_eq!(
+                backend.calls.load(Ordering::SeqCst),
+                usize::from(available),
+                "an unavailable backend is never called"
+            );
+            let ledger = daemon.governor().ledger();
+            assert_eq!(
+                (ledger.turns_used, ledger.tokens_used),
+                (0, 0),
+                "available={available}: nothing was billed, nothing is charged"
+            );
+            let agent = shared.read().unwrap();
+            let state = ReactorStore::new(&agent.engine)
+                .get("dead-turn")
+                .unwrap()
+                .state;
+            assert_eq!(
+                state.no_progress_streak, 0,
+                "available={available}: infrastructure failures are not model outcomes"
+            );
+            assert!(state.last_no_progress.is_none());
+        }
+
+        // Contrast: a model that answers is one charged turn and one
+        // no-progress outcome.
+        let shared = test_shared_agent();
+        shared
+            .write()
+            .unwrap()
+            .set_chat_backend(Arc::new(PromptRecorder {
+                prompts: Default::default(),
+                reply: "noted".into(),
+            }));
+        woken_event_turn(&shared, "live-turn");
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        let _ = daemon.run_task(DaemonTask::Reactor, |d| d.run_reactor_evaluation());
+        assert_eq!(daemon.governor().ledger().turns_used, 1);
+        let agent = shared.read().unwrap();
+        assert_eq!(
+            ReactorStore::new(&agent.engine)
+                .get("live-turn")
+                .unwrap()
+                .state
+                .no_progress_streak,
+            1
+        );
+    }
+
+    /// A board reply whose message type the schedule filters out makes no
+    /// model call, so an exhausted budget must not defer it: it completes.
+    #[test]
+    fn exhausted_budget_does_not_defer_a_board_reply_that_needs_no_model() {
+        use crate::agent::reactor::{
+            ReactorAction, ReactorEvent, ReactorSchedule, ReactorStore, ScheduleRule,
+        };
+        let thread = "01a04e2c-29ff-7230-967d-2534f39af690";
+        let shared = test_shared_agent();
+        let backend = Arc::new(DeadBackend {
+            available: true,
+            calls: Default::default(),
+        });
+        {
+            let mut agent = shared.write().unwrap();
+            agent.set_chat_backend(backend.clone());
+            let store = ReactorStore::new(&agent.engine);
+            let schedule = ReactorSchedule::new(
+                "board-watch",
+                "Board watch",
+                ScheduleRule::Event {
+                    source: format!("djehuty:thread:{thread}"),
+                },
+                ReactorAction::DjehutyReply {
+                    thread_id: thread.into(),
+                    prompt_prefix: "read only".into(),
+                    agent_id: Some("thoth".into()),
+                    allowed_message_types: vec!["board/note@v1".into()],
+                    max_prompt_chars: 12_000,
+                    max_reply_chars: 4_000,
+                    min_reply_interval_seconds: 0,
+                },
+                0,
+            )
+            .unwrap();
+            store.put(&schedule).unwrap();
+            let message = serde_json::json!({
+                "id": "01a04e4c-a665-7ca0-b551-b07851328fdf",
+                "author_id": "00000000-0000-0000-0000-000000000000",
+                "thread_id": thread,
+                "message_type": "coordination/status@v1",
+                "payload": {},
+                "summary": "status",
+                "created_at": "2026-09-24T00:00:00Z",
+            });
+            store
+                .wake(
+                    "board-watch",
+                    ReactorEvent {
+                        source: format!("djehuty:thread:{thread}"),
+                        id: "evt-1".into(),
+                        observed_at: 1,
+                        payload: message.to_string(),
+                    },
+                )
+                .unwrap();
+        }
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default())
+            .with_autonomy(exhausted_autonomy());
+        assert_eq!(daemon.run_reactor_evaluation(), TaskRun::Ran);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+        let agent = shared.read().unwrap();
+        let state = ReactorStore::new(&agent.engine)
+            .get("board-watch")
+            .unwrap()
+            .state;
+        assert!(state.pending_events.is_empty(), "the event was handled");
+        assert!(
+            state.retry_at.is_none_or(|at| at <= now_secs() + 60),
+            "not deferred to the budget reset"
+        );
+        assert!(state.active_scheduled_for.is_none(), "not left in flight");
+    }
+
+    #[test]
+    fn first_ticks_are_staggered_and_missed_ticks_are_delayed() {
+        use super::super::autonomy::{FirstTick, STARTUP_DELAY};
+        // The schedule table: cheap infrastructure at once, the sleep tick
+        // after the startup delay, everything heavy after one period.
+        for task in [
+            DaemonTask::Reactor,
+            DaemonTask::TriggerEvaluation,
+            DaemonTask::Persist,
+        ] {
+            assert_eq!(task.first_tick(), FirstTick::Immediate, "{task}");
+        }
+        for task in [DaemonTask::Harvest, DaemonTask::SleepCycle] {
+            assert_eq!(task.first_tick(), FirstTick::AfterStartupDelay, "{task}");
+        }
+        for task in [
+            DaemonTask::ContinuousLearning,
+            DaemonTask::KnowledgeElicitation,
+            DaemonTask::Librarian,
+            DaemonTask::IdleCycle,
+            DaemonTask::KnowledgeExtraction,
+            DaemonTask::GoalGeneration,
+        ] {
+            assert_eq!(task.first_tick(), FirstTick::AfterOnePeriod, "{task}");
+        }
+        let hour = Duration::from_secs(3600);
+        assert_eq!(FirstTick::AfterStartupDelay.delay(hour), STARTUP_DELAY);
+        assert_eq!(
+            FirstTick::AfterStartupDelay.delay(Duration::from_secs(5)),
+            Duration::from_secs(5),
+            "never later than one period"
+        );
+
+        // The real tickers.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let short = Duration::from_millis(100);
+            let mut reactor = task_interval(DaemonTask::Reactor, hour);
+            assert!(
+                tokio::time::timeout(short, reactor.tick()).await.is_ok(),
+                "infrastructure fires at once"
+            );
+            let mut learning = task_interval(DaemonTask::ContinuousLearning, hour);
+            assert!(
+                tokio::time::timeout(short, learning.tick()).await.is_err(),
+                "heavy tasks wait a period"
+            );
+            assert_eq!(
+                learning.missed_tick_behavior(),
+                tokio::time::MissedTickBehavior::Delay
+            );
+        });
+    }
+
+    #[test]
+    fn an_unusable_board_identity_warns_once_and_skips_ingress() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut board = board_for(dir.path(), "minerva", "t", "http://127.0.0.1:9");
+        board.auth = super::super::djehuty::BoardAuth::TokenFile(dir.path().join("missing"));
+        let mut daemon = AgentDaemon::new(test_shared_agent(), DaemonConfig::default())
+            .with_workspace("minerva")
+            .with_board_config(Some(board));
+        assert!(!daemon.board_identity_warned.load(Ordering::Relaxed));
+        for _ in 0..3 {
+            assert_eq!(daemon.run_reactor_evaluation(), TaskRun::Ran);
+            assert!(daemon.board_identity_warned.load(Ordering::Relaxed));
+        }
+        // Once the token is readable again, a later breakage warns again.
+        let token = dir.path().join("minerva.board");
+        daemon.board_config = Some(board_for(dir.path(), "minerva", "t", "http://127.0.0.1:9"));
+        assert!(token.exists());
+        assert_eq!(daemon.run_reactor_evaluation(), TaskRun::Ran);
+        assert!(!daemon.board_identity_warned.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn librarian_in_flight_check_stops_at_the_token_limit() {
+        let governor = AutonomyGovernor::in_memory(AutonomyBudget {
+            max_tokens_per_day: 1_000,
+            max_turns_per_day: 40,
+        });
+        let spent = |tokens| LlmUsage {
+            requests: 1,
+            prompt_tokens: tokens,
+            completion_tokens: 0,
+        };
+        assert!(
+            governor
+                .check_in_flight(DaemonTask::Librarian, spent(999))
+                .is_ok()
+        );
+        let refused = governor
+            .check_in_flight(DaemonTask::Librarian, spent(1_000))
+            .unwrap_err();
+        assert_eq!(
+            refused.dimension,
+            super::super::autonomy::BudgetDimension::Tokens
+        );
+        assert_eq!((refused.used, refused.limit), (1_000, 1_000));
     }
 
     // ── WI-259: the daemon must yield to a live turn, never block it ──

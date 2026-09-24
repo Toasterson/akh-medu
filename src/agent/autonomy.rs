@@ -24,15 +24,23 @@
 //! - one run of a per-run task (librarian, knowledge elicitation, knowledge
 //!   extraction with an external API) during which at least one model request
 //!   was metered, or
-//! - one reactor occurrence that ran a model turn (`LlmTurn`,
-//!   `DjehutyReply`), even if the backing does not meter its requests.
+//! - one reactor occurrence whose model turn (`LlmTurn`, `DjehutyReply`) got
+//!   a response, even if the backing does not meter its requests. The
+//!   reactor admits the turn lazily, right before the model call, so a
+//!   cached result or a filtered board message never waits for the budget.
 //!
 //! A task that is admitted but finds nothing to do (no targets, backend
 //! unavailable) costs nothing. Tokens are whatever the thread-local
 //! [`UsageScope`](super::llm_metrics::UsageScope) metered while the task ran.
-//! Admission checks the ledger *before* the work, so one run may overshoot
-//! the token limit. The next admission is then refused until the UTC day
-//! rolls over.
+//! Admission checks the ledger *before* the work. A run that makes many
+//! model calls (the librarian) also checks
+//! [`AutonomyGovernor::check_in_flight`] before each one, so it overshoots
+//! the token limit by at most one call. The next admission is then refused
+//! until the UTC day rolls over.
+//!
+//! Only a request that got a response counts
+//! ([`RequestOutcome`](super::llm_metrics::RequestOutcome)): transport
+//! errors and an unavailable backend are free.
 
 use std::fmt;
 use std::str::FromStr;
@@ -306,12 +314,39 @@ impl DaemonTask {
 
     /// Whether `[autonomy]` can switch this task off. Infrastructure tasks
     /// always run.
+    ///
+    /// Backward compatibility with pre-53b TOMLs (`[autonomy] enabled =
+    /// false`): harvest used to run inside the sleep cycle, so without its
+    /// own override it follows the sleep cycle's gate; the librarian and
+    /// OpenClaw sync were only ever env-gated, so the master switch does not
+    /// turn them off.
     pub const fn gating(self) -> TaskGating {
         match self {
             DaemonTask::Persist | DaemonTask::TriggerEvaluation | DaemonTask::Reactor => {
                 TaskGating::AlwaysOn
             }
+            DaemonTask::Harvest => TaskGating::FollowsTask(DaemonTask::SleepCycle),
+            DaemonTask::Librarian | DaemonTask::OpenclawSync => TaskGating::IgnoresMasterSwitch,
             _ => TaskGating::Autonomy,
+        }
+    }
+
+    /// When the daemon first runs this task after a start or wake.
+    ///
+    /// Cheap infrastructure (reactor, triggers, persistence) runs at once.
+    /// The sleep tick (harvest, then the sleep cycle) runs after a short
+    /// [`STARTUP_DELAY`] so a freshly started akh (the Roman cutover) harvests
+    /// soon without competing with its own wake. Everything else, including
+    /// the heavy tasks (continuous learning holds the agent write lock for
+    /// 30–120 s, knowledge elicitation loads a GGUF, the librarian calls a
+    /// model per source), waits one full period.
+    pub const fn first_tick(self) -> FirstTick {
+        match self {
+            DaemonTask::Reactor | DaemonTask::TriggerEvaluation | DaemonTask::Persist => {
+                FirstTick::Immediate
+            }
+            DaemonTask::Harvest | DaemonTask::SleepCycle => FirstTick::AfterStartupDelay,
+            _ => FirstTick::AfterOnePeriod,
         }
     }
 
@@ -360,6 +395,33 @@ impl FromStr for DaemonTask {
     }
 }
 
+/// Delay before the sleep tick's first run after a daemon start (see
+/// [`DaemonTask::first_tick`]).
+pub const STARTUP_DELAY: Duration = Duration::from_secs(60);
+
+/// When a task's ticker first fires after a daemon start or wake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstTick {
+    /// Right away.
+    Immediate,
+    /// After [`STARTUP_DELAY`] (or one period, if that is shorter).
+    AfterStartupDelay,
+    /// After one full period.
+    AfterOnePeriod,
+}
+
+impl FirstTick {
+    /// The delay before the first tick for a task that repeats every
+    /// `period`.
+    pub fn delay(self, period: Duration) -> Duration {
+        match self {
+            FirstTick::Immediate => Duration::ZERO,
+            FirstTick::AfterStartupDelay => STARTUP_DELAY.min(period),
+            FirstTick::AfterOnePeriod => period,
+        }
+    }
+}
+
 /// What running a task can cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskCost {
@@ -378,6 +440,12 @@ pub enum TaskGating {
     AlwaysOn,
     /// Follows `[autonomy]` (master switch, per-task override).
     Autonomy,
+    /// Its own `tasks` override wins; without one it follows the gate of
+    /// the named task (harvest follows the sleep cycle).
+    FollowsTask(DaemonTask),
+    /// Its own `tasks` override wins; the master switch does not turn it
+    /// off. Its environment gate still applies (librarian, OpenClaw sync).
+    IgnoresMasterSwitch,
 }
 
 /// How the daily budget meters a task.
@@ -421,6 +489,42 @@ impl From<&ExecBackendConfig> for ExecPlacement {
     }
 }
 
+/// Which tools the idle OODA cycle may pick on its own (`[autonomy]
+/// idle_cycle_tools`).
+///
+/// The idle cycle chooses tools with no human in the loop. By default it
+/// may only choose tools whose manifest is [`DangerLevel::Safe`] and that
+/// are not proxied from an MCP server, so an unattended cycle cannot spawn
+/// agents, message peers, edit reactor schedules or call external MCP
+/// tools. `all` lifts that only together with an explicit
+/// `tasks.idle_cycle = true` (see [`IdleCycleTools::candidate_policy`]).
+///
+/// [`DangerLevel::Safe`]: crate::agent::tool_manifest::DangerLevel::Safe
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdleCycleTools {
+    /// Safe, non-MCP tools only (the default).
+    #[default]
+    Safe,
+    /// Every registered tool. Needs `tasks.idle_cycle = true` as well.
+    All,
+}
+
+impl IdleCycleTools {
+    /// The candidate policy the idle cycle runs with. `All` applies only
+    /// when the operator also set `tasks.idle_cycle = true` explicitly;
+    /// otherwise the cycle stays safe-only.
+    pub const fn candidate_policy(
+        self,
+        idle_cycle_explicitly_enabled: bool,
+    ) -> super::ooda::ToolCandidatePolicy {
+        match (self, idle_cycle_explicitly_enabled) {
+            (IdleCycleTools::All, true) => super::ooda::ToolCandidatePolicy::Unrestricted,
+            _ => super::ooda::ToolCandidatePolicy::SafeNonMcp,
+        }
+    }
+}
+
 /// Why a task did not run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DisabledReason {
@@ -441,6 +545,14 @@ pub enum DisabledReason {
         /// What is missing.
         what: &'static str,
     },
+    /// The task has no override of its own and follows another task's gate,
+    /// which is off.
+    FollowsTask {
+        /// The task whose gate applies.
+        task: DaemonTask,
+        /// Why that task is off.
+        reason: Box<DisabledReason>,
+    },
 }
 
 impl fmt::Display for DisabledReason {
@@ -454,6 +566,10 @@ impl fmt::Display for DisabledReason {
             ),
             DisabledReason::EnvGate { var } => write!(f, "environment gate {var} is not set"),
             DisabledReason::NotConfigured { what } => write!(f, "{what} is not configured"),
+            DisabledReason::FollowsTask { task, reason } => write!(
+                f,
+                "follows `{task}`, which is off ({reason}); set [autonomy] tasks.<name> to override"
+            ),
         }
     }
 }
@@ -481,8 +597,11 @@ pub enum TaskGate {
 ///
 /// A limit of 0 turns every LLM-cost task off while leaving the free tasks
 /// running.
+///
+/// Unknown keys are rejected when the TOML is loaded (a typo such as
+/// `max_token_per_day` would otherwise silently leave the default in force).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AutonomyBudget {
     /// Prompt plus completion tokens per UTC day.
     pub max_tokens_per_day: u64,
@@ -823,6 +942,45 @@ impl AutonomyGovernor {
                 task,
                 day: ledger.day,
             }),
+        }
+    }
+
+    /// Whether an admitted per-run task may make another model call, given
+    /// the `in_flight` usage it has metered so far but not yet settled.
+    ///
+    /// Only the token limit is checked: the run as a whole is one turn and
+    /// was admitted on the turn limit already. A long run (the librarian
+    /// calls the model once per source) calls this before each call and
+    /// stops cleanly on `Err`, so one run cannot exceed the day's token
+    /// budget by more than one call.
+    pub fn check_in_flight(
+        &self,
+        task: DaemonTask,
+        in_flight: LlmUsage,
+    ) -> Result<(), BudgetExhausted> {
+        self.check_in_flight_on(task, in_flight, UtcDay::today())
+    }
+
+    /// [`AutonomyGovernor::check_in_flight`] on an explicit day.
+    pub fn check_in_flight_on(
+        &self,
+        task: DaemonTask,
+        in_flight: LlmUsage,
+        day: UtcDay,
+    ) -> Result<(), BudgetExhausted> {
+        let ledger = self.ledger().rolled_to(day);
+        let used = ledger.tokens_used.saturating_add(in_flight.total_tokens());
+        if used >= self.budget.max_tokens_per_day {
+            Err(BudgetExhausted {
+                task,
+                day: ledger.day,
+                dimension: BudgetDimension::Tokens,
+                used,
+                limit: self.budget.max_tokens_per_day,
+                resets_at: ledger.day.next().start_unix_secs(),
+            })
+        } else {
+            Ok(())
         }
     }
 
