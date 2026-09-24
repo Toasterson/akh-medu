@@ -60,18 +60,19 @@ pub enum RuntimeKind {
 
 /// How a native runtime reaches workspace effects.
 ///
-/// `Brokered` is the default (ADR 113 decision 3 / Phase 53 decision 7): a
-/// profile that does not say otherwise must route every workspace tool through
-/// the session broker to akhsbxd/akhexecd. `Colocated` has to be chosen
-/// explicitly, and deployed services refuse it outright.
+/// `Colocated` stays the default so existing development profiles keep their
+/// meaning. A deployed service does not rely on the default at all (Phase 53
+/// decision 7, ADR 113 decision 3): a runtime profile there must say
+/// `execution_mode = "brokered"` explicitly (see
+/// [`ProviderConfig::execution_mode_setting`]), and `Colocated` is refused.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
     /// Provider native tools are permitted only inside the bound workspace environment.
     /// Development only: a deployed service refuses it (see [`DeploymentMode`]).
+    #[default]
     Colocated,
     /// Workspace tools must traverse the session broker. Admission requires conformance evidence.
-    #[default]
     Brokered,
 }
 
@@ -1121,8 +1122,12 @@ pub struct ProviderConfig {
     pub launcher: Vec<String>,
     #[serde(default = "default_runtime_timeout")]
     pub timeout_secs: u64,
-    #[serde(default)]
-    pub execution_mode: ExecutionMode,
+    /// As configured; `None` when the profile omits it. Read the effective
+    /// mode through [`ProviderConfig::execution_mode`]. An omitted value is
+    /// not serialized, so a profile's digest (and its conformance evidence) is
+    /// unchanged by this being optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<ExecutionMode>,
     pub conformance_file: Option<std::path::PathBuf>,
     #[serde(default)]
     pub native_aliases: BTreeMap<String, String>,
@@ -1130,6 +1135,20 @@ pub struct ProviderConfig {
 }
 fn default_runtime_timeout() -> u64 {
     600
+}
+
+impl ProviderConfig {
+    /// The effective execution mode: the configured one, or
+    /// [`ExecutionMode::default`] (`Colocated`) when the profile omits it.
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode.unwrap_or_default()
+    }
+
+    /// Whether the profile states its execution mode explicitly. Deployed
+    /// services require it to.
+    pub fn execution_mode_setting(&self) -> Option<ExecutionMode> {
+        self.execution_mode
+    }
 }
 
 /// Provider-owned state and config, local to the runtime machine. Values are never
@@ -1369,8 +1388,29 @@ mod deployment_tests {
     }
 
     #[test]
-    fn native_runtimes_default_to_brokered() {
-        assert_eq!(ExecutionMode::default(), ExecutionMode::Brokered);
+    fn an_omitted_execution_mode_is_colocated_and_recorded_as_omitted() {
+        assert_eq!(ExecutionMode::default(), ExecutionMode::Colocated);
+        let omitted: ProviderConfig = serde_json::from_value(serde_json::json!({
+            "isolation":null,"model_endpoint":null,"revision":"1","kind":"codex",
+            "working_dir":"/w","binary":"/b","node_binary":null,"bridge_script":null,
+            "conformance_file":null,"effort":null
+        }))
+        .unwrap();
+        assert_eq!(omitted.execution_mode_setting(), None);
+        assert_eq!(omitted.execution_mode(), ExecutionMode::Colocated);
+        // Omission round-trips as omission, so profile digests do not change.
+        assert!(
+            serde_json::to_value(&omitted)
+                .unwrap()
+                .get("execution_mode")
+                .is_none()
+        );
+        let mut brokered = omitted.clone();
+        brokered.execution_mode = Some(ExecutionMode::Brokered);
+        assert_eq!(
+            serde_json::to_value(&brokered).unwrap()["execution_mode"],
+            "brokered"
+        );
     }
 
     #[test]

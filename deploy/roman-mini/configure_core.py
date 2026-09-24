@@ -38,18 +38,15 @@ import full_akh as fa  # noqa: E402
 
 
 def _save_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2) + "\n")
-    path.chmod(0o600)
+    fa.write_atomic(path, json.dumps(value, indent=2) + "\n")
 
 
 def _save_text(path, text):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-    path.chmod(0o600)
+    fa.write_atomic(path, text)
 
 
 def _ensure_key(path):
+    fa.private_dir(path.parent)
     if not path.exists():
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as file:
@@ -82,6 +79,7 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
     for name in ("core-config/akh-medu/workspaces", "core-data", "core-state", "core-runtime",
                  "core-cache", "state/core", "config/reactor-seeds", "launchd", "evidence", "logs"):
         (root / name).mkdir(parents=True, exist_ok=True, mode=0o700)
+    fa.private_dir(root / "secrets")
     config = root / "config"
     session = json.loads((config / "sessions.json").read_text())
     events = json.loads((config / "events.json").read_text())
@@ -148,7 +146,7 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
              "Umask": 63, "WorkingDirectory": str(root), "EnvironmentVariables": env,
              "StandardOutPath": str(root / "logs/core.out.log"),
              "StandardErrorPath": str(root / "logs/core.err.log")}
-    (root / "launchd/dev.roman-akhs.core.plist").write_bytes(plistlib.dumps(plist))
+    fa.write_atomic(root / "launchd/dev.roman-akhs.core.plist", plistlib.dumps(plist), mode=0o644)
     for name in ("daemon_credentials.py", "t3_entrypoint.py"):
         if (source / name).exists() and (root / "bin").is_dir():
             shutil.copy2(source / name, root / "bin" / name)
@@ -164,6 +162,8 @@ def main():
     parser.add_argument("--no-fetch", action="store_true", help="skip `git fetch origin`")
     parser.add_argument("--acp-port", type=int, default=fa.ACP_TCP_PORT)
     args = parser.parse_args()
+    # Everything rendered here is private unless written with an explicit mode.
+    os.umask(0o077)
     root = args.root.resolve()
     provenance = fa.main_provenance(args.repo.resolve(), fetch=not args.no_fetch)
     built = args.binaries.resolve() / "akhomed"

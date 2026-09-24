@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
     let mut command = turn.command(&turn.config.binary)?;
     command.args(["app-server", "--listen", "stdio://"]);
-    if turn.config.execution_mode == ExecutionMode::Brokered {
+    if turn.config.execution_mode() == ExecutionMode::Brokered {
         for setting in [
             "features.shell_tool=false",
             "features.unified_exec=false",
@@ -52,7 +52,7 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
                         "developerInstructions":turn.instructions});
                     // SandboxMode wire values are kebab-case, unlike item types.
                     if turn.request.approval_policy == ApprovalPolicy::ReadOnly
-                        || turn.config.execution_mode == ExecutionMode::Brokered
+                        || turn.config.execution_mode() == ExecutionMode::Brokered
                     {
                         params["sandbox"] = json!("read-only");
                         params["approvalPolicy"] = json!("never");
@@ -64,7 +64,7 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
                         params["threadId"] = json!(session);
                         "thread/resume"
                     } else {
-                        if turn.config.execution_mode == ExecutionMode::Brokered {
+                        if turn.config.execution_mode() == ExecutionMode::Brokered {
                             params["environments"] = json!([]);
                         }
                         params["dynamicTools"] = if turn.tools.is_empty() {
@@ -96,7 +96,7 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
                     // Resume has no environments parameter, and restoring a
                     // thread does not preserve this restriction. Reassert it
                     // for every turn so native workspace tools stay disabled.
-                    if turn.config.execution_mode == ExecutionMode::Brokered {
+                    if turn.config.execution_mode() == ExecutionMode::Brokered {
                         params["environments"] = json!([]);
                     }
                     if let Some(effort) = &turn.config.effort {

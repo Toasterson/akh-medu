@@ -99,8 +99,11 @@ pub enum ExecdError {
         code(akh::backend::execd::config),
         help(
             "Check the `[exec]` table: `sandbox_url` (and `executor_url`, if set) must be \
-             http(s) URLs without credentials, `profile` and `principal` must be \
-             non-empty, and `poll_wait_ms` must be between 1 and 10000."
+             https URLs without credentials, query or fragment; plain http is accepted for \
+             loopback hosts (localhost, 127.0.0.1, [::1]) or with \
+             `allow_insecure_http = true` for a trusted private link, because the bearer \
+             token crosses it in clear text. `profile` and `principal` must be non-empty, \
+             and `poll_wait_ms` must be between 1 and 10000."
         )
     )]
     Config { reason: String },
@@ -157,6 +160,28 @@ pub enum ExecdError {
     UnknownOutcome {
         operation: &'static str,
         receipt: String,
+    },
+
+    /// `exec_poll` kept failing, so the client stopped following a process it
+    /// had started. The process may still run, or may have finished.
+    #[error(
+        "lost track of execd process {process}: polling failed ({cause}); cancel requested: \
+         {cancel_requested}"
+    )]
+    #[diagnostic(
+        code(akh::backend::execd::process_outcome_unknown),
+        help(
+            "The command's outcome is unknown: it may still be running in the sandbox or \
+             may already have finished (with its side effects). The client retried the \
+             read-only poll with backoff, then sent a best-effort `exec_cancel`. Do not \
+             re-run the command blindly: check akhsbxd/akhexecd reachability, inspect the \
+             workspace, and poll process {process} (`exec_poll`) once the executor answers."
+        )
+    )]
+    ProcessOutcomeUnknown {
+        process: String,
+        cause: String,
+        cancel_requested: bool,
     },
 
     /// The workspace lease lapsed or was released.
@@ -250,6 +275,13 @@ pub struct ExecdConfig {
     pub allocate_timeout: Duration,
     /// Lease renewal cadence. The lease itself lasts 300 s.
     pub lease_renew_interval: Duration,
+    /// Accept plain `http://` to a non-loopback host. The bearer tokens then
+    /// cross that link in clear text, so this is for trusted private links
+    /// only (the same rule as the session services' `Endpoint`).
+    pub allow_insecure_http: bool,
+    /// How long `exec` keeps retrying a failed `exec_poll` past the process
+    /// deadline before it cancels and reports [`ExecdError::UnknownOutcome`].
+    pub poll_retry_budget: Duration,
 }
 
 impl ExecdConfig {
@@ -259,6 +291,9 @@ impl ExecdConfig {
     pub const MAX_POLL_WAIT: Duration = Duration::from_millis(10_000);
     /// A third of the 300 s lease, so two renewals can fail before it lapses.
     pub const DEFAULT_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(100);
+    /// Keep retrying failed polls for a minute past the process deadline, so a
+    /// short executor or gateway restart does not abandon a running process.
+    pub const DEFAULT_POLL_RETRY_BUDGET: Duration = Duration::from_secs(60);
 
     /// Settings for one akh workspace, routed through the akhsbxd gateway with
     /// the akhsbxd token. The session id is `akhomed-<workspace>-<uuid v7>`.
@@ -283,6 +318,8 @@ impl ExecdConfig {
             request_timeout: Duration::from_secs(30),
             allocate_timeout: Duration::from_secs(120),
             lease_renew_interval: Self::DEFAULT_LEASE_RENEW_INTERVAL,
+            allow_insecure_http: false,
+            poll_retry_budget: Self::DEFAULT_POLL_RETRY_BUDGET,
         }
     }
 
@@ -310,11 +347,23 @@ impl ExecdConfig {
         self
     }
 
+    /// Accept plain `http://` to non-loopback hosts (trusted private links).
+    pub fn with_insecure_http(mut self, allow: bool) -> Self {
+        self.allow_insecure_http = allow;
+        self
+    }
+
+    /// Override how long failed `exec_poll`s are retried past the deadline.
+    pub fn with_poll_retry_budget(mut self, budget: Duration) -> Self {
+        self.poll_retry_budget = budget;
+        self
+    }
+
     fn validate(&self) -> ExecdResult<()> {
         let invalid = |reason: String| Err(ExecdError::Config { reason });
-        validate_base_url("sandbox_url", &self.sandbox_url)?;
+        validate_base_url("sandbox_url", &self.sandbox_url, self.allow_insecure_http)?;
         if let ExecutorRoute::Direct { url, .. } = &self.executor {
-            validate_base_url("executor_url", url)?;
+            validate_base_url("executor_url", url, self.allow_insecure_http)?;
         }
         if self.profile.trim().is_empty() || self.principal.trim().is_empty() {
             return invalid("`profile` and `principal` must be non-empty".into());
@@ -335,7 +384,11 @@ impl ExecdConfig {
     }
 }
 
-fn validate_base_url(field: &str, url: &str) -> ExecdResult<()> {
+/// Check one service base URL. Plain `http://` carries the bearer token in
+/// clear text, so it is accepted only for a loopback host (`localhost`,
+/// `127.0.0.1`, `[::1]`, exactly the session services' `Endpoint::validate`
+/// and the MCP client's rule) or with `allow_insecure_http`.
+fn validate_base_url(field: &str, url: &str, allow_insecure_http: bool) -> ExecdResult<()> {
     let scheme_ok = url.starts_with("http://") || url.starts_with("https://");
     let authority = url.split_once("://").map(|(_, rest)| rest).unwrap_or("");
     let host = authority.split('/').next().unwrap_or("");
@@ -344,6 +397,18 @@ fn validate_base_url(field: &str, url: &str) -> ExecdResult<()> {
             reason: format!(
                 "`{field}` must be an http(s) base URL without credentials, query or \
                  fragment, got {url:?}"
+            ),
+        });
+    }
+    if let Some(rest) = url.strip_prefix("http://")
+        && !allow_insecure_http
+        && !crate::agent::tools::mcp_config::is_loopback_authority(rest)
+    {
+        return Err(ExecdError::Config {
+            reason: format!(
+                "`{field}` is plain http to a non-loopback host ({url:?}); the bearer token \
+                 would cross the network in clear text. Use https, or set \
+                 `allow_insecure_http = true` for a trusted private link"
             ),
         });
     }
@@ -512,6 +577,44 @@ const TRANSPORT_RETRIES: usize = 2;
 const CANCEL_GRACE: Duration = Duration::from_secs(2);
 /// akhexecd accepts process timeouts of 1 ms ..= 1 h.
 const MAX_PROCESS_TIMEOUT_MS: u64 = 3_600_000;
+/// First and largest pause between retries of a failed `exec_poll`.
+const POLL_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const POLL_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
+/// Deadline for one lease renewal or release exchange. Kept short so a stuck
+/// akhsbxd cannot hold the renewal thread for the full request timeout.
+const LEASE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How `exec` treats a failed `exec_poll`.
+#[derive(Debug)]
+enum PollFailure {
+    /// The workspace is fenced or its outcome is already unknown: report it.
+    Terminal(ExecdError),
+    /// Transport trouble or a transient service fault: poll again.
+    Retryable(ExecdError),
+    /// A definite refusal that retrying will not change (the process id is
+    /// unknown, the token lacks the role, ...): stop following the process.
+    Definite(ExecdError),
+}
+
+impl PollFailure {
+    fn classify(error: ExecdError) -> Self {
+        match &error {
+            ExecdError::LeaseExpired { .. }
+            | ExecdError::UnknownOutcome { .. }
+            | ExecdError::ProcessOutcomeUnknown { .. } => Self::Terminal(error),
+            ExecdError::Operation { code, .. }
+                if matches!(
+                    code.as_str(),
+                    "not_found" | "forbidden" | "unauthorized" | "invalid_request" | "conflict"
+                ) =>
+            {
+                Self::Definite(error)
+            }
+            ExecdError::Transport { .. } | ExecdError::Operation { .. } => Self::Retryable(error),
+            _ => Self::Definite(error),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -696,7 +799,8 @@ impl Shared {
             self.config.sandbox_url.trim_end_matches('/'),
             segment(&self.config.session_id)
         );
-        match self.post::<Allocation>(&url, &self.sandbox_token, None, None) {
+        match self.post::<Allocation>(&url, &self.sandbox_token, None, Some(LEASE_REQUEST_TIMEOUT))
+        {
             Ok(allocation) if allocation.state == "ready" => Ok(allocation.lease_until),
             Ok(allocation) => {
                 self.lease_lost.store(true, Ordering::SeqCst);
@@ -729,6 +833,25 @@ impl Shared {
         }
     }
 
+    /// Wait for a stop request, for at most `timeout` (`None`: indefinitely).
+    /// Returns `true` once stopped.
+    fn wait_for_stop(&self, timeout: Option<Duration>) -> bool {
+        let stopped = self.stop.lock().unwrap_or_else(|e| e.into_inner());
+        let stopped = match timeout {
+            Some(timeout) => {
+                self.wake
+                    .wait_timeout_while(stopped, timeout, |s| !*s)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0
+            }
+            None => self
+                .wake
+                .wait_while(stopped, |s| !*s)
+                .unwrap_or_else(|e| e.into_inner()),
+        };
+        *stopped
+    }
+
     fn release(&self) {
         let url = format!(
             "{}/v1/allocations/{}/release",
@@ -739,7 +862,7 @@ impl Shared {
             &url,
             &self.sandbox_token,
             None,
-            Some(Duration::from_secs(5)),
+            Some(LEASE_REQUEST_TIMEOUT.min(Duration::from_secs(5))),
         ) {
             Ok(allocation) => tracing::info!(
                 target: "akh::backend::execd",
@@ -757,20 +880,21 @@ impl Shared {
     }
 }
 
+/// The lease thread: renew every interval until stopped, then release.
+///
+/// The wait is a condvar wait, so a stop request wakes it at once. A stop that
+/// arrives during a renewal takes effect when that exchange returns (at most
+/// [`LEASE_REQUEST_TIMEOUT`]). [`ExecdBackend`]'s `Drop` does not join this
+/// thread; the thread owns the release, so dropping a backend never blocks on
+/// the network.
 fn spawn_renewer(shared: Arc<Shared>) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("akh-execd-lease".into())
         .spawn(move || {
             loop {
-                {
-                    let stopped = shared.stop.lock().unwrap_or_else(|e| e.into_inner());
-                    let (stopped, _) = shared
-                        .wake
-                        .wait_timeout_while(stopped, shared.config.lease_renew_interval, |s| !*s)
-                        .unwrap_or_else(|e| e.into_inner());
-                    if *stopped {
-                        return;
-                    }
+                if shared.wait_for_stop(Some(shared.config.lease_renew_interval)) {
+                    shared.release();
+                    return;
                 }
                 match shared.renew() {
                     Ok(lease_until) => tracing::debug!(
@@ -780,7 +904,12 @@ fn spawn_renewer(shared: Arc<Shared>) -> std::io::Result<JoinHandle<()>> {
                         "renewed execd workspace lease"
                     ),
                     // Terminal: the lease is gone and every verb now fails closed.
-                    Err(ExecdError::LeaseExpired { .. }) => return,
+                    Err(ExecdError::LeaseExpired { .. }) => {
+                        if shared.wait_for_stop(None) {
+                            shared.release();
+                        }
+                        return;
+                    }
                     Err(error) => tracing::warn!(
                         target: "akh::backend::execd",
                         session = %shared.config.session_id,
@@ -1184,9 +1313,14 @@ impl ExecdBackend {
             _ => {}
         }
         let deadline = Instant::now() + Duration::from_millis(timeout_ms) + CANCEL_GRACE;
+        // Polls are read-only, so a failed poll is retried with backoff rather
+        // than abandoning a process that may still be running.
+        let give_up = deadline + self.shared.config.poll_retry_budget;
+        let mut backoff = POLL_RETRY_INITIAL_BACKOFF;
+        let mut failing = false;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if remaining.is_zero() && !failing {
                 return self.cancel_after_deadline(request, &process);
             }
             let wait_ms = self
@@ -1196,25 +1330,93 @@ impl ExecdBackend {
                 .min(remaining)
                 .as_millis()
                 .max(1) as u64;
-            let poll: PollData = self.shared.call_as(
+            let error = match self.shared.call_as::<PollData>(
                 Verb::ExecPoll,
                 json!({"process_id": process, "wait_ms": wait_ms}),
-            )?;
-            if poll.status.terminal() || poll.status == TurnStatus::Unknown {
-                return self.finish(request, &process, poll.status, poll.result);
+            ) {
+                Ok(poll) if poll.status.terminal() || poll.status == TurnStatus::Unknown => {
+                    return self.finish(request, &process, poll.status, poll.result);
+                }
+                Ok(_) => {
+                    failing = false;
+                    backoff = POLL_RETRY_INITIAL_BACKOFF;
+                    continue;
+                }
+                Err(error) => error,
+            };
+            match PollFailure::classify(error) {
+                PollFailure::Terminal(error) => return Err(error.into()),
+                PollFailure::Retryable(error) if Instant::now() + backoff < give_up => {
+                    tracing::warn!(
+                        target: "akh::backend::execd",
+                        process = %process,
+                        %error,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "exec_poll failed; retrying the read-only poll"
+                    );
+                    failing = true;
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(POLL_RETRY_MAX_BACKOFF);
+                }
+                PollFailure::Retryable(error) | PollFailure::Definite(error) => {
+                    return Err(self.abandon_process(&process, error).into());
+                }
             }
+        }
+    }
+
+    /// Stop following a process whose polls keep failing: request a
+    /// best-effort cancel and report the outcome as unknown.
+    fn abandon_process(&self, process: &str, cause: ExecdError) -> ExecdError {
+        let cancel_requested = match self
+            .shared
+            .call(Verb::ExecCancel, json!({"process_id": process}))
+        {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(
+                    target: "akh::backend::execd",
+                    process,
+                    %error,
+                    "best-effort exec_cancel after lost polls failed"
+                );
+                false
+            }
+        };
+        tracing::error!(
+            target: "akh::backend::execd",
+            process,
+            %cause,
+            cancel_requested,
+            "lost track of an execd process; its outcome is unknown"
+        );
+        ExecdError::ProcessOutcomeUnknown {
+            process: process.to_owned(),
+            cause: cause.to_string(),
+            cancel_requested,
         }
     }
 }
 
-impl Drop for ExecdBackend {
-    fn drop(&mut self) {
+impl ExecdBackend {
+    /// Ask the lease thread to stop and release the allocation, without
+    /// waiting for it. Returns the thread's handle (if it is still owned) so a
+    /// caller that must observe the release can join it.
+    fn request_stop(&mut self) -> Option<JoinHandle<()>> {
         *self.shared.stop.lock().unwrap_or_else(|e| e.into_inner()) = true;
         self.shared.wake.notify_all();
-        if let Some(renewer) = self.renewer.take() {
-            let _ = renewer.join();
-        }
-        self.shared.release();
+        self.renewer.take()
+    }
+}
+
+impl Drop for ExecdBackend {
+    /// Non-blocking: the lease thread wakes on the stop signal, releases the
+    /// allocation (best effort) and exits on its own. Dropping a backend never
+    /// waits out a lease renewal or the release request, so evicting an agent
+    /// does not stall its caller.
+    fn drop(&mut self) {
+        // Detach: the thread holds its own `Arc<Shared>`.
+        drop(self.request_stop());
     }
 }
 
@@ -1895,6 +2097,213 @@ mod tests {
         assert_eq!(locus.backend, "execd");
         assert_eq!(locus.host.as_deref(), Some("mac-mini/akh-fixture"));
         assert_eq!(locus.correlation_id.as_deref(), Some(backend.session_id()));
+    }
+
+    #[test]
+    fn plain_http_is_loopback_only_unless_explicitly_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        for loopback in [
+            "http://localhost:8410",
+            "http://127.0.0.1:8410/",
+            "http://[::1]:8410",
+        ] {
+            config(dir.path(), loopback)
+                .validate()
+                .unwrap_or_else(|error| panic!("{loopback}: {error}"));
+        }
+        config(dir.path(), "https://akhsbxd.lab.internal")
+            .validate()
+            .unwrap();
+        for remote in [
+            "http://akhsbxd.lab.internal",
+            "http://10.0.0.5:8410",
+            "http://localhost.evil.example",
+            "http://127.0.0.1.nip.io",
+        ] {
+            let error = config(dir.path(), remote).validate().unwrap_err();
+            assert!(
+                matches!(&error, ExecdError::Config { reason } if reason.contains("clear text")),
+                "{remote}: {error:?}"
+            );
+            config(dir.path(), remote)
+                .with_insecure_http(true)
+                .validate()
+                .unwrap_or_else(|error| panic!("{remote} with opt-in: {error}"));
+        }
+        // The executor URL follows the same rule.
+        let direct = config(dir.path(), "https://akhsbxd.lab.internal").with_executor(
+            ExecutorRoute::Direct {
+                url: "http://akhexecd.lab.internal".into(),
+                token_file: dir.path().join("sandbox"),
+            },
+        );
+        assert!(matches!(
+            direct.clone().validate(),
+            Err(ExecdError::Config { .. })
+        ));
+        direct.with_insecure_http(true).validate().unwrap();
+    }
+
+    /// A handler for exec scenarios whose polls fail `failing_polls` times
+    /// with a transient `unavailable` fault before the process completes
+    /// (`usize::MAX`: every poll fails).
+    fn flaky_poll_handler(failing_polls: usize) -> Arc<Handler> {
+        let polls = AtomicUsize::new(0);
+        Arc::new(move |seen: &Seen| {
+            let body = &seen.body;
+            match seen.path.as_str() {
+                "/v1/allocations" => (200, allocation(body, "ready", "unconfined")),
+                path if path.ends_with("/renew") => {
+                    (200, allocation(&json!({}), "ready", "unconfined"))
+                }
+                path if path.ends_with("/release") => {
+                    (200, allocation(&json!({}), "released", "unconfined"))
+                }
+                _ => match body["operation"].as_str().unwrap() {
+                    "exec_start" => (200, receipt(body, "running", Value::Null)),
+                    "exec_poll" if polls.fetch_add(1, Ordering::SeqCst) < failing_polls => (
+                        503,
+                        json!({"code":"unavailable","message":"executor restarting"}),
+                    ),
+                    "exec_poll" => (
+                        200,
+                        receipt(
+                            body,
+                            "completed",
+                            ok(json!({"process_id":body["arguments"]["process_id"],
+                                "status":"completed","progress":null,
+                                "result":ok(json!({"stdout":"done\n","stderr":"",
+                                    "exit_code":0,"timed_out":false,"cancelled":false,
+                                    "truncated":false}))})),
+                        ),
+                    ),
+                    "exec_cancel" => (
+                        200,
+                        receipt(
+                            body,
+                            "completed",
+                            ok(json!({"cancel_requested":true,"terminal":false})),
+                        ),
+                    ),
+                    other => panic!("unexpected operation {other}"),
+                },
+            }
+        })
+    }
+
+    #[test]
+    fn a_failed_poll_is_retried_instead_of_abandoning_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, seen) = spawn_mock(flaky_poll_handler(2));
+        let backend = ExecdBackend::connect(config(dir.path(), &url)).unwrap();
+        let outcome = backend
+            .exec(ExecRequest::shell("cargo build", Duration::from_secs(30)))
+            .unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.stdout, b"done\n");
+        assert_eq!(
+            operations(&seen),
+            ["exec_start", "exec_poll", "exec_poll", "exec_poll"]
+        );
+    }
+
+    #[test]
+    fn polls_that_keep_failing_cancel_and_report_an_unknown_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, seen) = spawn_mock(flaky_poll_handler(usize::MAX));
+        let backend = ExecdBackend::connect(
+            config(dir.path(), &url).with_poll_retry_budget(Duration::from_millis(500)),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let error = backend
+            .exec(ExecRequest::shell("make install", Duration::from_millis(1)))
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let ExecError::Execd(ExecdError::ProcessOutcomeUnknown {
+            process,
+            cancel_requested,
+            cause,
+        }) = &error
+        else {
+            panic!("expected ProcessOutcomeUnknown, got {error:?}");
+        };
+        assert!(*cancel_requested);
+        assert!(cause.contains("unavailable"), "{cause}");
+        let ops = operations(&seen);
+        assert!(
+            ops.iter().filter(|op| *op == "exec_poll").count() >= 2,
+            "{ops:?}"
+        );
+        assert_eq!(ops.last().map(String::as_str), Some("exec_cancel"));
+        let requests = seen.lock().unwrap().clone();
+        let cancel = requests
+            .iter()
+            .find(|r| r.body["operation"] == "exec_cancel")
+            .unwrap();
+        assert_eq!(&cancel.body["arguments"]["process_id"], process.as_str());
+        let report = format!("{:?}", miette::Report::new(error));
+        assert!(
+            report.contains("akh::backend::execd::process_outcome_unknown"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn dropping_the_backend_does_not_wait_out_a_renewal_or_the_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let renewing = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&renewing);
+        let (url, seen) = spawn_mock(Arc::new(move |seen: &Seen| match seen.path.as_str() {
+            "/v1/allocations" => (200, allocation(&seen.body, "ready", "unconfined")),
+            path if path.ends_with("/renew") => {
+                flag.store(true, Ordering::SeqCst);
+                // A slow akhsbxd: the renewal is in flight when the backend drops.
+                std::thread::sleep(Duration::from_millis(1_500));
+                (200, allocation(&json!({}), "ready", "unconfined"))
+            }
+            _ => (200, allocation(&json!({}), "released", "unconfined")),
+        }));
+        let backend = ExecdBackend::connect(
+            config(dir.path(), &url).with_lease_renew_interval(Duration::from_millis(20)),
+        )
+        .unwrap();
+        let release_path = format!("/v1/allocations/{}/release", backend.session_id());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !renewing.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "renewer never ran");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let started = Instant::now();
+        drop(backend);
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "drop blocked for {:?}",
+            started.elapsed()
+        );
+        // The lease thread still releases once the renewal returns.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !seen.lock().unwrap().iter().any(|s| s.path == release_path) {
+            assert!(Instant::now() < deadline, "allocation never released");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn an_idle_lease_thread_stops_promptly_and_releases() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, seen) = spawn_mock(Arc::new(|seen: &Seen| match seen.path.as_str() {
+            "/v1/allocations" => (200, allocation(&seen.body, "ready", "unconfined")),
+            _ => (200, allocation(&json!({}), "released", "unconfined")),
+        }));
+        let mut backend = ExecdBackend::connect(config(dir.path(), &url)).unwrap();
+        let release_path = format!("/v1/allocations/{}/release", backend.session_id());
+        let started = Instant::now();
+        let renewer = backend.request_stop().expect("renewer handle");
+        renewer.join().unwrap();
+        // The default 100 s renewal wait is interrupted, not waited out.
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(seen.lock().unwrap().iter().any(|s| s.path == release_path));
     }
 
     #[test]

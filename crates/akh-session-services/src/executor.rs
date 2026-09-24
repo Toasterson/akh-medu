@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    store::{Store, key},
+    store::{Store, Transaction, key},
     types::*,
     workspace::{Workspace, digest},
 };
@@ -61,10 +61,49 @@ pub struct Executor {
     root: Arc<Workspace>,
     processes: Arc<Mutex<HashMap<String, Arc<RunningProcess>>>>,
     pub(crate) mutations: Arc<Mutex<()>>,
+    /// When read-only receipts were last garbage-collected (`None`: never).
+    last_receipt_gc: Arc<Mutex<Option<Instant>>>,
 }
 
 fn receipt_key(id: &str) -> String {
     key("receipt", &[id])
+}
+
+/// Index of `Unknown` receipts by workspace: `unknown_receipt/<ws><id>` holds
+/// the receipt id. The mutation fence reads one workspace's entries instead of
+/// scanning every receipt.
+fn unknown_key(workspace: &str, id: &str) -> String {
+    key("unknown_receipt", &[workspace, id])
+}
+fn unknown_prefix(workspace: &str) -> String {
+    key("unknown_receipt", &[workspace])
+}
+
+/// Read-only verbs whose terminal receipts are garbage-collected after
+/// [`READ_RECEIPT_RETENTION`]. Replaying such an id afterwards re-runs a
+/// harmless read. `git_snapshot` is read-only too, but a later `git_publish`
+/// consumes its receipt, so it is kept like a mutation's.
+pub const COLLECTABLE_READ_OPERATIONS: &[&str] = &["read", "list", "search", "stat", "exec_poll"];
+/// How long a terminal read-only receipt stays available for replay and for
+/// the session broker's recovery lookups.
+pub const READ_RECEIPT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+/// Minimum spacing of the collection sweep, which scans every receipt.
+pub const RECEIPT_GC_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// Persist a receipt and keep the `Unknown` index in step with its status.
+fn store_receipt(tx: &mut Transaction<'_>, receipt: &OperationReceipt) -> Result<()> {
+    tx.put(&receipt_key(&receipt.id), receipt)?;
+    let index = unknown_key(&receipt.request.workspace_id, &receipt.id);
+    if receipt.status == TurnStatus::Unknown {
+        tx.put(&index, &receipt.id)
+    } else {
+        tx.delete(&index)
+    }
+}
+
+/// Whether the workspace has an unresolved operation fencing mutations.
+fn workspace_fenced(tx: &Transaction<'_>, workspace: &str) -> Result<bool> {
+    Ok(!tx.scan::<String>(&unknown_prefix(workspace))?.is_empty())
 }
 fn argument<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
     args.get(name)
@@ -186,7 +225,7 @@ impl Executor {
             receipt.status = resolution.status;
             receipt.result = Some(result);
             receipt.finished_at = Some(now_ms());
-            tx.put(&target, &receipt)?;
+            store_receipt(tx, &receipt)?;
             crate::recovery::record(tx, p, &target, resolution)?;
             Ok(receipt)
         })
@@ -206,7 +245,10 @@ impl Executor {
                 if !receipt.status.terminal() && receipt.status != TurnStatus::Unknown {
                     receipt.status=if is_read_only_workspace_operation(&receipt.request.operation){TurnStatus::Failed}else{TurnStatus::Unknown};
                     receipt.result=Some(ToolResult{success:false,text:"Executor restarted before a durable terminal receipt. Reconcile the operation before further mutations.".into(),data:Some(json!({"code":"unknown_outcome"})),receipt:Some(receipt.id.clone())});
-                    tx.put(&receipt_key(&receipt.id),&receipt)?;
+                    store_receipt(tx,&receipt)?;
+                } else if receipt.status == TurnStatus::Unknown {
+                    // Rebuild the index for stores written before it existed.
+                    tx.put(&unknown_key(&receipt.request.workspace_id,&receipt.id),&receipt.id)?;
                 }
             }Ok(())
         })?;
@@ -216,7 +258,55 @@ impl Executor {
             root,
             processes: Default::default(),
             mutations: Default::default(),
+            last_receipt_gc: Default::default(),
         })
+    }
+
+    /// Delete terminal receipts of [`COLLECTABLE_READ_OPERATIONS`] that
+    /// finished before `cutoff_ms` (epoch ms). Mutation, `exec_start`,
+    /// `git_snapshot`, running and unknown receipts are never collected.
+    /// Returns how many were deleted.
+    pub fn collect_read_receipts(&self, cutoff_ms: u64) -> Result<usize> {
+        self.store.transaction(|tx| {
+            let expired = tx
+                .scan::<OperationReceipt>("receipt/")?
+                .into_iter()
+                .filter(|receipt| {
+                    COLLECTABLE_READ_OPERATIONS.contains(&receipt.request.operation.as_str())
+                        && receipt.status.terminal()
+                        && receipt.finished_at.is_some_and(|at| at < cutoff_ms)
+                })
+                .map(|receipt| receipt.id)
+                .collect::<Vec<_>>();
+            for id in &expired {
+                tx.delete(&receipt_key(id))?;
+            }
+            Ok(expired.len())
+        })
+    }
+
+    /// Run [`Self::collect_read_receipts`] at most once per
+    /// [`RECEIPT_GC_INTERVAL`]. A failed sweep is logged and retried later;
+    /// it never fails the operation that triggered it.
+    fn maybe_collect_read_receipts(&self) {
+        let Ok(mut last) = self.last_receipt_gc.try_lock() else {
+            return;
+        };
+        if last.is_some_and(|at| at.elapsed() < RECEIPT_GC_INTERVAL) {
+            return;
+        }
+        *last = Some(Instant::now());
+        drop(last);
+        let retention_ms = READ_RECEIPT_RETENTION.as_millis() as u64;
+        match self.collect_read_receipts(now_ms().saturating_sub(retention_ms)) {
+            Ok(0) => {}
+            Ok(collected) => {
+                tracing::debug!(collected, "collected expired read-only operation receipts")
+            }
+            Err(error) => {
+                tracing::warn!(code=%error.code, "read-only receipt collection failed; retrying later")
+            }
+        }
     }
     pub fn attach(&self, request: &AttachWorkspace) -> Result<WorkspaceBinding> {
         validate_key(&request.session_id)?;
@@ -411,12 +501,7 @@ impl Executor {
                 }
                 return Ok((old, false));
             }
-            if is_write
-                && tx.scan::<OperationReceipt>("receipt/")?.iter().any(|r| {
-                    r.request.workspace_id == request.workspace_id
-                        && r.status == TurnStatus::Unknown
-                })
-            {
+            if is_write && workspace_fenced(tx, &request.workspace_id)? {
                 return Err(Fault::conflict(
                     "workspace has an unresolved operation; mutation admission is fenced",
                 ));
@@ -436,6 +521,7 @@ impl Executor {
         if !fresh {
             return Ok(receipt);
         }
+        self.maybe_collect_read_receipts();
         if request.operation == "exec_start" {
             match self.start(&request, &ws) {
                 Ok(()) => return self.receipt(&request.id),
@@ -484,8 +570,7 @@ impl Executor {
                 receipt: Some(receipt.id.clone()),
             },
         });
-        self.store
-            .transaction(|tx| tx.put(&receipt_key(&receipt.id), &receipt))?;
+        self.store.transaction(|tx| store_receipt(tx, &receipt))?;
         Ok(receipt)
     }
     fn perform(&self, request: &WorkspaceOperation, ws: &Workspace) -> Result<Value> {
@@ -852,7 +937,7 @@ impl Executor {
                     data: Some(data),
                     receipt: Some(id.clone()),
                 });
-                tx.put(&receipt_key(&id), &receipt)
+                store_receipt(tx, &receipt)
             });
             if let Err(error) = result {
                 tracing::error!(operation=%id,code=%error.code,"could not persist process receipt");

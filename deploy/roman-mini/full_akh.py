@@ -15,6 +15,7 @@ them here if the final shapes differ.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -58,6 +59,47 @@ LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 class RenderError(RuntimeError):
     """A rendering precondition failed; the message says what to fix."""
+
+
+# ── File writing ─────────────────────────────────────────────────────────────
+
+
+def private_dir(path: Path) -> Path:
+    """Create `path` (and parents) and make the directory itself 0700."""
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+    return path
+
+
+def write_atomic(path: Path, data: str | bytes, mode: int = 0o600) -> None:
+    """Replace `path` with `data` atomically, never exposing it wider than `mode`.
+
+    The temporary file is created with `mode` (then fchmod'ed, so the umask
+    cannot narrow or a pre-set umask widen it), written, fsync'ed and renamed
+    over `path`; the directory is fsync'ed afterwards. A crash leaves either the
+    old file or the new one, never a truncated file, and a secret is never
+    readable by others in between. A failed write removes the temporary file.
+    """
+    if isinstance(data, str):
+        data = data.encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        with os.fdopen(fd, "wb") as file:
+            os.fchmod(file.fileno(), mode)
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp, path)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 # ── TOML writer ──────────────────────────────────────────────────────────────
@@ -470,16 +512,39 @@ def route_akh(route: dict) -> str | None:
     return target.get("akh") if target.get("kind") == "akh" else None
 
 
+# Where each role's privileged policy starts in its akhsessd automation text.
+# Those policies now live in roles/addenda/ (the workspace system prompt), so
+# the wake prompt cuts them. Every marker listed for a role must be present:
+# a missing one means the live text changed shape, and rendering on would copy
+# privileged policy into every reactor wake prompt a second time.
+POLICY_MARKERS = {
+    "janus": ("\n# Janus merge authority", "\n# Astra escalation contract"),
+    "minerva": (),
+    "vesta": ("\nVesta has homelab_inspect",),
+}
+
+
 def wake_prompt(session: dict, role: str) -> str:
     """The akhsessd automation instructions minus role policies, with 53i tool names.
 
     The role policies (Janus merge/escalation authority, Vesta capabilities)
-    now live in the workspace system prompt (roles/addenda/).
+    now live in the workspace system prompt (roles/addenda/). Fails closed
+    (RenderError) when a role's expected policy marker is absent.
     """
+    if role not in POLICY_MARKERS:
+        raise RenderError(f"no POLICY_MARKERS entry for role {role!r}; add one in full_akh.py")
     text = session["automations"][role]["instructions"]
-    for marker in ("\n# Janus merge authority", "\n# Astra escalation contract", "\nVesta has homelab_inspect"):
-        text = text.split(marker)[0]
-    return rename_tools(text.strip(), tool_renames(session, role))
+    missing = [marker.strip() for marker in POLICY_MARKERS[role] if marker not in text]
+    if missing:
+        raise RenderError(
+            f"{role}: the akhsessd automation instructions lack the policy marker(s) "
+            + ", ".join(repr(m) for m in missing)
+            + "; the role policy text changed shape, so it cannot be cut from the wake prompt "
+            "without duplicating it. Update POLICY_MARKERS in full_akh.py to the new heading "
+            "(or rerun the role's configure_*.py) and render again")
+    known = {marker for markers in POLICY_MARKERS.values() for marker in markers}
+    cut = min((text.index(marker) for marker in known if marker in text), default=len(text))
+    return rename_tools(text[:cut].strip(), tool_renames(session, role))
 
 
 def reactor_seeds(events: dict, session: dict, role: str,

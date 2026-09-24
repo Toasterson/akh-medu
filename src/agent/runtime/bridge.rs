@@ -9,7 +9,8 @@ use akh_session_types as wire;
 /// deployed akhomed refuses `backend = "codex" | "claude"` when the akh loads
 /// (`akh::config::in_process_forbidden`), and the bridge refuses again here so
 /// no path can run a colocated native runtime in deployed mode. Deployed
-/// native work is delegated to akhrtd, whose profiles default to `Brokered`.
+/// native work is delegated to akhrtd, whose deployed profiles must state
+/// `execution_mode = "brokered"` explicitly (`akh::runtime::execution_mode_required`).
 pub(super) fn execution_mode(
     mode: crate::deployment::DeploymentMode,
 ) -> Result<wire::ExecutionMode, String> {
@@ -48,7 +49,7 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
         environment: Default::default(),
         launcher: vec![],
         timeout_secs: turn.runtime.config.timeout_secs,
-        execution_mode,
+        execution_mode: Some(execution_mode),
         conformance_file: None,
         native_aliases: Default::default(),
         effort: turn.runtime.effort.clone(),

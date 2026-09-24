@@ -58,7 +58,7 @@ pub mod trigger_manage;
 
 pub use agent_management::{AgentListTool, AgentMessageTool, AgentRetireTool, AgentSpawnTool};
 pub use audit_log::AuditLogTool;
-pub use code_gen::CodeGenTool;
+pub use code_gen::{CodeGenTool, RustFormatter};
 pub use code_ingest::CodeIngestTool;
 pub use code_predicates::CodePredicates;
 pub use compile_feedback::CompileFeedbackTool;

@@ -14,6 +14,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import configure_core  # noqa: E402
@@ -69,7 +70,8 @@ def fixture(root: Path) -> None:
         wake = ("You are now on duty. Coordinate with board_send_inbox. " + json.dumps(IDS) +
                 "\nReport on thread " + fa.STATUS_THREAD + ".")
         if role == "janus":
-            wake += "\n# Janus merge authority\nUse anima__approve_and_merge."
+            wake += ("\n# Janus merge authority\nUse anima__approve_and_merge."
+                     "\n# Astra escalation contract\nUse escalate_to_astra.")
         if role == "vesta":
             wake += "\nVesta has homelab_inspect for live Kubernetes."
         automations[role] = {"id": role, "instructions": wake}
@@ -247,6 +249,77 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(len(keys), 4)
         t3 = json.loads((self.root / "config/t3-acp.json").read_text())
         self.assertEqual(t3["endpoint"], f"tcp://127.0.0.1:{fa.ACP_TCP_PORT}")
+
+
+class WakePromptTests(unittest.TestCase):
+    def session(self, role, instructions):
+        return {"endpoints": {}, "akhs": {role: {"tools": []}},
+                "automations": {role: {"instructions": instructions}}}
+
+    def test_role_policies_are_cut(self):
+        text = "On duty.\n# Janus merge authority\nmerge\n# Astra escalation contract\nescalate"
+        self.assertEqual(fa.wake_prompt(self.session("janus", text), "janus"), "On duty.")
+        self.assertEqual(fa.wake_prompt(self.session("minerva", "Research."), "minerva"), "Research.")
+
+    def test_a_missing_policy_marker_fails_closed(self):
+        # The Astra heading was reworded: cutting would leave the policy in.
+        text = "On duty.\n# Janus merge authority\nmerge\n# Astra escalation (v2)\nescalate"
+        with self.assertRaises(fa.RenderError) as raised:
+            fa.wake_prompt(self.session("janus", text), "janus")
+        self.assertIn("# Astra escalation contract", str(raised.exception))
+        with self.assertRaises(fa.RenderError):
+            fa.wake_prompt(self.session("vesta", "On duty. Vesta can write the cluster."), "vesta")
+        with self.assertRaises(fa.RenderError):
+            fa.wake_prompt(self.session("ceres", "On duty."), "ceres")
+
+
+class PrivateWriteTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.umask = os.umask(0o022)
+
+    def tearDown(self):
+        os.umask(self.umask)
+        self.temp.cleanup()
+
+    def test_secret_is_never_wider_than_0600(self):
+        path = self.root / "secrets/acp-clients.keys"
+        seen = []
+        real_replace = os.replace
+
+        def replace(src, dst):
+            seen.append(Path(src).stat().st_mode & 0o777)
+            real_replace(src, dst)
+
+        with unittest.mock.patch.object(fa.os, "replace", replace):
+            fa.write_atomic(path, "token\n")
+        self.assertEqual(seen, [0o600])
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.read_text(), "token\n")
+        fa.write_atomic(self.root / "plist", b"<plist/>", mode=0o644)
+        self.assertEqual((self.root / "plist").stat().st_mode & 0o777, 0o644)
+
+    def test_a_failed_write_keeps_the_old_file_and_no_temp(self):
+        path = self.root / "config/events.json"
+        fa.write_atomic(path, '{"old": true}\n')
+        with unittest.mock.patch.object(fa.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                fa.write_atomic(path, '{"new": true}\n')
+        self.assertEqual(path.read_text(), '{"old": true}\n')
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["events.json"])
+
+    def test_render_keeps_secrets_private(self):
+        fixture(self.root)
+        (self.root / "secrets").chmod(0o755)
+        prov = fa.Provenance(commit="c" * 40, short="c" * 12, origin_main="c" * 40, committed_at=0)
+        binary = self.root / "bin" / prov.binary_name
+        binary.write_text("#!/bin/sh\n")
+        configure_core.render(self.root, prov, binary, "0" * 64, source=SOURCE)
+        self.assertEqual((self.root / "secrets").stat().st_mode & 0o777, 0o700)
+        for name in ("acp-clients.keys", "core-events.key"):
+            self.assertEqual((self.root / "secrets" / name).stat().st_mode & 0o777, 0o600, name)
+        self.assertEqual((self.root / "config/core.json").stat().st_mode & 0o777, 0o600)
 
 
 class ProvenanceTests(unittest.TestCase):

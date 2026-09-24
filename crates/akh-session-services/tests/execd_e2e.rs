@@ -138,6 +138,14 @@ async fn execd_backend_runs_effects_through_real_akhsbxd_and_akhexecd() {
         );
         assert_eq!(receipt.request.session_id, session);
     }
-    // Dropping the backend released the allocation.
-    assert_eq!(sandboxes.get(&session).unwrap().state, "released");
+    // Dropping the backend releases the allocation from its lease thread, so
+    // the drop itself never blocks; the release lands shortly after.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while sandboxes.get(&session).unwrap().state != "released" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped backend never released its allocation"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

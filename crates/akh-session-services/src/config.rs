@@ -569,13 +569,34 @@ pub fn colocated_forbidden(subject: &str) -> Fault {
         format!(
             "{subject}: execution_mode \"colocated\" is forbidden in deployed mode; \
              native runtime tools would run in the runtime's own address space. \
-             Set execution_mode = \"brokered\" (the default) with installed conformance \
+             Set execution_mode = \"brokered\" with installed conformance \
              evidence so workspace effects go through akhsbxd/akhexecd, or run this \
              service with deployment = \"development\" and without AKH_DEPLOYMENT=deployed \
              for local development only."
         ),
     )
 }
+/// Diagnostic code for a deployed runtime profile without an explicit
+/// `execution_mode`.
+pub const EXECUTION_MODE_REQUIRED: &str = "akh::runtime::execution_mode_required";
+
+/// The fault a deployed service returns for runtime profiles that omit
+/// `execution_mode`. The omitted value means `colocated` (the development
+/// default), so a deployed service will not guess: the operator states it.
+pub fn execution_mode_required(subject: &str) -> Fault {
+    Fault::new(
+        EXECUTION_MODE_REQUIRED,
+        format!(
+            "{subject}: execution_mode is not set, and deployed mode requires it explicitly \
+             (an omitted value means \"colocated\", which deployed services refuse). \
+             help: add execution_mode = \"brokered\" to {subject} and install its \
+             conformance evidence (akh-runtime-profile), so workspace effects go through \
+             akhsbxd/akhexecd; for local development only, run with deployment = \
+             \"development\" and without AKH_DEPLOYMENT=deployed."
+        ),
+    )
+}
+
 fn default_reconciliation_interval_ms() -> u64 {
     5 * 60_000
 }
@@ -611,10 +632,19 @@ impl Config {
         if !mode.is_deployed() {
             return Ok(());
         }
+        let omitted = self
+            .runtimes
+            .iter()
+            .filter(|(_, profile)| profile.execution_mode_setting().is_none())
+            .map(|(id, _)| format!("runtimes.{id}"))
+            .collect::<Vec<_>>();
+        if !omitted.is_empty() {
+            return Err(execution_mode_required(&omitted.join(", ")));
+        }
         let colocated = self
             .runtimes
             .iter()
-            .filter(|(_, profile)| profile.execution_mode == ExecutionMode::Colocated)
+            .filter(|(_, profile)| profile.execution_mode() == ExecutionMode::Colocated)
             .map(|(id, _)| format!("runtimes.{id}"))
             .chain(
                 self.akhs
@@ -946,18 +976,37 @@ mod deployment_tests {
     }
 
     #[test]
-    fn an_omitted_execution_mode_is_brokered_and_passes_deployed_validation() {
+    fn an_omitted_execution_mode_is_colocated_for_development_and_refused_when_deployed() {
         let omitted = config("deployed", None);
+        let profile = &omitted.runtimes["codex-worker"];
+        assert_eq!(profile.execution_mode_setting(), None);
+        assert_eq!(profile.execution_mode(), ExecutionMode::Colocated);
+        let fault = omitted
+            .validate_deployment(DeploymentMode::Deployed)
+            .unwrap_err();
+        assert_eq!(fault.code, EXECUTION_MODE_REQUIRED);
+        assert!(fault.message.contains("runtimes.codex-worker"), "{fault}");
+        assert!(
+            fault.message.contains("execution_mode = \"brokered\""),
+            "{fault}"
+        );
+        // Development keeps the pre-Phase-53 meaning of an omitted mode.
+        let development = config("development", None);
+        assert_eq!(development.deployment, DeploymentMode::Development);
+        development
+            .validate_deployment(DeploymentMode::Development)
+            .unwrap();
+    }
+
+    #[test]
+    fn an_explicit_brokered_profile_passes_deployed_validation() {
+        let brokered = config("deployed", Some("brokered"));
         assert_eq!(
-            omitted.runtimes["codex-worker"].execution_mode,
+            brokered.runtimes["codex-worker"].execution_mode(),
             ExecutionMode::Brokered
         );
-        omitted
+        brokered
             .validate_deployment(DeploymentMode::Deployed)
             .unwrap();
-        assert_eq!(
-            config("development", None).deployment,
-            DeploymentMode::Development
-        );
     }
 }
