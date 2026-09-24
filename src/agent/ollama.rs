@@ -539,6 +539,9 @@ impl OllamaClient {
             response.into_json().map_err(|e| OllamaError::ParseFailed {
                 reason: format!("JSON decode failed: {e}"),
             })?;
+        // Phase 53b: meter one-shot generation (the Librarian's path) for the
+        // autonomy budget; chat paths meter through `LlmRequestMetrics::log`.
+        super::llm_metrics::record_usage(chat_resp.prompt_eval_count, chat_resp.eval_count);
 
         chat_resp
             .message

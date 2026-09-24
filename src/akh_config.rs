@@ -190,15 +190,29 @@ pub struct McpConfig {
     pub require_pushed_mcp: bool,
 }
 
-/// Per-akh background-automation gating (consumed by P5).
+/// Per-akh background-automation gating (P5; defaults per ADR 113 decision 6).
 ///
-/// `enabled` is the master switch and defaults to **off** — a fresh akh runs no
-/// background tasks. When enabled, `tasks` provides per-task overrides keyed by
-/// the daemon task name (e.g. `"consolidation"`, `"reflection"`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// `enabled` is the master switch and defaults to **on**: every akh runs its
+/// background tasks, and LLM-cost tasks are bounded by `budget` (Phase 53b).
+/// `tasks` provides per-task overrides keyed by the daemon task name
+/// ([`DaemonTask::as_str`](crate::agent::autonomy::DaemonTask::as_str), for
+/// example `"consolidation"` or `"reflection"`).
+///
+/// ```toml
+/// [autonomy]
+/// enabled = true
+/// tasks = { knowledge_elicitation = false }
+///
+/// [autonomy.budget]
+/// max_tokens_per_day = 250000
+/// max_turns_per_day = 40
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AutonomyConfig {
-    /// Master switch. When false, no background automation runs (default).
-    #[serde(default)]
+    /// Master switch. When false, only always-on infrastructure (session
+    /// persistence, triggers, reactor schedules) and explicitly enabled tasks
+    /// run. Defaults to true (ADR 113).
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Per-task enable/disable overrides keyed by daemon task name. An explicit
     /// override **always wins** over the master switch — so a single task can be
@@ -206,6 +220,21 @@ pub struct AutonomyConfig {
     /// or turned off with the master on.
     #[serde(default)]
     pub tasks: std::collections::BTreeMap<String, bool>,
+    /// Daily limits for LLM-cost background work (librarian, knowledge
+    /// elicitation, knowledge extraction via an external API, reactor model
+    /// turns). Defaults to 250 000 tokens and 40 turns per UTC day.
+    #[serde(default)]
+    pub budget: crate::agent::autonomy::AutonomyBudget,
+}
+
+impl Default for AutonomyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tasks: std::collections::BTreeMap::new(),
+            budget: crate::agent::autonomy::AutonomyBudget::default(),
+        }
+    }
 }
 
 /// Which execution backend an akh's executor-facing tools
@@ -414,11 +443,53 @@ impl Default for ExecBackendConfig {
 impl AutonomyConfig {
     /// Whether a named daemon task should run. An explicit per-task override
     /// takes precedence; otherwise the task follows the master switch.
+    ///
+    /// This is the raw config rule. The daemon gates with
+    /// [`AutonomyConfig::gate`], which also applies the idle-cycle executor
+    /// default and the always-on infrastructure tasks.
     pub fn task_enabled(&self, task: &str) -> bool {
         match self.tasks.get(task) {
             Some(&v) => v,
             None => self.enabled,
         }
+    }
+
+    /// Resolve whether `task` runs for an akh whose effective executor is
+    /// `exec`.
+    ///
+    /// Order: always-on infrastructure runs; an explicit `tasks` override
+    /// wins; the master switch applies; the idle OODA cycle then defaults
+    /// off while executor tools run in-process (ADR 113 decision 4).
+    pub fn gate(
+        &self,
+        task: crate::agent::autonomy::DaemonTask,
+        exec: crate::agent::autonomy::ExecPlacement,
+    ) -> crate::agent::autonomy::TaskGate {
+        use crate::agent::autonomy::{
+            DaemonTask, DisabledReason, ExecPlacement, TaskGate, TaskGating,
+        };
+        if task.gating() == TaskGating::AlwaysOn {
+            return TaskGate::Enabled;
+        }
+        match self.tasks.get(task.as_str()) {
+            Some(true) => TaskGate::Enabled,
+            Some(false) => TaskGate::Disabled(DisabledReason::ExplicitlyDisabled),
+            None if !self.enabled => TaskGate::Disabled(DisabledReason::MasterSwitchOff),
+            None if task == DaemonTask::IdleCycle && exec == ExecPlacement::InProcess => {
+                TaskGate::Disabled(DisabledReason::InProcessExecutor)
+            }
+            None => TaskGate::Enabled,
+        }
+    }
+
+    /// `tasks` keys that name no [`DaemonTask`](crate::agent::autonomy::DaemonTask).
+    /// Such a key has no effect; the daemon warns about each one at start.
+    pub fn unknown_task_names(&self) -> Vec<&str> {
+        self.tasks
+            .keys()
+            .map(String::as_str)
+            .filter(|name| name.parse::<crate::agent::autonomy::DaemonTask>().is_err())
+            .collect()
     }
 }
 
@@ -646,7 +717,8 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_runtime: Option<crate::agent::runtime::RuntimeConfig>,
 
-    /// Background-automation gating (P5). Defaults to fully disabled.
+    /// Background-automation gating (P5). Defaults to enabled with a daily
+    /// LLM budget (ADR 113 decision 6).
     #[serde(default)]
     pub autonomy: AutonomyConfig,
 
@@ -859,7 +931,7 @@ impl AkhConfig {
                     "temperature",
                 ],
             ),
-            ("autonomy", &["enabled", "tasks"]),
+            ("autonomy", &["enabled", "tasks", "budget"]),
             (
                 "delegation",
                 &[
@@ -1156,7 +1228,17 @@ mod tests {
         let cfg = AkhConfig::default();
         assert!(cfg.is_main, "akh defaults to MAIN");
         assert_eq!(cfg.path_mode, PathMode::Local);
-        assert!(!cfg.autonomy.enabled, "automation is off by default");
+        assert!(
+            cfg.autonomy.enabled,
+            "automation is on by default (ADR 113 decision 6)"
+        );
+        assert_eq!(
+            cfg.autonomy.budget,
+            crate::agent::autonomy::AutonomyBudget {
+                max_tokens_per_day: 250_000,
+                max_turns_per_day: 40,
+            }
+        );
         assert_eq!(cfg.ollama_endpoint, OllamaEndpoint::default());
         assert!(cfg.model.is_none());
         assert!(cfg.system_prompt.is_none());
@@ -1204,8 +1286,11 @@ mod tests {
     #[test]
     fn autonomy_task_enabled_override_wins() {
         let mut a = AutonomyConfig::default();
-        // Master off (default) → every task off.
-        assert!(!a.enabled);
+        // Master on by default (ADR 113); switch it off to test overrides.
+        assert!(a.enabled);
+        assert!(a.task_enabled("reflection"));
+        a.enabled = false;
+        // Master off → every unlisted task off.
         assert!(!a.task_enabled("reflection"));
         // Explicit on with the master off → exactly that task runs.
         a.tasks.insert("goal_generation".into(), true);
@@ -1235,6 +1320,78 @@ mod tests {
     }
 
     #[test]
+    fn autonomy_gate_applies_decision_4_idle_cycle_default() {
+        use crate::agent::autonomy::{DaemonTask, DisabledReason, ExecPlacement, TaskGate};
+        let mut a = AutonomyConfig::default();
+        // In-process exec: idle OODA tool use is off, everything else on.
+        assert_eq!(
+            a.gate(DaemonTask::IdleCycle, ExecPlacement::InProcess),
+            TaskGate::Disabled(DisabledReason::InProcessExecutor)
+        );
+        assert_eq!(
+            a.gate(DaemonTask::Reflection, ExecPlacement::InProcess),
+            TaskGate::Enabled
+        );
+        // Contained or disabled exec: idle cycle on.
+        for exec in [ExecPlacement::Contained, ExecPlacement::Disabled] {
+            assert_eq!(a.gate(DaemonTask::IdleCycle, exec), TaskGate::Enabled);
+        }
+        // An explicit override wins over the executor default.
+        a.tasks.insert("idle_cycle".into(), true);
+        assert_eq!(
+            a.gate(DaemonTask::IdleCycle, ExecPlacement::InProcess),
+            TaskGate::Enabled
+        );
+        // Master off: gated tasks stop, infrastructure keeps running.
+        a.enabled = false;
+        assert_eq!(
+            a.gate(DaemonTask::Harvest, ExecPlacement::Contained),
+            TaskGate::Disabled(DisabledReason::MasterSwitchOff)
+        );
+        for infra in [
+            DaemonTask::Persist,
+            DaemonTask::TriggerEvaluation,
+            DaemonTask::Reactor,
+        ] {
+            assert_eq!(a.gate(infra, ExecPlacement::InProcess), TaskGate::Enabled);
+        }
+        a.tasks.insert("librarian".into(), false);
+        a.enabled = true;
+        assert_eq!(
+            a.gate(DaemonTask::Librarian, ExecPlacement::Contained),
+            TaskGate::Disabled(DisabledReason::ExplicitlyDisabled)
+        );
+    }
+
+    #[test]
+    fn autonomy_budget_parses_and_is_a_known_table_key() {
+        let src = r#"
+            name = "janus"
+            [autonomy]
+            enabled = true
+            tasks = { idle_cycle = false, seshat_curaton = true }
+            [autonomy.budget]
+            max_turns_per_day = 12
+        "#;
+        let cfg: AkhConfig = toml::from_str(src).expect("parse");
+        assert_eq!(cfg.autonomy.budget.max_turns_per_day, 12);
+        assert_eq!(
+            cfg.autonomy.budget.max_tokens_per_day,
+            crate::agent::autonomy::AutonomyBudget::DEFAULT_MAX_TOKENS_PER_DAY,
+            "an omitted limit keeps its default"
+        );
+        assert_eq!(cfg.autonomy.unknown_task_names(), vec!["seshat_curaton"]);
+        let raw: toml::Value = toml::from_str(src).unwrap();
+        assert!(
+            AkhConfig::unknown_keys(&raw).is_empty(),
+            "`budget` is a known [autonomy] key"
+        );
+        // Round-trips through serialization.
+        let back: AkhConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.autonomy, cfg.autonomy);
+    }
+
+    #[test]
     fn legacy_workspace_toml_loads_as_akh_config() {
         // A pre-pivot per-workspace TOML carries only WorkspaceConfig fields.
         let legacy = r#"
@@ -1252,7 +1409,9 @@ mod tests {
         assert!(cfg.system_prompt.is_none());
         assert!(cfg.related_workspaces.is_empty());
         assert_eq!(cfg.path_mode, PathMode::Local);
-        assert!(!cfg.autonomy.enabled);
+        // No [autonomy] table → the ADR 113 default (on, budgeted).
+        assert!(cfg.autonomy.enabled);
+        assert_eq!(cfg.autonomy, AutonomyConfig::default());
     }
 
     #[test]

@@ -477,6 +477,34 @@ impl ServerState {
         }
     }
 
+    /// Phase 53b: the akh's `[autonomy]` plus where its executor tools run,
+    /// for the daemon. The placement comes from the same
+    /// `AkhConfig::effective_exec(host [exec])` resolution the agent build
+    /// wires the tools with, so the idle-cycle default (ADR 113 decision 4)
+    /// cannot disagree with the executor actually in use. An unreadable
+    /// `akh.toml` falls back to the default autonomy (on, budgeted) and the
+    /// host executor.
+    async fn daemon_autonomy(
+        &self,
+        name: &str,
+    ) -> (
+        akh_medu::akh_config::AutonomyConfig,
+        akh_medu::agent::autonomy::ExecPlacement,
+    ) {
+        use akh_medu::agent::autonomy::ExecPlacement;
+        let host_exec = self.config.read().await.exec.clone();
+        match self.get_akh_config(name).await {
+            Ok(cfg) => (
+                cfg.autonomy.clone(),
+                ExecPlacement::from(&cfg.effective_exec(host_exec.as_ref())),
+            ),
+            Err(_) => (
+                akh_medu::akh_config::AutonomyConfig::default(),
+                ExecPlacement::from(&host_exec.unwrap_or_default()),
+            ),
+        }
+    }
+
     /// Get or lazily load the [`AkhConfig`] (`akh.toml`) for a workspace.
     ///
     /// The akh config is the existing per-workspace config file parsed as an
@@ -3277,12 +3305,9 @@ impl ServerState {
             .insert(ws_name.to_string(), pause_handle.clone());
         let task_handle = pause_handle.clone();
 
-        // P5: gate background tasks by the akh's [autonomy] config.
-        let autonomy = self
-            .get_akh_config(ws_name)
-            .await
-            .map(|c| c.autonomy.clone())
-            .unwrap_or_default();
+        // P5 / 53b: gate background tasks by the akh's [autonomy] config and
+        // its effective executor placement.
+        let (autonomy, exec) = self.daemon_autonomy(ws_name).await;
 
         let pool = self.pg_pool();
         let global_cfg = self.config.read().await;
@@ -3296,6 +3321,7 @@ impl ServerState {
                 shutdown_rx,
                 daemon_config,
                 autonomy,
+                exec,
                 daemon_ws_name,
                 task_handle,
                 pool,
@@ -3498,6 +3524,7 @@ async fn run_daemon_task(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     daemon_config: akh_medu::agent::DaemonConfig,
     autonomy: akh_medu::akh_config::AutonomyConfig,
+    exec: akh_medu::agent::autonomy::ExecPlacement,
     ws_name: String,
     pause_handle: DaemonPauseHandle,
     // ADR 091: Postgres pool for the sleep-cycle transcript-harvest phase.
@@ -3512,6 +3539,8 @@ async fn run_daemon_task(
 
     let mut daemon = AgentDaemon::new(shared_agent, daemon_config)
         .with_autonomy(autonomy)
+        .with_exec_placement(exec)
+        .with_workspace(ws_name.clone())
         .with_shutdown(shutdown_rx)
         .with_status(Arc::clone(&status))
         .with_pause_handles(pause_handle.paused, pause_handle.cycle_done);
@@ -4581,12 +4610,9 @@ async fn main() {
                     let daemon_status = Arc::clone(&status);
                     let daemon_ws = ws_name.clone();
                     let dc = daemon_config.clone();
-                    // P5: per-akh automation gating from [autonomy] (off by default).
-                    let autonomy = state
-                        .get_akh_config(ws_name)
-                        .await
-                        .map(|c| c.autonomy.clone())
-                        .unwrap_or_default();
+                    // P5 / 53b: per-akh [autonomy] (on by default, budgeted)
+                    // and the effective executor placement.
+                    let (autonomy, exec) = state.daemon_autonomy(ws_name).await;
                     let pause_handle = DaemonPauseHandle::new();
                     state
                         .daemon_pauses
@@ -4606,6 +4632,7 @@ async fn main() {
                             shutdown_rx,
                             dc,
                             autonomy,
+                            exec,
                             daemon_ws,
                             task_handle,
                             pool,

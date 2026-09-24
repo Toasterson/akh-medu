@@ -29,7 +29,7 @@ use super::error::AgentResult;
 /// turns one sleep-cycle tick will mint, so a very chatty akh degrades
 /// gracefully (subsequent sleep ticks pick up where this one left off) rather
 /// than blocking a tick on an unbounded backlog.
-const HARVEST_BATCH_LIMIT: u64 = 256;
+pub const HARVEST_BATCH_LIMIT: u64 = 256;
 
 /// Outcome of one [`harvest_daily_log`] call.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -46,10 +46,12 @@ pub struct HarvestMetrics {
 /// Read un-harvested `kind='turn'` rows for `akh_id` and mint an episode index
 /// per turn, advancing the per-akh harvest watermark.
 ///
-/// **Sync/async boundary:** this function is deliberately **synchronous**. It
-/// is called from `AgentDaemon::run_sleep_cycle` while the daemon holds the
-/// `std::sync::Mutex<Agent>` inside `tokio::task::block_in_place` — ADR 027
-/// forbids holding that lock across an `.await`, so the three store calls
+/// **Sync/async boundary:** this function is deliberately **synchronous**. The
+/// daemon calls it (through [`harvest_tick`]) as its own `Harvest` task on the
+/// sleep tick, inside `tokio::task::block_in_place`, holding only cloned
+/// `Arc<Engine>`/predicates, not the agent lock (Phase 53b; before that it ran
+/// inside `run_sleep_cycle` under the agent lock). ADR 027 forbids holding the
+/// agent lock across an `.await`, and callers may still hold it, so the three store calls
 /// (watermark read → turn-tail read → watermark write) run via
 /// `tokio::runtime::Handle::current().block_on(...)` internally instead of
 /// this function being `async fn`. Callers must invoke it from within a tokio
@@ -116,6 +118,96 @@ pub fn harvest_daily_log(
     }
 
     Ok(metrics)
+}
+
+/// Outcome of one sleep-tick harvest ([`harvest_tick`]): up to
+/// `max_batches` consecutive [`harvest_daily_log`] batches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HarvestTick {
+    /// Every batch that completed, in order.
+    pub batches: Vec<HarvestMetrics>,
+    /// True when the last batch was full and the batch cap stopped the tick,
+    /// so more turns may still be waiting for the next tick.
+    pub backlog_may_remain: bool,
+}
+
+impl HarvestTick {
+    /// Turn rows read across all batches.
+    pub fn turns_harvested(&self) -> usize {
+        self.batches.iter().map(|b| b.turns_harvested).sum()
+    }
+
+    /// Episode symbols minted across all batches.
+    pub fn episodes_minted(&self) -> usize {
+        self.batches.iter().map(|b| b.episodes_minted).sum()
+    }
+
+    /// The watermark after the last completed batch, if any batch completed.
+    pub fn last_seq(&self) -> Option<i64> {
+        self.batches.last().map(|b| b.last_seq)
+    }
+}
+
+/// A harvest tick that stopped on a store or engine error. The batches that
+/// completed before the error are kept (their watermark is already
+/// committed), so a caller can report partial progress and the next tick
+/// resumes after them.
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error(
+    "transcript harvest stopped after {} completed batch(es): {source}",
+    completed.batches.len()
+)]
+#[diagnostic(
+    code(akh::agent::harvest::tick_failed),
+    help(
+        "The watermark only advances past committed batches, so nothing is lost. The next \
+         sleep tick retries. On SQLite, a `database is locked` or pool-timeout error means \
+         another writer held the store: check for a long snapshot or WAL flush."
+    )
+)]
+pub struct HarvestTickError {
+    /// Progress committed before the failure.
+    pub completed: HarvestTick,
+    /// The error that stopped the tick.
+    #[source]
+    pub source: super::error::AgentError,
+}
+
+/// Run up to `max_batches` harvest batches for one sleep tick, stopping early
+/// once a batch comes back short (the backlog is drained).
+///
+/// This is how the daemon drains a large captured backlog (for example the
+/// 598 turns captured before ADR 113) across a bounded number of sleep ticks
+/// instead of 256 turns per hour. Same sync/async contract as
+/// [`harvest_daily_log`]: call it from inside `block_in_place` on a tokio
+/// runtime.
+pub fn harvest_tick(
+    db: &DatabaseConnection,
+    engine: &Engine,
+    predicates: &AgentPredicates,
+    akh_id: Uuid,
+    max_batches: usize,
+) -> Result<HarvestTick, Box<HarvestTickError>> {
+    let mut tick = HarvestTick::default();
+    for _ in 0..max_batches.max(1) {
+        match harvest_daily_log(db, engine, predicates, akh_id) {
+            Ok(batch) => {
+                let full = batch.turns_harvested as u64 >= HARVEST_BATCH_LIMIT;
+                tick.batches.push(batch);
+                tick.backlog_may_remain = full;
+                if !full {
+                    break;
+                }
+            }
+            Err(source) => {
+                return Err(Box::new(HarvestTickError {
+                    completed: tick,
+                    source,
+                }));
+            }
+        }
+    }
+    Ok(tick)
 }
 
 /// Mint a single `episode:turn:{seq}` index symbol from one turn's payload.

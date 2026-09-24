@@ -12,13 +12,20 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::Agent;
+use super::autonomy::{
+    Admission, AutonomyBudget, AutonomyGovernor, BudgetExhausted, BudgetLedger, BudgetMetering,
+    BudgetTicket, DaemonTask, DaemonTaskReport, DisabledReason, ExecPlacement, FactDelta, TaskGate,
+    TaskOutcome, TaskRun,
+};
 use super::error::AgentResult;
+use super::llm_metrics::{LlmUsage, UsageScope};
 use crate::akh_config::AutonomyConfig;
 use crate::client::DaemonStatus;
 use crate::config::UpstreamEndpointConfig;
+use crate::engine::Engine;
 use crate::message::AkhMessage;
 
 /// Current unix timestamp in seconds.
@@ -91,43 +98,25 @@ fn assert_singleton_fact(
     }
 }
 
-/// Every daemon task name consulted via [`AgentDaemon::task_enabled`].
-///
-/// Task names are free-form strings — [`AutonomyConfig::task_enabled`]
-/// silently falls back to the akh's master `[autonomy] enabled` switch on an
-/// unrecognized one rather than erroring, so a typo in a new
-/// `tokio::select!` arm (`self.task_enabled("seshat_curaton")`, say) would
-/// otherwise fail quietly. **Extend this list whenever a new arm in
-/// [`AgentDaemon::run`] gates itself with `task_enabled(..)`.** Purely
-/// documentation/test fixture — has no runtime effect on gating.
-///
-/// Does *not* include `"librarian"`: that arm is gated by the
-/// `AKH_LIBRARIAN` env var instead, so it never consults `[autonomy]`.
-// Only consumed by `tests::known_task_names_includes_curation_tasks` today —
-// a documentation/test fixture, not runtime-referenced, hence `dead_code`
-// is expected outside `#[cfg(test)]` builds.
-#[allow(dead_code)]
-const KNOWN_TASK_NAMES: &[&str] = &[
-    "equivalence",
-    "reflection",
-    "consolidation",
-    "schema_discovery",
-    "rule_inference",
-    "gap_analysis",
-    "idle_cycle",
-    "continuous_learning",
-    "goal_generation",
-    "sleep_cycle",
-    "knowledge_extraction",
-    "bridge_training",
-    "openclaw_sync",
-    "knowledge_elicitation",
-    "kg_compaction",
-    "delegation",
-    "relation_enrichment",
-    "seshat_curation",
-    "heka_curation",
-];
+/// A task that passed gating and budget admission, waiting for its body to
+/// finish (see [`AgentDaemon::run_task`]).
+struct TaskStart {
+    task: DaemonTask,
+    ticket: Option<BudgetTicket>,
+    facts_before: FactDelta,
+    started: Instant,
+}
+
+/// Reports from one sleep tick: harvest first, then the sleep cycle
+/// (ADR 113 decision 5). Each task has its own report, so a failure in one
+/// never hides the other.
+#[derive(Debug, Clone)]
+pub struct SleepTickReport {
+    /// The transcript-harvest task.
+    pub harvest: DaemonTaskReport,
+    /// The sleep-cycle task.
+    pub sleep: DaemonTaskReport,
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -235,8 +224,8 @@ pub struct DaemonConfig {
     ///
     /// Surveys the configured `[upstreams.seshat]` endpoint's corpus status,
     /// forces an embedding pass when chunks are pending, and asserts the
-    /// resulting counts into the KG. Gated by `task_enabled("seshat_curation")`
-    /// (P5 autonomy), unlike `librarian_interval` which is env-gated.
+    /// resulting counts into the KG. Gated by `[autonomy]`
+    /// ([`DaemonTask::SeshatCuration`]).
     pub seshat_curation_interval: Duration,
     /// Heka long-term-memory store curation-pass interval (default: 24 h).
     ///
@@ -314,10 +303,23 @@ pub struct AgentDaemon {
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
     /// Optional shared status for real-time monitoring from HTTP handlers.
     status: Option<Arc<tokio::sync::Mutex<DaemonStatus>>>,
-    /// Per-akh automation gating (P5). Defaults to master-off, so a daemon
-    /// constructed without explicit autonomy runs only always-on infra tasks
-    /// (session persistence + user-trigger evaluation).
+    /// Per-akh automation gating (P5). Defaults to [`AutonomyConfig::default`]
+    /// (master on, default budget; ADR 113 decision 6).
     autonomy: AutonomyConfig,
+    /// Where this akh's executor tools run, from the effective `[exec]`
+    /// (`AkhConfig::effective_exec`, resolved by akhomed at daemon spawn).
+    /// Decides the idle-cycle default. Defaults to `InProcess`, the
+    /// conservative reading: idle OODA tool use stays off unless told
+    /// otherwise.
+    exec: ExecPlacement,
+    /// Daily LLM budget for this akh (Phase 53b).
+    governor: AutonomyGovernor,
+    /// The agent's engine, cached at construction (an Agent never swaps its
+    /// engine). Used for fact-delta telemetry without taking the agent lock.
+    engine: Arc<Engine>,
+    /// Short workspace alias, used as the `workspace` log field and metric
+    /// label.
+    workspace: String,
     /// Postgres backing store + this akh's stable id, for the ADR 091
     /// sleep-cycle transcript-harvest phase. `None` in local-only mode (no
     /// `[postgres]` section configured) — harvest is then a no-op, matching
@@ -344,9 +346,15 @@ pub struct AgentDaemon {
 impl AgentDaemon {
     /// Create a new daemon wrapping the given shared agent.
     pub fn new(agent: Arc<RwLock<Agent>>, config: DaemonConfig) -> Self {
+        let engine = Arc::clone(&agent.read().unwrap_or_else(|e| e.into_inner()).engine);
+        let governor = AutonomyGovernor::open_or_reset(&engine, AutonomyBudget::default());
         Self {
             agent,
             config,
+            exec: ExecPlacement::InProcess,
+            governor,
+            engine,
+            workspace: "unnamed".to_owned(),
             total_cycles: 0,
             consecutive_idle_skips: std::sync::atomic::AtomicUsize::new(0),
             paused: Arc::new(AtomicBool::new(false)),
@@ -365,21 +373,267 @@ impl AgentDaemon {
         }
     }
 
-    /// Set the per-akh automation gating (from `akh.toml` `[autonomy]`).
+    /// Set the per-akh automation gating and budget (from `akh.toml`
+    /// `[autonomy]`). Spend already recorded in the ledger is kept.
     pub fn with_autonomy(mut self, autonomy: AutonomyConfig) -> Self {
+        self.governor.set_budget(autonomy.budget);
         self.autonomy = autonomy;
         self
     }
 
-    /// Whether a gated background task is enabled for this akh. Always-on infra
-    /// tasks (persist, trigger evaluation) do not consult this.
+    /// Tell the daemon where this akh's executor tools run. akhomed passes
+    /// `ExecPlacement::from(&akh_config.effective_exec(host_exec))`, the same
+    /// resolution it uses to wire the tools. Without this call the daemon
+    /// assumes `InProcess`.
+    pub fn with_exec_placement(mut self, exec: ExecPlacement) -> Self {
+        self.exec = exec;
+        self
+    }
+
+    /// Set the workspace alias used in `akh::autonomy` logs and the
+    /// `akh_daemon_task_*` metric labels.
+    pub fn with_workspace(mut self, workspace: impl Into<String>) -> Self {
+        self.workspace = workspace.into();
+        self
+    }
+
+    /// This akh's budget governor (read-only view of the daily ledger).
+    pub fn governor(&self) -> &AutonomyGovernor {
+        &self.governor
+    }
+
+    /// Whether `task` may run now: `[autonomy]` gating (including the
+    /// idle-cycle executor default) and then the task's own prerequisites.
+    fn task_gate(&self, task: DaemonTask) -> TaskGate {
+        match self.autonomy.gate(task, self.exec) {
+            TaskGate::Enabled => match self.missing_prerequisite(task) {
+                Some(reason) => TaskGate::Disabled(reason),
+                None => TaskGate::Enabled,
+            },
+            disabled => disabled,
+        }
+    }
+
+    /// A prerequisite that keeps an otherwise-enabled task from running.
+    /// Checked before budget admission, so an unconfigured task never shows
+    /// up as a budget refusal.
+    fn missing_prerequisite(&self, task: DaemonTask) -> Option<DisabledReason> {
+        const STORE: &str = "a backing store ([database] / [postgres])";
+        match task {
+            DaemonTask::Librarian => {
+                // Stays env-gated until WI-298 (shared-triple retention)
+                // merges (ADR 113 decision 4).
+                if std::env::var("AKH_LIBRARIAN").as_deref() != Ok("1") {
+                    Some(DisabledReason::EnvGate {
+                        var: "AKH_LIBRARIAN",
+                    })
+                } else if !self.has_store() {
+                    Some(DisabledReason::NotConfigured { what: STORE })
+                } else {
+                    None
+                }
+            }
+            DaemonTask::Harvest => {
+                (!self.has_store()).then_some(DisabledReason::NotConfigured { what: STORE })
+            }
+            DaemonTask::OpenclawSync => super::openclaw::OpenClawConfig::from_env()
+                .is_none()
+                .then_some(DisabledReason::EnvGate {
+                    var: "OPENCLAW_API_KEY",
+                }),
+            DaemonTask::SeshatCuration => {
+                self.seshat_upstream
+                    .is_none()
+                    .then_some(DisabledReason::NotConfigured {
+                        what: "[upstreams.seshat]",
+                    })
+            }
+            DaemonTask::HekaCuration => {
+                #[cfg(feature = "postgres")]
+                let configured = self.heka_url.is_some();
+                #[cfg(not(feature = "postgres"))]
+                let configured = false;
+                (!configured).then_some(DisabledReason::NotConfigured { what: "[heka]" })
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a relational backing store is attached (harvest, librarian).
+    fn has_store(&self) -> bool {
+        #[cfg(feature = "postgres")]
+        return self.db.is_some();
+        #[cfg(not(feature = "postgres"))]
+        return false;
+    }
+
+    /// How the budget meters `task` for this akh. Knowledge extraction only
+    /// spends tokens when an external API is configured (ADR 113 decision 4).
+    fn budget_metering(&self, task: DaemonTask) -> BudgetMetering {
+        match task.metering() {
+            BudgetMetering::PerRun
+                if task == DaemonTask::KnowledgeExtraction
+                    && self.extraction_config().external_api.is_none() =>
+            {
+                BudgetMetering::Unmetered
+            }
+            metering => metering,
+        }
+    }
+
+    /// The extraction settings the daemon runs knowledge extraction with.
+    fn extraction_config(&self) -> crate::extraction::ExtractionConfig {
+        crate::extraction::ExtractionConfig::default()
+    }
+
+    /// Gate, admit and time one task tick. Returns the start record, or the
+    /// (already emitted) skip report.
+    fn begin_task(&self, task: DaemonTask) -> Result<TaskStart, Box<DaemonTaskReport>> {
+        let skip = |outcome| {
+            let report = DaemonTaskReport::skipped(task, outcome);
+            report.emit(&self.workspace);
+            Box::new(report)
+        };
+        if let TaskGate::Disabled(reason) = self.task_gate(task) {
+            return Err(skip(TaskOutcome::SkippedDisabled(reason)));
+        }
+        let ticket = match self.budget_metering(task) {
+            BudgetMetering::PerRun => match self.governor.admit(task) {
+                Admission::Admitted(ticket) => Some(ticket),
+                Admission::Exhausted(exhausted) => {
+                    return Err(skip(TaskOutcome::SkippedBudget(exhausted)));
+                }
+            },
+            BudgetMetering::Unmetered | BudgetMetering::PerOccurrence => None,
+        };
+        Ok(TaskStart {
+            task,
+            ticket,
+            facts_before: self.engine.fact_totals(),
+            started: Instant::now(),
+        })
+    }
+
+    /// Settle, build and emit the report for a task that ran.
+    fn finish_task(&self, start: TaskStart, run: TaskRun, usage: LlmUsage) -> DaemonTaskReport {
+        let duration = start.started.elapsed();
+        let facts = self.engine.fact_totals().since(start.facts_before);
+        let ledger = start.ticket.map(|ticket| self.settle_ticket(ticket, usage));
+        let report = DaemonTaskReport {
+            task: start.task,
+            outcome: TaskOutcome::from(run),
+            duration,
+            usage,
+            facts,
+            ledger,
+        };
+        report.emit(&self.workspace);
+        report
+    }
+
+    /// Charge a ticket. A ledger write failure is logged; the in-process
+    /// ledger still enforces the budget.
+    fn settle_ticket(&self, ticket: BudgetTicket, usage: LlmUsage) -> BudgetLedger {
+        let task = ticket.task();
+        match self.governor.settle(ticket, usage) {
+            Ok(ledger) => ledger,
+            Err(error) => {
+                tracing::warn!(
+                    target: "akh::autonomy",
+                    workspace = %self.workspace,
+                    task = task.as_str(),
+                    error = %error,
+                    "autonomy budget ledger not persisted; enforcing in memory"
+                );
+                self.governor.ledger()
+            }
+        }
+    }
+
+    /// Run one tick of `task` through gating, budget admission, LLM metering
+    /// and telemetry, and return its report (also logged under
+    /// `akh::autonomy` and exported as `akh_daemon_task_*` metrics).
     ///
-    /// Task names are free-form strings ([`AutonomyConfig::task_enabled`]
-    /// falls back to the master switch on an unrecognized one, silently) —
-    /// see [`KNOWN_TASK_NAMES`] for the full registry consulted by this
-    /// method across every gated `tokio::select!` arm in [`Self::run`].
-    fn task_enabled(&self, task: &str) -> bool {
-        self.autonomy.task_enabled(task)
+    /// `body` runs on the calling thread. Wrap the call in
+    /// `tokio::task::block_in_place` when calling from the async loop.
+    pub fn run_task(
+        &mut self,
+        task: DaemonTask,
+        body: impl FnOnce(&mut Self) -> TaskRun,
+    ) -> DaemonTaskReport {
+        let start = match self.begin_task(task) {
+            Ok(start) => start,
+            Err(skipped) => return *skipped,
+        };
+        let scope = UsageScope::open();
+        let run = body(self);
+        let usage = scope.finish();
+        self.finish_task(start, run, usage)
+    }
+
+    /// One sleep tick: [`DaemonTask::Harvest`] first, then
+    /// [`DaemonTask::SleepCycle`], each through [`Self::run_task`]
+    /// (ADR 113 decision 5). A sleep-cycle error cannot skip harvest, and a
+    /// harvest error cannot skip the sleep cycle.
+    pub fn run_sleep_tick(&mut self) -> SleepTickReport {
+        self.sleep_tick_with(|d| d.run_harvest(), |d| d.run_sleep_cycle())
+    }
+
+    /// [`Self::run_sleep_tick`] with injectable task bodies; the ordering and
+    /// independence live here so tests can prove them.
+    fn sleep_tick_with(
+        &mut self,
+        harvest: impl FnOnce(&mut Self) -> TaskRun,
+        sleep: impl FnOnce(&mut Self) -> TaskRun,
+    ) -> SleepTickReport {
+        let harvest = self.run_task(DaemonTask::Harvest, harvest);
+        let sleep = self.run_task(DaemonTask::SleepCycle, sleep);
+        SleepTickReport { harvest, sleep }
+    }
+
+    /// Log the effective autonomy plan once at daemon start: unknown task
+    /// keys (typos have no effect), every disabled task with its reason, and
+    /// the budget.
+    fn log_autonomy_plan(&self) {
+        for name in self.autonomy.unknown_task_names() {
+            tracing::warn!(
+                target: "akh::autonomy",
+                workspace = %self.workspace,
+                task = name,
+                "unknown [autonomy] tasks key has no effect; see DaemonTask for valid names"
+            );
+        }
+        let mut disabled = Vec::new();
+        for task in DaemonTask::ALL {
+            if let TaskGate::Disabled(reason) = self.task_gate(task) {
+                if reason == DisabledReason::InProcessExecutor {
+                    tracing::info!(
+                        target: "akh::autonomy",
+                        workspace = %self.workspace,
+                        task = task.as_str(),
+                        reason = %reason,
+                        "idle OODA cycle off: the effective executor is in-process (ADR 113 decision 4)"
+                    );
+                }
+                disabled.push(format!("{task} ({reason})"));
+            }
+        }
+        let budget = self.governor.budget();
+        let ledger = self.governor.ledger();
+        tracing::info!(
+            target: "akh::autonomy",
+            workspace = %self.workspace,
+            enabled = self.autonomy.enabled,
+            exec = ?self.exec,
+            disabled = ?disabled,
+            max_tokens_per_day = budget.max_tokens_per_day,
+            max_turns_per_day = budget.max_turns_per_day,
+            ledger_day = %ledger.day,
+            tokens_used = ledger.tokens_used,
+            turns_used = ledger.turns_used,
+            ledger_durable = self.governor.is_durable(),
+            "daemon autonomy plan"
+        );
     }
 
     /// Pause the daemon — prevents new cycle/learning work from acquiring
@@ -533,14 +787,18 @@ impl AgentDaemon {
             ));
         });
 
-        // Startup burst (P5-gated): seed the causal world model + initial goals
-        // so an autonomy-enabled akh can act immediately. A fresh akh with
-        // automation off seeds nothing and stays idle until prompted.
+        self.log_autonomy_plan();
+
+        // Startup burst (gated): seed the causal world model + initial goals
+        // so an autonomy-enabled akh can act immediately. An akh with goal
+        // generation off seeds nothing and stays idle until prompted.
         // Continuous learning is deliberately NOT run at startup — it holds the
         // agent mutex for 30-120s (network I/O + ingestion), blocking handlers.
-        if self.task_enabled("goal_generation") {
+        if self.task_gate(DaemonTask::GoalGeneration) == TaskGate::Enabled {
             self.bootstrap_causal_schemas();
-            tokio::task::block_in_place(|| self.run_goal_generation());
+            tokio::task::block_in_place(|| {
+                self.run_task(DaemonTask::GoalGeneration, |d| d.run_goal_generation())
+            });
         }
 
         loop {
@@ -551,142 +809,152 @@ impl AgentDaemon {
                 continue;
             }
 
-            // P5: each cognitive task arm is gated by `task_enabled(..)`; the
-            // ticker still fires but does nothing when disabled. `persist` and
-            // `trigger` are always-on infra (session durability + user-authored
-            // triggers, which are opt-in by being added).
+            // Every arm runs through `run_task`, which applies `[autonomy]`
+            // gating, the daily LLM budget and per-task telemetry (Phase
+            // 53b). The ticker fires regardless; a gated-off task just
+            // reports `skipped_disabled`. `persist`, `trigger_evaluation` and
+            // `reactor` are always-on infrastructure.
             tokio::select! {
                 _ = equivalence_tick.tick() => {
-                    if self.task_enabled("equivalence") {
-                        tokio::task::block_in_place(|| self.run_equivalence_learning());
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::Equivalence, |d| d.run_equivalence_learning())
+                    });
                 }
                 _ = reflection_tick.tick() => {
-                    if self.task_enabled("reflection") {
-                        tokio::task::block_in_place(|| self.run_reflection());
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::Reflection, |d| d.run_reflection())
+                    });
                 }
                 _ = consolidation_tick.tick() => {
-                    if self.task_enabled("consolidation") {
-                        tokio::task::block_in_place(|| self.run_consolidation_check());
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::Consolidation, |d| d.run_consolidation_check())
+                    });
                 }
                 _ = schema_tick.tick() => {
-                    if self.task_enabled("schema_discovery") {
-                        tokio::task::block_in_place(|| self.run_schema_discovery());
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::SchemaDiscovery, |d| d.run_schema_discovery())
+                    });
                 }
                 _ = rules_tick.tick() => {
-                    if self.task_enabled("rule_inference") {
-                        tokio::task::block_in_place(|| self.run_rule_inference());
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::RuleInference, |d| d.run_rule_inference())
+                    });
                 }
                 _ = gaps_tick.tick() => {
-                    if self.task_enabled("gap_analysis") {
-                        tokio::task::block_in_place(|| self.run_gap_analysis());
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::GapAnalysis, |d| d.run_gap_analysis())
+                    });
                 }
                 _ = persist_tick.tick() => {
-                    // Always on: session persistence is infra, not autonomy.
-                    tokio::task::block_in_place(|| self.persist());
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::Persist, |d| d.persist())
+                    });
                 }
                 _ = idle_cycle_tick.tick() => {
-                    if self.task_enabled("idle_cycle") {
-                        tokio::task::block_in_place(|| self.run_idle_cycle());
-                        if self.config.max_cycles > 0 && self.total_cycles >= self.config.max_cycles {
-                            tokio::task::block_in_place(|| {
-                                self.lock_agent().sink().emit(&AkhMessage::system(
-                                    format!(
-                                        "daemon: max cycles ({}) reached, shutting down",
-                                        self.config.max_cycles,
-                                    ),
-                                ));
-                            });
-                            break;
-                        }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::IdleCycle, |d| d.run_idle_cycle())
+                    });
+                    if self.config.max_cycles > 0 && self.total_cycles >= self.config.max_cycles {
+                        tokio::task::block_in_place(|| {
+                            self.lock_agent().sink().emit(&AkhMessage::system(
+                                format!(
+                                    "daemon: max cycles ({}) reached, shutting down",
+                                    self.config.max_cycles,
+                                ),
+                            ));
+                        });
+                        break;
                     }
                 }
                 _ = continuous_learning_tick.tick() => {
-                    if self.task_enabled("continuous_learning") {
-                        tokio::task::block_in_place(|| self.run_continuous_learning());
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::ContinuousLearning, |d| d.run_continuous_learning())
+                    });
                 }
                 _ = goal_gen_tick.tick() => {
-                    if self.task_enabled("goal_generation") {
-                        tokio::task::block_in_place(|| self.run_goal_generation());
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::GoalGeneration, |d| d.run_goal_generation())
+                    });
                 }
                 _ = sleep_tick.tick() => {
-                    if self.task_enabled("sleep_cycle") {
-                        tokio::task::block_in_place(|| self.run_sleep_cycle());
-                    }
+                    // ADR 113 decision 5: harvest is its own task, run first
+                    // and independently of the sleep cycle.
+                    tokio::task::block_in_place(|| self.run_sleep_tick());
                 }
                 _ = trigger_tick.tick() => {
-                    // Always on: user-authored triggers are opt-in by existing.
-                    tokio::task::block_in_place(|| self.run_trigger_evaluation());
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::TriggerEvaluation, |d| d.run_trigger_evaluation())
+                    });
                 }
                 _ = reactor_tick.tick() => {
-                    // Always on: durable schedules are opt-in by existing. In
-                    // particular, LlmTurn actions deliberately use the real
-                    // configured backend from this daemon interval.
-                    tokio::task::block_in_place(|| self.run_reactor_evaluation());
+                    // Always on: durable schedules are opt-in by existing.
+                    // LlmTurn / DjehutyReply occurrences are budgeted per
+                    // occurrence inside and deferred (not failed) when the
+                    // daily budget is spent.
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::Reactor, |d| d.run_reactor_evaluation())
+                    });
                 }
                 _ = extraction_tick.tick() => {
-                    if self.task_enabled("knowledge_extraction") {
-                        tokio::task::block_in_place(|| self.run_knowledge_extraction());
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::KnowledgeExtraction, |d| d.run_knowledge_extraction())
+                    });
                 }
                 _ = bridge_training_tick.tick() => {
-                    if self.task_enabled("bridge_training") {
-                        // run_bridge_training dispatches heavy work to spawn_blocking
-                        // internally; block_in_place covers only the brief mutex
-                        // acquisition at the start.
-                        tokio::task::block_in_place(|| self.run_bridge_training());
-                    }
+                    // run_bridge_training dispatches heavy work to spawn_blocking
+                    // internally; block_in_place covers only the brief mutex
+                    // acquisition at the start.
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::BridgeTraining, |d| d.run_bridge_training())
+                    });
                 }
                 _ = openclaw_sync_tick.tick() => {
-                    if self.task_enabled("openclaw_sync") {
-                        self.run_openclaw_sync();
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::OpenclawSync, |d| d.run_openclaw_sync())
+                    });
                 }
                 _ = elicitation_tick.tick() => {
-                    if self.task_enabled("knowledge_elicitation") {
-                        self.run_knowledge_elicitation_task();
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::KnowledgeElicitation, |d| {
+                            d.run_knowledge_elicitation_task()
+                        })
+                    });
                 }
                 _ = kg_compaction_tick.tick() => {
-                    if self.task_enabled("kg_compaction") {
-                        self.run_kg_compaction();
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::KgCompaction, |d| d.run_kg_compaction())
+                    });
                 }
                 _ = delegation_tick.tick() => {
-                    if self.task_enabled("delegation") {
-                        self.run_delegation_tick().await;
+                    // Async body: no thread-local LLM metering across the
+                    // await (delegation spend is guarded by its CostGuard).
+                    if let Ok(start) = self.begin_task(DaemonTask::Delegation) {
+                        let run = self.run_delegation_tick().await;
+                        self.finish_task(start, run, LlmUsage::default());
                     }
                 }
                 _ = relation_enrichment_tick.tick() => {
-                    if self.task_enabled("relation_enrichment") {
-                        tokio::task::block_in_place(|| self.run_relation_enrichment());
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::RelationEnrichment, |d| d.run_relation_enrichment())
+                    });
                 }
                 _ = librarian_tick.tick() => {
-                    // ADR 081 slice 4: gated on AKH_LIBRARIAN=1 *inside*
-                    // run_librarian_task (env-gated, like `openclaw_sync`'s
-                    // OPENCLAW_API_KEY check) rather than `task_enabled(..)`,
-                    // since this is an opt-in LLM-cost pass, not a
-                    // per-workspace autonomy toggle. No-op without the
-                    // `postgres` feature (turn material lives only in the WAL).
-                    #[cfg(feature = "postgres")]
-                    tokio::task::block_in_place(|| self.run_librarian_task());
+                    // ADR 081 slice 4, budgeted per run. Also env-gated on
+                    // AKH_LIBRARIAN=1 until WI-298 merges, and needs a backing
+                    // store (turn material lives only in the WAL).
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::Librarian, |d| d.run_librarian_task())
+                    });
                 }
                 _ = seshat_curation_tick.tick() => {
-                    if self.task_enabled("seshat_curation") {
-                        tokio::task::block_in_place(|| self.run_seshat_curation());
-                    }
+                    tokio::task::block_in_place(|| {
+                        self.run_task(DaemonTask::SeshatCuration, |d| d.run_seshat_curation())
+                    });
                 }
                 _ = heka_curation_tick.tick() => {
-                    if self.task_enabled("heka_curation") {
-                        self.run_heka_curation().await;
+                    if let Ok(start) = self.begin_task(DaemonTask::HekaCuration) {
+                        let run = self.run_heka_curation().await;
+                        self.finish_task(start, run, LlmUsage::default());
                     }
                 }
                 _ = self.wait_for_shutdown() => {
@@ -701,7 +969,7 @@ impl AgentDaemon {
         }
 
         // Final persist on shutdown.
-        tokio::task::block_in_place(|| self.persist());
+        tokio::task::block_in_place(|| self.run_task(DaemonTask::Persist, |d| d.persist()));
         if let Some(ref status) = self.status
             && let Ok(mut st) = status.try_lock()
         {
@@ -744,7 +1012,7 @@ impl AgentDaemon {
     // Background task methods
     // -----------------------------------------------------------------------
 
-    fn run_equivalence_learning(&mut self) {
+    fn run_equivalence_learning(&mut self) -> TaskRun {
         let engine = self.lock_agent().engine.clone();
         let current = engine.triple_count();
         let last = self
@@ -756,7 +1024,7 @@ impl AgentDaemon {
                 last,
                 "daemon: equivalence learning skipped, no new triples"
             );
-            return;
+            return TaskRun::Ran;
         }
 
         match engine.learn_equivalences() {
@@ -773,14 +1041,16 @@ impl AgentDaemon {
                 }
                 self.last_equivalence_triple_count
                     .store(current, std::sync::atomic::Ordering::Relaxed);
+                TaskRun::Ran
             }
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: equivalence learning failed");
+                TaskRun::Failed(e.to_string())
             }
         }
     }
 
-    fn run_reflection(&mut self) {
+    fn run_reflection(&mut self) -> TaskRun {
         let mut agent = self.lock_agent();
         match agent.reflect() {
             Ok(result) => {
@@ -805,19 +1075,21 @@ impl AgentDaemon {
                     )));
                 }
                 tracing::info!(adj_count, applied, "daemon: reflection complete");
+                TaskRun::Ran
             }
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: reflection failed");
+                TaskRun::Failed(e.to_string())
             }
         }
     }
 
-    fn run_consolidation_check(&mut self) {
+    fn run_consolidation_check(&mut self) -> TaskRun {
         let mut agent = self.lock_agent();
         let wm_len = agent.working_memory().len();
         let threshold = agent.config.consolidation.auto_consolidate_at;
         if wm_len < threshold {
-            return;
+            return TaskRun::Ran;
         }
 
         match agent.consolidate() {
@@ -832,14 +1104,16 @@ impl AgentDaemon {
                     episodes = result.episodes_created.len(),
                     "daemon: consolidation complete",
                 );
+                TaskRun::Ran
             }
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: consolidation failed");
+                TaskRun::Failed(e.to_string())
             }
         }
     }
 
-    fn run_schema_discovery(&self) {
+    fn run_schema_discovery(&self) -> TaskRun {
         let engine = self.lock_agent().engine.clone();
         let config = crate::autonomous::schema::SchemaDiscoveryConfig::default();
         match engine.discover_schema(config) {
@@ -854,14 +1128,16 @@ impl AgentDaemon {
                     }
                 }
                 tracing::info!(types, hierarchies, "daemon: schema discovery complete");
+                TaskRun::Ran
             }
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: schema discovery failed");
+                TaskRun::Failed(e.to_string())
             }
         }
     }
 
-    fn run_rule_inference(&self) {
+    fn run_rule_inference(&self) -> TaskRun {
         let engine = self.lock_agent().engine.clone();
         let config = crate::autonomous::rule_engine::RuleEngineConfig::default();
         match engine.run_rules(config) {
@@ -880,21 +1156,23 @@ impl AgentDaemon {
                     iterations = result.iterations,
                     "daemon: rule inference complete",
                 );
+                TaskRun::Ran
             }
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: rule inference failed");
+                TaskRun::Failed(e.to_string())
             }
         }
     }
 
-    fn run_gap_analysis(&self) {
+    fn run_gap_analysis(&self) -> TaskRun {
         use super::goal;
 
         let (engine, goal_ids) = {
             let agent = self.lock_agent();
             let active = goal::active_goals(agent.goals());
             if active.is_empty() {
-                return;
+                return TaskRun::Ran;
             }
             let ids: Vec<_> = active.iter().map(|g| g.symbol_id).collect();
             (agent.engine.clone(), ids)
@@ -912,14 +1190,16 @@ impl AgentDaemon {
                     }
                 }
                 tracing::info!(gaps, "daemon: gap analysis complete");
+                TaskRun::Ran
             }
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: gap analysis failed");
+                TaskRun::Failed(e.to_string())
             }
         }
     }
 
-    fn run_continuous_learning(&self) {
+    fn run_continuous_learning(&self) -> TaskRun {
         // Extract what we need from the agent, then DROP the lock before the
         // expensive learning pipeline runs.  `run_continuous_learning` only
         // needs an `&Arc<Engine>` and a curiosity config — it does not mutate
@@ -957,14 +1237,16 @@ impl AgentDaemon {
                 {
                     st.last_learning_at = Some(now_secs());
                 }
+                TaskRun::Ran
             }
             Err(e) => {
                 tracing::info!(error = %e, "daemon: continuous learning skipped");
+                TaskRun::Failed(e.to_string())
             }
         }
     }
 
-    fn run_goal_generation(&mut self) {
+    fn run_goal_generation(&mut self) -> TaskRun {
         // Phase 1: Brief lock — snapshot inputs + update drives (needs &WorkingMemory).
         let (
             engine,
@@ -1039,7 +1321,7 @@ impl AgentDaemon {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(error = %e, "daemon: goal generation skipped");
-                return;
+                return TaskRun::Failed(e.to_string());
             }
         };
 
@@ -1132,9 +1414,10 @@ impl AgentDaemon {
             st.last_goal_gen_at = Some(now_secs());
             st.active_goals = goal_count;
         }
+        TaskRun::Ran
     }
 
-    fn run_sleep_cycle(&mut self) {
+    fn run_sleep_cycle(&mut self) -> TaskRun {
         let mut guard = self.lock_agent();
         // Explicit reborrow so the borrow checker can see partial field access.
         let agent: &mut Agent = &mut *guard;
@@ -1153,56 +1436,95 @@ impl AgentDaemon {
                     metrics.dream_connections_found,
                 )));
                 tracing::info!(?metrics, "daemon: sleep cycle complete");
-
-                // ADR 091: transcript-harvest phase, still inside the agent
-                // lock (this whole method already runs inside the caller's
-                // `block_in_place`) so the store calls' internal `block_on`
-                // never blocks a live async task on this thread.
-                #[cfg(feature = "postgres")]
-                if let Some((db, akh_id)) = self.db.as_ref() {
-                    match super::harvest::harvest_daily_log(
-                        db,
-                        &agent.engine,
-                        agent.predicates(),
-                        *akh_id,
-                    ) {
-                        Ok(hm) => tracing::info!(
-                            turns_harvested = hm.turns_harvested,
-                            episodes_minted = hm.episodes_minted,
-                            last_seq = hm.last_seq,
-                            "daemon: transcript harvest complete"
-                        ),
-                        Err(e) => tracing::warn!(error = %e, "daemon: transcript harvest failed"),
-                    }
-                }
-
                 drop(guard); // Release agent lock before status lock.
                 if let Some(ref status) = self.status
                     && let Ok(mut st) = status.try_lock()
                 {
                     st.last_sleep_at = Some(now_secs());
                 }
+                TaskRun::Ran
             }
-            Err(e) => tracing::debug!(error = %e, "daemon: sleep cycle skipped"),
+            Err(e) => {
+                tracing::warn!(error = %e, "daemon: sleep cycle failed");
+                TaskRun::Failed(e.to_string())
+            }
         }
+    }
+
+    /// ADR 091 transcript harvest as its own task (ADR 113 decision 5):
+    /// up to [`HARVEST_MAX_BATCHES_PER_TICK`](super::autonomy::HARVEST_MAX_BATCHES_PER_TICK)
+    /// batches of captured turns become episode indexes. It holds only
+    /// cloned handles, never the agent write lock, so a large backlog does
+    /// not block live turns. The store calls use `block_on` internally, so
+    /// the caller must be inside `block_in_place` on a tokio runtime.
+    fn run_harvest(&self) -> TaskRun {
+        #[cfg(feature = "postgres")]
+        {
+            let Some((db, akh_id)) = self.db.as_ref() else {
+                return TaskRun::Failed("no backing store attached for transcript harvest".into());
+            };
+            let predicates = self
+                .agent
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .predicates()
+                .clone();
+            match super::harvest::harvest_tick(
+                db,
+                &self.engine,
+                &predicates,
+                *akh_id,
+                super::autonomy::HARVEST_MAX_BATCHES_PER_TICK,
+            ) {
+                Ok(tick) => {
+                    tracing::info!(
+                        workspace = %self.workspace,
+                        batches = tick.batches.len(),
+                        turns_harvested = tick.turns_harvested(),
+                        episodes_minted = tick.episodes_minted(),
+                        last_seq = tick.last_seq(),
+                        backlog_may_remain = tick.backlog_may_remain,
+                        "daemon: transcript harvest complete"
+                    );
+                    TaskRun::Ran
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %self.workspace,
+                        completed_batches = error.completed.batches.len(),
+                        turns_harvested = error.completed.turns_harvested(),
+                        error = %error.source,
+                        "daemon: transcript harvest failed"
+                    );
+                    TaskRun::Failed(error.to_string())
+                }
+            }
+        }
+        #[cfg(not(feature = "postgres"))]
+        TaskRun::Failed("transcript harvest needs the `postgres` feature".into())
     }
 
     /// ADR 081 slice 4 — daily Librarian pass: LLM extraction of typed
     /// triples from captured transcript turns against the in-force schema.
     ///
-    /// Off by default (`AKH_LIBRARIAN=1` opts in) — unlike the always-on
-    /// harvest phase's pure KG bookkeeping, this is a real per-tick LLM cost
-    /// (ADR 081 decision 10: gpt-oss 120B). No-op without a configured
-    /// Postgres store, matching every other store-backed background task's
-    /// local-only degradation (turn material lives only in the WAL).
+    /// Env-gated (`AKH_LIBRARIAN=1` opts in until WI-298 merges) and budgeted
+    /// per run: unlike harvest's pure KG bookkeeping, this is a real LLM cost
+    /// (ADR 081 decision 10: gpt-oss 120B). Skipped without a backing store
+    /// (turn material lives only in the WAL).
+    ///
+    /// Gating (`AKH_LIBRARIAN`, store present) and budget admission happen in
+    /// [`Self::run_task`] before this body runs.
+    fn run_librarian_task(&self) -> TaskRun {
+        #[cfg(feature = "postgres")]
+        return self.run_librarian_pass();
+        #[cfg(not(feature = "postgres"))]
+        TaskRun::Failed("the librarian needs the `postgres` feature".into())
+    }
+
     #[cfg(feature = "postgres")]
-    fn run_librarian_task(&self) {
-        if std::env::var("AKH_LIBRARIAN").as_deref() != Ok("1") {
-            return;
-        }
+    fn run_librarian_pass(&self) -> TaskRun {
         let Some((db, akh_id)) = self.db.as_ref() else {
-            tracing::debug!("daemon: librarian pass skipped — no Postgres store configured");
-            return;
+            return TaskRun::Failed("no backing store attached for the librarian".into());
         };
 
         let engine = {
@@ -1245,8 +1567,12 @@ impl AgentDaemon {
                     last_seq = report.last_seq,
                     "daemon: librarian pass complete",
                 );
+                TaskRun::Ran
             }
-            Err(e) => tracing::warn!(error = %e, "daemon: librarian pass failed"),
+            Err(e) => {
+                tracing::warn!(error = %e, "daemon: librarian pass failed");
+                TaskRun::Failed(e.to_string())
+            }
         }
     }
 
@@ -1255,18 +1581,16 @@ impl AgentDaemon {
     /// Surveys the configured `[upstreams.seshat]` endpoint's corpus status,
     /// forces an embedding pass when chunks are pending, and asserts the
     /// resulting counts into the KG so the akh can reason about its own
-    /// library. Gated by `task_enabled("seshat_curation")` — see
-    /// [`KNOWN_TASK_NAMES`].
+    /// library. Gated by `[autonomy]` ([`DaemonTask::SeshatCuration`]).
     ///
     /// Deliberately **not** in v1: pushing KG summaries back into Seshat via
     /// `seshat_ingest`. That tool appends to an ever-growing corpus with no
     /// delete/dedupe support — doing this safely needs slug-idempotency
     /// verified first (re-ingesting the same summary on every tick would
     /// otherwise flood the archive).
-    fn run_seshat_curation(&self) {
+    fn run_seshat_curation(&self) -> TaskRun {
         let Some(cfg) = self.seshat_upstream.clone() else {
-            tracing::debug!("daemon: seshat curation skipped — no [upstreams.seshat] configured");
-            return;
+            return TaskRun::Failed("no [upstreams.seshat] configured".into());
         };
 
         use crate::upstream_client::UpstreamMcpClient;
@@ -1286,14 +1610,14 @@ impl AgentDaemon {
             Ok(text) => text,
             Err(e) => {
                 tracing::debug!(error = %e, "daemon: seshat_status call failed, skipping curation pass");
-                return;
+                return TaskRun::Failed(format!("seshat_status call failed: {e}"));
             }
         };
         let status: serde_json::Value = match serde_json::from_str(&status_text) {
             Ok(v) => v,
             Err(e) => {
                 tracing::debug!(error = %e, "daemon: seshat_status response was not valid JSON");
-                return;
+                return TaskRun::Failed(format!("seshat_status response was not JSON: {e}"));
             }
         };
 
@@ -1364,6 +1688,7 @@ impl AgentDaemon {
             embeddings_created,
             "daemon: seshat curation pass complete",
         );
+        TaskRun::Ran
     }
 
     /// Periodic Heka long-term-memory store curation pass.
@@ -1380,18 +1705,19 @@ impl AgentDaemon {
     /// `postgres` feature (raw SQL against `akhomed_store`'s sea_orm
     /// connection type — see the branch's commit message for why this reuses
     /// that instead of depending on the `heka` crate directly).
-    async fn run_heka_curation(&self) {
+    async fn run_heka_curation(&self) -> TaskRun {
         #[cfg(feature = "postgres")]
-        self.run_heka_curation_inner().await;
+        return self.run_heka_curation_inner().await;
+        #[cfg(not(feature = "postgres"))]
+        TaskRun::Failed("heka curation needs the `postgres` feature".into())
     }
 
     #[cfg(feature = "postgres")]
-    async fn run_heka_curation_inner(&self) {
+    async fn run_heka_curation_inner(&self) -> TaskRun {
         use akhomed_store::sea_orm::{ConnectionTrait, DbBackend, Statement};
 
         let Some(url) = self.heka_url.clone() else {
-            tracing::debug!("daemon: heka curation skipped — no [heka] configured");
-            return;
+            return TaskRun::Failed("no [heka] configured".into());
         };
 
         let opts = akhomed_store::PoolOptions::new(url);
@@ -1399,7 +1725,7 @@ impl AgentDaemon {
             Ok(db) => db,
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: failed to connect to heka Postgres");
-                return;
+                return TaskRun::Failed(format!("connect to heka Postgres: {e}"));
             }
         };
 
@@ -1417,7 +1743,7 @@ impl AgentDaemon {
             Ok(None) => 0,
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: heka unembedded-chunk count query failed");
-                return;
+                return TaskRun::Failed(format!("heka unembedded-chunk count: {e}"));
             }
         };
 
@@ -1435,7 +1761,7 @@ impl AgentDaemon {
             Ok(None) => 0,
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: heka untagged-drawer count query failed");
-                return;
+                return TaskRun::Failed(format!("heka untagged-drawer count: {e}"));
             }
         };
 
@@ -1476,9 +1802,10 @@ impl AgentDaemon {
             )));
         }
         tracing::info!(unembedded, untagged, "daemon: heka curation pass complete",);
+        TaskRun::Ran
     }
 
-    fn run_trigger_evaluation(&mut self) {
+    fn run_trigger_evaluation(&mut self) -> TaskRun {
         use super::trigger::{self as trigger_mod, TriggerStore};
 
         let mut guard = self.lock_agent();
@@ -1487,7 +1814,7 @@ impl AgentDaemon {
 
         let triggers = TriggerStore::new(&agent.engine).list();
         if triggers.is_empty() {
-            return;
+            return TaskRun::Ran;
         }
 
         let trigger_count = triggers.len();
@@ -1521,9 +1848,10 @@ impl AgentDaemon {
         {
             st.trigger_count = trigger_count;
         }
+        TaskRun::Ran
     }
 
-    fn run_reactor_evaluation(&mut self) {
+    fn run_reactor_evaluation(&mut self) -> TaskRun {
         use super::memory::index_system_episode;
         use super::reactor::{ReactorAction, ReactorStore};
 
@@ -1532,7 +1860,7 @@ impl AgentDaemon {
             Ok(agent) => (Arc::clone(&agent.engine), agent.predicates().clone()),
             Err(_) => {
                 tracing::debug!("daemon: agent lock contended; skipping reactor ingress");
-                return;
+                return TaskRun::Contended;
             }
         };
         match super::board_reactor::ingest_board_events_from_env(&engine, now) {
@@ -1555,7 +1883,7 @@ impl AgentDaemon {
             Ok(poll) => poll,
             Err(error) => {
                 tracing::warn!(error = %error, "daemon: reactor poll failed");
-                return;
+                return TaskRun::Failed(format!("reactor poll failed: {error}"));
             }
         };
 
@@ -1581,6 +1909,27 @@ impl AgentDaemon {
 
         for claim in poll.claims {
             let schedule_tag = format!("reactor_schedule_{}", claim.schedule.id);
+            // Phase 53b: occurrences that run a model turn are admitted
+            // against the daily budget one by one. An exhausted budget DEFERS
+            // the occurrence to the budget reset through the same path as
+            // lock contention: the claim survives and no retry is consumed.
+            let spends_llm = matches!(
+                &claim.schedule.action,
+                ReactorAction::LlmTurn { .. } | ReactorAction::DjehutyReply { .. }
+            );
+            let ticket = if spends_llm {
+                match self.governor.admit(DaemonTask::Reactor) {
+                    Admission::Admitted(ticket) => Some(ticket),
+                    Admission::Exhausted(exhausted) => {
+                        self.defer_claim_for_budget(&engine, &predicates, &claim, &exhausted);
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let occurrence_scope = ticket.as_ref().map(|_| UsageScope::open());
+            let mut ran_model_turn = false;
             let start_key = format!("reactor:{}:attempt:{}:started", claim.run_id, claim.attempt);
             let start_summary = format!(
                 "reactor schedule {} started run {} attempt {} scheduled_for={} trigger={}",
@@ -1636,6 +1985,7 @@ impl AgentDaemon {
                         {
                             return Ok((cached, true));
                         }
+                        ran_model_turn = true;
                         let reply =
                             super::board_reactor::run_tool_free_turn(&guard, agent_id, prompt)?;
                         let excerpt: String = reply.chars().take(240).collect();
@@ -1645,6 +1995,7 @@ impl AgentDaemon {
                         ReactorStore::new(&engine).cache_llm_result(&claim.run_id, &summary)?;
                         return Ok((summary, true));
                     }
+                    ran_model_turn = true;
                     match guard.run_agentic_turn_with_conversation_state(
                         &engine,
                         agent_id,
@@ -1736,6 +2087,16 @@ impl AgentDaemon {
                 }
             };
 
+            if let Some(ticket) = ticket {
+                let mut usage = occurrence_scope.map(UsageScope::finish).unwrap_or_default();
+                // A model turn is one turn even when its backing does not
+                // meter requests (native runtimes, Grug).
+                if ran_model_turn && !usage.reached_model() {
+                    usage.requests = 1;
+                }
+                self.settle_ticket(ticket, usage);
+            }
+
             let lock_contention = matches!(
                 &result,
                 Err(super::error::AgentError::ToolExecution { message, .. })
@@ -1803,15 +2164,73 @@ impl AgentDaemon {
                 tracing::warn!(run_id = %claim.run_id, attempt = claim.attempt, summary = %outcome_summary, "daemon: reactor action failed");
             }
         }
+        TaskRun::Ran
     }
 
-    fn run_idle_cycle(&mut self) {
+    /// Defer a model-turn occurrence until the budget resets, through the
+    /// reactor's contention-deferral path: the occurrence survives, keeps its
+    /// retry budget and becomes due again at the next UTC midnight.
+    fn defer_claim_for_budget(
+        &self,
+        engine: &Engine,
+        predicates: &super::agent::AgentPredicates,
+        claim: &super::reactor::ReactorClaim,
+        exhausted: &BudgetExhausted,
+    ) {
+        use super::memory::index_system_episode;
+        use super::reactor::ReactorStore;
+
+        let now = now_secs();
+        let delay = exhausted.seconds_until_reset(now);
+        if let Err(error) = ReactorStore::new(engine).defer_claim(claim, now, delay) {
+            tracing::warn!(
+                target: "akh::autonomy",
+                workspace = %self.workspace,
+                run_id = %claim.run_id,
+                error = %error,
+                "reactor occurrence over budget but could not be deferred; its lease expiry retries it"
+            );
+            return;
+        }
+        tracing::info!(
+            target: "akh::autonomy",
+            workspace = %self.workspace,
+            task = DaemonTask::Reactor.as_str(),
+            schedule = %claim.schedule.name,
+            run_id = %claim.run_id,
+            dimension = exhausted.dimension.as_str(),
+            used = exhausted.used,
+            limit = exhausted.limit,
+            retry_at = now.saturating_add(delay),
+            "reactor model turn deferred: autonomy budget exhausted"
+        );
+        let schedule_tag = format!("reactor_schedule_{}", claim.schedule.id);
+        let key = format!(
+            "reactor:{}:attempt:{}:budget-deferred:{}",
+            claim.run_id, claim.attempt, exhausted.day
+        );
+        let summary = format!(
+            "reactor schedule {} run {} deferred to the budget reset: {exhausted}",
+            claim.schedule.name, claim.run_id
+        );
+        if let Err(error) = index_system_episode(
+            engine,
+            predicates,
+            &key,
+            &summary,
+            &["reactor_run", "deferred", "budget", schedule_tag.as_str()],
+        ) {
+            tracing::warn!(error = %error, run_id = %claim.run_id, "daemon: failed to record reactor budget deferral episode");
+        }
+    }
+
+    fn run_idle_cycle(&mut self) -> TaskRun {
         use super::goal;
 
         // Respect pause — don't even try to acquire the agent lock.
         if self.paused.load(Ordering::SeqCst) {
             self.cycle_done.notify_one();
-            return;
+            return TaskRun::Contended;
         }
 
         // Try to acquire a write lock without blocking. If a live ACP turn
@@ -1830,16 +2249,16 @@ impl AgentDaemon {
             Err(_) => {
                 tracing::debug!("daemon: agent lock contended; skipping idle cycle");
                 self.cycle_done.notify_one();
-                return;
+                return TaskRun::Contended;
             }
         };
         if goal::active_goals(agent.goals()).is_empty() {
             drop(agent);
             self.cycle_done.notify_one();
-            return;
+            return TaskRun::Ran;
         }
 
-        match agent.run_cycle() {
+        let run = match agent.run_cycle() {
             Ok(result) => {
                 self.total_cycles += 1;
                 agent.sink().emit(&AkhMessage::system(format!(
@@ -1858,13 +2277,16 @@ impl AgentDaemon {
                 {
                     st.total_cycles = self.total_cycles;
                 }
+                TaskRun::Ran
             }
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: OODA cycle failed");
+                TaskRun::Failed(e.to_string())
             }
-        }
+        };
         // Notify any waiter that we've released the agent lock.
         self.cycle_done.notify_one();
+        run
     }
 
     /// Run autonomous knowledge extraction on recently-fetched content.
@@ -1877,8 +2299,8 @@ impl AgentDaemon {
     ///
     /// Drops the agent lock during extraction (expensive I/O) to avoid blocking
     /// HTTP handlers.
-    fn run_knowledge_extraction(&self) {
-        use crate::extraction::{ExtractionConfig, TripleExtractor};
+    fn run_knowledge_extraction(&self) -> TaskRun {
+        use crate::extraction::TripleExtractor;
 
         // Extract engine ref and drop agent lock.
         let engine = {
@@ -1886,11 +2308,11 @@ impl AgentDaemon {
             agent.engine.clone()
         };
 
-        // Load extraction config (use defaults for now — config.toml integration
-        // reads from the file at daemon startup and passes through DaemonConfig).
-        let config = ExtractionConfig::default();
+        // Same config `budget_metering` inspects: the run is budgeted only
+        // when it can reach an external API.
+        let config = self.extraction_config();
         if !config.enabled {
-            return;
+            return TaskRun::Ran;
         }
 
         let extractor = TripleExtractor::new(config);
@@ -1900,7 +2322,7 @@ impl AgentDaemon {
         // have few outgoing relations (knowledge gaps).
         let doc_mentions = engine.resolve_symbol("doc:mentions").ok();
         let Some(mentions_pred) = doc_mentions else {
-            return; // No content has been ingested yet.
+            return TaskRun::Ran; // No content has been ingested yet.
         };
 
         let mention_triples = engine
@@ -1908,7 +2330,7 @@ impl AgentDaemon {
             .triples_for_predicate(mentions_pred);
 
         if mention_triples.is_empty() {
-            return;
+            return TaskRun::Ran;
         }
 
         // Collect paragraph entities that mention under-connected concepts.
@@ -1929,7 +2351,7 @@ impl AgentDaemon {
         extraction_targets.truncate(10);
 
         if extraction_targets.is_empty() {
-            return;
+            return TaskRun::Ran;
         }
 
         let mut total_extracted = 0usize;
@@ -1975,9 +2397,10 @@ impl AgentDaemon {
                 "daemon: knowledge extraction complete"
             );
         }
+        TaskRun::Ran
     }
 
-    fn run_bridge_training(&self) {
+    fn run_bridge_training(&self) -> TaskRun {
         use crate::training::{BridgeTrainingSession, TrainerConfig};
         use crate::vsa::Dimension;
         use crate::vsa::neural_bridge::NeuralVsaBridge;
@@ -1994,7 +2417,7 @@ impl AgentDaemon {
                 symbols = symbol_count,
                 "daemon: bridge training skipped — insufficient grounded symbols (need ≥50)"
             );
-            return;
+            return TaskRun::Ran;
         }
 
         // Training is CPU-bound — run in spawn_blocking to avoid starving
@@ -2031,16 +2454,18 @@ impl AgentDaemon {
                 "daemon: bridge training complete"
             );
         });
+        // Training continues on a blocking thread; this report covers the
+        // dispatch only.
+        TaskRun::Ran
     }
 
-    fn run_openclaw_sync(&self) {
+    fn run_openclaw_sync(&self) -> TaskRun {
         use super::memory_sync::{MemorySyncConfig, sync_openclaw_journals};
         use super::openclaw::OpenClawConfig;
 
         // Load config from env — if the key is absent, skip silently.
         let Some(openclaw_cfg) = OpenClawConfig::from_env() else {
-            tracing::debug!("daemon: OPENCLAW_API_KEY not set, skipping journal sync");
-            return;
+            return TaskRun::Failed("OPENCLAW_API_KEY is not set".into());
         };
 
         let (engine, predicates, cycle_count) = {
@@ -2080,9 +2505,11 @@ impl AgentDaemon {
                 if result.ingested > 0 {
                     let _ = engine.persist();
                 }
+                TaskRun::Ran
             }
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: OpenClaw journal sync failed");
+                TaskRun::Failed(e.to_string())
             }
         }
     }
@@ -2091,7 +2518,7 @@ impl AgentDaemon {
     ///
     /// Releases the agent lock before the scan (CPU-bound) to avoid blocking
     /// HTTP handlers during the triple classification loop.
-    fn run_kg_compaction(&self) {
+    fn run_kg_compaction(&self) -> TaskRun {
         use super::compaction::{CompactionConfig, run_kg_compaction};
 
         // Brief lock: clone the engine Arc, then release.
@@ -2126,9 +2553,11 @@ impl AgentDaemon {
                     st.knowledge_density = Some(metrics.knowledge_density);
                     st.last_compaction_at = Some(now_secs());
                 }
+                TaskRun::Ran
             }
             Err(e) => {
                 tracing::debug!(error = %e, "daemon: KG compaction skipped");
+                TaskRun::Failed(e.to_string())
             }
         }
     }
@@ -2139,7 +2568,7 @@ impl AgentDaemon {
     /// the entity:relation ratio toward the healthy 2–3:1 target range.
     /// Releases the agent lock before the pass runs to avoid blocking HTTP
     /// handlers during the symbol-scan loop.
-    fn run_relation_enrichment(&self) {
+    fn run_relation_enrichment(&self) -> TaskRun {
         use super::relation_enrichment::{RelationEnrichmentConfig, run_relation_enrichment};
 
         // Brief lock: clone the engine Arc, then release.
@@ -2171,9 +2600,11 @@ impl AgentDaemon {
                     under_represented = metrics.under_represented_count,
                     "daemon: relation enrichment complete",
                 );
+                TaskRun::Ran
             }
             Err(e) => {
                 tracing::debug!(error = %e, "daemon: relation enrichment skipped");
+                TaskRun::Failed(e.to_string())
             }
         }
     }
@@ -2184,7 +2615,7 @@ impl AgentDaemon {
     /// then runs the KnowledgeElicitor (taxonomy + relationships pass) on each.
     /// Falls back silently when the `candle-backend` feature is disabled or the
     /// model file is absent — bootstrap continues via web-API-only mode.
-    fn run_knowledge_elicitation_task(&self) {
+    fn run_knowledge_elicitation_task(&self) -> TaskRun {
         use crate::bootstrap::knowledge_elicit::{
             ElicitConfig, ElicitPass, ElicitValidator, KnowledgeElicitor, ingest_validated,
         };
@@ -2204,7 +2635,7 @@ impl AgentDaemon {
 
         if expand_pred.is_none() && is_a_pred.is_none() {
             // No domain ontology present yet — nothing to elicit for.
-            return;
+            return TaskRun::Ran;
         }
 
         // Collect candidate domain labels by sampling concept symbols with low
@@ -2250,7 +2681,7 @@ impl AgentDaemon {
         }
 
         if domain_concepts.is_empty() {
-            return;
+            return TaskRun::Ran;
         }
 
         let config = ElicitConfig::default();
@@ -2258,7 +2689,7 @@ impl AgentDaemon {
 
         if !elicitor.is_available() {
             tracing::debug!("daemon:elicitation: backend unavailable, skipping");
-            return;
+            return TaskRun::Ran;
         }
 
         let mut total_inserted = 0usize;
@@ -2299,12 +2730,14 @@ impl AgentDaemon {
                 )));
             }
         }
+        TaskRun::Ran
     }
 
-    fn persist(&self) {
+    fn persist(&self) -> TaskRun {
         let agent = self.lock_agent();
         if let Err(e) = agent.persist_session() {
             tracing::warn!(error = %e, "daemon: session persist failed");
+            TaskRun::Failed(e.to_string())
         } else {
             tracing::debug!("daemon: session persisted");
             drop(agent); // Release agent lock before status lock.
@@ -2313,6 +2746,7 @@ impl AgentDaemon {
             {
                 st.last_persist_at = Some(now_secs());
             }
+            TaskRun::Ran
         }
     }
 
@@ -2373,9 +2807,10 @@ impl AgentDaemon {
     /// Process the delegation subsystem on each tick (every 10s).
     ///
     /// When the `delegation` feature is disabled this is a no-op.
-    async fn run_delegation_tick(&self) {
+    async fn run_delegation_tick(&self) -> TaskRun {
         #[cfg(feature = "delegation")]
         self.run_delegation_tick_inner().await;
+        TaskRun::Ran
     }
 
     /// Inner implementation (only compiled with the `delegation` feature).
@@ -2582,12 +3017,257 @@ mod tests {
     }
 
     #[test]
-    fn known_task_names_includes_curation_tasks() {
-        // Regression guard for the typo-falls-back-to-master-switch trap
-        // documented on `KNOWN_TASK_NAMES`: the two curation tasks added
-        // alongside this test must be registered here.
-        assert!(KNOWN_TASK_NAMES.contains(&"seshat_curation"));
-        assert!(KNOWN_TASK_NAMES.contains(&"heka_curation"));
+    fn curation_tasks_are_registered_daemon_tasks() {
+        // Replaces the KNOWN_TASK_NAMES typo guard: config keys now parse
+        // into the typed registry, and unknown keys are reported.
+        assert_eq!(
+            "seshat_curation".parse::<DaemonTask>().unwrap(),
+            DaemonTask::SeshatCuration
+        );
+        assert_eq!(
+            "heka_curation".parse::<DaemonTask>().unwrap(),
+            DaemonTask::HekaCuration
+        );
+    }
+
+    // ── Phase 53b: budgeted autonomy ──
+
+    fn exhausted_autonomy() -> AutonomyConfig {
+        AutonomyConfig {
+            budget: AutonomyBudget {
+                max_tokens_per_day: 250_000,
+                max_turns_per_day: 0,
+            },
+            ..AutonomyConfig::default()
+        }
+    }
+
+    #[test]
+    fn exhausted_budget_yields_a_skip_report_without_running_the_task() {
+        let shared = test_shared_agent();
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default())
+            .with_autonomy(exhausted_autonomy())
+            .with_workspace("budget-test");
+        let report = daemon.run_task(DaemonTask::KnowledgeElicitation, |_| {
+            panic!("an over-budget LLM task must not run")
+        });
+        match &report.outcome {
+            TaskOutcome::SkippedBudget(exhausted) => {
+                assert_eq!(exhausted.task, DaemonTask::KnowledgeElicitation);
+                assert_eq!(exhausted.limit, 0);
+            }
+            other => panic!("expected skipped_budget, got {other:?}"),
+        }
+        assert_eq!(report.outcome.label(), "skipped_budget");
+        assert_eq!(report.duration, Duration::ZERO);
+
+        // Free tasks keep running on an exhausted budget.
+        let free = daemon.run_task(DaemonTask::Reflection, |_| TaskRun::Ran);
+        assert_eq!(free.outcome, TaskOutcome::Ran);
+    }
+
+    #[test]
+    fn admitted_llm_task_is_charged_its_metered_usage() {
+        let shared = test_shared_agent();
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        let report = daemon.run_task(DaemonTask::KnowledgeElicitation, |_| {
+            crate::agent::llm_metrics::record_usage(1_000, 200);
+            TaskRun::Ran
+        });
+        assert_eq!(report.outcome, TaskOutcome::Ran);
+        assert_eq!(report.usage.total_tokens(), 1_200);
+        let ledger = report.ledger.expect("a metered run settles the ledger");
+        assert_eq!((ledger.turns_used, ledger.tokens_used), (1, 1_200));
+
+        // An admitted run that never reached a model is free.
+        let idle = daemon.run_task(DaemonTask::KnowledgeElicitation, |_| TaskRun::Ran);
+        assert_eq!(idle.ledger.unwrap().turns_used, 1);
+
+        // Extraction without an external API is unmetered: no ledger.
+        let extraction = daemon.run_task(DaemonTask::KnowledgeExtraction, |_| TaskRun::Ran);
+        assert!(extraction.ledger.is_none());
+    }
+
+    #[test]
+    fn task_reports_carry_the_fact_delta() {
+        let shared = test_shared_agent();
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        let report = daemon.run_task(DaemonTask::RuleInference, |d| {
+            let engine = Arc::clone(&d.engine);
+            let s = engine.resolve_or_create_entity("fact-delta-s").unwrap();
+            let p = engine.resolve_or_create_relation("fact-delta-p").unwrap();
+            let o = engine.resolve_or_create_entity("fact-delta-o").unwrap();
+            engine
+                .add_triple(&crate::graph::Triple::new(s, p, o))
+                .unwrap();
+            engine.remove_triple(s, p, o).unwrap();
+            TaskRun::Ran
+        });
+        assert_eq!(report.facts.asserted, 1);
+        assert!(report.facts.retracted >= 1);
+        assert!(report.is_noteworthy());
+    }
+
+    #[test]
+    fn idle_cycle_defaults_off_in_process_and_on_when_contained() {
+        let shared = test_shared_agent();
+        let mut in_process = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        let report = in_process.run_task(DaemonTask::IdleCycle, |_| {
+            panic!("idle OODA tool use must stay off with an in-process executor")
+        });
+        assert_eq!(
+            report.outcome,
+            TaskOutcome::SkippedDisabled(DisabledReason::InProcessExecutor)
+        );
+
+        let mut contained = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default())
+            .with_exec_placement(ExecPlacement::Contained);
+        let report = contained.run_task(DaemonTask::IdleCycle, |_| TaskRun::Ran);
+        assert_eq!(report.outcome, TaskOutcome::Ran);
+    }
+
+    #[test]
+    fn harvest_is_skipped_as_not_configured_without_a_store() {
+        let shared = test_shared_agent();
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        let tick = daemon.sleep_tick_with(
+            |_| panic!("harvest must not run without a store"),
+            |_| TaskRun::Ran,
+        );
+        assert!(matches!(
+            tick.harvest.outcome,
+            TaskOutcome::SkippedDisabled(DisabledReason::NotConfigured { .. })
+        ));
+        assert_eq!(tick.sleep.outcome, TaskOutcome::Ran);
+    }
+
+    /// ADR 113 decision 5 at the scheduling seam: harvest runs before the
+    /// sleep cycle, and neither one's failure skips the other. The bodies are
+    /// injected because a real `run_sleep_cycle` failure cannot be forced
+    /// without also breaking the engine that harvest writes to.
+    #[cfg(feature = "postgres")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn harvest_runs_before_and_independent_of_the_sleep_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = akhomed_store::PoolOptions::new(format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("order.sqlite3").display()
+        ));
+        akhomed_store::run_migrations_locked(&options)
+            .await
+            .unwrap();
+        let db = akhomed_store::connect(&options).await.unwrap();
+
+        let shared = test_shared_agent();
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default())
+            .with_db(db, akhomed_store::uuid::Uuid::new_v4());
+        let order = std::sync::Mutex::new(Vec::new());
+
+        let tick = daemon.sleep_tick_with(
+            |_| {
+                order.lock().unwrap().push(DaemonTask::Harvest);
+                TaskRun::Ran
+            },
+            |_| {
+                order.lock().unwrap().push(DaemonTask::SleepCycle);
+                TaskRun::Failed("sleep cycle exploded".into())
+            },
+        );
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec![DaemonTask::Harvest, DaemonTask::SleepCycle]
+        );
+        assert_eq!(tick.harvest.outcome, TaskOutcome::Ran);
+        assert_eq!(tick.sleep.outcome.label(), "failed");
+
+        // And a failed harvest is reported, never silently skipped, while the
+        // sleep cycle still runs.
+        let tick = daemon.sleep_tick_with(
+            |_| TaskRun::Failed("store unavailable".into()),
+            |_| TaskRun::Ran,
+        );
+        assert_eq!(
+            tick.harvest.outcome,
+            TaskOutcome::Failed("store unavailable".into())
+        );
+        assert_eq!(tick.sleep.outcome, TaskOutcome::Ran);
+    }
+
+    /// An over-budget reactor model turn is deferred through the reactor's
+    /// deferral path: the backend is never called, the occurrence stays
+    /// pending (not completed, not failed) and no retry is consumed.
+    #[test]
+    fn exhausted_budget_defers_reactor_llm_turn() {
+        use crate::agent::chat_backend::{ChatBackend, ChatBackendError};
+        use crate::agent::ollama::AssistantTurn;
+        use crate::agent::reactor::{ReactorAction, ReactorSchedule, ReactorStore, ScheduleRule};
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountingBackend(AtomicUsize);
+        impl ChatBackend for CountingBackend {
+            fn label(&self) -> &str {
+                "counting"
+            }
+            fn available(&self) -> bool {
+                true
+            }
+            fn chat_with_tools(
+                &self,
+                _agent_id: &str,
+                _conversation: &[serde_json::Value],
+                _tools: &[serde_json::Value],
+                _request_seq: usize,
+            ) -> Result<AssistantTurn, ChatBackendError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(AssistantTurn {
+                    content: "should not happen".into(),
+                    ..AssistantTurn::default()
+                })
+            }
+        }
+
+        let shared = test_shared_agent();
+        let backend = Arc::new(CountingBackend(AtomicUsize::new(0)));
+        {
+            let mut agent = shared.write().unwrap();
+            agent.set_chat_backend(backend.clone());
+            let schedule = ReactorSchedule::new(
+                "budget-proof",
+                "Budget proof",
+                ScheduleRule::Once { at: 0 },
+                ReactorAction::LlmTurn {
+                    prompt: "Respond once".into(),
+                    agent_id: Some("test-akh".into()),
+                    allow_tools: false,
+                    require_mutation: false,
+                },
+                0,
+            )
+            .unwrap();
+            ReactorStore::new(&agent.engine).put(&schedule).unwrap();
+        }
+
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default())
+            .with_autonomy(exhausted_autonomy());
+        let report = daemon.run_task(DaemonTask::Reactor, |d| d.run_reactor_evaluation());
+        assert_eq!(report.outcome, TaskOutcome::Ran);
+        assert_eq!(
+            backend.0.load(Ordering::SeqCst),
+            0,
+            "no model call over budget"
+        );
+
+        let agent = shared.read().unwrap();
+        let schedule = ReactorStore::new(&agent.engine)
+            .get("budget-proof")
+            .unwrap();
+        assert!(!schedule.state.completed, "the occurrence survives");
+        assert_eq!(schedule.state.attempt, 0, "no retry budget consumed");
+        assert!(
+            schedule.state.retry_at.is_some_and(|at| at > now_secs()),
+            "deferred to the budget reset"
+        );
+        assert!(schedule.state.active_scheduled_for.is_some());
     }
 
     // ── WI-259: the daemon must yield to a live turn, never block it ──
@@ -2666,7 +3346,7 @@ mod tests {
         let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let cycle_thread = std::thread::spawn(move || {
-            daemon.run_idle_cycle();
+            let _ = daemon.run_idle_cycle();
             let _ = done_tx.send(());
         });
         let skipped_promptly = done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
@@ -2752,7 +3432,7 @@ mod tests {
         }
 
         let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
-        daemon.run_reactor_evaluation();
+        assert_eq!(daemon.run_reactor_evaluation(), TaskRun::Ran);
 
         // The default unattended LLM action is one tool-free backend request.
         assert_eq!(backend.0.load(Ordering::SeqCst), 1);

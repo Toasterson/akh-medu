@@ -196,6 +196,9 @@ pub struct Engine {
     /// mode. Every successful assert/retract is recorded here (best-effort,
     /// non-blocking).
     mutation_sink: std::sync::OnceLock<Arc<dyn crate::mutation::MutationSink>>,
+    /// Phase 53b: fact-change counters bumped for every recorded mutation,
+    /// sink or not, so the daemon can report a per-task fact delta.
+    fact_counters: crate::mutation::FactCounters,
     /// ADR 091 decision 5: optional WAL body-paging reader, installed by the
     /// daemon binary alongside the `MutationSink` when a Postgres store is
     /// configured. Lets [`Engine::turn_body`] page a captured turn's raw text
@@ -650,6 +653,7 @@ impl Engine {
             mutation_lock: Mutex::new(()),
             mutations_quiesced: AtomicBool::new(false),
             mutation_sink: std::sync::OnceLock::new(),
+            fact_counters: crate::mutation::FactCounters::default(),
             turn_body_reader: std::sync::OnceLock::new(),
             inference_options: Arc::new(crate::inference_options::InferenceOptions::default()),
             identity_index: dashmap::DashMap::new(),
@@ -760,10 +764,18 @@ impl Engine {
         self.mutation_sink.set(sink)
     }
 
-    /// Record a mutation on the WAL sink if one is installed. Non-blocking; a
+    /// Monotonic fact-change totals since this engine was constructed
+    /// (Phase 53b). Counted for every recorded mutation, WAL sink or not.
+    pub fn fact_totals(&self) -> crate::mutation::FactTotals {
+        self.fact_counters.totals()
+    }
+
+    /// Record a mutation on the WAL sink if one is installed, after counting
+    /// it in [`Engine::fact_totals`]. Non-blocking; the sink hand-off is a
     /// no-op in local-only mode.
     #[inline]
     fn record_mutation(&self, kind: crate::mutation::MutationKind, payload: serde_json::Value) {
+        self.fact_counters.observe(kind, &payload);
         if let Some(sink) = self.mutation_sink.get() {
             sink.record(crate::mutation::MutationRecord::new(kind, payload));
         }

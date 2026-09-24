@@ -14,6 +14,7 @@ pub mod active_inference;
 pub mod affect;
 pub mod agent;
 pub mod agentic_chat;
+pub mod autonomy;
 #[cfg(feature = "daemon")]
 pub mod board_reactor;
 pub mod calendar;

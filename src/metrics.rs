@@ -175,6 +175,34 @@ pub struct AkhomedMetrics {
     ///
     /// Type: `u64` counter. Unit: `"retry"`. Labels: `workspace`, `retry_reason`.
     pub acp_turn_retries_total: Counter<u64>,
+
+    // ── Daemon background tasks (Phase 53b, ADR 113) ──────────────────────
+    /// `akh_daemon_task_runs_total` — daemon task ticks by outcome.
+    ///
+    /// Type: `u64` counter. Unit: `"run"`. Labels: `workspace`, `task`,
+    /// `outcome` (`ran`, `skipped_disabled`, `skipped_budget`,
+    /// `skipped_contended`, `failed`).
+    pub daemon_task_runs_total: Counter<u64>,
+
+    /// `akh_daemon_task_duration_seconds` — wall time of a daemon task body
+    /// (recorded for `ran` and `failed` only).
+    ///
+    /// Type: `f64` histogram. Unit: `"s"`. Labels: `workspace`, `task`, `outcome`.
+    pub daemon_task_duration_seconds: Histogram<f64>,
+
+    /// `akh_daemon_task_llm_tokens_total` — LLM tokens metered while a daemon
+    /// task ran.
+    ///
+    /// Type: `u64` counter. Unit: `"token"`. Labels: `workspace`, `task`,
+    /// `direction` (`prompt`, `completion`).
+    pub daemon_task_llm_tokens_total: Counter<u64>,
+
+    /// `akh_daemon_task_facts_total` — KG fact changes observed while a daemon
+    /// task ran.
+    ///
+    /// Type: `u64` counter. Unit: `"triple"`. Labels: `workspace`, `task`,
+    /// `change` (`asserted`, `retracted`).
+    pub daemon_task_facts_total: Counter<u64>,
 }
 
 impl AkhomedMetrics {
@@ -318,6 +346,27 @@ impl AkhomedMetrics {
                 .with_description("Retry attempts for a turn")
                 .with_unit("retry")
                 .build(),
+
+            daemon_task_runs_total: meter
+                .u64_counter("akh_daemon_task_runs_total")
+                .with_description("Daemon background task ticks by outcome")
+                .with_unit("run")
+                .build(),
+            daemon_task_duration_seconds: meter
+                .f64_histogram("akh_daemon_task_duration_seconds")
+                .with_description("Wall time of a daemon background task body")
+                .with_unit("s")
+                .build(),
+            daemon_task_llm_tokens_total: meter
+                .u64_counter("akh_daemon_task_llm_tokens_total")
+                .with_description("LLM tokens metered while a daemon task ran")
+                .with_unit("token")
+                .build(),
+            daemon_task_facts_total: meter
+                .u64_counter("akh_daemon_task_facts_total")
+                .with_description("KG fact changes observed while a daemon task ran")
+                .with_unit("triple")
+                .build(),
         }
     }
 
@@ -434,6 +483,10 @@ mod tests {
         let _ = &reg.acp_turn_tool_results_total;
         let _ = &reg.acp_turn_errors_total;
         let _ = &reg.acp_turn_retries_total;
+        let _ = &reg.daemon_task_runs_total;
+        let _ = &reg.daemon_task_duration_seconds;
+        let _ = &reg.daemon_task_llm_tokens_total;
+        let _ = &reg.daemon_task_facts_total;
 
         drop(provider);
     }
