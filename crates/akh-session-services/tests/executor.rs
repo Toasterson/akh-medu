@@ -499,6 +499,19 @@ fn stat_is_read_only_and_stays_admitted_behind_the_unknown_outcome_fence() {
             )
         })
         .unwrap();
+    // The raw fixture write bypasses the executor's Unknown index; a restart
+    // rebuilds it, as it does for stores written before the index existed.
+    let config = executor.config.clone();
+    drop(executor);
+    let executor =
+        Executor::new(config, Store::open(&dir.path().join("state.redb")).unwrap()).unwrap();
+    let stat = |id: &str, path: &str| {
+        let receipt = executor
+            .operate(request(id, "stat", json!({"path":path})))
+            .unwrap();
+        assert_eq!(receipt.status, TurnStatus::Completed);
+        serde_json::from_value::<WorkspaceStat>(receipt.result.unwrap().data.unwrap()).unwrap()
+    };
     assert_eq!(
         executor
             .operate(request("after-fence", "mkdir", json!({"path":"d"})))
@@ -558,5 +571,90 @@ async fn http_operations_record_the_authenticated_principal_on_the_receipt() {
     assert_eq!(
         executor.receipt("attributed").unwrap().principal.as_deref(),
         Some("akhomed-janus")
+    );
+}
+
+#[test]
+fn a_legacy_unknown_receipt_is_indexed_on_restart_and_fences_mutations() {
+    let (dir, executor) = setup();
+    let op = request(
+        "legacy-unknown",
+        "write",
+        json!({"path":"marker","content":"new","create":true}),
+    );
+    // A store written before the index existed: an Unknown receipt, no index.
+    executor
+        .store
+        .transaction(|tx| {
+            tx.put(
+                &key("receipt", &["legacy-unknown"]),
+                &OperationReceipt {
+                    id: "legacy-unknown".into(),
+                    request: op.clone(),
+                    status: TurnStatus::Unknown,
+                    result: None,
+                    started_at: now_ms(),
+                    finished_at: None,
+                    principal: None,
+                },
+            )
+        })
+        .unwrap();
+    let config = executor.config.clone();
+    drop(executor);
+    let executor =
+        Executor::new(config, Store::open(&dir.path().join("state.redb")).unwrap()).unwrap();
+    let indexed = executor
+        .store
+        .scan::<String>(&key("unknown_receipt", &["workspace"]))
+        .unwrap();
+    assert_eq!(indexed, ["legacy-unknown"]);
+    let fenced = executor
+        .operate(request(
+            "blocked",
+            "write",
+            json!({"path":"other","content":"x","create":true}),
+        ))
+        .unwrap_err();
+    assert_eq!(fenced.code, "conflict");
+    // Reads stay admitted behind the fence.
+    assert_eq!(
+        executor
+            .operate(request("look", "stat", json!({"path":"."})))
+            .unwrap()
+            .status,
+        TurnStatus::Completed
+    );
+}
+
+#[test]
+fn terminal_read_receipts_are_collected_and_mutation_receipts_are_kept() {
+    let (_dir, executor) = setup();
+    let write = request(
+        "kept-write",
+        "write",
+        json!({"path":"kept","content":"x","create":true}),
+    );
+    executor.operate(write.clone()).unwrap();
+    let stat = request("old-stat", "stat", json!({"path":"kept"}));
+    assert_eq!(
+        executor.operate(stat.clone()).unwrap().status,
+        TurnStatus::Completed
+    );
+    executor
+        .operate(request("old-read", "read", json!({"path":"kept"})))
+        .unwrap();
+    // Nothing is old enough yet.
+    assert_eq!(executor.collect_read_receipts(0).unwrap(), 0);
+    assert_eq!(executor.collect_read_receipts(now_ms() + 1).unwrap(), 2);
+    assert_eq!(executor.receipt("old-stat").unwrap_err().code, "not_found");
+    assert_eq!(executor.receipt("old-read").unwrap_err().code, "not_found");
+    // The mutation keeps its receipt, so its replay is still deduplicated.
+    let original = executor.receipt("kept-write").unwrap();
+    assert_eq!(executor.operate(write).unwrap(), original);
+    // Replaying a collected read just reads again.
+    assert_eq!(
+        executor.operate(stat).unwrap().status,
+        TurnStatus::Completed
     );
 }

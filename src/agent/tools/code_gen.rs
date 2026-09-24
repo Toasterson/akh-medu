@@ -68,8 +68,44 @@ impl CodeScope {
 // Tool
 // ---------------------------------------------------------------------------
 
+/// How `code_gen` honours `format = true`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RustFormatter {
+    /// Pipe the code through a host `rustfmt` process.
+    #[default]
+    HostRustfmt,
+    /// Spawn nothing; return the linearized code unformatted. Deployed akhs
+    /// use this because akhomed runs no host process (Phase 53 decision 6).
+    Disabled,
+}
+
+impl RustFormatter {
+    fn format(self, code: String) -> String {
+        match self {
+            Self::HostRustfmt => format_with_rustfmt(&code).unwrap_or(code),
+            Self::Disabled => code,
+        }
+    }
+}
+
 /// Generate Rust code from KG structure through the grammar system.
-pub struct CodeGenTool;
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CodeGenTool {
+    formatter: RustFormatter,
+}
+
+impl CodeGenTool {
+    /// A `code_gen` that never spawns `rustfmt`; `format = true` is a no-op.
+    pub fn without_host_formatter() -> Self {
+        Self {
+            formatter: RustFormatter::Disabled,
+        }
+    }
+
+    pub fn formatter(&self) -> RustFormatter {
+        self.formatter
+    }
+}
 
 impl Tool for CodeGenTool {
     fn signature(&self) -> ToolSignature {
@@ -129,7 +165,8 @@ impl Tool for CodeGenTool {
 
         // --- Template path ---
         if let Some(template_name) = input.get("template") {
-            return execute_template(engine, target_str, template_name, &input, run_format);
+            let formatter = run_format.then_some(self.formatter);
+            return execute_template(engine, target_str, template_name, &input, formatter);
         }
 
         // --- KG → AbsTree → RustCodeGrammar path ---
@@ -169,7 +206,7 @@ impl Tool for CodeGenTool {
 
         // Optionally format with rustfmt
         let final_code = if run_format {
-            format_with_rustfmt(&code).unwrap_or(code)
+            self.formatter.format(code)
         } else {
             code
         };
@@ -260,7 +297,7 @@ fn execute_template(
     target_str: &str,
     template_name: &str,
     input: &ToolInput,
-    run_format: bool,
+    formatter: Option<RustFormatter>,
 ) -> AgentResult<ToolOutput> {
     let registry = TemplateRegistry::new();
 
@@ -296,10 +333,9 @@ fn execute_template(
         }
     };
 
-    let final_code = if run_format {
-        format_with_rustfmt(&code).unwrap_or(code)
-    } else {
-        code
+    let final_code = match formatter {
+        Some(formatter) => formatter.format(code),
+        None => code,
     };
 
     // Record provenance if target exists in KG
@@ -805,6 +841,21 @@ mod tests {
     use crate::engine::EngineConfig;
     use crate::vsa::Dimension;
 
+    #[test]
+    fn disabled_formatter_returns_code_verbatim() {
+        let tool = CodeGenTool::without_host_formatter();
+        assert_eq!(tool.formatter(), RustFormatter::Disabled);
+        assert_eq!(
+            CodeGenTool::default().formatter(),
+            RustFormatter::HostRustfmt
+        );
+        let unformatted = "fn   f( ){}".to_string();
+        assert_eq!(
+            RustFormatter::Disabled.format(unformatted.clone()),
+            unformatted
+        );
+    }
+
     fn test_engine_with_fn() -> (Engine, SymbolId) {
         let engine = Engine::new(EngineConfig {
             dimension: Dimension::TEST,
@@ -879,7 +930,7 @@ mod tests {
     #[test]
     fn code_gen_function() {
         let (engine, _fn_id) = test_engine_with_fn();
-        let tool = CodeGenTool;
+        let tool = CodeGenTool::default();
 
         let input = ToolInput::new()
             .with_param("target", "greet")
@@ -895,7 +946,7 @@ mod tests {
     #[test]
     fn code_gen_struct() {
         let (engine, _struct_id) = test_engine_with_struct();
-        let tool = CodeGenTool;
+        let tool = CodeGenTool::default();
 
         let input = ToolInput::new()
             .with_param("target", "Config")
@@ -911,7 +962,7 @@ mod tests {
     #[test]
     fn code_gen_auto_detect_fn() {
         let (engine, _) = test_engine_with_fn();
-        let tool = CodeGenTool;
+        let tool = CodeGenTool::default();
 
         let input = ToolInput::new().with_param("target", "greet");
 
@@ -923,7 +974,7 @@ mod tests {
     #[test]
     fn code_gen_auto_detect_struct() {
         let (engine, _) = test_engine_with_struct();
-        let tool = CodeGenTool;
+        let tool = CodeGenTool::default();
 
         let input = ToolInput::new().with_param("target", "Config");
 
@@ -940,7 +991,7 @@ mod tests {
         })
         .unwrap();
 
-        let tool = CodeGenTool;
+        let tool = CodeGenTool::default();
         let input = ToolInput::new().with_param("target", "NonExistent");
 
         let output = tool.execute(&engine, input).unwrap();
@@ -951,7 +1002,7 @@ mod tests {
     #[test]
     fn code_gen_module() {
         let (engine, _) = test_engine_with_fn();
-        let tool = CodeGenTool;
+        let tool = CodeGenTool::default();
 
         let input = ToolInput::new()
             .with_param("target", "utils")
@@ -1022,7 +1073,7 @@ mod tests {
         })
         .unwrap();
 
-        let tool = CodeGenTool;
+        let tool = CodeGenTool::default();
         let input = ToolInput::new()
             .with_param("target", "MyError")
             .with_param("template", "error-type")
@@ -1056,7 +1107,7 @@ mod tests {
         })
         .unwrap();
 
-        let tool = CodeGenTool;
+        let tool = CodeGenTool::default();
         let input = ToolInput::new()
             .with_param("target", "Config")
             .with_param("template", "builder")
@@ -1079,7 +1130,7 @@ mod tests {
         })
         .unwrap();
 
-        let tool = CodeGenTool;
+        let tool = CodeGenTool::default();
         let input = ToolInput::new()
             .with_param("target", "Foo")
             .with_param("template", "nonexistent");
@@ -1098,7 +1149,7 @@ mod tests {
         })
         .unwrap();
 
-        let tool = CodeGenTool;
+        let tool = CodeGenTool::default();
         let input = ToolInput::new()
             .with_param("target", "Foo")
             .with_param("template", "error-type")

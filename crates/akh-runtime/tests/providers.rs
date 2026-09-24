@@ -85,7 +85,7 @@ fn setup(
         environment: Default::default(),
         launcher: vec![],
         timeout_secs: 5,
-        execution_mode: mode,
+        execution_mode: Some(mode),
         conformance_file: None,
         native_aliases: Default::default(),
         effort: None,

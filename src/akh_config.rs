@@ -439,6 +439,7 @@ pub enum ExecBackendConfig {
     /// # executor_url = "http://127.0.0.1:8413"      # default: akhsbxd gateway
     /// # executor_token_file = "/run/akh/credentials/akhexecd-token"
     /// # poll_wait_ms = 5000
+    /// # allow_insecure_http = false  # plain http only to loopback unless true
     /// ```
     Execd {
         /// akhsbxd base URL.
@@ -461,6 +462,12 @@ pub enum ExecBackendConfig {
         /// Server-side wait per `exec_poll`, 1..=10000 ms.
         #[serde(default = "default_execd_poll_wait_ms")]
         poll_wait_ms: u64,
+        /// Accept plain `http://` URLs to non-loopback hosts. The bearer
+        /// tokens then cross the link in clear text; set it only for a
+        /// trusted private link. Loopback (`localhost`, `127.0.0.1`, `[::1]`)
+        /// never needs it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_insecure_http: bool,
     },
 }
 
@@ -553,6 +560,7 @@ impl ExecBackendConfig {
             profile,
             principal,
             poll_wait_ms,
+            allow_insecure_http,
         } = self
         else {
             return None;
@@ -576,7 +584,8 @@ impl ExecBackendConfig {
                 workspace,
             )
             .with_executor(route)
-            .with_poll_wait(std::time::Duration::from_millis(*poll_wait_ms)),
+            .with_poll_wait(std::time::Duration::from_millis(*poll_wait_ms))
+            .with_insecure_http(*allow_insecure_http),
         )
     }
 

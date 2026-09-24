@@ -67,7 +67,7 @@ pub fn run(
 ) -> Result<String, String> {
     if config.kind != request.binding.kind
         || config.revision != request.binding.revision
-        || config.execution_mode != request.binding.execution_mode
+        || config.execution_mode() != request.binding.execution_mode
     {
         return Err("runtime binding does not match the installed profile".into());
     }
@@ -79,7 +79,7 @@ pub fn run(
         );
     }
     // A remote workspace path is never resolved on this host in brokered mode.
-    let cwd = if config.execution_mode == ExecutionMode::Brokered {
+    let cwd = if config.execution_mode() == ExecutionMode::Brokered {
         config.working_dir.clone()
     } else {
         let path = PathBuf::from(&request.workspace.root)
@@ -96,7 +96,7 @@ pub fn run(
     };
     let tools = request.tools.iter().map(|t|json!({"function":{"name":t.name,"description":t.description,"parameters":t.input_schema}})).collect();
     let mut instructions = request.instructions.clone();
-    if config.execution_mode == ExecutionMode::Brokered {
+    if config.execution_mode() == ExecutionMode::Brokered {
         instructions.push_str("\nWorkspace operations MUST use the provided Akh tools. The working directory of this runtime is private runtime state, not the workspace. Native workspace tools are disabled. Never substitute local execution if an Akh tool fails.");
     }
     let mut turn = Turn {
@@ -148,7 +148,7 @@ impl Turn<'_> {
         Ok(json!(self.host.tool(id, name, arguments)?))
     }
     fn approve(&mut self, id: &str, name: &str, arguments: &Value) -> Result<bool, String> {
-        if self.config.execution_mode == ExecutionMode::Brokered
+        if self.config.execution_mode() == ExecutionMode::Brokered
             || self.request.approval_policy == ApprovalPolicy::ReadOnly
             || self.cancel.load(Ordering::Relaxed)
         {

@@ -81,6 +81,11 @@ pub struct AgentConfig {
     pub max_empty_cycles: usize,
     /// Goal queue hygiene settings.
     pub hygiene: super::hygiene::HygieneConfig,
+    /// The deployment mode the tool registry is built for (Phase 53 decision
+    /// 6). Deployed agents withhold tools that spawn host processes inside
+    /// akhomed (see [`HostProcessPolicy`]). Defaults to the process mode
+    /// ([`crate::deployment::process_mode`]).
+    pub deployment: crate::deployment::DeploymentMode,
 }
 
 impl Default for AgentConfig {
@@ -99,6 +104,7 @@ impl Default for AgentConfig {
             curiosity: super::curiosity::DirectedCuriosityConfig::default(),
             max_empty_cycles: 4,
             hygiene: super::hygiene::HygieneConfig::default(),
+            deployment: crate::deployment::process_mode(),
         }
     }
 }
@@ -163,6 +169,9 @@ impl AgentPredicates {
 pub struct Agent {
     pub(crate) engine: Arc<Engine>,
     pub(crate) config: AgentConfig,
+    /// Whether tools that spawn host processes in akhomed are registered
+    /// (built-ins at construction, skill CLI tools on skill load).
+    pub(crate) host_process_policy: HostProcessPolicy,
     pub(crate) working_memory: WorkingMemory,
     pub(crate) tool_registry: std::sync::Mutex<Arc<ToolRegistry>>,
     pub(crate) goals: Vec<Goal>,
@@ -344,6 +353,86 @@ impl From<Option<Arc<dyn crate::backend::Backend>>> for ExecToolWiring {
     }
 }
 
+/// A tool that spawns host processes inside akhomed's own address space,
+/// outside the [`Backend`](crate::backend::Backend) seam (Phase 53 decision 6,
+/// ADR 113 decision 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostProcessTool {
+    /// `compile_feedback`: runs `cargo` (build scripts and proc-macros are
+    /// arbitrary code) and `git` in a model-chosen directory.
+    CompileFeedback,
+    /// `diagnostics`: the same cargo/git pipeline as `compile_feedback`.
+    Diagnostics,
+    /// A skill-contributed CLI tool: runs the manifest's binary on the host.
+    SkillCli,
+}
+
+impl HostProcessTool {
+    /// The built-in tools of this kind, in registration order.
+    pub const BUILTIN: [Self; 2] = [Self::CompileFeedback, Self::Diagnostics];
+
+    /// The registry name, or the family name for skill CLI tools.
+    pub fn tool_name(self) -> &'static str {
+        match self {
+            Self::CompileFeedback => "compile_feedback",
+            Self::Diagnostics => "diagnostics",
+            Self::SkillCli => "skill cli_tools",
+        }
+    }
+}
+
+/// Why a deployed agent withholds its [`HostProcessTool`]s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostToolWithholding {
+    /// `exec kind = "none"`: the akh has no executor, so nothing may spawn.
+    NoExecutor,
+    /// An executor is configured, but these tools spawn in akhomed and have no
+    /// route through its `Backend::exec`/`Filesystem`.
+    NoBackendRoute,
+}
+
+impl std::fmt::Display for HostToolWithholding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NoExecutor => "deployed mode with exec kind = \"none\" (no executor)",
+            Self::NoBackendRoute => {
+                "deployed mode: the tool spawns host processes inside akhomed and does not \
+                 route through the configured executor backend"
+            }
+        })
+    }
+}
+
+/// Whether an agent registers tools that spawn host processes in akhomed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostProcessPolicy {
+    /// Development: registered as before.
+    Admitted,
+    /// Deployed: not registered, for the given reason.
+    Withheld(HostToolWithholding),
+}
+
+impl HostProcessPolicy {
+    /// Resolve the policy for one agent. Development admits everything;
+    /// deployed mode withholds every host-process tool, because none of them
+    /// routes through the configured backend.
+    pub fn resolve(mode: crate::deployment::DeploymentMode, wiring: &ExecToolWiring) -> Self {
+        if !mode.is_deployed() {
+            return Self::Admitted;
+        }
+        Self::Withheld(match wiring {
+            ExecToolWiring::None => HostToolWithholding::NoExecutor,
+            ExecToolWiring::Default | ExecToolWiring::Backend(_) => {
+                HostToolWithholding::NoBackendRoute
+            }
+        })
+    }
+
+    pub fn admits(self) -> bool {
+        self == Self::Admitted
+    }
+}
+
 impl Agent {
     /// Register all built-in tools (core + external).
     fn register_builtin_tools(
@@ -351,6 +440,7 @@ impl Agent {
         predicates: &AgentPredicates,
         engine: &Engine,
         exec_wiring: ExecToolWiring,
+        host_process_policy: HostProcessPolicy,
         #[cfg(feature = "delegation")] delegation_pending: std::sync::Arc<
             std::sync::Mutex<Vec<super::delegation::DelegationTask>>,
         >,
@@ -451,9 +541,34 @@ impl Agent {
         registry.register(Box::new(tools::DocGenTool));
 
         // Code generation, validation, and pattern mining.
-        registry.register(Box::new(tools::CodeGenTool));
-        registry.register(Box::new(tools::CompileFeedbackTool));
-        registry.register(Box::new(tools::DiagnosticsTool));
+        // Code generation, validation, and pattern mining. `code_gen` stays
+        // registered everywhere: it is a pure KG → code tool, and only its
+        // optional rustfmt pass spawns a host process, so deployed agents get
+        // it without the formatter. `compile_feedback` and `diagnostics` run
+        // cargo/git inside akhomed (build scripts and proc-macros are
+        // arbitrary code), so deployed agents do not get them (Phase 53
+        // decision 6).
+        match host_process_policy {
+            HostProcessPolicy::Admitted => {
+                registry.register(Box::new(tools::CodeGenTool::default()));
+                registry.register(Box::new(tools::CompileFeedbackTool));
+                registry.register(Box::new(tools::DiagnosticsTool));
+            }
+            HostProcessPolicy::Withheld(reason) => {
+                registry.register(Box::new(tools::CodeGenTool::without_host_formatter()));
+                let withheld: Vec<&str> = HostProcessTool::BUILTIN
+                    .iter()
+                    .chain(std::iter::once(&HostProcessTool::SkillCli))
+                    .map(|tool| tool.tool_name())
+                    .collect();
+                tracing::info!(
+                    target: "akh::deployment",
+                    ?withheld,
+                    %reason,
+                    "host-process tools withheld; code_gen registered without rustfmt"
+                );
+            }
+        }
         registry.register(Box::new(tools::PatternMineTool::sandboxed(fs.clone())));
 
         // Agent management (multi-agent orchestration).
@@ -549,7 +664,25 @@ impl Agent {
 
             // Load CLI tools from manifest JSON files.
             if let Ok(manifest) = Self::read_skill_manifest(&skill_dir) {
-                for cli_path in &manifest.cli_tools {
+                // A CLI tool runs its binary on the host inside akhomed, so a
+                // deployed agent does not register it (Phase 53 decision 6).
+                if let HostProcessPolicy::Withheld(reason) = self.host_process_policy
+                    && !manifest.cli_tools.is_empty()
+                {
+                    tracing::info!(
+                        target: "akh::deployment",
+                        skill = %info.id,
+                        withheld = ?manifest.cli_tools,
+                        %reason,
+                        "skill CLI tools withheld"
+                    );
+                }
+                let cli_tools: &[String] = if self.host_process_policy.admits() {
+                    &manifest.cli_tools
+                } else {
+                    &[]
+                };
+                for cli_path in cli_tools {
                     let full_path = skill_dir.join(cli_path);
                     match std::fs::read_to_string(&full_path) {
                         Ok(json) => {
@@ -855,12 +988,14 @@ impl Agent {
         #[cfg(feature = "delegation")]
         let delegation_pending = delegation_manager.pending_queue();
 
+        let host_process_policy = HostProcessPolicy::resolve(config.deployment, &exec_wiring);
         let mut tool_registry = ToolRegistry::new();
         Self::register_builtin_tools(
             &mut tool_registry,
             &predicates,
             &engine,
             exec_wiring,
+            host_process_policy,
             #[cfg(feature = "delegation")]
             delegation_pending,
         )?;
@@ -940,6 +1075,7 @@ impl Agent {
         let mut agent = Self {
             engine,
             config,
+            host_process_policy,
             working_memory,
             tool_registry: std::sync::Mutex::new(Arc::new(tool_registry)),
             goals,
@@ -4196,12 +4332,14 @@ impl Agent {
         #[cfg(feature = "delegation")]
         let delegation_pending = delegation_manager.pending_queue();
 
+        let host_process_policy = HostProcessPolicy::resolve(config.deployment, &exec_wiring);
         let mut tool_registry = ToolRegistry::new();
         Self::register_builtin_tools(
             &mut tool_registry,
             &predicates,
             &engine,
             exec_wiring,
+            host_process_policy,
             #[cfg(feature = "delegation")]
             delegation_pending,
         )?;
@@ -4480,6 +4618,7 @@ impl Agent {
         let mut agent = Self {
             engine,
             config,
+            host_process_policy,
             working_memory,
             tool_registry: std::sync::Mutex::new(Arc::new(tool_registry)),
             goals,
@@ -4784,6 +4923,99 @@ mod backend_seam_tests {
             names.contains("kg_query"),
             "kg_query should remain registered"
         );
+    }
+
+    fn tool_names(agent: &Agent) -> std::collections::HashSet<String> {
+        agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .list()
+            .into_iter()
+            .map(|sig| sig.name)
+            .collect()
+    }
+
+    fn config_for(mode: crate::deployment::DeploymentMode) -> AgentConfig {
+        AgentConfig {
+            deployment: mode,
+            ..AgentConfig::default()
+        }
+    }
+
+    /// Phase 53 decision 6: a deployed akh with `exec kind = "none"` registers
+    /// no tool that spawns host processes inside akhomed.
+    #[test]
+    fn deployed_without_executor_registers_no_host_process_tools() {
+        use crate::deployment::DeploymentMode;
+        let agent = Agent::with_exec_wiring(
+            test_engine(),
+            config_for(DeploymentMode::Deployed),
+            ExecToolWiring::None,
+        )
+        .expect("deployed agent should construct");
+        assert_eq!(
+            agent.host_process_policy,
+            HostProcessPolicy::Withheld(HostToolWithholding::NoExecutor)
+        );
+        let names = tool_names(&agent);
+        for tool in HostProcessTool::BUILTIN {
+            assert!(
+                !names.contains(tool.tool_name()),
+                "{} must not be registered in deployed mode",
+                tool.tool_name()
+            );
+        }
+        for executor_tool in ["shell_exec", "file_io", "edit", "glob", "grep"] {
+            assert!(!names.contains(executor_tool), "{executor_tool}");
+        }
+        // code_gen stays, without the host rustfmt pass.
+        assert!(names.contains("code_gen"));
+        assert!(names.contains("kg_query"));
+    }
+
+    /// With an executor wired, deployed mode still withholds them: they spawn
+    /// in akhomed rather than through the backend.
+    #[test]
+    fn deployed_with_executor_still_withholds_host_process_tools() {
+        use crate::deployment::DeploymentMode;
+        assert_eq!(
+            HostProcessPolicy::resolve(DeploymentMode::Deployed, &ExecToolWiring::Default),
+            HostProcessPolicy::Withheld(HostToolWithholding::NoBackendRoute)
+        );
+        let agent = Agent::with_exec_wiring(
+            test_engine(),
+            config_for(DeploymentMode::Deployed),
+            ExecToolWiring::Default,
+        )
+        .expect("deployed agent should construct");
+        let names = tool_names(&agent);
+        assert!(!names.contains("compile_feedback"));
+        assert!(!names.contains("diagnostics"));
+        assert!(!agent.host_process_policy.admits());
+    }
+
+    /// Development mode is unchanged: every host-process tool is registered.
+    #[test]
+    fn development_registers_host_process_tools() {
+        use crate::deployment::DeploymentMode;
+        for wiring in [ExecToolWiring::Default, ExecToolWiring::None] {
+            assert_eq!(
+                HostProcessPolicy::resolve(DeploymentMode::Development, &wiring),
+                HostProcessPolicy::Admitted
+            );
+            let agent = Agent::with_exec_wiring(
+                test_engine(),
+                config_for(DeploymentMode::Development),
+                wiring,
+            )
+            .expect("development agent should construct");
+            let names = tool_names(&agent);
+            for tool in ["code_gen", "compile_feedback", "diagnostics"] {
+                assert!(names.contains(tool), "{tool} should be registered");
+            }
+            assert!(agent.host_process_policy.admits());
+        }
     }
 
     /// Regression: `Agent::resume` (the production path for any akh with

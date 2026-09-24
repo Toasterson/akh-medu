@@ -23,13 +23,11 @@ def retarget(root: Path) -> list[str]:
     current = json.loads((config / "events.json").read_text())
     backup = root / "evidence/events-before-phase53.json"
     if not backup.exists():
-        backup.write_text(json.dumps(current, indent=2) + "\n")
-        backup.chmod(0o600)
+        fa.write_atomic(backup, json.dumps(current, indent=2) + "\n")
     for route in staged.get("routes", []):
         if route.get("automation") is not None or route.get("target", {}).get("kind") != "akh":
             raise fa.RenderError(f"staged route {route.get('id')!r} is not an akh target; rerun configure_core.py")
-    (config / "events.json").write_text(json.dumps(staged, indent=2) + "\n")
-    (config / "events.json").chmod(0o600)
+    fa.write_atomic(config / "events.json", json.dumps(staged, indent=2) + "\n")
     return [f"{r['id']}: {r['source']}/{r['event_type']} -> akh {r['target']['akh']}" for r in staged["routes"]]
 
 
@@ -37,8 +35,7 @@ def rollback(root: Path) -> None:
     backup = root / "evidence/events-before-phase53.json"
     if not backup.exists():
         raise fa.RenderError(f"{backup} not found; nothing to roll back")
-    (root / "config/events.json").write_text(backup.read_text())
-    (root / "config/events.json").chmod(0o600)
+    fa.write_atomic(root / "config/events.json", backup.read_text())
 
 
 if __name__ == "__main__":

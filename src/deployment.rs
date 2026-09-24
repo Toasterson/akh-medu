@@ -257,6 +257,7 @@ mod tests {
             profile: "rust".into(),
             principal: "janus".into(),
             poll_wait_ms: 5_000,
+            allow_insecure_http: false,
         }
     }
 

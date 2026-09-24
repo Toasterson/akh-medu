@@ -342,6 +342,18 @@ fn build_execd_backend(
     ))
 }
 
+/// Drop an evicted agent on the blocking pool, outside the `agents` lock and
+/// off the async runtime. Tearing an agent down can block: its executor
+/// backend stops a lease thread and releases the allocation over blocking
+/// HTTP (`ExecdBackend`), and other members flush or join threads. Only the
+/// hand-off happens under the caller's write guard; the drop itself runs on
+/// another thread, so neither the lock nor a runtime worker waits on it.
+fn drop_evicted_agent(evicted: Option<Arc<StdRwLock<Agent>>>) {
+    if let Some(agent) = evicted {
+        drop(tokio::task::spawn_blocking(move || drop(agent)));
+    }
+}
+
 ///
 /// The agent lives behind a `std::sync::RwLock`, so capture (sync) runs under the
 /// lock and the guard is dropped before the async DB persist. A not-yet-loaded
@@ -792,7 +804,7 @@ impl ServerState {
                     tracing::error!(workspace = %name, %error, "reconnect handoff retained residency because WAL did not drain");
                     continue;
                 }
-                self.agents.write().await.remove(&name);
+                drop_evicted_agent(self.agents.write().await.remove(&name));
                 self.workspaces.write().await.remove(&name);
                 self.psyche_snapshots.write().await.remove(&name);
                 self.nlu_pipelines.write().await.remove(&name);
@@ -1547,7 +1559,7 @@ impl ServerState {
 
         // Drop the cached agent + engine + ancillary caches so memory is freed.
         // Dropping the engine releases the redb lock so a later wake can reopen it.
-        self.agents.write().await.remove(name);
+        drop_evicted_agent(self.agents.write().await.remove(name));
         self.workspaces.write().await.remove(name);
         self.psyche_snapshots.write().await.remove(name);
         self.nlu_pipelines.write().await.remove(name);
@@ -4028,7 +4040,7 @@ impl akh_medu::acp::ServerControl for ServerState {
                         .ok_or_else(|| "missing required param: name".to_string())?;
                     // Drop the cached engine + agent before removing the data.
                     self.workspaces.write().await.remove(name);
-                    self.agents.write().await.remove(name);
+                    drop_evicted_agent(self.agents.write().await.remove(name));
                     let manager = WorkspaceManager::new(self.paths.clone());
                     manager
                         .delete(name)
