@@ -357,7 +357,7 @@ def acp_principals(session: dict, root: Path) -> list[dict]:
     principals = [Inline(id=p["id"], token_file=p["token_file"], akhs=list(p["akhs"]))
                   for p in session.get("principals", []) if p["id"].startswith("t3-")]
     principals.append(Inline(id="operator", token_file=str(root / "secrets/operator.key"),
-                             akhs=list(ROLES)))
+                             akhs=list(ROLES), control=True))
     return principals
 
 
