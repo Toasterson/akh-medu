@@ -21,6 +21,10 @@
 //! auth = { token_file = "/path/to/observer.key" }
 //! ```
 //!
+//! A server with credentials must use `https://` or a loopback host
+//! (`localhost`, `127.0.0.1`, `[::1]`, the session services' rule) unless the
+//! entry sets `allow_insecure_http = true` for a trusted private link.
+//!
 //! Every tool a server advertises (or only the `tools` allowlist) is
 //! registered as `mcp__<name>__<tool>`. Secrets are never stored in the
 //! config: `auth` names an environment variable or a file, resolved at call
@@ -151,6 +155,19 @@ pub enum McpServerConfigProblem {
         )
     )]
     InvalidHeaderName { server: String, header: String },
+
+    #[error("MCP server `{server}` would send its credential over plaintext HTTP to `{url}`")]
+    #[diagnostic(
+        code(akh::mcp::config::insecure_http),
+        help(
+            "A credentialed server needs `https://`, or a loopback host (`localhost`, \
+             `127.0.0.1`, `[::1]`), the same rule the session services apply to their \
+             endpoints. For a trusted private link (for example a WireGuard-only address) set \
+             `allow_insecure_http = true` on this entry; the token then crosses that link \
+             unencrypted."
+        )
+    )]
+    InsecureCredentialedHttp { server: String, url: String },
 
     #[error("MCP server `{server}` auth has an empty token_file path")]
     #[diagnostic(
@@ -490,6 +507,11 @@ pub struct McpServerSpec {
     /// Per-request timeout in seconds (default 30, at most 600).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Permit a credential over plaintext `http://` to a non-loopback host
+    /// (Phase 53i follow-up). Default `false`, mirroring the session
+    /// services' `Endpoint.allow_insecure_http`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_insecure_http: bool,
     /// Credential source. Declared last so it serializes after the scalars.
     #[serde(default, skip_serializing_if = "McpServerAuth::is_none")]
     pub auth: McpServerAuth,
@@ -503,6 +525,7 @@ impl McpServerSpec {
             url: url.into(),
             tools: None,
             timeout_secs: None,
+            allow_insecure_http: false,
             auth: McpServerAuth::None,
         }
     }
@@ -545,6 +568,20 @@ impl McpServerSpec {
                 server: server.clone(),
                 url: self.url.clone(),
                 reason,
+            });
+        }
+
+        if url_reason.is_none()
+            && !self.auth.is_none()
+            && !self.allow_insecure_http
+            && self
+                .url
+                .strip_prefix("http://")
+                .is_some_and(|rest| !is_loopback_authority(rest))
+        {
+            out.push(McpServerConfigProblem::InsecureCredentialedHttp {
+                server: server.clone(),
+                url: self.url.clone(),
             });
         }
 
@@ -613,6 +650,26 @@ impl McpServerSpec {
             }
         }
     }
+}
+
+/// Whether the authority at the start of `rest` (the URL after `http://`)
+/// names a loopback host. The accepted set is exactly the session services'
+/// `Endpoint::validate` rule (`localhost`, `127.0.0.1`, `[::1]`), so a URL is
+/// accepted by both or by neither.
+fn is_loopback_authority(rest: &str) -> bool {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    let host = if host_port.starts_with('[') {
+        host_port
+            .find(']')
+            .map_or(host_port, |end| &host_port[..=end])
+    } else {
+        host_port.split(':').next().unwrap_or_default()
+    };
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "[::1]"
+    )
 }
 
 /// Validate a whole `[[mcp.servers]]` list: per-entry invariants plus unique
@@ -948,5 +1005,85 @@ mod tests {
         assert!(!auth.describe().contains("hidden-value"));
         assert!(auth.describe().contains(VAR));
         unsafe { std::env::remove_var(VAR) };
+    }
+
+    #[test]
+    fn credentialed_plain_http_needs_loopback_or_an_explicit_opt_in() {
+        let servers = parse(
+            r#"
+            [[servers]]
+            name = "remote-token"
+            url = "http://10.0.0.5:8080/mcp"
+            auth = { token_env = "REMOTE_TOKEN" }
+
+            [[servers]]
+            name = "remote-header"
+            url = "http://user@lan-host/mcp"
+            auth = { header_env = { header = "X-Api-Key", env = "KEY" } }
+
+            [[servers]]
+            name = "remote-open"
+            url = "http://10.0.0.5:8080/mcp"
+
+            [[servers]]
+            name = "remote-allowed"
+            url = "http://10.0.0.5:8080/mcp"
+            allow_insecure_http = true
+            auth = { token_file = "/etc/akh/t" }
+
+            [[servers]]
+            name = "loopback-v4"
+            url = "http://127.0.0.1:18436/mcp"
+            auth = { token_file = "/etc/akh/t" }
+
+            [[servers]]
+            name = "loopback-name"
+            url = "http://LOCALHOST:18089/mcp"
+            auth = { token_env = "BOARD" }
+
+            [[servers]]
+            name = "loopback-v6"
+            url = "http://[::1]:18089/mcp"
+            auth = { token_env = "BOARD" }
+
+            [[servers]]
+            name = "tls"
+            url = "https://anima.example/mcp"
+            auth = { token_env = "ANIMA" }
+
+            [[servers]]
+            name = "not-loopback"
+            url = "http://127.0.0.2/mcp"
+            auth = { token_env = "ANIMA" }
+            "#,
+        )
+        .expect("parse");
+        assert!(servers[3].allow_insecure_http);
+        assert!(!servers[0].allow_insecure_http, "defaults to false");
+        let err = validate_mcp_servers(&servers).unwrap_err();
+        let rejected: Vec<_> = err
+            .problems
+            .iter()
+            .map(|problem| match problem {
+                McpServerConfigProblem::InsecureCredentialedHttp { server, .. } => server.as_str(),
+                other => panic!("unexpected problem {other:?}"),
+            })
+            .collect();
+        // Exactly the session services' loopback set: 127.0.0.2 is not in it.
+        assert_eq!(rejected, ["remote-token", "remote-header", "not-loopback"]);
+        assert_eq!(
+            miette::Diagnostic::code(&err.problems[0])
+                .unwrap()
+                .to_string(),
+            "akh::mcp::config::insecure_http"
+        );
+        // Round trip keeps the flag, and omits it when false.
+        let text = toml::to_string(&servers[3]).unwrap();
+        assert!(text.contains("allow_insecure_http = true"), "{text}");
+        assert!(
+            !toml::to_string(&servers[4])
+                .unwrap()
+                .contains("allow_insecure_http")
+        );
     }
 }

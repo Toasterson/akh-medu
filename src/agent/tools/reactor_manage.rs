@@ -34,6 +34,20 @@ struct AddRequest {
     lease_seconds: Option<u64>,
     #[serde(default)]
     retry: Option<RetryPolicy>,
+    /// Event schedules: keep only the newest pending event.
+    #[serde(default)]
+    coalesce: Option<bool>,
+}
+
+/// `update`: replace the action (and optionally coalescing) of a stored
+/// schedule, for example to add the `exit_condition` a paused legacy
+/// schedule lacks (ADR 105).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateRequest {
+    action: ReactorAction,
+    #[serde(default)]
+    coalesce: Option<bool>,
 }
 
 fn tool_error(message: impl Into<String>) -> AgentError {
@@ -58,17 +72,17 @@ impl Tool for ReactorManageTool {
             parameters: vec![
                 ToolParam {
                     name: "operation".into(),
-                    description: "list, add, remove, enable, disable, or wake".into(),
+                    description: "list, add, update, remove, enable, disable, or wake".into(),
                     required: true,
                 },
                 ToolParam {
                     name: "id".into(),
-                    description: "Schedule id for remove/enable/disable/wake".into(),
+                    description: "Schedule id for update/remove/enable/disable/wake".into(),
                     required: false,
                 },
                 ToolParam {
                     name: "schedule".into(),
-                    description: "Structured schedule object for add".into(),
+                    description: "Structured schedule object for add; {action, coalesce} for update".into(),
                     required: false,
                 },
                 ToolParam {
@@ -115,12 +129,28 @@ impl Tool for ReactorManageTool {
                 if let Some(retry) = request.retry {
                     schedule.retry = retry;
                 }
+                if let Some(coalesce) = request.coalesce {
+                    schedule.coalesce = coalesce;
+                }
+                schedule.validate_for_admission()?;
                 // Model-authored schedules are always staged. Enabling a
                 // persistent autonomous action is a separate operator gate.
                 schedule.enabled = false;
                 store.put(&schedule)?;
                 Ok(ToolOutput::ok(format!(
                     "durable schedule {id} added disabled; set {ENABLE_ENV}=1 and enable it explicitly"
+                )))
+            }
+            "update" => {
+                let id = input.require("id", "reactor_manage")?;
+                let value = input.get_value("schedule").ok_or_else(|| {
+                    tool_error("schedule {action, coalesce} is required for update")
+                })?;
+                let request: UpdateRequest = serde_json::from_value(value.clone())
+                    .map_err(|error| tool_error(format!("invalid update object: {error}")))?;
+                store.update_action(id, request.action, request.coalesce)?;
+                Ok(ToolOutput::ok(format!(
+                    "schedule {id} updated and left disabled; set {ENABLE_ENV}=1 and enable it explicitly"
                 )))
             }
             "remove" => {
@@ -169,12 +199,13 @@ impl Tool for ReactorManageTool {
                 "name": {"type": "string"},
                 "rule": {
                     "type": "object",
-                    "description": "Tagged rule: once {at}, interval {every_seconds,anchor}, cron {expression}, or event {source}."
+                    "description": "Tagged rule: once {at}, interval {every_seconds,anchor}, cron {expression}, or event {source}. Events admitted through POST /v1/akhs/{akh}/events wake event schedules whose source is \"<event source>/<event type>\" (for example \"djehuty-inbox/delegation\")."
                 },
                 "action": {
                     "type": "object",
-                    "description": "Tagged action: llm_turn (tool-free by default; allow_tools is explicit), djehuty_reply, trigger, or training_monitor."
+                    "description": "Tagged action: llm_turn {prompt, agent_id?, allow_tools?, require_mutation?, exit_condition, report_thread?}, djehuty_reply, trigger, or training_monitor. llm_turn is tool-free by default; with allow_tools it REQUIRES exit_condition (ADR 105: what done/failed look like). report_thread is an Agent Board thread UUID that receives a coordination/status@v1 message after every run. A woken event's payload is appended to the prompt as untrusted data."
                 },
+                "coalesce": {"type": "boolean", "description": "Event schedules only: keep just the newest pending event (replaceable state notifications, never commands)."},
                 "misfire_policy": {"type": "string", "enum": ["skip", "run_once"]},
                 "misfire_grace_seconds": {"type": "integer", "minimum": 0},
                 "lease_seconds": {"type": "integer", "minimum": 1},
@@ -197,12 +228,12 @@ impl Tool for ReactorManageTool {
             parameters: vec![
                 ToolParamSchema::required(
                     "operation",
-                    "list, add, remove, enable, disable, or wake",
+                    "list, add, update, remove, enable, disable, or wake",
                 ),
                 ToolParamSchema::optional("id", "Schedule id"),
                 ToolParamSchema::optional_schema(
                     "schedule",
-                    "Schedule object for add",
+                    "Schedule object for add, or {action, coalesce} for update",
                     schedule_schema,
                 ),
                 ToolParamSchema::optional_schema("event", "Event object for wake", event_schema),
@@ -250,5 +281,68 @@ mod tests {
         let schedule = ReactorStore::new(&engine).get("daily-review").unwrap();
         assert!(matches!(schedule.action, ReactorAction::LlmTurn { .. }));
         assert!(!schedule.enabled);
+    }
+
+    #[test]
+    fn tool_creates_governed_event_schedules_and_fixes_legacy_ones() {
+        let engine = Engine::new(EngineConfig {
+            data_dir: Some(tempfile::tempdir().unwrap().keep()),
+            ..EngineConfig::default()
+        })
+        .unwrap();
+        let add = |schedule: serde_json::Value| {
+            ReactorManageTool.execute(
+                &engine,
+                ToolInput::new()
+                    .with_param("operation", "add")
+                    .with_value("schedule", schedule),
+            )
+        };
+        // Tool-capable without an exit condition: refused with the diagnostic.
+        let refused = add(serde_json::json!({
+            "id": "inbox", "name": "inbox",
+            "rule": {"kind": "event", "source": "djehuty-inbox/delegation"},
+            "action": {"kind": "llm_turn", "prompt": "Handle it", "allow_tools": true}
+        }))
+        .unwrap_err();
+        assert!(refused.to_string().contains("exit condition"), "{refused}");
+
+        add(serde_json::json!({
+            "id": "inbox", "name": "inbox", "coalesce": true,
+            "rule": {"kind": "event", "source": "djehuty-inbox/delegation"},
+            "action": {"kind": "llm_turn", "prompt": "Handle it", "allow_tools": true,
+                "exit_condition": "delegation acknowledged on the board",
+                "report_thread": "01a0ab49-9cc4-7012-8785-1eada26fbd46"}
+        }))
+        .unwrap();
+        let stored = ReactorStore::new(&engine).get("inbox").unwrap();
+        assert!(stored.coalesce && !stored.enabled);
+        let ReactorAction::LlmTurn {
+            exit_condition,
+            report_thread,
+            ..
+        } = &stored.action
+        else {
+            panic!("llm_turn expected");
+        };
+        assert_eq!(exit_condition, "delegation acknowledged on the board");
+        assert!(report_thread.is_some());
+
+        let updated = ReactorManageTool
+            .execute(
+                &engine,
+                ToolInput::new()
+                    .with_param("operation", "update")
+                    .with_param("id", "inbox")
+                    .with_value(
+                        "schedule",
+                        serde_json::json!({"coalesce": false, "action": {"kind": "llm_turn",
+                            "prompt": "Handle it", "allow_tools": true,
+                            "exit_condition": "delegation closed"}}),
+                    ),
+            )
+            .unwrap();
+        assert!(updated.success);
+        assert!(!ReactorStore::new(&engine).get("inbox").unwrap().coalesce);
     }
 }

@@ -38,6 +38,9 @@ use std::{
 };
 use thiserror::Error;
 
+mod events;
+pub use events::{CoreRole, EventAdmissionError};
+
 pub type CoreFuture<'a, T> =
     Pin<Box<dyn Future<Output = std::result::Result<T, String>> + Send + 'a>>;
 pub trait CoreBackend: Send + Sync {
@@ -103,6 +106,10 @@ pub struct CorePrincipal {
     /// Tool surface of this principal (Phase 53a). Absent = legacy nine.
     #[serde(default)]
     pub tools: ToolScope,
+    /// Service roles (Phase 53d). `event` may `POST /v1/akhs/{akh}/events`
+    /// for the akhs above. Absent = none.
+    #[serde(default)]
+    pub roles: BTreeSet<CoreRole>,
 }
 
 /// Errors of the `/v1` core API (Phase 53a).
@@ -276,6 +283,8 @@ impl IntoResponse for ApiError {
             "not_found" => StatusCode::NOT_FOUND,
             "conflict" | "unknown_outcome" => StatusCode::CONFLICT,
             "unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+            // Phase 53d: a well-formed event nothing subscribes to.
+            akh_session_types::NO_SUBSCRIBER => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self.0)).into_response()
@@ -367,6 +376,7 @@ pub fn router(app: CoreApp) -> Router {
             }),
         )
         .route("/v1/akhs/{akh}/tools", get(catalog))
+        .route("/v1/akhs/{akh}/events", post(events::submit))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(
             app.clone(),
@@ -1028,6 +1038,7 @@ mod tests {
                     token_file,
                     akhs: vec!["test".into()],
                     tools: scope,
+                    roles: BTreeSet::new(),
                 }],
             },
             backend,
@@ -1066,6 +1077,7 @@ mod tests {
                         token_file,
                         akhs: vec!["test".into()],
                         tools: ToolScope::default(),
+                        roles: BTreeSet::new(),
                     }],
                 },
                 Arc::new(Backend {

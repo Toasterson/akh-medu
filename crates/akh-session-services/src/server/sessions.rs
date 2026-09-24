@@ -2137,6 +2137,7 @@ mod lifecycle_tests {
                     token_file: token.clone(),
                     akhs: vec!["test".into()],
                     tools: Default::default(),
+                    roles: Default::default(),
                 }],
             },
             Arc::new(Backend(Arc::new(Engine::new(Default::default()).unwrap()))),

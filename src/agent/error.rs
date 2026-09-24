@@ -220,6 +220,12 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Task(#[from] super::tasks::TaskError),
 
+    /// ADR 105 governance refused a reactor schedule (Phase 53d).
+    #[cfg(feature = "daemon")]
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    ReactorGovernance(#[from] super::reactor::ReactorGovernanceError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

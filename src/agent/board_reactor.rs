@@ -244,6 +244,78 @@ pub fn ingest_board_events_from_env(engine: &Engine, now: u64) -> AgentResult<Bo
     ingest_board_events(engine, &DjehutyClient::new(config), own_agent_id, now)
 }
 
+/// Board protocol of reactor run reports (ADR 105 rule 3).
+pub const COORDINATION_STATUS_V1: &str = "coordination/status@v1";
+
+/// `state` of a `coordination/status@v1` run report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunReportState {
+    /// The run finished; its outcome is in `detail`.
+    Complete,
+    /// The run failed, or the reactor paused the schedule and needs an
+    /// operator.
+    Blocked,
+}
+
+/// One reactor run, rendered as a `coordination/status@v1` message.
+#[derive(Debug, Clone)]
+pub struct RunReport {
+    pub schedule_id: String,
+    pub schedule_name: String,
+    /// Stable per occurrence and attempt; keys the board idempotency.
+    pub run_key: String,
+    pub state: RunReportState,
+    pub exit_condition: String,
+    pub outcome: String,
+    /// Set when the reactor paused the schedule during this run.
+    pub pause: Option<super::reactor::SchedulePause>,
+}
+
+impl RunReport {
+    /// The board envelope. Retries of the same run post one message.
+    pub fn message(&self) -> DjehutyMessageContent {
+        let detail = serde_json::json!({
+            "schedule": self.schedule_id,
+            "run": self.run_key,
+            "exit_condition": self.exit_condition,
+            "outcome": truncate_chars(&self.outcome, 2_000),
+            "pause": self.pause,
+        });
+        let state = serde_json::to_value(self.state).unwrap_or_default();
+        DjehutyMessageContent {
+            message_type: COORDINATION_STATUS_V1.to_owned(),
+            payload: serde_json::json!({ "state": state, "detail": detail.to_string() }),
+            summary: truncate_chars(
+                &format!(
+                    "{} {}",
+                    self.schedule_name,
+                    state.as_str().unwrap_or_default()
+                ),
+                240,
+            ),
+            retention: super::djehuty::DjehutyRetention::Durable,
+            reply_to: None,
+            idempotency_key: format!("akh-reactor:{}:status", self.run_key),
+        }
+    }
+}
+
+/// Post a run report to `thread` (a board thread UUID).
+pub fn post_run_report(
+    client: &dyn DjehutyBoardApi,
+    thread: &str,
+    report: &RunReport,
+) -> AgentResult<DjehutyMessageId> {
+    let thread_id = uuid::Uuid::parse_str(thread)
+        .map(DjehutyThreadId)
+        .map_err(|error| board_error(format!("invalid report thread {thread:?}: {error}")))?;
+    client
+        .post_thread_message(thread_id, report.message())
+        .map(|posted| posted.id)
+        .map_err(|error| board_error(format!("post run report to thread {thread_id}: {error}")))
+}
+
 /// Execute one tool-free model reply for a claimed Djehuty event and post it
 /// with an idempotency key derived from the durable reactor run id.
 pub fn execute_board_reply(

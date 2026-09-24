@@ -4336,6 +4336,8 @@ mod tests {
                 agent_id: None,
                 allow_tools: false,
                 require_mutation: false,
+                exit_condition: String::new(),
+                report_thread: None,
             },
             0,
         )

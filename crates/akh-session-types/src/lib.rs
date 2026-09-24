@@ -767,6 +767,24 @@ pub struct EventEnvelope {
     pub data: Value,
 }
 
+/// Fault code akhomed returns when an admitted event matches no enabled
+/// reactor schedule. Terminal for a delivery: retrying cannot help until a
+/// schedule subscribes (Phase 53d).
+pub const NO_SUBSCRIBER: &str = "no_subscriber";
+
+/// akhomed's answer to `POST /v1/akhs/{akh}/events` (Phase 53d, ADR 113
+/// decision 4): the event landed in the akh's own reactor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EventAdmission {
+    /// Stable identity of the event inside the akh: `<source>/<type>#<id>`.
+    pub event_key: String,
+    /// Reactor schedules this submission newly queued the event on.
+    pub schedules_woken: Vec<String>,
+    /// The event id was admitted before; nothing new was queued.
+    pub duplicate: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct InvokeAutomation {

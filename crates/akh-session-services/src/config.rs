@@ -334,6 +334,28 @@ pub fn validate_checkout(request: &bootstrap::BootstrapRepository) -> Result<()>
     Ok(())
 }
 
+/// Where a routed event is delivered (Phase 53d, ADR 113 decision 4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RouteTarget {
+    /// Invoke an akhsessd automation (`POST /v1/automations/{automation}/invoke`
+    /// on the `sessions` endpoint). The pre-53d behaviour.
+    Automation { automation: String },
+    /// Admit the event into an akh's own reactor:
+    /// `POST {endpoints[endpoint].url}/v1/akhs/{akh}/events`. The akh wakes its
+    /// event schedules whose source is `<event source>/<event type>`.
+    Akh {
+        /// Name of a configured `endpoints` entry for akhomed's `/v1` API
+        /// (URL, CA and HTTPS policy come from there).
+        endpoint: String,
+        akh: String,
+        /// Bearer credential of the core principal holding the `event` role.
+        /// Absent = the endpoint's own credential.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_file: Option<PathBuf>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventRoute {
@@ -343,7 +365,30 @@ pub struct EventRoute {
     pub id: String,
     pub source: String,
     pub event_type: String,
-    pub automation: String,
+    /// Shorthand for `target = { kind = "automation", automation = ... }`,
+    /// kept so existing configs parse unchanged. Exactly one of `automation`
+    /// and `target` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<RouteTarget>,
+}
+
+impl EventRoute {
+    /// The resolved delivery target. Errors unless exactly one of
+    /// `automation` and `target` is set.
+    pub fn resolved_target(&self) -> Result<RouteTarget> {
+        match (&self.automation, &self.target) {
+            (Some(automation), None) => Ok(RouteTarget::Automation {
+                automation: automation.clone(),
+            }),
+            (None, Some(target)) => Ok(target.clone()),
+            _ => Err(Fault::invalid(format!(
+                "route {} must set exactly one of `automation` and `target`",
+                self.id
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -679,6 +724,29 @@ impl Config {
                 return Err(Fault::invalid(
                     "Djehuty inboxes require unique sources, protocols and positive bounded polling",
                 ));
+            }
+        }
+        let mut route_ids = std::collections::HashSet::new();
+        for route in &self.routes {
+            validate_key(&route.id)?;
+            validate_key(&route.source)?;
+            validate_key(&route.event_type)?;
+            if !route_ids.insert(&route.id) {
+                return Err(Fault::invalid("event route IDs must be unique"));
+            }
+            match route.resolved_target()? {
+                RouteTarget::Automation { automation } => validate_key(&automation)?,
+                RouteTarget::Akh {
+                    endpoint,
+                    akh,
+                    token_file,
+                } => {
+                    self.endpoint(&endpoint)?;
+                    validate_key(&akh)?;
+                    if token_file.as_ref().is_some_and(|path| !path.is_absolute()) {
+                        return Err(Fault::invalid("route target token_file must be absolute"));
+                    }
+                }
             }
         }
         for (id, automation) in &self.automations {
