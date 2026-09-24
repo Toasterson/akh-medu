@@ -19,6 +19,15 @@ LoRA fine-tuning pipeline that encodes each personality into model weights.
   config (e.g. `~/.claude.json` mcpServers) and copy the pattern.
 - **The runner token in `~/.config/anima-runner/gateway.env` is NOT an MCP
   PAT** — it lacks `workitem.read`; don't use it for tracker calls.
+- **Deploy only from `main`.** Every binary or image that runs an akh or a
+  platform daemon (akhomed, akh CLI, akhrtd/akhsessd/akhexecd/akheventd/akhsbxd,
+  container images, Mac LaunchDaemons, cluster) is built from a commit on
+  `origin/main` and carries its short SHA. Never deploy from a feature, `wip/*`,
+  `codex/*` or worktree branch; merge the PR first. Full rule:
+  `.claude/rules/deploy-from-main.md`.
+- **Every akh is fully featured (ADR 113).** Never deploy a stripped akh (no
+  daemon loop, no in-process turn, reduced tool catalog). Side-effecting tools from
+  any caller route through `akhsbxd`/`akhexecd`.
 
 ---
 
