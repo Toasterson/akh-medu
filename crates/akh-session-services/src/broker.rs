@@ -290,40 +290,119 @@ impl Broker {
         self.sessions.store.transaction(|tx| tx.put(&k, &record))?;
         let result: Result<ToolResult> = match &tool.destination {
             ToolDestination::Workspace { operation } => {
-                let workspace = session.workspace.as_ref().ok_or_else(||Fault::conflict("workspace is not ready"))?;
-                let operation = WorkspaceOperation { id: record.operation_id.clone(), session_id: session.id.clone(), turn_id: call.turn_id.clone(),
-                    workspace_id: workspace.id.clone(), generation: workspace.generation, operation: operation.clone(), arguments: call.arguments.clone() };
-                let receipt: OperationReceipt = self.client.in_sandbox(&workspace.sandbox_id)?.post(&workspace.executor, "/v1/operations", &operation).await?;
-                if receipt.request != operation { return Err(Fault::conflict("executor returned a receipt for another request")); }
-                if receipt.status == TurnStatus::Unknown { record.unknown = true; self.sessions.store.transaction(|tx|tx.put(&k, &record))?; return Err(Fault::new("unknown_outcome", "executor cannot confirm this operation")); }
+                let workspace = session
+                    .workspace
+                    .as_ref()
+                    .ok_or_else(|| Fault::conflict("workspace is not ready"))?;
+                let operation = WorkspaceOperation {
+                    id: record.operation_id.clone(),
+                    session_id: session.id.clone(),
+                    turn_id: call.turn_id.clone(),
+                    workspace_id: workspace.id.clone(),
+                    generation: workspace.generation,
+                    operation: operation.clone(),
+                    arguments: call.arguments.clone(),
+                };
+                let receipt: OperationReceipt = self
+                    .client
+                    .in_sandbox(&workspace.sandbox_id)?
+                    .post(&workspace.executor, "/v1/operations", &operation)
+                    .await?;
+                if receipt.request != operation {
+                    return Err(Fault::conflict(
+                        "executor returned a receipt for another request",
+                    ));
+                }
+                if receipt.status == TurnStatus::Unknown {
+                    record.unknown = true;
+                    self.sessions.store.transaction(|tx| tx.put(&k, &record))?;
+                    return Err(Fault::new(
+                        "unknown_outcome",
+                        "executor cannot confirm this operation",
+                    ));
+                }
                 if operation.operation == "exec_start" && !receipt.status.terminal() {
-                    Ok(ToolResult { success: true, text: "Process started; use the process handle to poll, send stdin or cancel.".into(),
-                        data: Some(json!({"process_id":receipt.id,"status":receipt.status})), receipt: Some(receipt.id) })
-                } else if let Some(result) = receipt.result { Ok(result) }
-                else { return Ok(CallbackReply { result: None, response: None, pending: true }); }
+                    Ok(ToolResult {
+                        success: true,
+                        text:
+                            "Process started; use the process handle to poll, send stdin or cancel."
+                                .into(),
+                        data: Some(json!({"process_id":receipt.id,"status":receipt.status})),
+                        receipt: Some(receipt.id),
+                    })
+                } else if let Some(result) = receipt.result {
+                    Ok(result)
+                } else {
+                    return Ok(CallbackReply {
+                        result: None,
+                        response: None,
+                        pending: true,
+                    });
+                }
             }
             ToolDestination::Cognitive { service, tool } => {
-                self.client.post(service, "/v1/tools/call", &CognitiveToolCall { request_id: record.operation_id.clone(), session_id: session.id.clone(), akh: session.akh.clone(), tool: tool.clone(), arguments: call.arguments.clone(), grant }).await
+                self.client
+                    .post(
+                        service,
+                        "/v1/tools/call",
+                        &CognitiveToolCall {
+                            request_id: record.operation_id.clone(),
+                            session_id: session.id.clone(),
+                            akh: session.akh.clone(),
+                            tool: tool.clone(),
+                            arguments: call.arguments.clone(),
+                            grant,
+                        },
+                    )
+                    .await
             }
             ToolDestination::Mcp { service, tool } => {
-                if was_sent { return self.mcp_uncertain(k, record, "previous response unavailable"); }
-                let mut endpoint=self.sessions.config.endpoint(service)?.clone();
-                if endpoint.url.contains("{sandbox}") {
-                    let workspace=session.workspace.as_ref().ok_or_else(||Fault::missing("MCP sandbox is unbound"))?;
-                    self.client.in_sandbox(&workspace.sandbox_id)?;
-                    endpoint.url=endpoint.url.replace("{sandbox}",&workspace.sandbox_id);
+                if was_sent {
+                    return self.mcp_uncertain(k, record, "previous response unavailable");
                 }
-                match crate::mcp::call_with_token(&endpoint, mcp_token.expect("resolved MCP capability"), &record.operation_id, tool, call.arguments.clone()).await {
+                let mut endpoint = self.sessions.config.endpoint(service)?.clone();
+                if endpoint.url.contains("{sandbox}") {
+                    let workspace = session
+                        .workspace
+                        .as_ref()
+                        .ok_or_else(|| Fault::missing("MCP sandbox is unbound"))?;
+                    self.client.in_sandbox(&workspace.sandbox_id)?;
+                    endpoint.url = endpoint.url.replace("{sandbox}", &workspace.sandbox_id);
+                }
+                match crate::mcp::call_with_token(
+                    &endpoint,
+                    mcp_token.expect("resolved MCP capability"),
+                    &record.operation_id,
+                    tool,
+                    call.arguments.clone(),
+                )
+                .await
+                {
                     Ok(result) => Ok(result),
-                    Err(error) => { return self.mcp_uncertain(k, record, &error.code); }
+                    Err(error) => {
+                        return self.mcp_uncertain(k, record, &error.code);
+                    }
                 }
             }
             ToolDestination::Client => {
-                let mut client_call = call.clone(); client_call.id = format!("client-{}", record.operation_id);
-                let pending = self.sessions.request_input(principal, &client_call, "client_tool", json!({"name":call.name,"arguments":call.arguments}))?;
+                let mut client_call = call.clone();
+                client_call.id = format!("client-{}", record.operation_id);
+                let pending = self.sessions.request_input(
+                    principal,
+                    &client_call,
+                    "client_tool",
+                    json!({"name":call.name,"arguments":call.arguments}),
+                )?;
                 match pending.response {
-                    Some(value) => serde_json::from_value(value).map_err(|_|Fault::invalid("client tool response must be a ToolResult")),
-                    None => return Ok(CallbackReply { result: None, response: None, pending: true }),
+                    Some(value) => serde_json::from_value(value)
+                        .map_err(|_| Fault::invalid("client tool response must be a ToolResult")),
+                    None => {
+                        return Ok(CallbackReply {
+                            result: None,
+                            response: None,
+                            pending: true,
+                        });
+                    }
                 }
             }
         };
@@ -512,10 +591,7 @@ impl RecoveryLookup {
     /// for a collectable read-only verb; for every other operation (mutations,
     /// `exec_start`, `git_snapshot`) it stays a hard failure, because the
     /// receipt is the only evidence of what ran.
-    fn classify(
-        destination: &ToolDestination,
-        lookup: Result<OperationReceipt>,
-    ) -> Result<Self> {
+    fn classify(destination: &ToolDestination, lookup: Result<OperationReceipt>) -> Result<Self> {
         match lookup {
             Ok(receipt) => Ok(Self::Receipt(Box::new(receipt))),
             Err(error) if error.code == "not_found" => match destination {

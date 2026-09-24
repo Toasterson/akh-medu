@@ -333,10 +333,12 @@ fn backend_repository_witness(
 ) -> Option<u64> {
     witness_with(
         |args| {
-            let request =
-                crate::backend::ExecRequest::shell(format!("git {}", args.join(" ")), BACKEND_WITNESS_TIMEOUT)
-                    .with_cwd(cwd)
-                    .with_env("GIT_OPTIONAL_LOCKS", "0");
+            let request = crate::backend::ExecRequest::shell(
+                format!("git {}", args.join(" ")),
+                BACKEND_WITNESS_TIMEOUT,
+            )
+            .with_cwd(cwd)
+            .with_env("GIT_OPTIONAL_LOCKS", "0");
             match backend.exec(request) {
                 Ok(outcome) if outcome.success => Some(outcome.stdout),
                 Ok(outcome) => {
@@ -969,7 +971,9 @@ impl Agent {
             None
         };
         let witness_route = self.witness_route.clone();
-        let initial_worktree = work_cwd.as_deref().and_then(|cwd| witness_route.witness(cwd));
+        let initial_worktree = work_cwd
+            .as_deref()
+            .and_then(|cwd| witness_route.witness(cwd));
         // Full results are retained only for this turn's provenance gate. A
         // study-note write may cite a successful evidence result from a prior
         // model round, never another parallel call emitted in the same round.
@@ -1192,7 +1196,11 @@ impl Agent {
                     });
                     let shell_changed_tree = shell_ran
                         && initial_worktree
-                            .zip(work_cwd.as_deref().and_then(|cwd| witness_route.witness(cwd)))
+                            .zip(
+                                work_cwd
+                                    .as_deref()
+                                    .and_then(|cwd| witness_route.witness(cwd)),
+                            )
                             .is_some_and(|(before, after)| before != after);
                     let has_mutating_calls = explicit_write || shell_changed_tree;
 
@@ -3278,10 +3286,7 @@ mod tests {
         fn write(&self, path: &std::path::Path, contents: &str) -> crate::fs::FsResult<()> {
             self.inner.write(path, contents)
         }
-        fn read_dir(
-            &self,
-            path: &std::path::Path,
-        ) -> crate::fs::FsResult<Vec<std::path::PathBuf>> {
+        fn read_dir(&self, path: &std::path::Path) -> crate::fs::FsResult<Vec<std::path::PathBuf>> {
             self.inner.read_dir(path)
         }
         fn exists(&self, path: &std::path::Path) -> bool {
@@ -3415,7 +3420,10 @@ mod tests {
     fn unavailable_witness_is_skipped_without_spawning() {
         let dir = tempfile::tempdir().unwrap();
         init_witness_repo(dir.path());
-        for reason in [WitnessUnavailable::NoExecutor, WitnessUnavailable::InProcessOnly] {
+        for reason in [
+            WitnessUnavailable::NoExecutor,
+            WitnessUnavailable::InProcessOnly,
+        ] {
             assert_eq!(WitnessRoute::Unavailable(reason).witness(dir.path()), None);
         }
         // Development still witnesses in-process.

@@ -2052,12 +2052,7 @@ async fn recovery_treats_a_collected_read_receipt_as_not_applied() {
         };
         sessions
             .store
-            .transaction(|tx| {
-                tx.put(
-                    &key("tool", &[&session.id, &request.turn_id, id]),
-                    &record,
-                )
-            })
+            .transaction(|tx| tx.put(&key("tool", &[&session.id, &request.turn_id, id]), &record))
             .unwrap();
     };
     let job = || RuntimeJob {
@@ -2106,9 +2101,7 @@ async fn recovery_treats_a_collected_read_receipt_as_not_applied() {
         assert!(record.unknown && record.result.is_none(), "{operation}");
         sessions
             .store
-            .transaction(|tx| {
-                tx.delete(&key("tool", &[&session.id, &request.turn_id, operation]))
-            })
+            .transaction(|tx| tx.delete(&key("tool", &[&session.id, &request.turn_id, operation])))
             .unwrap();
     }
     server.abort();

@@ -2262,9 +2262,13 @@ impl CandleBackend {
     pub fn device_memory(&self) -> Option<DeviceMemory> {
         match &self.device {
             #[cfg(feature = "hip")]
-            Device::Cuda(_) => candle_core::cuda::device_memory_info().map(|(free, total)| {
-                DeviceMemory { free, total, source: "hipMemGetInfo" }
-            }),
+            Device::Cuda(_) => {
+                candle_core::cuda::device_memory_info().map(|(free, total)| DeviceMemory {
+                    free,
+                    total,
+                    source: "hipMemGetInfo",
+                })
+            }
             #[cfg(feature = "vulkan")]
             Device::Vulkan(_) => amd_sysfs_memory(),
             _ => None,
@@ -2506,14 +2510,9 @@ impl CandleBackend {
         max_tokens: u32,
         check: &mut dyn FnMut() -> NluResult<()>,
     ) -> NluResult<CandleCompletion> {
-        self.generate_completion_scoped(
-            None,
-            prompt,
-            None,
-            max_tokens,
-            check,
-            &mut |_| Ok(RecallDecision::Continue),
-        )
+        self.generate_completion_scoped(None, prompt, None, max_tokens, check, &mut |_| {
+            Ok(RecallDecision::Continue)
+        })
     }
 
     /// Generate from a prompt that contains one image.
@@ -2534,7 +2533,7 @@ impl CandleBackend {
         check: &mut dyn FnMut() -> NluResult<()>,
     ) -> NluResult<CandleCompletion> {
         use crate::nlu::vision_positions::position_triples;
-        use crate::nlu::vision_prompt::{expand_single_image, VisionTokens};
+        use crate::nlu::vision_prompt::{VisionTokens, expand_single_image};
         let started = std::time::Instant::now();
         check()?;
         let fail = |error: candle_core::Error| NluError::LlmGenerationFailed {
@@ -2546,7 +2545,10 @@ impl CandleBackend {
         }
         if self.family != ModelFamily::Qwen35 {
             return Err(NluError::LlmGenerationFailed {
-                reason: format!("image input needs the Qwen35 family, this model is {:?}", self.family),
+                reason: format!(
+                    "image input needs the Qwen35 family, this model is {:?}",
+                    self.family
+                ),
             });
         }
         if max_tokens == 0 {
@@ -2556,9 +2558,13 @@ impl CandleBackend {
         }
         let specials = {
             let id = |name: &str| {
-                self.tokenizer.token_to_id(name).ok_or_else(|| NluError::LlmGenerationFailed {
-                    reason: format!("tokenizer has no `{name}` token; this model cannot take images"),
-                })
+                self.tokenizer
+                    .token_to_id(name)
+                    .ok_or_else(|| NluError::LlmGenerationFailed {
+                        reason: format!(
+                            "tokenizer has no `{name}` token; this model cannot take images"
+                        ),
+                    })
             };
             VisionTokens {
                 start: id("<|vision_start|>")?,
@@ -2599,7 +2605,10 @@ impl CandleBackend {
         let (rows, width) = image_rows.dims2().map_err(fail)?;
         if rows != prepared.grid.tokens() {
             return Err(NluError::LlmGenerationFailed {
-                reason: format!("projector produced {rows} rows for a {}-token grid", prepared.grid.tokens()),
+                reason: format!(
+                    "projector produced {rows} rows for a {}-token grid",
+                    prepared.grid.tokens()
+                ),
             });
         }
         check()?;
@@ -2611,7 +2620,10 @@ impl CandleBackend {
         };
         if width != model.embedding_width() {
             return Err(NluError::LlmGenerationFailed {
-                reason: format!("projector width {width} does not match the residual width {}", model.embedding_width()),
+                reason: format!(
+                    "projector width {width} does not match the residual width {}",
+                    model.embedding_width()
+                ),
             });
         }
         let tokens = Tensor::new(expanded.tokens.as_slice(), &self.device)
@@ -2622,8 +2634,14 @@ impl CandleBackend {
         let spliced = Tensor::cat(
             &[
                 &text_rows.narrow(1, 0, span.start).map_err(fail)?,
-                &image_rows.to_dtype(text_rows.dtype()).map_err(fail)?.unsqueeze(0).map_err(fail)?,
-                &text_rows.narrow(1, span.end, total - span.end).map_err(fail)?,
+                &image_rows
+                    .to_dtype(text_rows.dtype())
+                    .map_err(fail)?
+                    .unsqueeze(0)
+                    .map_err(fail)?,
+                &text_rows
+                    .narrow(1, span.end, total - span.end)
+                    .map_err(fail)?,
             ],
             1,
         )
@@ -2631,7 +2649,9 @@ impl CandleBackend {
         .map_err(fail)?;
         let positions = position_triples(&expanded.pieces);
 
-        let mut logits = model.prefill_embedded(&tokens, &spliced, &positions).map_err(fail)?;
+        let mut logits = model
+            .prefill_embedded(&tokens, &spliced, &positions)
+            .map_err(fail)?;
 
         // The decode loop below mirrors the text path's sampling, stop and
         // timing. It is separate because the text path drives the tracked
@@ -2651,7 +2671,9 @@ impl CandleBackend {
             }
             .map_err(fail)?;
             let token = if self.config.temperature == 0.0 {
-                row.argmax(0).and_then(|t| t.to_scalar::<u32>()).map_err(fail)?
+                row.argmax(0)
+                    .and_then(|t| t.to_scalar::<u32>())
+                    .map_err(fail)?
             } else {
                 let scaled = (&row / self.config.temperature as f64).map_err(fail)?;
                 let probs = candle_nn::ops::softmax(&scaled, 0).map_err(fail)?;
@@ -2685,7 +2707,9 @@ impl CandleBackend {
         // keyed text call believe it can extend this state.
         self.discard_completion_state();
         let text = self.tokenizer.decode(&generated, false).map_err(|e| {
-            NluError::LlmGenerationFailed { reason: format!("detokenization: {e}") }
+            NluError::LlmGenerationFailed {
+                reason: format!("detokenization: {e}"),
+            }
         })?;
         Ok(CandleCompletion {
             text,
@@ -2712,7 +2736,9 @@ impl CandleBackend {
             reason: format!("open projector {}: {e}", path.display()),
         })?;
         let content = candle_core::quantized::gguf_file::Content::read(&mut file).map_err(|e| {
-            NluError::ModelLoadFailed { reason: format!("read projector {}: {e}", path.display()) }
+            NluError::ModelLoadFailed {
+                reason: format!("read projector {}: {e}", path.display()),
+            }
         })?;
         let tower = crate::nlu::vision_tower::VisionTower::load(&content, &mut file, &self.device)?;
         self.vision = Some(tower);
@@ -2768,7 +2794,14 @@ impl CandleBackend {
                 reason: "empty completion session key".into(),
             });
         }
-        self.generate_completion_scoped(Some(session_key), prompt, capture, max_tokens, check, recall)
+        self.generate_completion_scoped(
+            Some(session_key),
+            prompt,
+            capture,
+            max_tokens,
+            check,
+            recall,
+        )
     }
 
     /// Target block count and residual width of a resident Qwen3.5 model.
@@ -2951,7 +2984,8 @@ impl CandleBackend {
                 RecallDecision::Continue => (logits, reused),
                 RecallDecision::Reprompt(new_prompt) => {
                     model.rewind(checkpoint).map_err(fail)?;
-                    let new_tokens = encode_prompt_tokens(&self.tokenizer, self.family, &new_prompt)?;
+                    let new_tokens =
+                        encode_prompt_tokens(&self.tokenizer, self.family, &new_prompt)?;
                     validate_completion_budget(new_tokens.len(), max_tokens, limit)?;
                     admission.check(new_tokens.len(), max_tokens as usize)?;
                     check()?;
@@ -4155,10 +4189,19 @@ mod tests {
             let groups: [[String; 2]; 3] = if let Some(path) = fixture_path {
                 use std::io::Read;
                 let mut bytes = Vec::new();
-                std::fs::File::open(path).unwrap().take(65537).read_to_end(&mut bytes).unwrap();
+                std::fs::File::open(path)
+                    .unwrap()
+                    .take(65537)
+                    .read_to_end(&mut bytes)
+                    .unwrap();
                 assert!(bytes.len() <= 65536, "fixture exceeds 64 KiB");
                 let groups: [[String; 2]; 3] = serde_json::from_slice(&bytes).unwrap();
-                assert!(groups.iter().flatten().all(|text| !text.trim().is_empty() && text.len() <= 8192));
+                assert!(
+                    groups
+                        .iter()
+                        .flatten()
+                        .all(|text| !text.trim().is_empty() && text.len() <= 8192)
+                );
                 groups
             } else {
                 groups.map(|pair| pair.map(str::to_owned))
@@ -4252,21 +4295,31 @@ mod tests {
                 // three closely related facts in the candidate pool.
                 let mut correct = 0;
                 for g in 0..groups.len() {
-                    let distances: Vec<_> = vectors.iter()
-                        .map(|pair| hamming(&vectors[g][1], &pair[0])).collect();
+                    let distances: Vec<_> = vectors
+                        .iter()
+                        .map(|pair| hamming(&vectors[g][1], &pair[0]))
+                        .collect();
                     let expected = distances[g];
-                    let unique = distances.iter().enumerate()
+                    let unique = distances
+                        .iter()
+                        .enumerate()
                         .all(|(other, &d)| other == g || expected < d);
                     eprintln!("fact query {g}: distances {distances:?}, unique correct={unique}");
                     correct += usize::from(unique);
                 }
-                assert_eq!(correct, 3, "all held-out questions must retrieve their unique supporting fact");
+                assert_eq!(
+                    correct, 3,
+                    "all held-out questions must retrieve their unique supporting fact"
+                );
             } else {
                 assert!(
                     max_within < min_between,
                     "every paraphrase pair must be closer than every unrelated pair"
                 );
-                assert!(min_between > 500, "unrelated spans must not look like near-duplicates");
+                assert!(
+                    min_between > 500,
+                    "unrelated spans must not look like near-duplicates"
+                );
             }
         }
 
@@ -4319,7 +4372,10 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(reply.finish_reason, CandleFinishReason::Stop);
-            let taps = reply.prompt_span_taps.clone().expect("newly forwarded span");
+            let taps = reply
+                .prompt_span_taps
+                .clone()
+                .expect("newly forwarded span");
             assert_eq!(offered.as_ref(), Some(&taps));
             assert_eq!(taps.token_span, 1..3);
             assert_eq!(taps.layers.len(), 5);
@@ -4436,7 +4492,10 @@ mod tests {
                 .unwrap();
             // Rewound to the three-token first turn, then forwarded the rewrite.
             assert_eq!((reply.prompt_tokens, reply.reused_prompt_tokens), (6, 3));
-            assert!(reply.prompt_span_taps.is_some(), "taps come from the original forward");
+            assert!(
+                reply.prompt_span_taps.is_some(),
+                "taps come from the original forward"
+            );
 
             // The resident state now matches the rewritten prompt, not the original.
             let reply = backend
@@ -4458,7 +4517,10 @@ mod tests {
                 .unwrap();
             // Recurrent state cannot be sliced: divergence after the shared
             // prefix forces a fresh prefill rather than a partial reuse.
-            assert_eq!(reply.reused_prompt_tokens, 0, "divergence forces fresh prefill");
+            assert_eq!(
+                reply.reused_prompt_tokens, 0,
+                "divergence forces fresh prefill"
+            );
         }
 
         #[test]
@@ -4643,7 +4705,6 @@ Some trailing text."#;
         assert!(config.hidden_layer.is_none());
     }
 }
-
 
 /// What the device can hold, captured before any of a request is allocated.
 #[cfg(feature = "candle-backend")]
@@ -4844,7 +4905,11 @@ fn measure_kv_tensor(
         for position in 0..positions {
             let start = (head * positions + position) * dim;
             let original = &flat[start..start + dim];
-            let norm: f64 = original.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
+            let norm: f64 = original
+                .iter()
+                .map(|v| (*v as f64) * (*v as f64))
+                .sum::<f64>()
+                .sqrt();
             if norm == 0.0 {
                 continue;
             }
