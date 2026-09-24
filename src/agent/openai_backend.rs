@@ -437,12 +437,20 @@ impl OpenAiClient {
             .set("Content-Type", "application/json")
             .send_json(&body)
             .map_err(|e| {
-                metrics.log(&self.config.model, "cancelled");
+                // No response (transport error or HTTP error status): not
+                // billed, so not metered.
+                metrics.log(
+                    &self.config.model,
+                    super::llm_metrics::RequestOutcome::NoResponse,
+                );
                 self.map_transport(e, &url)
             })?;
 
         let parsed: Value = resp.into_json().map_err(|e| {
-            metrics.log(&self.config.model, "cancelled");
+            metrics.log(
+                &self.config.model,
+                super::llm_metrics::RequestOutcome::Partial,
+            );
             OpenAiError::ParseFailed {
                 reason: format!("JSON decode failed: {e}"),
             }
@@ -454,7 +462,10 @@ impl OpenAiClient {
             .and_then(|c| c.first())
             .and_then(|c| c.get("message"))
             .ok_or_else(|| {
-                metrics.log(&self.config.model, "cancelled");
+                metrics.log(
+                    &self.config.model,
+                    super::llm_metrics::RequestOutcome::Partial,
+                );
                 OpenAiError::ParseFailed {
                     reason: "choices[0].message missing in /chat/completions response".into(),
                 }
@@ -471,7 +482,10 @@ impl OpenAiClient {
             metrics.note_tool_call_chunk();
         }
         metrics.set_tokens(prompt_tokens, completion_tokens);
-        metrics.log(&self.config.model, "completed");
+        metrics.log(
+            &self.config.model,
+            super::llm_metrics::RequestOutcome::Completed,
+        );
 
         Ok(AssistantTurn {
             content,
@@ -520,7 +534,12 @@ impl OpenAiClient {
             .set("Accept", "text/event-stream")
             .send_json(&body)
             .map_err(|e| {
-                metrics.log(&self.config.model, "cancelled");
+                // No response (transport error or HTTP error status): not
+                // billed, so not metered.
+                metrics.log(
+                    &self.config.model,
+                    super::llm_metrics::RequestOutcome::NoResponse,
+                );
                 self.map_transport(e, &url)
             })?;
 
@@ -532,7 +551,7 @@ impl OpenAiClient {
         let reader = std::io::BufReader::new(resp.into_reader());
         for line in reader.lines() {
             let line = line.map_err(|e| {
-                metrics.log(&self.config.model, "cancelled");
+                metrics.log(&self.config.model, metrics.interrupted_outcome());
                 OpenAiError::Unreachable {
                     url: url.clone(),
                     reason: format!("stream read failed: {e}"),
@@ -619,7 +638,10 @@ impl OpenAiClient {
             .collect();
 
         metrics.set_tokens(prompt_tokens, completion_tokens);
-        metrics.log(&self.config.model, "completed");
+        metrics.log(
+            &self.config.model,
+            super::llm_metrics::RequestOutcome::Completed,
+        );
 
         Ok(AssistantTurn {
             content,

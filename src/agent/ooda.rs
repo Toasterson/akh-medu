@@ -19,6 +19,84 @@ use super::tool_semantics::{encode_criteria, encode_goal_semantics};
 use super::vsa_decide::{DecideMode, VsaDecideConfig, vsa_native_decide};
 
 // ---------------------------------------------------------------------------
+// Tool candidate policy (Phase 53, ADR 113)
+// ---------------------------------------------------------------------------
+
+/// Which registered tools the Decide phase may choose.
+///
+/// Interactive and CLI cycles are [`ToolCandidatePolicy::Unrestricted`]. The
+/// daemon's unattended idle cycle runs [`ToolCandidatePolicy::SafeNonMcp`]
+/// by default (see `[autonomy] idle_cycle_tools`), so with nobody watching
+/// it cannot spawn or message agents, edit reactor schedules or call
+/// external MCP tools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolCandidatePolicy {
+    /// Any registered tool.
+    #[default]
+    Unrestricted,
+    /// Only registered tools whose manifest is [`DangerLevel::Safe`] and
+    /// that are not proxied from an MCP server. A tool without a manifest
+    /// (not registered) is refused.
+    ///
+    /// [`DangerLevel::Safe`]: super::tool_manifest::DangerLevel::Safe
+    SafeNonMcp,
+}
+
+impl ToolCandidatePolicy {
+    /// Whether the tool `name`, with its registered `manifest`, may be
+    /// chosen under this policy.
+    pub fn permits(
+        self,
+        name: &str,
+        manifest: Option<&super::tool_manifest::ToolManifest>,
+    ) -> bool {
+        use super::tool_manifest::{DangerLevel, ToolSource};
+        match self {
+            ToolCandidatePolicy::Unrestricted => true,
+            ToolCandidatePolicy::SafeNonMcp => manifest.is_some_and(|manifest| {
+                manifest.danger.level == DangerLevel::Safe
+                    && !matches!(manifest.source, ToolSource::Mcp { .. })
+                    && !name.starts_with("mcp__")
+            }),
+        }
+    }
+
+    fn permits_in(self, name: &str, registry: &super::tool::ToolRegistry) -> bool {
+        match self {
+            ToolCandidatePolicy::Unrestricted => true,
+            ToolCandidatePolicy::SafeNonMcp => self.permits(name, registry.manifest(name).as_ref()),
+        }
+    }
+}
+
+thread_local! {
+    /// The candidate policy of the OODA cycle running on this thread. The
+    /// OODA loop is synchronous, so a thread-local scopes the policy to one
+    /// cycle without threading it through `Agent::run_cycle`.
+    static CANDIDATE_POLICY: std::cell::Cell<ToolCandidatePolicy> =
+        const { std::cell::Cell::new(ToolCandidatePolicy::Unrestricted) };
+}
+
+/// Run `f` (typically `agent.run_cycle()`) with `policy` restricting which
+/// tools the Decide phase may choose. The previous policy is restored
+/// afterwards, also when `f` panics.
+pub fn with_tool_candidate_policy<R>(policy: ToolCandidatePolicy, f: impl FnOnce() -> R) -> R {
+    struct Restore(ToolCandidatePolicy);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CANDIDATE_POLICY.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(CANDIDATE_POLICY.with(|cell| cell.replace(policy)));
+    f()
+}
+
+/// The candidate policy in force on this thread.
+pub fn current_tool_candidate_policy() -> ToolCandidatePolicy {
+    CANDIDATE_POLICY.with(std::cell::Cell::get)
+}
+
+// ---------------------------------------------------------------------------
 // OODA cycle types
 // ---------------------------------------------------------------------------
 
@@ -505,6 +583,45 @@ fn decide(
                 .unwrap_or_else(|e| e.into_inner()),
             Some(&agent.affective_system),
         ),
+    };
+
+    // Enforce the candidate policy on whatever the decide mode chose (the
+    // LLM-driven path already filters its candidates; the VSA-native path
+    // does not know about the policy).
+    let policy = current_tool_candidate_policy();
+    let (tool_name, tool_input, reasoning) = {
+        let registry = agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if policy.permits_in(&tool_name, &registry) {
+            (tool_name, tool_input, reasoning)
+        } else if policy.permits_in("kg_query", &registry) {
+            tracing::info!(
+                refused = %tool_name,
+                ?policy,
+                "OODA decide: tool not permitted by the candidate policy; falling back to kg_query"
+            );
+            (
+                "kg_query".to_owned(),
+                ToolInput::new()
+                    .with_param("symbol", agent.engine.resolve_label(top_goal.symbol_id))
+                    .with_param("direction", "both"),
+                format!(
+                    "{tool_name} is not permitted by the {policy:?} candidate policy; \
+                     falling back to KG query"
+                ),
+            )
+        } else {
+            return Err(AgentError::ToolExecution {
+                tool_name,
+                message: format!(
+                    "no tool is permitted by the {policy:?} candidate policy (kg_query is not \
+                     registered as a safe tool); set [autonomy] idle_cycle_tools or register \
+                     kg_query"
+                ),
+            });
+        }
     };
 
     // Store impasse on agent for goal generation to pick up.
@@ -1352,6 +1469,11 @@ fn select_tool(
             }
         }
     }
+
+    // Drop candidates the thread's candidate policy refuses (the daemon's
+    // idle cycle runs safe, non-MCP tools only by default).
+    let policy = current_tool_candidate_policy();
+    candidates.retain(|candidate| policy.permits_in(&candidate.name, tool_registry));
 
     // Apply psyche archetype bonus if available.
     if let Some(psyche) = psyche {
@@ -2306,6 +2428,83 @@ fn evaluate_goal_progress_keyword_fallback(
 mod tests {
     use super::*;
     use crate::agent::tool::ToolInput;
+
+    fn manifest_with(
+        name: &str,
+        level: crate::agent::tool_manifest::DangerLevel,
+        source: crate::agent::tool_manifest::ToolSource,
+    ) -> crate::agent::tool_manifest::ToolManifest {
+        use crate::agent::tool_manifest::{DangerInfo, ToolManifest};
+        ToolManifest {
+            name: name.into(),
+            description: String::new(),
+            parameters: Vec::new(),
+            danger: DangerInfo {
+                level,
+                capabilities: Default::default(),
+                description: String::new(),
+                shadow_triggers: Vec::new(),
+            },
+            source,
+        }
+    }
+
+    #[test]
+    fn safe_non_mcp_policy_refuses_side_effecting_and_mcp_tools() {
+        use crate::agent::tool_manifest::{DangerLevel, ToolSource};
+        let policy = ToolCandidatePolicy::SafeNonMcp;
+        let safe = manifest_with("kg_query", DangerLevel::Safe, ToolSource::Native);
+        assert!(policy.permits("kg_query", Some(&safe)));
+        for level in [
+            DangerLevel::Cautious,
+            DangerLevel::Dangerous,
+            DangerLevel::Critical,
+        ] {
+            let m = manifest_with("agent_spawn", level, ToolSource::Native);
+            assert!(!policy.permits("agent_spawn", Some(&m)), "{level:?}");
+        }
+        let mcp = manifest_with(
+            "mcp__board__post",
+            DangerLevel::Safe,
+            ToolSource::Mcp {
+                server: "board".into(),
+            },
+        );
+        assert!(!policy.permits("mcp__board__post", Some(&mcp)));
+        // A static MCP tool registered with a native manifest is still
+        // recognised by its name.
+        let named = manifest_with("mcp__x__y", DangerLevel::Safe, ToolSource::Native);
+        assert!(!policy.permits("mcp__x__y", Some(&named)));
+        // Unregistered tools are refused; the unrestricted policy allows all.
+        assert!(!policy.permits("ghost", None));
+        assert!(ToolCandidatePolicy::Unrestricted.permits("ghost", None));
+        assert!(ToolCandidatePolicy::Unrestricted.permits("mcp__x__y", Some(&mcp)));
+    }
+
+    #[test]
+    fn candidate_policy_is_scoped_and_restored() {
+        assert_eq!(
+            current_tool_candidate_policy(),
+            ToolCandidatePolicy::Unrestricted
+        );
+        let inside = with_tool_candidate_policy(ToolCandidatePolicy::SafeNonMcp, || {
+            current_tool_candidate_policy()
+        });
+        assert_eq!(inside, ToolCandidatePolicy::SafeNonMcp);
+        assert_eq!(
+            current_tool_candidate_policy(),
+            ToolCandidatePolicy::Unrestricted
+        );
+        let caught = std::panic::catch_unwind(|| {
+            with_tool_candidate_policy(ToolCandidatePolicy::SafeNonMcp, || panic!("boom"))
+        });
+        assert!(caught.is_err());
+        assert_eq!(
+            current_tool_candidate_policy(),
+            ToolCandidatePolicy::Unrestricted,
+            "restored after a panic"
+        );
+    }
 
     fn make_candidate(name: &str, base_score: f32) -> ToolCandidate {
         ToolCandidate::new(name, ToolInput::new(), base_score, "test".into())

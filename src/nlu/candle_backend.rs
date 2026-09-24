@@ -938,6 +938,14 @@ impl CandleBackend {
     #[cfg(feature = "candle-backend")]
     pub fn generate(&mut self, prompt: &str, max_tokens: u32) -> NluResult<String> {
         let result = self.generate_inner(prompt, max_tokens, StopMode::Text)?;
+        // Phase 53b: meter one-shot generation (knowledge elicitation, local
+        // extraction) for the autonomy budget. Only a generation that
+        // produced a result is recorded; the chat path meters through
+        // `LlmRequestMetrics::log` and does not call this method.
+        crate::agent::llm_metrics::record_usage(
+            result.prompt_tokens as u64,
+            u64::from(result.tokens_generated),
+        );
         let text = clean_generated_text(&result.text);
         tracing::debug!(
             tokens = result.tokens_generated,
@@ -3110,15 +3118,20 @@ impl CandleBackend {
         // speculative (prompt-lookup) path (Phase 47 / ADR 075): greedy → byte-exact vs plain
         // greedy, temperature → distribution-lossless speculative sampling (47e). Every other
         // case keeps the proven plain decode loop unchanged.
-        if self.spec_decode_eligible() {
+        let prompt_len = prompt_tokens.len();
+        let result = if self.spec_decode_eligible() {
             if self.config.temperature == 0.0 {
                 self.spec_decode_loop(logits, prompt_tokens, max_tokens, stop)
             } else {
                 self.spec_sample_decode_loop(logits, prompt_tokens, max_tokens, stop)
             }
         } else {
-            self.decode_loop(logits, prompt_tokens.len(), max_tokens, stop)
-        }
+            self.decode_loop(logits, prompt_len, max_tokens, stop)
+        };
+        result.map(|mut result| {
+            result.prompt_tokens = prompt_len;
+            result
+        })
     }
 
     /// Emit one freshly-chosen `token` into `st` and apply the `StopMode` stopping rules,
@@ -3294,6 +3307,7 @@ impl CandleBackend {
 
         Ok(GenerationResult {
             text: st.generated_text,
+            prompt_tokens: 0,
             tokens_generated: st.n_generated,
             decode_secs,
         })
@@ -3447,6 +3461,7 @@ impl CandleBackend {
         );
         Ok(GenerationResult {
             text: st.generated_text,
+            prompt_tokens: 0,
             tokens_generated: st.n_generated,
             decode_secs,
         })
@@ -3598,6 +3613,7 @@ impl CandleBackend {
         );
         Ok(GenerationResult {
             text: st.generated_text,
+            prompt_tokens: 0,
             tokens_generated: st.n_generated,
             decode_secs,
         })
@@ -3913,6 +3929,9 @@ enum StopMode {
 /// Internal generation result.
 struct GenerationResult {
     text: String,
+    /// Prompt tokens prefilled for this generation. Set by
+    /// [`CandleBackend::generate_inner`] (the decode loops leave it 0).
+    prompt_tokens: usize,
     tokens_generated: u32,
     /// Wall-clock spent in the autoregressive decode loop (prefill excluded), in
     /// seconds. Drives the Phase 45a tok/s baseline. Zero when no token was decoded.
