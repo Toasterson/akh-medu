@@ -3,7 +3,7 @@
 > Date: 2026-09-24
 > Status: Accepted (grilling session 2026-09-24, ten decisions locked by the operator)
 > Phase: 53 (plan: `docs/ai/plans/2026-09-24-phase53-full-akh-always.md`)
-> Anima: project `019d9844-ce74-7993-a9f0-c953b8f04a4e` (work items listed in the plan)
+> Anima: project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, umbrella WI `01a0d43b-bf90-7630-bbc6-bd31d0609864` (slice WIs listed in the plan)
 > Supersedes: the `core-server` build profile (`docs/wayfinder/agent-loops/implementation.md` "Added an `akhomed` `core-server` build profile") and the `akhomed` row of `docs/wayfinder/agent-loops/assets/daemon-boundaries.md` §1 as far as it excludes resident loops, automation and admission from `akhomed`
 > Related: ADR 049 (relocatable akh), ADR 065 (context assembly runtime), ADR 070 (selectable chat backing), ADR 081/091 (memory schema, transcript capture), ADR 082 (executor `Backend` seam), ADR 105 (autonomous run governance)
 

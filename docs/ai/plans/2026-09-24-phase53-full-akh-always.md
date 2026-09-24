@@ -3,7 +3,7 @@
 - **Date:** 2026-09-24
 - **ADR:** [113](../decisions/113-full-akh-always.md)
 - **Status:** Design locked (grilling session 2026-09-24); implementation pending
-- **Anima project:** `019d9844-ce74-7993-a9f0-c953b8f04a4e` (work items to be filed per slice)
+- **Anima:** project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, umbrella WI `01a0d43b-bf90-7630-bbc6-bd31d0609864` (draft; slice WIs filed when promoted)
 - **Deploy rule:** `.claude/rules/deploy-from-main.md`. Every slice ships from `origin/main` only.
 
 ## Why
