@@ -81,9 +81,9 @@ fn unknown_prefix(workspace: &str) -> String {
 
 /// Read-only verbs whose terminal receipts are garbage-collected after
 /// [`READ_RECEIPT_RETENTION`]. Replaying such an id afterwards re-runs a
-/// harmless read. `git_snapshot` is read-only too, but a later `git_publish`
-/// consumes its receipt, so it is kept like a mutation's.
-pub const COLLECTABLE_READ_OPERATIONS: &[&str] = &["read", "list", "search", "stat", "exec_poll"];
+/// harmless read. Shared with the session broker, which treats a collected
+/// read receipt as not applied during recovery.
+pub use akh_session_types::COLLECTABLE_READ_OPERATIONS;
 /// How long a terminal read-only receipt stays available for replay and for
 /// the session broker's recovery lookups.
 pub const READ_RECEIPT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);

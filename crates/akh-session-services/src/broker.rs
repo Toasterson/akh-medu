@@ -393,28 +393,50 @@ impl Broker {
                 && matches!(record.destination, ToolDestination::Workspace { .. })
             {
                 let workspace = &job.request.workspace;
-                let receipt: OperationReceipt = self
+                let lookup = self
                     .client
                     .in_sandbox(&workspace.sandbox_id)?
-                    .get(
+                    .get::<OperationReceipt>(
                         &workspace.executor,
                         &format!("/v1/operations/{}", segment(&record.operation_id)),
                     )
-                    .await?;
-                if receipt.request.session_id != job.request.session_id
-                    || receipt.request.turn_id != job.request.turn_id
-                    || receipt.id != record.operation_id
-                {
-                    return Err(Fault::conflict(
-                        "executor recovery receipt belongs to another turn",
-                    ));
-                }
-                if receipt.status.terminal() {
-                    record.result = receipt.result;
-                    record.unknown = false;
-                    self.sessions
-                        .store
-                        .transaction(|tx| tx.put(&record_key(&record.call), &record))?;
+                    .await;
+                match RecoveryLookup::classify(&record.destination, lookup)? {
+                    RecoveryLookup::Receipt(receipt) => {
+                        if receipt.request.session_id != job.request.session_id
+                            || receipt.request.turn_id != job.request.turn_id
+                            || receipt.id != record.operation_id
+                        {
+                            return Err(Fault::conflict(
+                                "executor recovery receipt belongs to another turn",
+                            ));
+                        }
+                        if receipt.status.terminal() {
+                            record.result = receipt.result;
+                            record.unknown = false;
+                            self.sessions
+                                .store
+                                .transaction(|tx| tx.put(&record_key(&record.call), &record))?;
+                        }
+                    }
+                    RecoveryLookup::CollectedRead { operation } => {
+                        // The read changed nothing, so an expired receipt
+                        // cannot hide an effect: settle it as not applied and
+                        // let the model re-issue the read if it still needs it.
+                        tracing::info!(
+                            event.name = "workspace.read_receipt.collected",
+                            session.id = %record.call.session_id,
+                            turn.id = %record.call.turn_id,
+                            operation.id = %record.operation_id,
+                            operation = %operation,
+                            "read-only receipt was collected by akhexecd; settling the call as not applied"
+                        );
+                        record.result = Some(collected_read_result(&record, &operation));
+                        record.unknown = false;
+                        self.sessions
+                            .store
+                            .transaction(|tx| tx.put(&record_key(&record.call), &record))?;
+                    }
                 }
             }
             if matches!(record.destination, ToolDestination::Mcp { .. }) {
@@ -475,6 +497,60 @@ impl Broker {
         Ok(job)
     }
 }
+/// What a broker recovery lookup of a workspace receipt found.
+enum RecoveryLookup {
+    /// akhexecd still holds the receipt; it stays authoritative.
+    Receipt(Box<OperationReceipt>),
+    /// akhexecd garbage-collected the terminal receipt of a read-only verb
+    /// (see `COLLECTABLE_READ_OPERATIONS`). Reads have no effect, so the call
+    /// is safe to treat as not applied.
+    CollectedRead { operation: String },
+}
+
+impl RecoveryLookup {
+    /// Classify a `GET /v1/operations/{id}` result. A `not_found` is safe only
+    /// for a collectable read-only verb; for every other operation (mutations,
+    /// `exec_start`, `git_snapshot`) it stays a hard failure, because the
+    /// receipt is the only evidence of what ran.
+    fn classify(
+        destination: &ToolDestination,
+        lookup: Result<OperationReceipt>,
+    ) -> Result<Self> {
+        match lookup {
+            Ok(receipt) => Ok(Self::Receipt(Box::new(receipt))),
+            Err(error) if error.code == "not_found" => match destination {
+                ToolDestination::Workspace { operation }
+                    if COLLECTABLE_READ_OPERATIONS.contains(&operation.as_str()) =>
+                {
+                    Ok(Self::CollectedRead {
+                        operation: operation.clone(),
+                    })
+                }
+                _ => Err(error),
+            },
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn collected_read_result(record: &ToolRecord, operation: &str) -> ToolResult {
+    ToolResult {
+        success: false,
+        text: format!(
+            "The receipt for read-only operation {} ({operation}) has expired, so its result is unavailable. Nothing was changed; re-issue the {operation} if you still need it.",
+            record.operation_id
+        ),
+        data: Some(json!({
+            "code":"read_receipt_collected",
+            "outcome":"not_applied",
+            "operation":operation,
+            "retryable":true,
+            "operation_id":record.operation_id,
+        })),
+        receipt: Some(record.operation_id.clone()),
+    }
+}
+
 fn done(result: ToolResult) -> CallbackReply {
     CallbackReply {
         result: Some(result),

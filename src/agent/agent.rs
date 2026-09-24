@@ -172,6 +172,10 @@ pub struct Agent {
     /// Whether tools that spawn host processes in akhomed are registered
     /// (built-ins at construction, skill CLI tools on skill load).
     pub(crate) host_process_policy: HostProcessPolicy,
+    /// How the autonomous completion check runs `git` to witness shell-made
+    /// repository changes (in-process in development, through the executor
+    /// backend or not at all in deployed mode).
+    pub(crate) witness_route: super::agentic_chat::WitnessRoute,
     pub(crate) working_memory: WorkingMemory,
     pub(crate) tool_registry: std::sync::Mutex<Arc<ToolRegistry>>,
     pub(crate) goals: Vec<Goal>,
@@ -989,6 +993,8 @@ impl Agent {
         let delegation_pending = delegation_manager.pending_queue();
 
         let host_process_policy = HostProcessPolicy::resolve(config.deployment, &exec_wiring);
+        let witness_route =
+            super::agentic_chat::WitnessRoute::resolve(config.deployment, &exec_wiring);
         let mut tool_registry = ToolRegistry::new();
         Self::register_builtin_tools(
             &mut tool_registry,
@@ -1076,6 +1082,7 @@ impl Agent {
             engine,
             config,
             host_process_policy,
+            witness_route,
             working_memory,
             tool_registry: std::sync::Mutex::new(Arc::new(tool_registry)),
             goals,
@@ -4333,6 +4340,8 @@ impl Agent {
         let delegation_pending = delegation_manager.pending_queue();
 
         let host_process_policy = HostProcessPolicy::resolve(config.deployment, &exec_wiring);
+        let witness_route =
+            super::agentic_chat::WitnessRoute::resolve(config.deployment, &exec_wiring);
         let mut tool_registry = ToolRegistry::new();
         Self::register_builtin_tools(
             &mut tool_registry,
@@ -4619,6 +4628,7 @@ impl Agent {
             engine,
             config,
             host_process_policy,
+            witness_route,
             working_memory,
             tool_registry: std::sync::Mutex::new(Arc::new(tool_registry)),
             goals,

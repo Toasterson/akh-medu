@@ -200,6 +200,13 @@ pub const READ_ONLY_WORKSPACE_OPERATIONS: &[&str] = &[
     "git_snapshot",
 ];
 
+/// Read-only verbs whose terminal receipts akhexecd garbage-collects after its
+/// read-receipt retention (24 h). A recovery lookup of such a receipt that
+/// returns `not_found` is safe: the read changed nothing and can be re-issued.
+/// `git_snapshot` is read-only too, but a later `git_publish` consumes its
+/// receipt, so it is kept like a mutation's.
+pub const COLLECTABLE_READ_OPERATIONS: &[&str] = &["read", "list", "search", "stat", "exec_poll"];
+
 pub fn is_read_only_workspace_operation(operation: &str) -> bool {
     READ_ONLY_WORKSPACE_OPERATIONS.contains(&operation)
 }
