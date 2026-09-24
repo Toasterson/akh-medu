@@ -4,7 +4,7 @@ use opentelemetry::{KeyValue, trace::TracerProvider as _};
 use opentelemetry_otlp::{Protocol, WithExportConfig};
 use opentelemetry_sdk::{Resource, runtime::Tokio};
 use std::time::Instant;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{Layer, filter, layer::SubscriberExt, util::SubscriberInitExt};
 
 pub struct Telemetry {
     traces: Option<opentelemetry_sdk::trace::TracerProvider>,
@@ -34,9 +34,11 @@ impl Drop for Telemetry {
 pub fn init(service: &str, instance: &str) -> Result<Telemetry, Box<dyn std::error::Error>> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info,opentelemetry=warn,hyper=warn,reqwest=warn".into());
-    let base = tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
+    let base = tracing_subscriber::registry().with(filter).with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_filter(filter::filter_fn(|meta| !is_stream_delta(meta))),
+    );
     if std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_none() {
         base.try_init()?;
         return Ok(Telemetry {
@@ -141,6 +143,14 @@ impl Drop for Operation {
             .build()
             .add(1, &labels);
     }
+}
+
+/// Per-token stream deltas go to OTLP only. On stderr they flood the service
+/// log (one line per provider chunk: 2.9M lines in a few days on the Mac
+/// runtimes) without adding anything the OTLP logs and the
+/// `akh.runtime.delta.bytes` counter don't already carry.
+fn is_stream_delta(meta: &tracing::Metadata<'_>) -> bool {
+    meta.is_event() && meta.fields().field("delta.kind").is_some()
 }
 
 pub fn delta(kind: &'static str, text: &str) {
