@@ -242,6 +242,7 @@ dependencies = [
  "harness-core",
  "hnsw_rs",
  "hound",
+ "httpdate",
  "icalendar",
  "image",
  "imap",

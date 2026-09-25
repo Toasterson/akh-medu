@@ -43,6 +43,56 @@ pub enum ChatBackendError {
     #[error("chat backend \"{backend}\" turn failed: {reason}")]
     #[diagnostic(code(akh::chat_backend::turn_failed))]
     TurnFailed { backend: String, reason: String },
+
+    /// The model provider failed the request (non-2xx status or transport
+    /// failure). `evidence` carries the status, `Retry-After` and structured
+    /// error code for the provider gate (Phase 53g PR 4); the message is the
+    /// same as [`Self::TurnFailed`].
+    #[error("chat backend \"{backend}\" turn failed: {reason}")]
+    #[diagnostic(
+        code(akh::chat_backend::provider_failed),
+        help(
+            "The provider refused or did not answer. Autonomous turns back off on \
+             authentication, quota and rate-limit failures; see the `akh::provider` log \
+             target and `_akh/provider/gate` for the gate's state."
+        )
+    )]
+    ProviderFailed {
+        backend: String,
+        reason: String,
+        evidence: super::provider_failure::ProviderFailureEvidence,
+    },
+}
+
+impl ChatBackendError {
+    /// A backend error from a provider-client error: [`Self::ProviderFailed`]
+    /// when the client captured provider evidence, [`Self::TurnFailed`]
+    /// otherwise.
+    pub fn from_provider(
+        backend: &str,
+        error: &impl std::fmt::Display,
+        evidence: Option<super::provider_failure::ProviderFailureEvidence>,
+    ) -> Self {
+        match evidence {
+            Some(evidence) => Self::ProviderFailed {
+                backend: backend.to_owned(),
+                reason: error.to_string(),
+                evidence,
+            },
+            None => Self::TurnFailed {
+                backend: backend.to_owned(),
+                reason: error.to_string(),
+            },
+        }
+    }
+
+    /// The provider evidence, when the provider itself failed the request.
+    pub fn provider_evidence(&self) -> Option<&super::provider_failure::ProviderFailureEvidence> {
+        match self {
+            Self::ProviderFailed { evidence, .. } => Some(evidence),
+            Self::Unavailable { .. } | Self::TurnFailed { .. } => None,
+        }
+    }
 }
 
 /// Immutable backend state captured once at the start of an agentic turn.
@@ -297,10 +347,7 @@ impl ChatBackend for OllamaChatBackend {
     ) -> Result<AssistantTurn, ChatBackendError> {
         self.mgr
             .chat_with_tools(agent_id, conversation, tools, request_seq)
-            .map_err(|e| ChatBackendError::TurnFailed {
-                backend: "ollama".into(),
-                reason: e.to_string(),
-            })
+            .map_err(|e| ChatBackendError::from_provider("ollama", &e, e.provider_evidence()))
     }
 
     fn chat_with_tools_prepared(
@@ -314,10 +361,7 @@ impl ChatBackend for OllamaChatBackend {
         let system_prompt = prepared.require_system_prompt("ollama")?;
         self.mgr
             .chat_with_tools_using_prompt(agent_id, system_prompt, conversation, tools, request_seq)
-            .map_err(|e| ChatBackendError::TurnFailed {
-                backend: "ollama".into(),
-                reason: e.to_string(),
-            })
+            .map_err(|e| ChatBackendError::from_provider("ollama", &e, e.provider_evidence()))
     }
 
     fn chat_with_tools_streaming(
@@ -330,10 +374,7 @@ impl ChatBackend for OllamaChatBackend {
     ) -> Result<AssistantTurn, ChatBackendError> {
         self.mgr
             .chat_with_tools_streaming(agent_id, conversation, tools, request_seq, on_event)
-            .map_err(|e| ChatBackendError::TurnFailed {
-                backend: "ollama".into(),
-                reason: e.to_string(),
-            })
+            .map_err(|e| ChatBackendError::from_provider("ollama", &e, e.provider_evidence()))
     }
 
     fn chat_with_tools_streaming_prepared(
@@ -355,10 +396,7 @@ impl ChatBackend for OllamaChatBackend {
                 request_seq,
                 on_event,
             )
-            .map_err(|e| ChatBackendError::TurnFailed {
-                backend: "ollama".into(),
-                reason: e.to_string(),
-            })
+            .map_err(|e| ChatBackendError::from_provider("ollama", &e, e.provider_evidence()))
     }
 }
 

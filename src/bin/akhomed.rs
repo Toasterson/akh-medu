@@ -607,12 +607,14 @@ impl ServerState {
                 exec: ExecPlacement::from(&cfg.effective_exec(host_exec.as_ref())),
                 board: cfg.board.clone(),
                 memory: cfg.memory,
+                provider: cfg.provider.clone(),
             },
             Err(_) => DaemonAkhSettings {
                 autonomy: akh_medu::akh_config::AutonomyConfig::default(),
                 exec: ExecPlacement::from(&host_exec.unwrap_or_default()),
                 board: None,
                 memory: akh_medu::akh_config::MemoryConfig::default(),
+                provider: akh_medu::agent::provider_failure::ProviderConfig::default(),
             },
         }
     }
@@ -3987,6 +3989,8 @@ struct DaemonAkhSettings {
     board: Option<akh_medu::agent::djehuty::BoardConfig>,
     /// `[memory]` hygiene settings (Phase 53j).
     memory: akh_medu::akh_config::MemoryConfig,
+    /// `[provider]` cooldown ladder and error-code lexicon (Phase 53g PR 4).
+    provider: akh_medu::agent::provider_failure::ProviderConfig,
 }
 
 /// Background daemon task: delegates to [`AgentDaemon`] for the full set of
@@ -4016,6 +4020,7 @@ async fn run_daemon_task(
         .with_exec_placement(settings.exec)
         .with_board_config(settings.board)
         .with_memory(settings.memory)
+        .with_provider(settings.provider)
         .with_workspace(ws_name.clone())
         .with_shutdown(shutdown_rx)
         .with_status(Arc::clone(&status))

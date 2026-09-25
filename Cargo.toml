@@ -95,6 +95,9 @@ epub = "2"
 
 # HTTP (sync)
 ureq = { version = "2", features = ["json"] }
+# `Retry-After: <HTTP-date>` parsing for the provider-failure taxonomy
+# (Phase 53g PR 4, `src/agent/provider_failure.rs`).
+httpdate = "1"
 
 # MCP protocol version vocabulary (`ProtocolVersion`, `KNOWN_VERSIONS`) for the
 # hand-rolled Streamable HTTP client in `src/upstream_client.rs` — reuses

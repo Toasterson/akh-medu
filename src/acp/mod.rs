@@ -2281,6 +2281,9 @@ const ENGINE_ONLY_METHODS: &[&str] = &[
     "_akh/provenance",
     "_akh/provenance/filter",
     "_akh/identity",
+    // Phase 53g PR 4: the provider gate lives in engine metadata.
+    "_akh/provider/gate",
+    "_akh/provider/gate/reset",
 ];
 
 /// Agent-read methods that need the agent for full responses but degrade
@@ -2345,6 +2348,8 @@ fn dispatch_akh(
                 "provenance",
                 // ADR 081 Slice 9 — schema-coverage report.
                 "schema",
+                // Phase 53g PR 4 — provider-failure gate.
+                "provider",
                 // Identity — client-driven Ritual of Awakening (re-exposed as an
                 // ACP data-plane op after IdentityAwakenTool's removal as an
                 // agent tool; see spec_C_identity_acp).
@@ -2402,6 +2407,10 @@ fn dispatch_akh(
                 "_akh/schema/reject",
                 // Identity — client-driven Ritual of Awakening.
                 "_akh/identity/awaken",
+                // Phase 53g PR 4 — provider gate status (the reset is a
+                // control-plane write, see `is_control_plane_write`).
+                "_akh/provider/gate",
+                "_akh/provider/gate/reset",
             ];
             // Server-level control-plane (only when a backend is wired).
             if has_control {
@@ -2606,6 +2615,29 @@ fn dispatch_akh(
                 "object_still_asserted": object_still_asserted,
                 "cascade_retracted": result.retracted.len(),
                 "cascade_depth": result.cascade_depth,
+            }))
+        }
+
+        // ── provider group (Phase 53g PR 4): the gate that pauses this akh's
+        //    autonomous model turns during a provider outage. The reset is a
+        //    control-plane write (`is_control_plane_write`). ─────────────────
+        "provider/gate" => {
+            let state = crate::agent::provider_failure::load_persisted(engine)
+                .map_err(|e| diag_err(e, "reading the provider gate"))?
+                .unwrap_or_default();
+            Ok(serde_json::json!({
+                "workspace": workspace,
+                "durable": engine.store().durable.is_some(),
+                "gate": state,
+            }))
+        }
+        "provider/gate/reset" => {
+            let previous = crate::agent::provider_failure::reset_persisted(engine)
+                .map_err(|e| diag_err(e, "resetting the provider gate"))?;
+            Ok(serde_json::json!({
+                "workspace": workspace,
+                "previous": previous,
+                "gate": crate::agent::provider_failure::ProviderGateState::Open,
             }))
         }
 
@@ -4726,6 +4758,8 @@ fn is_control_plane_write(method: &str, params: &serde_json::Value) -> bool {
         "_akh/psyche/archetypes" => ARCHETYPE_WEIGHT_KEYS
             .iter()
             .any(|key| params.get(key).is_some()),
+        // Reopening a provider gate resumes autonomous (billed) model turns.
+        "_akh/provider/gate/reset" => true,
         _ => false,
     }
 }
@@ -10578,6 +10612,55 @@ tags = []
             &json!({"workspace": "a"})
         ));
         assert!(!is_control_plane_write("_akh/goals", &json!({"mode": "x"})));
+        assert!(is_control_plane_write(
+            "_akh/provider/gate/reset",
+            &json!({})
+        ));
+        assert!(!is_control_plane_write("_akh/provider/gate", &json!({})));
+    }
+
+    /// `_akh/provider/gate` reports the persisted gate and
+    /// `_akh/provider/gate/reset` opens it (Phase 53g PR 4).
+    #[test]
+    fn provider_gate_status_and_reset() {
+        use crate::agent::autonomy::UnixSecs;
+        use crate::agent::provider_failure::{CooldownLadder, ProviderFailureClass, ProviderGate};
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(
+            Engine::new(crate::engine::EngineConfig {
+                data_dir: Some(dir.path().to_path_buf()),
+                ..crate::engine::EngineConfig::default()
+            })
+            .unwrap(),
+        );
+        let params = serde_json::json!({});
+        let status = dispatch_akh(&engine, "w", false, "_akh/provider/gate", &params).unwrap();
+        assert_eq!(status["gate"]["state"], "open");
+
+        ProviderGate::open(&engine, CooldownLadder::default())
+            .unwrap()
+            .record_failure(
+                ProviderFailureClass::Authentication,
+                UnixSecs::from_secs(1_790_251_200),
+            )
+            .unwrap();
+        let status = dispatch_akh(&engine, "w", false, "_akh/provider/gate", &params).unwrap();
+        assert_eq!(status["gate"]["state"], "auth_blocked");
+        assert_eq!(status["gate"]["since"], 1_790_251_200u64);
+
+        let reset = dispatch_akh(&engine, "w", false, "_akh/provider/gate/reset", &params).unwrap();
+        assert_eq!(reset["previous"]["state"], "auth_blocked");
+        let status = dispatch_akh(&engine, "w", false, "_akh/provider/gate", &params).unwrap();
+        assert_eq!(status["gate"]["state"], "open");
+
+        // An in-memory akh has nothing to reset: a diagnostic, not a no-op.
+        let memory = Arc::new(Engine::new(crate::engine::EngineConfig::default()).unwrap());
+        let error =
+            dispatch_akh(&memory, "w", false, "_akh/provider/gate/reset", &params).unwrap_err();
+        assert_eq!(
+            error.into_json()["code"].as_str(),
+            Some("akh::provider::not_durable")
+        );
     }
 
     /// An unknown token is refused at `initialize`, even with principals set.

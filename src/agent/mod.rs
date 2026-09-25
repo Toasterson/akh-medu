@@ -90,6 +90,7 @@ pub mod preference;
 pub mod priority_reasoning;
 pub mod project;
 pub mod promotion;
+pub mod provider_failure;
 #[cfg(feature = "daemon")]
 pub mod reactor;
 pub mod reflect;

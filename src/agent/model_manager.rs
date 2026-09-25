@@ -185,6 +185,29 @@ pub enum ModelManagerError {
     Ollama(#[from] OllamaError),
 }
 
+impl ModelManagerError {
+    /// What this failure says about the model provider, for the provider
+    /// gate (Phase 53g PR 4). `None` for failures inside the akh (no agent
+    /// loaded, no backend, an unparseable answer).
+    pub fn provider_evidence(&self) -> Option<super::provider_failure::ProviderFailureEvidence> {
+        use super::provider_failure::{ProviderErrorDetail, ProviderFailureEvidence};
+        match self {
+            Self::Ollama(error) => error.provider_evidence(),
+            // Status 0 is how the fallback reports a transport failure.
+            Self::FallbackRequestFailed { status: 0, .. } => {
+                Some(ProviderFailureEvidence::Transport)
+            }
+            Self::FallbackRequestFailed { status, body, .. } => {
+                Some(ProviderFailureEvidence::Http {
+                    status: *status,
+                    detail: ProviderErrorDetail::from_parts(None, body),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Convenience alias.
 pub type ModelManagerResult<T> = std::result::Result<T, ModelManagerError>;
 
