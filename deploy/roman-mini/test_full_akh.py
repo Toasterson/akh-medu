@@ -70,8 +70,7 @@ def fixture(root: Path) -> None:
         if role == "janus":
             tools.append(mcp_tool("escalate_to_astra", "janus-escalation", "escalate_to_astra"))
         if role == "vesta":
-            tools += [mcp_tool("homelab_inspect", "vesta-ops", "homelab_inspect"),
-                      mcp_tool("grafana__query_prometheus", "vesta-ops", "grafana__query_prometheus")]
+            tools += [mcp_tool("homelab_inspect", "vesta-ops", "homelab_inspect")]
         akhs[role] = {"core_service": "core", "instructions": "", "tools": tools}
         wake = ("You are now on duty. Coordinate with board_send_inbox. " + json.dumps(IDS) +
                 "\nReport on thread " + fa.STATUS_THREAD + ".")
@@ -85,6 +84,8 @@ def fixture(root: Path) -> None:
     principals += [{"id": f"t3-{r}", "token_file": str(root / f"secrets/t3-{r}.key"), "roles": ["client"], "akhs": [r]} for r in ROLES]
     (root / "config/sessions.json").write_text(json.dumps(
         {"endpoints": endpoints, "principals": principals, "akhs": akhs, "automations": automations}))
+    (root / "config/vesta-grafana-tools.json").write_text(json.dumps(
+        [{"name": "query_prometheus", "description": ""}, {"name": "list_datasources", "description": ""}]))
     routes, ev_endpoints = [], {"sessions": {"url": "http://127.0.0.1:18431", "token_file": str(root / "secrets/core.key")}}
     for role in ROLES:
         ev_endpoints[f"board-{role}"] = {"url": "http://127.0.0.1:18089", "token_env": f"ROMAN_BOARD_{role.upper()}"}
@@ -148,13 +149,20 @@ class RenderTests(unittest.TestCase):
                                            "auth": {"token_env": f"ROMAN_BOARD_{role.upper()}"}})
             servers = {s["name"]: s for s in ws["mcp"]["servers"]}
             expected = {"anima", "seshat", "sokar", "board", "observer", "laya"}
-            expected |= {"janus": {"janus-escalation"}, "vesta": {"vesta-ops"}}.get(role, set())
+            expected |= {"janus": {"janus-escalation"}, "vesta": {"vesta-ops", "grafana"}}.get(role, set())
             self.assertEqual(set(servers), expected)
             self.assertEqual(servers["board"]["auth"], {"token_env": f"ROMAN_BOARD_{role.upper()}"})
             self.assertEqual(servers["laya"]["auth"], {"token_file": str(self.root / f"secrets/laya-{role}.key")})
             self.assertEqual(servers["laya"]["tools"], ["record_fixer_result"])
             self.assertTrue(servers["seshat"]["allow_insecure_http"])
             self.assertNotIn("allow_insecure_http", servers["sokar"])
+            if role == "vesta":
+                self.assertEqual(servers["grafana"]["url"], fa.GRAFANA_URL)
+                self.assertEqual(servers["grafana"]["tools"], ["list_datasources", "query_prometheus"])
+                self.assertNotIn("auth", servers["grafana"])
+                self.assertNotIn("allow_insecure_http", servers["grafana"])
+            else:
+                self.assertNotIn("grafana", servers)
             self.assertTrue(ws["system_prompt"].startswith((SOURCE / "roles/common.md").read_text()))
             self.assertIn((SOURCE / f"roles/{role}.md").read_text(), ws["system_prompt"])
         self.assertEqual(self.warnings[1:], [])
@@ -182,11 +190,42 @@ class RenderTests(unittest.TestCase):
         self.assertIn("mcp__anima__approve_and_merge", janus)
         self.assertIn("mcp__janus-escalation__escalate_to_astra", janus)
         self.assertIn("mcp__vesta-ops__homelab_inspect", prompts[2])
+        self.assertIn("mcp__grafana__", prompts[2])
+        self.assertNotIn("mcp__vesta-ops__grafana__", prompts[2])
+        self.assertEqual(prompts[2].count("grafana__"), prompts[2].count("mcp__grafana__"),
+                         "every grafana__ mention must be qualified mcp__grafana__")
 
     def test_rename_is_single_pass(self):
         renames = {"board__board_agents": "mcp__board__board_agents", "board_agents": "mcp__board__board_agents"}
         self.assertEqual(fa.rename_tools("use board__board_agents or board_agents", renames),
                          "use mcp__board__board_agents or mcp__board__board_agents")
+
+    def test_grafana_prefix_prose_is_rewritten_to_the_direct_server(self):
+        # The prose names a prefix, not an exact tool, so it isn't covered by
+        # the per-tool `renames` map; `rename_tools` special-cases it.
+        self.assertEqual(
+            fa.rename_tools("Grafana MCP tools prefixed grafana__ support queries.", {}),
+            "Grafana MCP tools prefixed mcp__grafana__ support queries.")
+
+    def test_grafana_server_is_vesta_only(self):
+        for role in ("janus", "minerva"):
+            ws = self.toml(f"core-config/akh-medu/workspaces/{role}.toml")
+            self.assertNotIn("grafana", {s["name"] for s in ws["mcp"]["servers"]})
+        vesta = self.toml("core-config/akh-medu/workspaces/vesta.toml")
+        servers = {s["name"]: s for s in vesta["mcp"]["servers"]}
+        self.assertEqual(servers["grafana"], {
+            "name": "grafana", "url": "http://127.0.0.1:18441/mcp",
+            "tools": ["list_datasources", "query_prometheus"]})
+
+    def test_missing_grafana_catalog_fails_rendering_closed(self):
+        (self.root / "config/vesta-grafana-tools.json").unlink()
+        with self.assertRaisesRegex(fa.RenderError, "vesta-grafana-tools.json"):
+            configure_core.render(self.root, self.prov, self.binary, "0" * 64, source=SOURCE)
+
+    def test_empty_grafana_catalog_fails_rendering_closed(self):
+        (self.root / "config/vesta-grafana-tools.json").write_text("[]")
+        with self.assertRaisesRegex(fa.RenderError, "no Grafana tools"):
+            configure_core.render(self.root, self.prov, self.binary, "0" * 64, source=SOURCE)
 
     def test_core_json_scopes_sessions_events_operator(self):
         core = json.loads((self.root / "config/core.json").read_text())

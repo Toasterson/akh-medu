@@ -12,7 +12,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from vesta_actions import ACTION_TOOLS, grafana_rpc, publish, write_args
+from vesta_actions import ACTION_TOOLS, publish, write_args
 
 RESOURCES=['pods','deployments','statefulsets','daemonsets','nodes','events','services','endpoints','persistentvolumeclaims','persistentvolumes','storageclasses','jobs','cronjobs','helmreleases','kustomizations','gitrepositories','helmrepositories','buckets']
 TOOLS=[
@@ -68,9 +68,7 @@ def serve(root):
     token=(root/'secrets/vesta-ops.key').read_text().strip()
     config=json.loads((root/'config/vesta-ops.json').read_text())
     lock=threading.Lock()
-    grafana_tools=json.loads((root/'config/vesta-grafana-tools.json').read_text()) if (root/'config/vesta-grafana-tools.json').exists() else []
-    tools=TOOLS+ACTION_TOOLS+[dict(t,name='grafana__'+t['name']) for t in grafana_tools]
-    grafana_names={t['name'] for t in grafana_tools}
+    tools=TOOLS+ACTION_TOOLS
     def confined():
         raw=subprocess.check_output(['/opt/homebrew/bin/docker','inspect',config['container']],timeout=10)
         state=json.loads(raw)[0];host=state['HostConfig'];mounts=state['Mounts']
@@ -82,8 +80,6 @@ def serve(root):
         if name=='homelab_inspect':return bounded(inspect_args(args),30)
         if name=='homelab_write':
             argv,body=write_args(args,config['cluster_context']);return bounded(argv,45,body)
-        if name.startswith('grafana__') and name[9:] in grafana_names:
-            return grafana_rpc('tools/call',{'name':name[9:],'arguments':args})
         if name=='gitops_publish':
             with lock:confined();return publish(config,args)
         if name!='gitops_exec' or set(args)-{'command','timeout_seconds'}:raise ValueError('Unknown tool or argument')
