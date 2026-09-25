@@ -12,13 +12,33 @@
 //! with no extra registry to persist or rebuild. A lookup is one label lookup
 //! plus the handful of edges leaving the predicate symbol, and returns
 //! immediately when no pack ever declared a cardinality or alias.
+//!
+//! ## Two tiers: an akh's own packs over the built-in default
+//!
+//! Declarations come from two tiers ([`DeclarationTier`]). A built-in default
+//! pack (the fleet memory pack, [`super::builtin`]) writes its declarations
+//! under the `onto:default-*` predicates; every other schema pack writes the
+//! plain ones. Every read here consults the pack tier first and falls back to
+//! the default tier only when the pack tier says nothing about the symbol:
+//!
+//! - **cardinality**: any `onto:cardinality` edge on the predicate (including
+//!   an explicit `onto:cardinality/multi`) replaces the default-tier value;
+//! - **aliases**: a pack alias wins; a default alias is ignored when a pack
+//!   declares the alias spelling itself as a relation;
+//! - **relations**: a default-tier relation stops counting when a pack
+//!   declares that spelling as an alias of one of its own relations.
+//!
+//! Within one tier, conflicting cardinalities resolve to the most specific
+//! (temporal single-valued, then single-valued, then multi) and conflicting
+//! alias targets to the lowest symbol id, as before.
 
 use crate::engine::Engine;
 use crate::symbol::SymbolId;
 
 use super::compile::{
-    CARDINALITY_SINGLE_VALUED, CARDINALITY_SINGLE_VALUED_TEMPORAL, PRED_ALIAS_OF, PRED_CARDINALITY,
-    PRED_IS_A, RELATION_MARKER,
+    CARDINALITY_MULTI, CARDINALITY_SINGLE_VALUED, CARDINALITY_SINGLE_VALUED_TEMPORAL,
+    PRED_ALIAS_OF, PRED_CARDINALITY, PRED_DEFAULT_ALIAS_OF, PRED_DEFAULT_CARDINALITY,
+    PRED_DEFAULT_RELATION, PRED_IS_A, RELATION_MARKER,
 };
 
 /// How many live objects a subject may hold for a predicate.
@@ -46,44 +66,99 @@ impl PredicateCardinality {
     pub const fn is_temporal(self) -> bool {
         matches!(self, PredicateCardinality::SingleValued { temporal: true })
     }
-}
 
-/// The cardinality declared for `predicate` by any installed schema pack.
-///
-/// Conflicting declarations resolve to the most specific one: temporal
-/// single-valued, then single-valued, then multi.
-pub fn declared_cardinality(engine: &Engine, predicate: SymbolId) -> PredicateCardinality {
-    let Ok(cardinality_pred) = engine.lookup_symbol(PRED_CARDINALITY) else {
-        return PredicateCardinality::Multi;
-    };
-    let single = engine.lookup_symbol(CARDINALITY_SINGLE_VALUED).ok();
-    let temporal = engine
-        .lookup_symbol(CARDINALITY_SINGLE_VALUED_TEMPORAL)
-        .ok();
-    let mut declared = PredicateCardinality::Multi;
-    for edge in engine.triples_from(predicate) {
-        if edge.predicate != cardinality_pred {
-            continue;
-        }
-        if Some(edge.object) == temporal {
-            return PredicateCardinality::SingleValued { temporal: true };
-        }
-        if Some(edge.object) == single {
-            declared = PredicateCardinality::SingleValued { temporal: false };
+    /// Specificity rank: conflicting declarations within one tier resolve
+    /// to the highest.
+    const fn specificity(self) -> u8 {
+        match self {
+            PredicateCardinality::Multi => 0,
+            PredicateCardinality::SingleValued { temporal: false } => 1,
+            PredicateCardinality::SingleValued { temporal: true } => 2,
         }
     }
-    declared
 }
 
-/// Every predicate some installed pack declared single-valued, with its
-/// cardinality, in ascending symbol order (deterministic).
-pub fn single_valued_predicates(engine: &Engine) -> Vec<(SymbolId, PredicateCardinality)> {
-    let Ok(cardinality_pred) = engine.lookup_symbol(PRED_CARDINALITY) else {
-        return Vec::new();
-    };
-    let mut predicates: Vec<SymbolId> = engine
-        .triples_with_predicate(cardinality_pred)
+/// Which tier a declaration comes from. Pack declarations take precedence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclarationTier {
+    /// An installed schema pack (admitted through the registry, or an akh's
+    /// own pack): `is-a relation`, `onto:cardinality`, `onto:alias-of`.
+    Pack,
+    /// A built-in default pack compiled into the binary:
+    /// `onto:default-relation`, `onto:default-cardinality`,
+    /// `onto:default-alias-of`.
+    BuiltinDefault,
+}
+
+impl DeclarationTier {
+    /// The predicate label carrying this tier's cardinality declarations.
+    pub const fn cardinality_predicate(self) -> &'static str {
+        match self {
+            DeclarationTier::Pack => PRED_CARDINALITY,
+            DeclarationTier::BuiltinDefault => PRED_DEFAULT_CARDINALITY,
+        }
+    }
+
+    /// The predicate label carrying this tier's alias declarations.
+    pub const fn alias_predicate(self) -> &'static str {
+        match self {
+            DeclarationTier::Pack => PRED_ALIAS_OF,
+            DeclarationTier::BuiltinDefault => PRED_DEFAULT_ALIAS_OF,
+        }
+    }
+}
+
+/// The cardinality `predicate` carries in one tier, if that tier declares
+/// one (the most specific when it declares several).
+fn tier_cardinality(
+    engine: &Engine,
+    predicate: SymbolId,
+    tier: DeclarationTier,
+) -> Option<PredicateCardinality> {
+    let tier_predicate = engine.lookup_symbol(tier.cardinality_predicate()).ok()?;
+    let lookup = |label| engine.lookup_symbol(label).ok();
+    let (multi, single, temporal) = (
+        lookup(CARDINALITY_MULTI),
+        lookup(CARDINALITY_SINGLE_VALUED),
+        lookup(CARDINALITY_SINGLE_VALUED_TEMPORAL),
+    );
+    engine
+        .triples_from(predicate)
         .into_iter()
+        .filter(|edge| edge.predicate == tier_predicate)
+        .filter_map(|edge| {
+            let value = Some(edge.object);
+            if value == temporal {
+                Some(PredicateCardinality::SingleValued { temporal: true })
+            } else if value == single {
+                Some(PredicateCardinality::SingleValued { temporal: false })
+            } else if value == multi {
+                Some(PredicateCardinality::Multi)
+            } else {
+                None
+            }
+        })
+        .max_by_key(|c| c.specificity())
+}
+
+/// The cardinality declared for `predicate`: an installed pack's declaration
+/// if it has one, else the built-in default pack's, else multi.
+///
+/// Conflicting declarations within a tier resolve to the most specific one:
+/// temporal single-valued, then single-valued, then multi.
+pub fn declared_cardinality(engine: &Engine, predicate: SymbolId) -> PredicateCardinality {
+    tier_cardinality(engine, predicate, DeclarationTier::Pack)
+        .or_else(|| tier_cardinality(engine, predicate, DeclarationTier::BuiltinDefault))
+        .unwrap_or_default()
+}
+
+/// Every predicate some installed pack (either tier) declared single-valued,
+/// with its effective cardinality, in ascending symbol order (deterministic).
+pub fn single_valued_predicates(engine: &Engine) -> Vec<(SymbolId, PredicateCardinality)> {
+    let mut predicates: Vec<SymbolId> = [DeclarationTier::Pack, DeclarationTier::BuiltinDefault]
+        .into_iter()
+        .filter_map(|tier| engine.lookup_symbol(tier.cardinality_predicate()).ok())
+        .flat_map(|p| engine.triples_with_predicate(p))
         .map(|edge| edge.subject)
         .collect();
     predicates.sort_unstable();
@@ -97,29 +172,55 @@ pub fn single_valued_predicates(engine: &Engine) -> Vec<(SymbolId, PredicateCard
         .collect()
 }
 
-/// Whether `symbol` is a declared relation: `(symbol, is-a, relation)`, the
-/// convention schema packs and seed packs both use.
-pub fn is_declared_relation(engine: &Engine, symbol: SymbolId) -> bool {
-    let (Ok(is_a), Ok(marker)) = (
-        engine.lookup_symbol(PRED_IS_A),
-        engine.lookup_symbol(RELATION_MARKER),
+/// Whether `symbol` has an edge `(symbol, predicate_label, object_label)`.
+fn has_edge(engine: &Engine, symbol: SymbolId, predicate_label: &str, object_label: &str) -> bool {
+    let (Ok(predicate), Ok(object)) = (
+        engine.lookup_symbol(predicate_label),
+        engine.lookup_symbol(object_label),
     ) else {
         return false;
     };
     engine
         .triples_from(symbol)
         .iter()
-        .any(|edge| edge.predicate == is_a && edge.object == marker)
+        .any(|edge| edge.predicate == predicate && edge.object == object)
 }
 
-/// The canonical relation `predicate` is a declared alias of, if any.
-///
-/// Only an `onto:alias-of` edge whose target is a declared relation counts:
-/// ADR 081 promotion records the same edge for frontier *properties*, and
-/// those must not start rewriting predicates. When several targets qualify
-/// (conflicting packs) the lowest symbol id wins, deterministically.
-pub fn declared_alias_target(engine: &Engine, predicate: SymbolId) -> Option<SymbolId> {
-    let alias_of = engine.lookup_symbol(PRED_ALIAS_OF).ok()?;
+/// `(symbol, is-a, relation)`: declared by a schema pack or a seed pack.
+fn is_pack_relation(engine: &Engine, symbol: SymbolId) -> bool {
+    has_edge(engine, symbol, PRED_IS_A, RELATION_MARKER)
+}
+
+/// Whether a pack declares `symbol` an alias of one of the pack tier's own
+/// relations (non-recursive: the target must carry `is-a relation`).
+fn is_pack_alias(engine: &Engine, symbol: SymbolId) -> bool {
+    let Ok(alias_of) = engine.lookup_symbol(PRED_ALIAS_OF) else {
+        return false;
+    };
+    engine
+        .triples_from(symbol)
+        .into_iter()
+        .any(|edge| edge.predicate == alias_of && is_pack_relation(engine, edge.object))
+}
+
+/// Whether `symbol` is a declared relation: `(symbol, is-a, relation)`, the
+/// convention schema packs and seed packs both use, or a built-in default
+/// pack's `(symbol, onto:default-relation, relation)` that no pack re-declares
+/// as an alias.
+pub fn is_declared_relation(engine: &Engine, symbol: SymbolId) -> bool {
+    is_pack_relation(engine, symbol)
+        || (has_edge(engine, symbol, PRED_DEFAULT_RELATION, RELATION_MARKER)
+            && !is_pack_alias(engine, symbol))
+}
+
+/// The lowest declared-relation target of `predicate`'s alias edges in one
+/// tier.
+fn tier_alias_target(
+    engine: &Engine,
+    predicate: SymbolId,
+    tier: DeclarationTier,
+) -> Option<SymbolId> {
+    let alias_of = engine.lookup_symbol(tier.alias_predicate()).ok()?;
     engine
         .triples_from(predicate)
         .into_iter()
@@ -129,15 +230,29 @@ pub fn declared_alias_target(engine: &Engine, predicate: SymbolId) -> Option<Sym
         .min()
 }
 
+/// The canonical relation `predicate` is a declared alias of, if any.
+///
+/// Only an alias edge whose target is a declared relation counts: ADR 081
+/// promotion records the same edge for frontier *properties*, and those must
+/// not start rewriting predicates. When several targets qualify
+/// (conflicting packs) the lowest symbol id wins, deterministically. A pack
+/// alias beats a built-in default alias, and a default alias does not apply
+/// to a spelling a pack declares as a relation of its own.
+pub fn declared_alias_target(engine: &Engine, predicate: SymbolId) -> Option<SymbolId> {
+    tier_alias_target(engine, predicate, DeclarationTier::Pack).or_else(|| {
+        let target = tier_alias_target(engine, predicate, DeclarationTier::BuiltinDefault)?;
+        (!is_pack_relation(engine, predicate)).then_some(target)
+    })
+}
+
 /// Every declared `(alias, canonical)` pair whose canonical is a declared
-/// relation, in ascending `(canonical, alias)` order.
+/// relation (either tier, after precedence), in ascending
+/// `(canonical, alias)` order.
 pub fn declared_aliases(engine: &Engine) -> Vec<(SymbolId, SymbolId)> {
-    let Ok(alias_of) = engine.lookup_symbol(PRED_ALIAS_OF) else {
-        return Vec::new();
-    };
-    let mut aliases: Vec<SymbolId> = engine
-        .triples_with_predicate(alias_of)
+    let mut aliases: Vec<SymbolId> = [DeclarationTier::Pack, DeclarationTier::BuiltinDefault]
         .into_iter()
+        .filter_map(|tier| engine.lookup_symbol(tier.alias_predicate()).ok())
+        .flat_map(|p| engine.triples_with_predicate(p))
         .map(|edge| edge.subject)
         .collect();
     aliases.sort_unstable();

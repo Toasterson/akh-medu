@@ -465,6 +465,54 @@ mod tests {
         );
     }
 
+    /// The built-in fleet pack (no operator-installed pack): a
+    /// `current-state` update through `memory_write` lands on
+    /// `current_state` and supersedes the previous value.
+    #[test]
+    fn fleet_pack_state_update_supersedes_through_memory_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap();
+        crate::schema::ensure_builtin_pack(
+            &engine,
+            crate::schema::BuiltinPack::FleetMemory,
+            "mw-fleet",
+            crate::schema::DefaultPackPolicy::Enabled,
+        )
+        .unwrap();
+        let tool = MemoryWriteTool::new(AgentPredicates::init(&engine).unwrap());
+        for (summary, predicate, object) in [
+            ("deploy started", "current_state", "deploying"),
+            ("deploy finished", "current-state", "serving"),
+        ] {
+            let out = tool
+                .execute(
+                    &engine,
+                    ToolInput::new().with_value("summary", summary).with_value(
+                        "facts",
+                        json!([{"subject": "service-9", "predicate": predicate, "object": object}]),
+                    ),
+                )
+                .unwrap();
+            assert!(out.success, "{}", out.result);
+        }
+        let service = engine.lookup_symbol("service-9").unwrap();
+        let current_state = engine.lookup_symbol("current_state").unwrap();
+        let live: Vec<String> = engine
+            .triples_from(service)
+            .into_iter()
+            .filter(|t| t.predicate == current_state)
+            .map(|t| engine.resolve_label(t.object))
+            .collect();
+        assert_eq!(live, vec!["serving"]);
+        let deploying = engine.lookup_symbol("deploying").unwrap();
+        assert!(engine.tms().was_retracted(deploying));
+    }
+
     #[test]
     fn re_running_same_source_is_idempotent() {
         let engine = test_engine();

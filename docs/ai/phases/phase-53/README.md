@@ -865,3 +865,151 @@ start, so a task whose period is longer than the gap between restarts (the
 - **Marks.** Written when a tick finishes `Ran` or `Failed`. A failure is
   marked like a run so a failing heavy task is retried once per period, not
   after every restart. Skips (gated, over budget, contended) leave the mark.
+
+
+## Follow-up: a built-in fleet memory pack for every akh (Anima WI 01a0d569-1cf1, item 7)
+
+53j gave memory hygiene to akhs that have a schema pack declaring their state
+predicates, and in practice only the Romans had one (`roman-memory`). Every
+other akh still piled up status values. Now every akh gets a default pack,
+`fleet-memory@1.0.0`, without an operator installing it.
+
+### What the pack declares (`data/schema-packs/fleet-memory.json`)
+
+The pack declares only predicates that hold one current value per subject by
+construction:
+
+| Relation | Cardinality | Evidence |
+|---|---|---|
+| `status`, `state`, `has_state`, `current_state`, `current_phase`, `next_action`, `next_check`, `planned_action` | single-valued, temporal | Roman store 2026-09-24 (the `roman-memory` descriptions): every multi-valued subject held successive updates of one state. The same aliases as `roman-memory` (separator variants, plus `has_next_check`). |
+| `tool:danger_level`, `tool:schema` | single-valued | The engine writes these itself (`agent/tool_graph.rs`) each time a tool manifest is registered. In the 2026-09-25 store, 6 of 111 tool subjects per predicate held both the old and the new value, for example `tool:task_list` was `Safe` and `Cautious` at once after the review fixes reclassified it. |
+
+These predicates are left out:
+
+- **`agent:*` state** (`agent:has_status`, `agent:has_priority`). The
+  namespace is reserved (`akh::schema::reserved_name`), and `agent/goal.rs`
+  already removes the old value before writing a new one. The store has no
+  multi-valued subject for either predicate.
+- **Legitimately multi-valued predicates**: `agent:has_tag`, `agent:learned`
+  (1,424 multi-valued subjects, which are real facts), `tool:access`,
+  `psyche:*`, `is-a` and `part-of`.
+- **Roman-specific state**: `observed_state`, `verified_state` and
+  `boundary_state` stay in `roman-memory`. An observation log can legitimately
+  hold several values, and "boundary" is Anima vocabulary.
+
+The list is data in a reviewed file, and the code holds no word lists.
+
+### Admission: built in, admitted by code review
+
+ADR 081 decision 8 requires a human confirm before a pack is admitted to the
+shared registry. The fleet pack never enters the registry. The binary embeds
+it with `include_str!` (`src/schema/builtin.rs`, `BuiltinPack::FleetMemory`),
+so the code review that merges the JSON is its admission, and a binary can
+only install the revision it was built from. The registry, `akh schema
+admit|install` and wake-time convergence are unchanged. No
+`workspaces_active_microtheories` row is written, so `converge_workspace` never
+looks for the pack in the registry.
+
+A built-in pack may declare relations with `cardinality`, `temporal` and
+`aliases` only. Types are global and immutable (decision 5), so a default tier
+for them could give no precedence. `default_tier_triples` rejects any other
+triple with `akh::schema::not_default_tier`.
+
+### Precedence: the akh's own pack wins, in either install order
+
+The KG stores one edge per `(s, p, o)` whatever the compartment. If the fleet
+pack wrote `(status, onto:cardinality, …)`, that edge would merge into
+`roman-memory`'s identical edge. It could not be told apart, and retiring the
+fleet pack would delete `roman-memory`'s edge. The fleet pack therefore
+installs on a **default tier** with its own predicates:
+
+- `(r, onto:default-relation, relation)`
+- `(r, onto:default-cardinality, …)`
+- `(alias, onto:default-alias-of, r)`
+
+These go under the compartment `mt:schema/builtin/fleet-memory@<version>`,
+which cannot collide with a registry pack's `mt:schema/<name>@<version>`.
+`schema::cardinality` reads the pack tier first:
+
+- **Cardinality.** Any `onto:cardinality` edge replaces the default. A pack can
+  now say `"cardinality": "multi"` explicitly, which lowers to
+  `onto:cardinality/multi` and switches a default off for one relation.
+  `RelationDef.cardinality` is now `Option`, so a pack that omits the field
+  still compiles to the same triples and checksum.
+- **Aliases.** A pack alias wins. A default alias does not rewrite a spelling
+  that a pack declares as a relation.
+- **Relations.** A default relation that a pack re-declares as an alias of its
+  own relation stops counting as a relation.
+
+A relation that the akh's pack declares without a cardinality keeps the
+default. To opt that relation out, declare `multi`.
+
+### Install, versions, opt-out
+
+`schema::ensure_builtin_packs(engine, workspace, policy)` runs in akhomed
+`get_engine` after the WAL is wired and before the engine is published. Hydrate
+and wake both pass through `get_engine`, and the install is written to the WAL
+like any other install. A failure is logged and never refuses the akh.
+
+| Installed state | Result |
+|---|---|
+| None | `Installed`: declarations, the `akh:schema-installed` marker and the `ctx:specializes` activation edge from `mt:akh/<ws>-effective` |
+| This version | `Current`, nothing written (idempotent) |
+| An older version | `Upgraded`: the old compartment and activation edge are retired **first**, then the new version is installed, so the retirement cannot delete edges both versions share |
+| A newer version | `NewerKept`: a rolled-back binary never downgrades an akh |
+| `[memory] default_pack = false` | `Disabled`: installs nothing and retires any installed version |
+
+`[memory] default_pack` defaults to `true`, is a known key, and is written back
+only when it is `false`. Versions are dot-separated integers compared
+numerically (`PackVersion`; `1.0` equals `1.0.0`). Bump the version in the JSON
+to ship changed declarations.
+
+### Acceptance (`tests/fleet_pack_accept.rs`, `#[ignore]`)
+
+The run used a private copy of the 2026-09-25 Roman store, where
+`roman-memory` was already active and hygiene had converged. For each akh it:
+
+1. woke the copy (which converged `roman-memory` from the copy's registry);
+2. ran `roman-memory` hygiene to its fixed point;
+3. ensured the fleet pack;
+4. ran hygiene to a fixed point again;
+5. ran an idempotency pass.
+
+| akh | fleet install | overlapping relations | conflicts with roman-memory | hygiene with both packs | roman-memory relations changed | last pass |
+|---|---|---|---|---|---|---|
+| janus | 35 triples | 8 | 0 | 4 mutations, 4 superseded, 0 merges | 0 | no-op |
+| minerva | 35 triples | 8 | 0 | 4 mutations, 4 superseded, 0 merges | 0 | no-op |
+| vesta | 35 triples | 8 | 0 | 4 mutations, 4 superseded, 0 merges | 0 | no-op |
+
+- **Roman-only baseline.** The baseline pass was already a fixed point: 0
+  mutations.
+- **What the fleet pass superseded.** The 4 supersessions per akh are the
+  stale tool manifests. `tool:danger_level` and `tool:schema` each went from
+  39 live values on 37 subjects (2 subjects multi-valued) to 37 on 37.
+- **Overlap.** Every overlapping relation kept `roman-memory`'s cardinality
+  and alias targets, and every `roman-memory` relation kept its live triple
+  count.
+- **Wake time.** Wake took 65–175 s; the passes took under a second.
+
+### Operator notes
+
+- **Romans.** Nothing to do. `roman-memory` stays installed and wins on its
+  relations. The fleet pack adds only the two tool predicates for them.
+- **Other akhs.** The pack installs on the first open after the deploy. The
+  next sleep-tick `memory_hygiene` pass clears the backlog, within
+  `hygiene_batch` mutations per pass.
+- **Opting out.** Set `[memory] default_pack = false` in the akh's TOML and
+  reopen the akh. The pack is retired, but values it already superseded stay
+  retracted: they are history, with `memory_hygiene` provenance.
+
+### Code
+
+- `src/schema/builtin.rs`: `BuiltinPack`, `PackVersion`, `DefaultPackPolicy`,
+  `BuiltinPackOutcome`, `ensure_builtin_pack[s]`, `default_tier_triples`.
+- `src/schema/cardinality.rs`: `DeclarationTier` and the two-tier reads.
+- `src/schema/canonical.rs`: default relations anchor collision families.
+- `src/schema/compile.rs` and `source.rs`: explicit `multi` and the
+  default-tier vocabulary.
+- `src/akh_config.rs`: `MemoryConfig.default_pack`.
+- `src/bin/akhomed.rs`: the `get_engine` hook.
+- New diagnostics: `akh::schema::{invalid_pack_version, not_default_tier}`.

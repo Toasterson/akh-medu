@@ -34,15 +34,20 @@
 //! | `(r, onto:arg1type, T)` / `(r, onto:arg2type, T)` | argument type shapes (reuses `ArityPredicates` labels) |
 //! | `(r, onto:cardinality, onto:cardinality/single-valued[-temporal])` | `r` holds one live object per subject (Phase 53j, [`cardinality`]) |
 //! | `(alias, onto:alias-of, r)` | `alias` is another spelling of `r`; writes are stored under `r` (Phase 53j) |
+//! | `(r, onto:cardinality, onto:cardinality/multi)` | explicit multi-valued: overrides a built-in default (Phase 53 follow-up) |
+//! | `(r, onto:default-relation, relation)`, `(r, onto:default-cardinality, …)`, `(alias, onto:default-alias-of, r)` | the same declarations from a built-in default pack ([`builtin`]); an installed pack's declaration of `r` wins |
 //!
 //! Phase 53j adds memory hygiene on top of these declarations: structural
 //! predicate keys ([`canonical`]) and the bounded self-repair pass
-//! ([`hygiene`]) the daemon runs on every sleep tick.
+//! ([`hygiene`]) the daemon runs on every sleep tick. [`builtin`] ships the
+//! fleet memory pack in the binary so every akh gets those declarations by
+//! default (`[memory] default_pack`).
 //!
 //! References: ADR 081 (`docs/ai/decisions/081-akh-memory-schema-typing.md`),
 //! plan (`docs/ai/plans/2026-06-30-akh-memory-schema.md`), Anima project
 //! `019d9844-ce74-7993-a9f0-c953b8f04a4e`.
 
+pub mod builtin;
 pub mod canonical;
 pub mod cardinality;
 pub mod compile;
@@ -60,8 +65,14 @@ pub mod source;
 use miette::Diagnostic;
 use thiserror::Error;
 
+pub use builtin::{
+    BuiltinPack, BuiltinPackOutcome, DefaultPackPolicy, PackVersion, ensure_builtin_pack,
+    ensure_builtin_packs,
+};
 pub use canonical::{CanonicalChoice, FamilyVerdict, PredicateFamily, PredicateKey, collisions};
-pub use cardinality::{PredicateCardinality, declared_alias_target, declared_cardinality};
+pub use cardinality::{
+    DeclarationTier, PredicateCardinality, declared_alias_target, declared_cardinality,
+};
 pub use compile::{
     CompiledSchemaPack, PortableTriple, RegistryRow, SchemaRegistry, check_admission, compile,
 };
@@ -338,6 +349,29 @@ pub enum SchemaError {
         first: String,
         second: String,
     },
+
+    #[error("invalid schema pack version \"{version}\"")]
+    #[diagnostic(
+        code(akh::schema::invalid_pack_version),
+        help(
+            "A pack version that is compared (built-in packs) is dot-separated unsigned \
+             integers such as `1.0.0`, with no pre-release or build suffix. Fix `pack.version` \
+             in the pack source."
+        )
+    )]
+    InvalidPackVersion { version: String },
+
+    #[error("schema pack \"{pack}\" cannot be a built-in default pack: {detail}")]
+    #[diagnostic(
+        code(akh::schema::not_default_tier),
+        help(
+            "A built-in pack (compiled into the binary, `src/schema/builtin.rs`) may declare \
+             relations with `cardinality`, `temporal` and `aliases` only. Types, properties, \
+             argument types and `assumes` belong in a registry pack admitted with \
+             `akh schema admit`."
+        )
+    )]
+    NotDefaultTier { pack: String, detail: String },
 
     #[error("predicate merge failed: {message}")]
     #[diagnostic(

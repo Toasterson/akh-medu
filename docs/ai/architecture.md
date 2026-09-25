@@ -1,6 +1,17 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-09-24 (**Phase 53 — every akh runs fully featured**, [ADR
+> Last updated: 2026-09-25 (Phase 53 follow-up, Anima WI 01a0d569-1cf1 item 7:
+> the **built-in fleet memory pack** `fleet-memory@1.0.0`,
+> `data/schema-packs/fleet-memory.json` compiled into the binary by
+> `src/schema/builtin.rs`, is installed on every akh when akhomed opens its
+> engine, unless `[memory] default_pack = false`. Its declarations live on a
+> separate *default tier* (`onto:default-relation`, `onto:default-cardinality`,
+> `onto:default-alias-of`), and an akh's own packs override it relation by
+> relation, including with an explicit `"cardinality": "multi"`
+> (`onto:cardinality/multi`). See
+> [phase-53 README](phases/phase-53/README.md#follow-up-a-built-in-fleet-memory-pack-for-every-akh-anima-wi-01a0d569-1cf1-item-7).)
+>
+> Previous update: 2026-09-24 (**Phase 53 — every akh runs fully featured**, [ADR
 > 113](decisions/113-full-akh-always.md), [plan](plans/2026-09-24-phase53-full-akh-always.md),
 > briefs [docs/ai/phases/phase-53/README.md](phases/phase-53/README.md)): the
 > `core-server` build profile is retired — `akhomed` has one `server` feature
@@ -86,7 +97,7 @@ crates/seshat/          — Seshat's Archive service: pgvector schema (SeaORM), 
 crates/akh-egraph-bench/ — Phase 40 wake-path measurement harness (e-graph re-saturation / HNSW rebuild / fork arms; subprocess-per-cell; JSON + markdown reports) — permanent measurement infra per ADR 084
 ├── reason/              3 modules — e-graph language (AkhLang), rewrite rules, second-order quantification (Phase 9n), anti-unification (Phase 10h)
 ├── simd/                5 modules — runtime SIMD kernel dispatch (AVX2 / generic)
-├── schema/              ADR 081 schema packs (+ Phase 53j cardinality/aliases, structural predicate keys `canonical`, bounded self-repair pass `hygiene`): portable JSON source parser/validator (schema.org subset + Obsidian value types + is-a subtyping + onto: shapes), confirm-time compiler → native-triple bincode blob (`CompiledSchemaPack`, registry-row seam `SchemaRegistry`), per-akh install as microtheory with the global-immutable-type-name guard; `akh schema compile/show` CLI; seed pack `data/schema-packs/schema-org-core.json`
+├── schema/              ADR 081 schema packs (+ Phase 53j cardinality/aliases, structural predicate keys `canonical`, bounded self-repair pass `hygiene`, built-in default-tier packs `builtin` = `fleet-memory`): portable JSON source parser/validator (schema.org subset + Obsidian value types + is-a subtyping + onto: shapes), confirm-time compiler → native-triple bincode blob (`CompiledSchemaPack`, registry-row seam `SchemaRegistry`), per-akh install as microtheory with the global-immutable-type-name guard; `akh schema compile/show` CLI; seed pack `data/schema-packs/schema-org-core.json`
 ├── skills/              1 module  — skillpack lifecycle (Cold/Warm/Hot)
 ├── store/               3 modules — tiered storage (hot/warm/cold)
 ├── thinking/           10 modules — Phase 41 Thinking Engine (ADR 052): unified ThinkingLoop over existing primitives, ThoughtState (HyperVec focus + DS hypotheses + faithful trace), ThinkingBudget, schedulers (round-robin/weighted/goal-shape), CompositeVerifier (contradiction + evidence + source reliability + convergence), VocBudgetController (Phase 11g), ThoughtPersistence seam (41d Postgres deferred), 41f scaling-law bench harness
