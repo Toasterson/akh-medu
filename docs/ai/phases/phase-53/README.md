@@ -794,3 +794,38 @@ Roll back in the reverse order. The operator runbook is
   - The SET forms of `_akh/permission/mode` (a `mode` param) and
     `_akh/psyche/archetypes` (any weight) need `control`. The GET forms stay
     per-akh.
+
+## Follow-up: ACP sessions belong to their creator (Anima WI 01a0d569-1cf1, item 2)
+
+Per-principal scoping (fix-up 1) limited each connection to its akhs, but two
+principals granted the same akh could still load, prompt or cancel each
+other's sessions by id, and ids were nanosecond timestamps.
+
+- **Owner recorded at `session/new`.** Each session stores a `SessionOwner`:
+  the connection's principal id, `legacy` for the unscoped shared secret, or
+  `local` for the Unix socket and in-process embeds.
+- **Checked before any side effect.** `session/load`, `session/prompt` and
+  `session/cancel` check the owner before any LRU touch, turn checkout or
+  cancel flag, and then check the session's akh. No `_akh/*` method takes an
+  ACP session id.
+- **Session operators.** Callers that already hold the control plane may use
+  any session on an akh they are granted: principals with `control = true`,
+  the legacy shared secret and the local socket. An operator using another
+  owner's session is logged at `info`. A control principal is still limited to
+  its `akhs`.
+- **No existence oracle.** A caller without `control` gets the same error for
+  another principal's session and for an unknown id: `akh::acp::session_not_owned`,
+  JSON-RPC invalid-params (the code an unknown session always had, so clients
+  that fall back to `session/new` still do), and the same message and help.
+  Because the owner is checked before the akh, a session on an akh that is not
+  granted no longer answers `workspace_not_granted` either. Operators still see
+  the plain unknown-session error.
+- **Persistence.** ACP sessions are memory-only, so a daemon restart drops them
+  and no stored session lacks an owner. `SessionOwner`'s default is `legacy`: a
+  session restored from state that predates ownership can be used only by the
+  legacy secret and by operators.
+- **Unguessable ids.** Ids are now `akh-<UUIDv4>`, with 122 bits from the OS
+  CSPRNG. The `akh-` prefix and the opaque suffix are unchanged.
+- Code: `SessionOwner`, `SessionUse`, `AcpAccess::{Local, SharedSecret}` and
+  `AcpAccess::authorize_session` in `src/acp/auth.rs`; `SessionRoute` and
+  `AkhAcpAgent::authorize_session_access` in `src/acp/mod.rs`.

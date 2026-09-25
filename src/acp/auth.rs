@@ -16,6 +16,22 @@
 //! `AKH_CORE_CONFIG` is set, while ACP ingress is always on when `[acp] tcp_port`
 //! is. Coupling them would make a scoped ACP depend on an unrelated surface.
 //!
+//! # Session ownership
+//!
+//! Every ACP session records the [`SessionOwner`] that created it at
+//! `session/new`: the connection's principal, [`SessionOwner::Legacy`] for the
+//! unscoped shared secret, or [`SessionOwner::Local`] for the Unix socket and
+//! in-process embeds. `session/load`, `session/prompt` and `session/cancel`
+//! check [`AcpAccess::authorize_session`] before touching the session, so two
+//! principals granted the same akh cannot use each other's sessions. Session
+//! operators (a principal with `control = true`, the legacy shared secret and
+//! the local socket, all of which already hold the control plane) may use any
+//! session on an akh they are granted; the daemon logs that at `info`.
+//!
+//! To a non-operator, a session owned by someone else and a session that does
+//! not exist produce the *same* refusal (`akh::acp::session_not_owned`, same
+//! JSON-RPC code and message), so session ids cannot be probed for existence.
+//!
 //! Token files are re-read on every `initialize`, so rotating a key (several
 //! non-empty lines overlap old and new) takes effect without a restart. Every
 //! comparison is constant-time and every candidate is compared against every
@@ -23,6 +39,7 @@
 //! (if any) a token is close to.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -141,6 +158,26 @@ pub enum AcpAuthError {
         )
     )]
     ControlNotGranted { principal: String, method: String },
+
+    /// The session was created by another principal, or does not exist. The two
+    /// cases are deliberately one error so a non-operator cannot probe ids.
+    #[error(
+        "ACP session {session_id:?} is unknown, expired, or not owned by principal `{principal}`"
+    )]
+    #[diagnostic(
+        code(akh::acp::session_not_owned),
+        help(
+            "Nothing ran. An ACP session belongs to the principal that created it with \
+             `session/new`; only that principal can load, prompt or cancel it. Sessions \
+             also expire (LRU eviction, daemon restart). Open a new session with \
+             `session/new`, use the token of the principal that created this one, or ask \
+             an operator (a principal with `control = true`) to act on it."
+        )
+    )]
+    SessionNotOwned {
+        principal: String,
+        session_id: String,
+    },
 }
 
 impl AcpAuthError {
@@ -151,16 +188,30 @@ impl AcpAuthError {
     }
 
     /// A JSON-RPC error carrying this diagnostic (`code`, `message`, `help`).
+    ///
+    /// [`Self::SessionNotOwned`] uses JSON-RPC invalid-params, the code an
+    /// unknown session has always had, so a client that falls back to
+    /// `session/new` on a failed `session/load` keeps doing so, and the error
+    /// cannot be told apart from an unknown id by its code.
     #[must_use]
     pub fn rpc_error(&self) -> agent_client_protocol::Error {
         let status = match self {
             Self::Unauthenticated => 401,
             Self::WorkspaceNotGranted { .. } | Self::ControlNotGranted { .. } => 403,
+            Self::SessionNotOwned { .. } => 404,
             Self::PrincipalConfig { .. }
             | Self::PrincipalToken { .. }
             | Self::NoIngressCredential { .. } => 503,
         };
-        agent_client_protocol::Error::new(status, self.to_string()).data(serde_json::json!({
+        let error = match self {
+            Self::SessionNotOwned { .. } => {
+                let mut error = agent_client_protocol::Error::invalid_params();
+                error.message = self.to_string();
+                error
+            }
+            _ => agent_client_protocol::Error::new(status, self.to_string()),
+        };
+        error.data(serde_json::json!({
             "status": status,
             "code": self.code_str(),
             "message": self.to_string(),
@@ -223,11 +274,59 @@ impl AkhScope {
 /// What an authenticated ACP connection may do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcpAccess {
-    /// No ingress auth on this listener (Unix socket, in-process embeds) or the
-    /// legacy shared secret: every akh and the control plane.
-    Unrestricted,
+    /// No ingress auth on this listener (Unix socket, in-process embeds): every
+    /// akh and the control plane. Sessions it creates are [`SessionOwner::Local`].
+    Local,
+    /// The legacy unscoped shared secret (TCP without `[[acp.principals]]`):
+    /// every akh and the control plane. Sessions it creates are
+    /// [`SessionOwner::Legacy`].
+    SharedSecret,
     /// A configured principal.
     Scoped(Arc<AcpGrant>),
+}
+
+/// Who created an ACP session (recorded at `session/new`).
+///
+/// Sessions live only in the daemon's memory (they are never persisted), so
+/// every tracked session carries an owner from creation. Should a session ever
+/// be restored from state that predates ownership, it is [`Self::Legacy`]:
+/// usable by the legacy shared secret and by session operators only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum SessionOwner {
+    /// A configured `[[acp.principals]]` principal, by id.
+    Principal(String),
+    /// The legacy unscoped shared secret, or a session with no recorded owner
+    /// (the default).
+    #[default]
+    Legacy,
+    /// The local Unix socket or an in-process embed (no ingress auth).
+    Local,
+}
+
+impl fmt::Display for SessionOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Principal(id) => write!(f, "principal `{id}`"),
+            Self::Legacy => f.write_str("the legacy shared secret"),
+            Self::Local => f.write_str("the local socket"),
+        }
+    }
+}
+
+/// How a connection may use an existing session, from
+/// [`AcpAccess::authorize_session`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionUse {
+    /// The caller created the session.
+    Owner,
+    /// A session operator uses a session someone else created (log it).
+    Operator {
+        /// Who created the session.
+        owner: SessionOwner,
+    },
+    /// No such session. Only session operators learn this; the caller reports
+    /// the id as unknown (and `session/cancel` is a no-op).
+    Unknown,
 }
 
 /// The grant of one authenticated principal.
@@ -245,7 +344,7 @@ impl AcpAccess {
     /// Refuse `workspace` unless this access covers it.
     pub fn authorize_workspace(&self, workspace: &str) -> Result<(), AcpAuthError> {
         match self {
-            Self::Unrestricted => Ok(()),
+            Self::Local | Self::SharedSecret => Ok(()),
             Self::Scoped(grant) if grant.akhs.contains(workspace) => Ok(()),
             Self::Scoped(grant) => Err(AcpAuthError::WorkspaceNotGranted {
                 principal: grant.principal.clone(),
@@ -258,11 +357,61 @@ impl AcpAccess {
     /// Refuse a control-plane `method` unless this access allows the control plane.
     pub fn authorize_control(&self, method: &str) -> Result<(), AcpAuthError> {
         match self {
-            Self::Unrestricted => Ok(()),
+            Self::Local | Self::SharedSecret => Ok(()),
             Self::Scoped(grant) if grant.control => Ok(()),
             Self::Scoped(grant) => Err(AcpAuthError::ControlNotGranted {
                 principal: grant.principal.clone(),
                 method: method.to_string(),
+            }),
+        }
+    }
+
+    /// The owner recorded on a session this access creates.
+    #[must_use]
+    pub fn session_owner(&self) -> SessionOwner {
+        match self {
+            Self::Local => SessionOwner::Local,
+            Self::SharedSecret => SessionOwner::Legacy,
+            Self::Scoped(grant) => SessionOwner::Principal(grant.principal.clone()),
+        }
+    }
+
+    /// Whether this access may use sessions other callers created: the holders
+    /// of the control plane (`control = true`, the legacy shared secret, the
+    /// local socket). Still limited to the akhs the access is granted.
+    #[must_use]
+    pub fn is_session_operator(&self) -> bool {
+        match self {
+            Self::Local | Self::SharedSecret => true,
+            Self::Scoped(grant) => grant.control,
+        }
+    }
+
+    /// Decide whether this access may use session `session_id`, whose recorded
+    /// owner is `owner` (`None`: no such session).
+    ///
+    /// A non-operator gets [`AcpAuthError::SessionNotOwned`] both for a session
+    /// someone else created and for an unknown id, so the answer reveals
+    /// nothing about which ids exist. This check does not cover the akh: the
+    /// caller still authorizes the session's workspace afterwards.
+    pub fn authorize_session(
+        &self,
+        session_id: &str,
+        owner: Option<&SessionOwner>,
+    ) -> Result<SessionUse, AcpAuthError> {
+        let caller = self.session_owner();
+        match owner {
+            Some(owner) if *owner == caller => Ok(SessionUse::Owner),
+            Some(owner) if self.is_session_operator() => Ok(SessionUse::Operator {
+                owner: owner.clone(),
+            }),
+            None if self.is_session_operator() => Ok(SessionUse::Unknown),
+            _ => Err(AcpAuthError::SessionNotOwned {
+                principal: match self {
+                    Self::Scoped(grant) => grant.principal.clone(),
+                    Self::Local | Self::SharedSecret => caller.to_string(),
+                },
+                session_id: session_id.to_string(),
             }),
         }
     }
@@ -513,7 +662,7 @@ impl AcpIngressAuth {
     pub(crate) fn authenticate(&self, token: &str) -> Result<AcpAccess, IngressDenial> {
         match self {
             Self::SharedSecret(auth) => match auth.authorizes(token) {
-                Ok(true) => Ok(AcpAccess::Unrestricted),
+                Ok(true) => Ok(AcpAccess::SharedSecret),
                 Ok(false) => Err(IngressDenial::InvalidCredentials),
                 Err(error) => Err(IngressDenial::Unavailable(error)),
             },
@@ -604,6 +753,68 @@ mod tests {
         let access = AcpAccess::Scoped(auth.resolve(TOKEN_A).unwrap().unwrap());
         access.authorize_workspace("anything").unwrap();
         access.authorize_control("_akh/daemon/stop").unwrap();
+    }
+
+    #[test]
+    fn sessions_are_usable_by_their_owner_and_session_operators_only() {
+        let scoped = |id: &str, control: bool| {
+            AcpAccess::Scoped(Arc::new(AcpGrant {
+                principal: id.into(),
+                akhs: AkhScope::All,
+                control,
+            }))
+        };
+        let a = scoped("a", false);
+        let b = scoped("b", false);
+        let op = scoped("op", true);
+        let owned_by_a = SessionOwner::Principal("a".into());
+
+        assert_eq!(a.session_owner(), owned_by_a);
+        assert_eq!(
+            a.authorize_session("akh-1", Some(&owned_by_a)).unwrap(),
+            SessionUse::Owner
+        );
+        let foreign = b.authorize_session("akh-1", Some(&owned_by_a)).unwrap_err();
+        assert_eq!(foreign.code_str(), "akh::acp::session_not_owned");
+        let unknown = b.authorize_session("akh-1", None).unwrap_err();
+        assert_eq!(
+            foreign.to_string(),
+            unknown.to_string(),
+            "foreign and unknown ids must be indistinguishable to a non-operator"
+        );
+        let rpc = foreign.rpc_error();
+        assert_eq!(
+            rpc.code,
+            agent_client_protocol::Error::invalid_params().code
+        );
+        assert_eq!(rpc.data, unknown.rpc_error().data);
+
+        assert_eq!(
+            op.authorize_session("akh-1", Some(&owned_by_a)).unwrap(),
+            SessionUse::Operator { owner: owned_by_a }
+        );
+        assert_eq!(
+            op.authorize_session("akh-1", None).unwrap(),
+            SessionUse::Unknown
+        );
+        assert!(
+            b.authorize_session("akh-2", Some(&SessionOwner::Legacy))
+                .is_err()
+        );
+        assert_eq!(
+            AcpAccess::SharedSecret
+                .authorize_session("akh-2", Some(&SessionOwner::Legacy))
+                .unwrap(),
+            SessionUse::Owner
+        );
+        assert_eq!(
+            AcpAccess::Local
+                .authorize_session("akh-2", Some(&SessionOwner::Legacy))
+                .unwrap(),
+            SessionUse::Operator {
+                owner: SessionOwner::Legacy
+            }
+        );
     }
 
     #[test]
