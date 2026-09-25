@@ -15,6 +15,8 @@
 //! for each one.  This decouples the synchronous tool context from the async
 //! subprocess machinery.
 
+pub mod escalation;
+pub mod ledger;
 pub mod native_session;
 pub mod peer;
 pub mod remote_trigger;

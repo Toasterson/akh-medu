@@ -2242,3 +2242,105 @@ async fn a_delegation_grant_stays_private_and_rides_every_cognitive_call() {
     assert_eq!(seen.lock().unwrap()[1].grant, None);
     server.abort();
 }
+
+/// 53g PR 7: a worker workspace profile runs the akh's delegated sessions on a
+/// native runtime under neutral instructions, while the akh's own profile
+/// keeps its runtime, and the create is recoverable by its request id.
+#[test]
+fn worker_profile_overrides_runtime_and_instructions_and_create_is_found_by_request_id() {
+    let (_dir, old, owner) = setup();
+    let mut config = (*old.config).clone();
+    let profile = config.akhs.get_mut("thoth").unwrap();
+    profile.workspace_profiles.push("worker".into());
+    profile.session_grants.insert(
+        "worker".into(),
+        serde_json::from_value(json!({
+            "tools": [],
+            "runtime": {"runtime":"runtime-1","profile":"codex-worker","revision":"1","kind":"codex","model":"gpt-6-astra","execution_mode":"brokered"},
+            "instructions": "Follow the procedure in the first input."
+        }))
+        .unwrap(),
+    );
+    config.validate().unwrap();
+    let sessions = Sessions::new(old.store.clone(), Arc::new(config.clone()));
+    let own = create(&sessions, &owner);
+    assert_eq!(own.runtime.profile, "claude");
+    assert_eq!(own.instructions, "Be useful");
+    let request = NewSession {
+        request_id: "incident-request".into(),
+        akh: "thoth".into(),
+        workspace_profile: "worker".into(),
+        conversation_key: None,
+        grant: Some(GrantToken::new("first-grant-secret-0123456789")),
+    };
+    let worker = sessions.create(&owner, &request).unwrap();
+    assert_eq!(worker.akh, "thoth");
+    assert_eq!(worker.runtime.profile, "codex-worker");
+    assert_eq!(worker.runtime.kind, RuntimeKind::Codex);
+    assert_eq!(
+        worker.instructions,
+        "Follow the procedure in the first input."
+    );
+
+    // After a restart the client no longer holds the first grant secret: a
+    // replay with a fresh grant is refused, the lookup finds the session.
+    let replay = NewSession {
+        grant: Some(GrantToken::new("second-grant-secret-0123456789")),
+        ..request.clone()
+    };
+    assert_eq!(
+        sessions.create(&owner, &replay).unwrap_err().code,
+        "conflict"
+    );
+    let found = sessions
+        .created_by_request(&owner, "incident-request")
+        .unwrap();
+    assert_eq!(found.id, worker.id);
+    assert_eq!(
+        sessions
+            .created_by_request(&owner, "never-sent")
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+    // The lookup is scoped to the principal that created the session.
+    let mut stranger = owner.clone();
+    stranger.id = "stranger".into();
+    assert_eq!(
+        sessions
+            .created_by_request(&stranger, "incident-request")
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+
+    // An override needs a named runtime and non-empty instructions, and a
+    // colocated override is refused when deployed like any other binding.
+    let grants = config
+        .akhs
+        .get_mut("thoth")
+        .unwrap()
+        .session_grants
+        .get_mut("worker")
+        .unwrap();
+    grants.instructions = Some("  ".into());
+    assert!(config.validate().is_err());
+    let grants = config
+        .akhs
+        .get_mut("thoth")
+        .unwrap()
+        .session_grants
+        .get_mut("worker")
+        .unwrap();
+    grants.instructions = None;
+    grants.runtime.as_mut().unwrap().execution_mode = ExecutionMode::Colocated;
+    let fault = config
+        .validate_deployment(DeploymentMode::Deployed)
+        .unwrap_err();
+    assert!(
+        fault
+            .message
+            .contains("akhs.thoth.session_grants.worker.runtime"),
+        "{fault}"
+    );
+}

@@ -95,6 +95,35 @@ Restart privileges: akheventd and core are system LaunchDaemons. The core can al
 - **Policy** lives in skillpacks loaded by path.
 - **Merge repair:** a `git_publication` profile allows fast-forward pushes to PR branches only.
 - **Deploy:** services and core go together, readers before writers.
+- **Implemented (repository side, 2026-09-26):**
+  - `src/agent/delegation/ledger.rs`: `IncidentLedger` (`delegation:incidents:v1`
+    in engine meta and `extra.delegation.incidents` in snapshots), dedup by
+    validated `IncidentKey`, `[delegation.native] max_new_per_day` (default 4)
+    per UTC day, a stable create request id per incident.
+  - `src/agent/delegation/escalation.rs` + `src/agent/tools/escalation.rs`:
+    `escalate`, `dispatch_merge_repair`, `escalation_status` (Dangerous,
+    Mutating, outside the legacy `/v1` scope), registered only when
+    `[delegation.native.escalation] enabled`. Per-project worker profiles in
+    `[delegation.native.profiles]` (a bare name or `{ workspace_profile,
+    runtime_profile }`; the old single `workspace_profile` stays the default).
+    A session on another runtime than `runtime_profile` is retired and the
+    incident fails closed. Failed turns are classified by fault code against
+    the `[provider]` lexicon (PR 4 taxonomy).
+  - akhsessd: `session_grants.<profile>.{runtime, instructions}` overrides
+    (a worker profile runs Codex under the akh's identity without its
+    persona) and `GET /v1/session-requests/{request_id}`, which restart
+    reconciliation uses because a replayed create cannot carry the lost grant
+    secret. `git_publication` profiles gain `require_existing_branch` (D4:
+    no branch creation, no force flag).
+  - Worker policy: `deploy/roman-mini/skills/{astra-escalation,mergiraf}`,
+    loaded by path on every dispatch and sent as the worker's first input.
+  - `full_akh.py`/`configure_core.py` render Janus's `[delegation]` and drop
+    `[[mcp.servers]] janus-escalation`.
+  - Mac-side steps, verification, rollback and the remaining D4 gap (host
+    executor with ambient Git credentials) are in
+    [INVENTORY.md](../../../deploy/roman-mini/INVENTORY.md) ("PR 7 Mac-side
+    steps"). `janus_escalation.py`, `mergiraf_worker.py` and
+    `provider_failure.py` are deleted in a follow-up after the verified cutover.
 
 ### PR 8: `vesta_ops` plus `vesta_actions` move to execd and Kubernetes sandboxes (risk: highest; D5)
 

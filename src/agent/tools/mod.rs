@@ -16,6 +16,7 @@ pub mod diagnostics;
 pub mod doc_gen;
 pub mod edit;
 pub mod entity_schema;
+pub mod escalation;
 pub mod file_io;
 pub mod gap_analysis;
 pub mod glob;
@@ -71,6 +72,9 @@ pub use diagnostics::DiagnosticsTool;
 pub use doc_gen::DocGenTool;
 pub use edit::EditTool;
 pub use entity_schema::{EntitySchemaTool, EntityTypeFilterTool, EntityTypesTool};
+pub use escalation::{
+    DispatchMergeRepairTool, EscalateTool, EscalationStatusTool, escalation_tools,
+};
 pub use file_io::FileIoTool;
 pub use gap_analysis::GapAnalysisTool;
 pub use glob::GlobTool;

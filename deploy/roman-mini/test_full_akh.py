@@ -68,10 +68,13 @@ def fixture(root: Path) -> None:
                  mcp_tool("monitoring_snapshot", "observer", "monitoring_snapshot"),
                  mcp_tool("record_fixer_result", f"laya-{role}", "record_fixer_result")]
         if role == "janus":
-            tools.append(mcp_tool("escalate_to_astra", "janus-escalation", "escalate_to_astra"))
+            tools += [mcp_tool(name, "janus-escalation", name) for name in
+                      ("escalate_to_astra", "astra_escalation_status", "dispatch_mergiraf", "mergiraf_status")]
         if role == "vesta":
             tools += [mcp_tool("homelab_inspect", "vesta-ops", "homelab_inspect")]
-        akhs[role] = {"core_service": "core", "instructions": "", "tools": tools}
+        akhs[role] = {"core_service": "core", "instructions": "", "tools": tools, "workspace_profiles": [role]}
+        if role == "janus":
+            akhs[role]["workspace_profiles"] += ["janus-worker-akh-medu", "janus-worker-droneworld"]
         wake = ("You are now on duty. Coordinate with board_send_inbox. " + json.dumps(IDS) +
                 "\nReport on thread " + fa.STATUS_THREAD + ".")
         if role == "janus":
@@ -82,10 +85,17 @@ def fixture(root: Path) -> None:
         automations[role] = {"id": role, "instructions": wake}
     principals = [{"id": "runtime", "token_file": str(root / "secrets/core.key"), "roles": ["runtime"], "akhs": list(ROLES)}]
     principals += [{"id": f"t3-{r}", "token_file": str(root / f"secrets/t3-{r}.key"), "roles": ["client"], "akhs": [r]} for r in ROLES]
+    workspaces = {name: {"revision": "1", "site": "armini", "provisioner": {"kind": "existing", "executor": "executor",
+                                                                             "root": str(root / "workspaces" / name)}}
+                  for name in ("janus", "minerva", "vesta", "janus-worker-akh-medu", "janus-worker-droneworld")}
     (root / "config/sessions.json").write_text(json.dumps(
-        {"endpoints": endpoints, "principals": principals, "akhs": akhs, "automations": automations}))
+        {"endpoints": endpoints, "principals": principals, "akhs": akhs, "automations": automations,
+         "workspaces": workspaces, "listen": "127.0.0.1:18431"}))
     (root / "config/vesta-grafana-tools.json").write_text(json.dumps(
         [{"name": "query_prometheus", "description": ""}, {"name": "list_datasources", "description": ""}]))
+    # The retired broker's registry: its keys are the registered projects.
+    (root / "config/janus-escalation.json").write_text(json.dumps(
+        {"projects": {"akh-medu": "t3-project-1", "Droneworld": "t3-project-2"}}))
     routes, ev_endpoints = [], {"sessions": {"url": "http://127.0.0.1:18431", "token_file": str(root / "secrets/core.key")}}
     for role in ROLES:
         ev_endpoints[f"board-{role}"] = {"url": "http://127.0.0.1:18089", "token_env": f"ROMAN_BOARD_{role.upper()}"}
@@ -149,7 +159,7 @@ class RenderTests(unittest.TestCase):
                                            "auth": {"token_env": f"ROMAN_BOARD_{role.upper()}"}})
             servers = {s["name"]: s for s in ws["mcp"]["servers"]}
             expected = {"anima", "seshat", "sokar", "board", "observer", "laya"}
-            expected |= {"janus": {"janus-escalation"}, "vesta": {"vesta-ops", "grafana"}}.get(role, set())
+            expected |= {"vesta": {"vesta-ops", "grafana"}}.get(role, set())
             self.assertEqual(set(servers), expected)
             self.assertEqual(servers["board"]["auth"], {"token_env": f"ROMAN_BOARD_{role.upper()}"})
             self.assertEqual(servers["laya"]["auth"], {"token_file": str(self.root / f"secrets/laya-{role}.key")})
@@ -188,12 +198,50 @@ class RenderTests(unittest.TestCase):
             self.assertNotRegex(prompt, r"(?<!__)\bboard_send_inbox\b")
         janus = prompts[0]
         self.assertIn("mcp__anima__approve_and_merge", janus)
-        self.assertIn("mcp__janus-escalation__escalate_to_astra", janus)
+        for native in ("escalate", "dispatch_merge_repair", "escalation_status"):
+            self.assertRegex(janus, rf"(?<![\w-]){native}(?!\w)")
+        for prompt in prompts:
+            self.assertNotIn("janus-escalation", prompt)
+            self.assertNotRegex(prompt, r"escalate_to_astra|astra_escalation_status|dispatch_mergiraf|mergiraf_status")
         self.assertIn("mcp__vesta-ops__homelab_inspect", prompts[2])
         self.assertIn("mcp__grafana__", prompts[2])
         self.assertNotIn("mcp__vesta-ops__grafana__", prompts[2])
         self.assertEqual(prompts[2].count("grafana__"), prompts[2].count("mcp__grafana__"),
                          "every grafana__ mention must be qualified mcp__grafana__")
+
+    def test_janus_delegates_escalations_natively(self):
+        janus = self.toml("core-config/akh-medu/workspaces/janus.toml")
+        delegation = janus["delegation"]
+        self.assertFalse(delegation["enabled"], "the generic delegate tool stays off")
+        native = delegation["native"]
+        self.assertTrue(native["enabled"])
+        self.assertEqual(native["url"], "http://127.0.0.1:18431")
+        self.assertEqual(native["token_file"], str(self.root / fa.DELEGATION_TOKEN))
+        self.assertEqual(native["workspace_profile"], "janus")
+        self.assertEqual(native["core_principal"], "sessions")
+        self.assertEqual(native["max_new_per_day"], 4)
+        self.assertEqual(native["profiles"], {
+            "Droneworld": {"workspace_profile": "janus-worker-droneworld", "runtime_profile": "codex-astra"},
+            "akh-medu": {"workspace_profile": "janus-worker-akh-medu", "runtime_profile": "codex-astra"}})
+        escalation = native["escalation"]
+        self.assertTrue(escalation["enabled"])
+        self.assertEqual(escalation["report_thread"], fa.STATUS_THREAD)
+        for key, name in (("escalation_skill", "astra-escalation"), ("merge_repair_skill", "mergiraf")):
+            skill = Path(escalation[key])
+            self.assertEqual(skill, self.root / "skills" / name)
+            manifest = json.loads((skill / "skill.json").read_text())
+            self.assertEqual(manifest["id"], name)
+            self.assertTrue((skill / manifest["procedures_file"]).read_text().strip())
+        token = self.root / fa.DELEGATION_TOKEN
+        self.assertEqual(token.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn("janus-escalation", {s["name"] for s in janus["mcp"]["servers"]})
+        for role in ("minerva", "vesta"):
+            self.assertNotIn("delegation", self.toml(f"core-config/akh-medu/workspaces/{role}.toml"))
+        # D4 is in the merge worker's procedures, not in code.
+        mergiraf = (self.root / "skills/mergiraf/procedures.md").read_text()
+        self.assertIn("fast-forward", mergiraf)
+        self.assertIn("Never force-push", mergiraf)
+        self.assertIn("Never merge the PR", mergiraf)
 
     def test_rename_is_single_pass(self):
         renames = {"board__board_agents": "mcp__board__board_agents", "board_agents": "mcp__board__board_agents"}
@@ -295,6 +343,39 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(len(keys), 4)
         t3 = json.loads((self.root / "config/t3-acp.json").read_text())
         self.assertEqual(t3["endpoint"], f"tcp://127.0.0.1:{fa.ACP_TCP_PORT}")
+
+
+class DelegationTests(unittest.TestCase):
+    def session(self, profiles):
+        return {"listen": "127.0.0.1:19999",
+                "akhs": {"janus": {"workspace_profiles": ["janus"] + profiles, "tools": []}},
+                "workspaces": {name: {} for name in ["janus"] + profiles}}
+
+    def test_projects_without_a_worker_profile_are_not_registered(self):
+        root = Path("/deploy")
+        rendered, warnings = fa.render_delegation(self.session(["janus-worker-anima"]), root,
+                                                  ["anima", "Secrets Share"])
+        self.assertEqual(list(rendered["native"]["profiles"]), ["anima"])
+        self.assertEqual(rendered["native"]["url"], "http://127.0.0.1:19999")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("janus-worker-secrets-share", warnings[0])
+        rendered, warnings = fa.render_delegation(self.session([]), root, ["anima"])
+        self.assertFalse(rendered["native"]["enabled"])
+        self.assertFalse(rendered["native"]["escalation"]["enabled"])
+        self.assertIn("stay disabled", warnings[-1])
+
+    def test_broker_tool_names_map_to_native_tools(self):
+        session = {"akhs": {"janus": {"tools": [
+            mcp_tool(name, "janus-escalation", name) for name in fa.NATIVE_ESCALATION_TOOLS]}}}
+        renames = fa.tool_renames(session, "janus")
+        self.assertEqual(renames["mcp__janus-escalation__escalate_to_astra"], "escalate")
+        self.assertEqual(renames["dispatch_mergiraf"], "dispatch_merge_repair")
+        self.assertEqual(renames["mergiraf_status"], "escalation_status")
+        self.assertEqual(fa.rename_tools("use mcp__janus-escalation__astra_escalation_status or escalate_to_astra",
+                                         renames), "use escalation_status or escalate")
+        session["akhs"]["janus"]["tools"].append(mcp_tool("new_tool", "janus-escalation", "new_tool"))
+        with self.assertRaises(fa.RenderError):
+            fa.tool_renames(session, "janus")
 
 
 class WakePromptTests(unittest.TestCase):

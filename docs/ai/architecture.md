@@ -1,6 +1,20 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-09-25 (Phase 53 follow-up, Anima WI 01a0d569-1cf1 item 7:
+> Last updated: 2026-09-26 (**53g PR 7** — Janus escalation and merge repair
+> move to scoped delegation; see *Escalation delegation (53g PR 7)* below).
+>
+> 2026-09-25 (akhrtd gains the `opencode` native runtime kind —
+> [research](research/2026-09-25-opencode-runtime-integration.md)).
+>
+> 2026-09-25 (**Paragraph streaming for native-runtime text**):
+> akhrtd's runtime host (`RemoteHost` in `crates/akh-session-services/src/runtime.rs`)
+> now puts a `DeltaStream` (`crates/akh-session-services/src/streaming.rs`) in front of
+> telemetry and the durable job event log, coalescing provider text/reasoning deltas
+> into paragraphs with `ParagraphCoalescer` (`crates/akh-session-types/src/streaming.rs`).
+> Service config `[streaming]` (`mode = "paragraph" | "token"`, `max_bytes`,
+> `idle_flush_ms`, `max_latency_ms`; default paragraph/4096/1500/3000).
+>
+> 2026-09-25 (Phase 53 follow-up, Anima WI 01a0d569-1cf1 item 7:
 > the **built-in fleet memory pack** `fleet-memory@1.0.0`,
 > `data/schema-packs/fleet-memory.json` compiled into the binary by
 > `src/schema/builtin.rs`, is installed on every akh when akhomed opens its
@@ -10,17 +24,6 @@
 > relation, including with an explicit `"cardinality": "multi"`
 > (`onto:cardinality/multi`). See
 > [phase-53 README](phases/phase-53/README.md#follow-up-a-built-in-fleet-memory-pack-for-every-akh-anima-wi-01a0d569-1cf1-item-7).)
->
-> Previous update: 2026-09-24 (**Phase 53 — every akh runs fully featured**, [ADR
-> Last updated: 2026-09-25 (akhrtd gains the `opencode` native runtime kind —
-> [research](research/2026-09-25-opencode-runtime-integration.md); previously 2026-09-24: **Phase 53 — every akh runs fully featured**, [ADR
-> Last updated: 2026-09-25 (**Paragraph streaming for native-runtime text**):
-> akhrtd's runtime host (`RemoteHost` in `crates/akh-session-services/src/runtime.rs`)
-> now puts a `DeltaStream` (`crates/akh-session-services/src/streaming.rs`) in front of
-> telemetry and the durable job event log, coalescing provider text/reasoning deltas
-> into paragraphs with `ParagraphCoalescer` (`crates/akh-session-types/src/streaming.rs`).
-> Service config `[streaming]` (`mode = "paragraph" | "token"`, `max_bytes`,
-> `idle_flush_ms`, `max_latency_ms`; default paragraph/4096/1500/3000).
 >
 > Previous update: 2026-09-24 (**Phase 53 — every akh runs fully featured**, [ADR
 > 113](decisions/113-full-akh-always.md), [plan](plans/2026-09-24-phase53-full-akh-always.md),
@@ -441,6 +444,21 @@ native tool through a bridge-owned permission policy and requires the extra
   `DerivationKind::DelegatedCall` (tag 108) with the delegate's own provenance,
   not the akh's. Minting/revoking/listing is exposed over ACP
   `_akh/delegation/grant/{mint,revoke,list}`.
+- **Escalation delegation (53g PR 7, `src/agent/delegation/{ledger,escalation}.rs`,
+  `src/agent/tools/escalation.rs`)**: an akh whose `[delegation.native.escalation]`
+  enables them (Janus) gets `escalate`, `dispatch_merge_repair` and
+  `escalation_status` (Dangerous/Mutating, outside the legacy `/v1` scope).
+  Each validated request is admitted by the durable `IncidentLedger`
+  (`delegation:incidents:v1` in engine meta and `extra.delegation.incidents`
+  in snapshots; dedup by incident key, `max_new_per_day` per UTC day), then
+  runs as an akhsessd session in the project's worker profile
+  (`[delegation.native.profiles]`) carrying a per-incident grant; the brief is
+  the skillpack's `procedures.md` loaded by path (`skills::procedures`). A
+  worker profile binds its own runtime through akhsessd
+  `session_grants.<profile>.runtime` (the akh fails closed on any other).
+  Restart reconciliation looks sessions up by the incident's stable create
+  request id (`GET /v1/session-requests/{id}`). Merge-repair publication (D4)
+  uses a `git_publication` profile with `require_existing_branch`.
 - **Autonomy governor (53b, `src/agent/autonomy.rs`)**: autonomy is on by
   default. `DaemonTask` is the typed registry of every background task (25
   variants, including `Harvest`, `MemoryHygiene` (53j), `Reactor`,

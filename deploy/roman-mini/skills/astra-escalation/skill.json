@@ -1,0 +1,9 @@
+{
+  "id": "astra-escalation",
+  "name": "Astra escalation worker",
+  "version": "1.0.0",
+  "description": "Procedure for a contained native worker (Codex, gpt-6-astra) that an akh delegated one bounded blocker to through the `escalate` tool. Sent as the worker session's first input, followed by the job as an akh-delegation-job block. Replaces the prompt in deploy/roman-mini/janus_escalation.py (53g PR 7).",
+  "domains": ["delegation", "escalation", "anima", "recovery"],
+  "weight_size_bytes": 0,
+  "procedures_file": "procedures.md"
+}

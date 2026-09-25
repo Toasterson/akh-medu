@@ -19,6 +19,8 @@ Renders (existing unrelated keys and secrets are preserved; rerunning is safe):
 - config/events.akh-target.json             staged akheventd routes (retarget_events.py)
 - config/t3-acp.json                        T3 transport -> akhomed ACP (t3_entrypoint.py)
 - launchd/dev.roman-akhs.core.plist         execs through daemon_credentials.py core
+- skills/{astra-escalation,mergiraf}/       Janus's worker skillpacks (53g PR 7)
+- secrets/sessions-janus-delegation.key     akhsessd client token for Janus's delegation
 Never reads a provider key; token files are only concatenated into the ACP
 shared-secret file, never printed.
 """
@@ -96,6 +98,17 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
         header="Rendered by deploy/roman-mini/configure_core.py (Phase 53f, ADR 113).\n"
                f"akhomed-main-{provenance.short} = {provenance.commit}"))
 
+    # 53g PR 7: Janus's escalation and merge-repair workers. The skillpacks are
+    # read by path on every dispatch; the registered projects are the keys of
+    # the retired broker's config/janus-escalation.json.
+    if (source / "skills").is_dir():
+        shutil.copytree(source / "skills", root / "skills", dirs_exist_ok=True)
+    registry = config / "janus-escalation.json"
+    projects = list(json.loads(registry.read_text()).get("projects", {})) if registry.exists() else []
+    if not projects:
+        warnings.append("config/janus-escalation.json lists no projects; Janus's escalation tools stay disabled")
+    _ensure_key(root / fa.DELEGATION_TOKEN)
+
     for role in fa.ROLES:
         path = root / f"core-config/akh-medu/workspaces/{role}.toml"
         if tomllib is None:
@@ -107,8 +120,12 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
         existing = tomllib.loads(path.read_text()) if path.exists() else None
         servers, server_warnings = fa.mcp_servers(session, role, root)
         warnings.extend(server_warnings)
+        delegation = None
+        if role in fa.DELEGATING_ROLES:
+            delegation, delegation_warnings = fa.render_delegation(session, root, projects, role)
+            warnings.extend(delegation_warnings)
         doc = fa.render_workspace(existing, role, fa.system_prompt(source / "roles", role), servers,
-                                  fa.board_identity(events, role))
+                                  fa.board_identity(events, role), delegation)
         _save_text(path, fa.dump_toml(doc, fa.WORKSPACE_COMMENTS,
                                       header=f"{role}: full akh (ADR 113). Rendered by configure_core.py."))
         _save_json(config / f"reactor-seeds/{role}.json", fa.reactor_seeds(events, session, role))

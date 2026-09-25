@@ -146,6 +146,19 @@ pub enum Delivery {
 }
 
 impl NativeSessionError {
+    /// Whether akhsessd answered that the addressed thing does not exist
+    /// (its `not_found` fault, as opposed to a route an older akhsessd lacks,
+    /// which carries no fault code).
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::Rejected { code, .. } if code == "not_found")
+    }
+
+    /// Whether akhsessd refused the request as conflicting with one it
+    /// already accepted (for example a request id reused with other content).
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, Self::Rejected { code, .. } if code == "conflict")
+    }
+
     /// Whether akhsessd may have acted on the request despite the error: the
     /// connection failed after sending, or the answer could not be read.
     pub fn may_have_been_applied(&self) -> bool {
@@ -207,6 +220,25 @@ pub struct SessionView {
     pub id: String,
     #[serde(default)]
     pub turns: Vec<TurnView>,
+    /// The runtime the session is bound to (absent in stub answers).
+    #[serde(default)]
+    pub runtime: Option<RuntimeView>,
+    /// When akhsessd archived the session.
+    #[serde(default)]
+    pub closed_at: Option<u64>,
+}
+
+/// The parts of an akhsessd runtime binding this client reads.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeView {
+    /// The runtime profile (e.g. the Codex worker profile).
+    pub profile: String,
+    /// The runtime kind (`codex`, `claude`, `internal`, ...).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// The model the binding pins, if any.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// The parts of an akhsessd turn this client reads.
@@ -273,6 +305,17 @@ impl NativeSessionClient {
             "POST",
             &format!("/v1/sessions/{}/inputs", segment(session_id)),
             Some(input),
+        )
+    }
+
+    /// `GET /v1/session-requests/{request_id}`: the session a create with
+    /// this request id made for this client (53g PR 7). `not_found` means no
+    /// such create ever landed.
+    pub fn session_by_request(&self, request_id: &str) -> Result<SessionView, NativeSessionError> {
+        self.send::<(), _>(
+            "GET",
+            &format!("/v1/session-requests/{}", segment(request_id)),
+            None,
         )
     }
 
@@ -441,7 +484,12 @@ pub fn new_session_request(
 
 /// The delegate identity recorded in provenance for a native session.
 pub fn delegate_principal(config: &NativeDelegationConfig) -> String {
-    format!("native:{}/{}", config.service, config.workspace_profile)
+    delegate_principal_for(&config.service, &config.workspace_profile)
+}
+
+/// The delegate identity for a session of `workspace_profile` on `service`.
+pub fn delegate_principal_for(service: &str, workspace_profile: &str) -> String {
+    format!("native:{service}/{workspace_profile}")
 }
 
 /// Run one native-session delegation to completion (blocking).
@@ -554,7 +602,7 @@ pub fn run_native_delegation(
 /// it now; either way the caller closes it. `None` when akhsessd stays
 /// unreachable (the session, if any, is then archived by akhsessd's own
 /// sweeps and the grant is revoked regardless).
-fn recover_created_session(
+pub(crate) fn recover_created_session(
     client: &NativeSessionClient,
     create: &NewSession,
     backoff: Duration,

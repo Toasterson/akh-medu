@@ -455,6 +455,23 @@ enum LexiconClass {
     RateLimited,
 }
 
+/// The class a structured failure identifier names in `lexicon`, if any.
+///
+/// Used where no HTTP status is available, for example a delegated worker's
+/// failed turn, which akhsessd reports as a `Fault` with a machine `code`
+/// (53g PR 7). The match is exact, like [`classify`]'s: a code the lexicon
+/// does not list is `None`, never a guess.
+pub fn classify_identifier(
+    identifier: &str,
+    lexicon: &ProviderErrorLexicon,
+) -> Option<ProviderFailureClass> {
+    lexicon.class_of(identifier).map(|class| match class {
+        LexiconClass::Authentication => ProviderFailureClass::Authentication,
+        LexiconClass::Quota => ProviderFailureClass::Quota,
+        LexiconClass::RateLimited => ProviderFailureClass::RateLimited { retry_after: None },
+    })
+}
+
 /// Classify a provider failure.
 ///
 /// Precedence: an exact lexicon match on `error.code`, then on `error.type`,
@@ -1134,6 +1151,29 @@ mod tests {
             }
         );
         assert_eq!(class(&auth_400), ProviderFailureClass::Unknown);
+    }
+
+    #[test]
+    fn structured_identifiers_classify_without_a_status() {
+        let lexicon = ProviderErrorLexicon {
+            auth_error_codes: ["login_failed".to_owned()].into(),
+            quota_error_codes: ["usage_limit_exceeded".to_owned()].into(),
+            rate_limit_error_codes: ["rate_limited".to_owned()].into(),
+        };
+        assert_eq!(
+            classify_identifier("login_failed", &lexicon),
+            Some(ProviderFailureClass::Authentication)
+        );
+        assert_eq!(
+            classify_identifier("usage_limit_exceeded", &lexicon),
+            Some(ProviderFailureClass::Quota)
+        );
+        assert_eq!(
+            classify_identifier("rate_limited", &lexicon),
+            Some(ProviderFailureClass::RateLimited { retry_after: None })
+        );
+        assert_eq!(classify_identifier("unknown_outcome", &lexicon), None);
+        assert_eq!(classify_identifier("Login_Failed", &lexicon), None);
     }
 
     #[test]
