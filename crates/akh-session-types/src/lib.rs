@@ -56,6 +56,11 @@ pub enum RuntimeKind {
     Internal,
     Codex,
     Claude,
+    /// sst/opencode driven over the Agent Client Protocol (`opencode acp`).
+    /// Akh tools reach it as a per-turn loopback MCP server; see
+    /// `akh_runtime::opencode` and docs/ai/research/2026-09-25-opencode-runtime-integration.md.
+    #[serde(rename = "opencode")]
+    OpenCode,
 }
 
 /// How a native runtime reaches workspace effects.
@@ -1418,6 +1423,20 @@ mod deployment_tests {
             serde_json::to_value(&brokered).unwrap()["execution_mode"],
             "brokered"
         );
+    }
+
+    #[test]
+    fn opencode_runtime_kind_uses_its_product_name_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(RuntimeKind::OpenCode).unwrap(),
+            "opencode"
+        );
+        assert_eq!(
+            serde_json::from_value::<RuntimeKind>(serde_json::json!("opencode")).unwrap(),
+            RuntimeKind::OpenCode
+        );
+        // The snake_case spelling a derive would produce is not accepted.
+        assert!(serde_json::from_value::<RuntimeKind>(serde_json::json!("open_code")).is_err());
     }
 
     #[test]

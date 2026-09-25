@@ -214,3 +214,250 @@ fn standalone_transport_resumes_exact_provider_session() {
         }));
     }
 }
+
+/// An OpenCode profile around the fixture. Brokered OpenCode requires a private
+/// isolation directory; the fixture interpreter is found through the profile PATH.
+fn opencode(mode: ExecutionMode) -> (tempfile::TempDir, ProviderConfig, RuntimeJobRequest) {
+    let (dir, mut config, mut request) = setup(RuntimeKind::OpenCode, mode);
+    config.node_binary = None;
+    config.bridge_script = None;
+    if mode == ExecutionMode::Brokered {
+        config.isolation =
+            Some(serde_json::from_value(json!({"directory": dir.path().join("profile")})).unwrap());
+        config
+            .environment
+            .insert("PATH".into(), std::env::var("PATH").unwrap());
+    }
+    request.binding.model = Some("fixture/model".into());
+    (dir, config, request)
+}
+
+fn echo_tool() -> ToolSpec {
+    ToolSpec {
+        name: "echo".into(),
+        description: "echo".into(),
+        input_schema: json!({"type":"object","properties":{"n":{"type":"integer"}}}),
+        read_only: true,
+        destination: ToolDestination::Client,
+    }
+}
+
+fn bound_session(host: &Witness) -> Option<String> {
+    host.events.iter().find_map(|e| match e {
+        RuntimeEvent::Bound {
+            provider_session, ..
+        } => Some(provider_session.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn brokered_opencode_serves_akh_tools_over_loopback_mcp_and_never_approves() {
+    let _serial = serial();
+    let (_dir, config, mut request) = opencode(ExecutionMode::Brokered);
+    let mut host = Witness::default();
+    let cancel = AtomicBool::new(false);
+
+    request.tools.push(echo_tool());
+    request.input.text = "tool".into();
+    assert_eq!(
+        akh_runtime::run(&config, &request, &mut host, &cancel).unwrap(),
+        "7"
+    );
+    assert_eq!(host.calls, 1, "the rogue call must not reach the host");
+    assert!(host.events.iter().any(
+        |e| matches!(e, RuntimeEvent::ToolStarted { id, name } if id == "call-1" && name == "akh_echo")
+    ));
+    assert!(host.events.iter().any(
+        |e| matches!(e, RuntimeEvent::ToolCompleted { id, success: true, .. } if id == "call-1")
+    ));
+    assert!(host.events.iter().any(
+        |e| matches!(e, RuntimeEvent::Reasoning { text } if text == "fixture OpenCode reasoning")
+    ));
+    assert!(
+        !host
+            .events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::Text { text } if text == "LEAK")),
+        "updates for other sessions are ignored"
+    );
+    assert_eq!(host.usage.last().unwrap()["prompt_tokens"], 13);
+    assert_eq!(host.usage.last().unwrap()["completion_tokens"], 4);
+    assert_eq!(
+        host.usage.last().unwrap()["completion_tokens_details"]["reasoning_tokens"],
+        1
+    );
+
+    request.tools.clear();
+    request.input.text = "approval".into();
+    assert_eq!(
+        akh_runtime::run(&config, &request, &mut host, &cancel).unwrap(),
+        "reject"
+    );
+    assert_eq!(host.approvals, 0);
+}
+
+#[test]
+fn colocated_opencode_routes_native_permissions_to_the_host() {
+    let _serial = serial();
+    let (_dir, config, mut request) = opencode(ExecutionMode::Colocated);
+    let mut host = Witness::default();
+    let cancel = AtomicBool::new(false);
+    request.input.text = "approval".into();
+    assert_eq!(
+        akh_runtime::run(&config, &request, &mut host, &cancel).unwrap(),
+        "once"
+    );
+    assert_eq!(host.approvals, 1);
+    request.approval_policy = ApprovalPolicy::ReadOnly;
+    assert_eq!(
+        akh_runtime::run(&config, &request, &mut host, &cancel).unwrap(),
+        "reject"
+    );
+    assert_eq!(host.approvals, 1, "read-only sessions never ask the host");
+}
+
+#[test]
+fn opencode_resumes_the_exact_session_without_replaying_history() {
+    let _serial = serial();
+    let (_dir, config, mut request) = opencode(ExecutionMode::Brokered);
+    let mut host = Witness::default();
+    let cancel = AtomicBool::new(false);
+    assert_eq!(
+        akh_runtime::run(&config, &request, &mut host, &cancel).unwrap(),
+        "hello"
+    );
+    request.provider_session = bound_session(&host);
+    assert!(request.provider_session.is_some());
+    request.input.text = "again".into();
+    let mut resumed = Witness::default();
+    assert_eq!(
+        akh_runtime::run(&config, &request, &mut resumed, &cancel).unwrap(),
+        "hello | again"
+    );
+    assert_eq!(bound_session(&resumed), request.provider_session);
+    assert!(
+        !resumed
+            .events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::Text { text } if text.contains("REPLAYED")))
+    );
+}
+
+#[test]
+fn opencode_cancellation_reaches_the_provider_before_teardown() {
+    let _serial = serial();
+    let (dir, config, mut request) = opencode(ExecutionMode::Brokered);
+    let mut host = Witness::default();
+    let cancel = AtomicBool::new(false);
+    request.input.text = "hang".into();
+    let error = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        akh_runtime::run(&config, &request, &mut host, &cancel).unwrap_err()
+    });
+    assert!(error.contains("cancelled"), "{error}");
+    let marker = dir.path().join("cancelled.marker");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::read_to_string(marker).ok(),
+        bound_session(&host),
+        "session/cancel names the bound session"
+    );
+}
+
+#[test]
+fn opencode_failures_carry_diagnostic_codes() {
+    let _serial = serial();
+    let (_dir, config, mut request) = opencode(ExecutionMode::Brokered);
+    let mut host = Witness::default();
+    let cancel = AtomicBool::new(false);
+    for (prompt, code) in [
+        ("auth", "akh::runtime::opencode::auth_required"),
+        ("stop", "akh::runtime::opencode::stopped"),
+    ] {
+        request.input.text = prompt.into();
+        let error = akh_runtime::run(&config, &request, &mut host, &cancel).unwrap_err();
+        assert!(error.starts_with(code), "{error}");
+        assert!(error.contains(" help: "), "{error}");
+    }
+
+    // OpenCode ignores MCP registration failures; the bridge does not.
+    request.tools.push(echo_tool());
+    std::fs::write(config.working_dir.join("skip-mcp"), "").unwrap();
+    let error = akh_runtime::run(&config, &request, &mut host, &cancel).unwrap_err();
+    assert!(
+        error.starts_with("akh::runtime::opencode::mcp_not_connected"),
+        "{error}"
+    );
+    std::fs::remove_file(config.working_dir.join("skip-mcp")).unwrap();
+    request.tools.clear();
+
+    request.binding.model = Some("no-provider".into());
+    let error = akh_runtime::run(&config, &request, &mut host, &cancel).unwrap_err();
+    assert!(
+        error.starts_with("akh::runtime::opencode::model_format"),
+        "{error}"
+    );
+
+    // Brokered OpenCode refuses to launch without a private profile directory
+    // or with bridge-owned configuration in its environment.
+    let (_dir, mut ambient, mut request) = opencode(ExecutionMode::Brokered);
+    ambient.isolation = None;
+    let error = akh_runtime::run(&ambient, &request, &mut host, &cancel).unwrap_err();
+    assert!(
+        error.starts_with("akh::runtime::opencode::isolation_required"),
+        "{error}"
+    );
+    let (_dir, mut layered, _) = opencode(ExecutionMode::Brokered);
+    layered
+        .environment
+        .insert("OPENCODE_CONFIG".into(), "/tmp/extra.json".into());
+    request.binding.revision = layered.revision.clone();
+    let error = akh_runtime::run(&layered, &request, &mut host, &cancel).unwrap_err();
+    assert!(
+        error.starts_with("akh::runtime::opencode::brokered_environment"),
+        "{error}"
+    );
+}
+
+/// Real-binary smoke test; not part of the default suite.
+///
+/// ```text
+/// AKH_OPENCODE_BIN=/absolute/path/to/opencode AKH_OPENCODE_MODEL=provider/model \
+///   cargo test -p akh-runtime --test providers real_opencode -- --ignored --nocapture
+/// ```
+///
+/// Runs one colocated, read-only turn with the caller's existing OpenCode
+/// login (development only; the test reads and copies no credentials). It shows
+/// that the installed release accepts the bridge's generated configuration
+/// (OpenCode rejects unknown config keys at load), that the `akh` agent can be
+/// selected, and that an Akh tool round-trips through the loopback MCP endpoint.
+/// It is not conformance evidence: brokered admission still needs a measured
+/// conformance file for the exact binary and profile.
+#[test]
+#[ignore = "needs an installed OpenCode, a logged-in provider and AKH_OPENCODE_BIN/AKH_OPENCODE_MODEL"]
+fn real_opencode_round_trips_an_akh_tool() {
+    let binary = std::env::var("AKH_OPENCODE_BIN").expect("AKH_OPENCODE_BIN");
+    let model = std::env::var("AKH_OPENCODE_MODEL").expect("AKH_OPENCODE_MODEL");
+    let (_dir, mut config, mut request) = opencode(ExecutionMode::Colocated);
+    config.binary = binary.into();
+    config.timeout_secs = 300;
+    request.binding.model = Some(model);
+    request.approval_policy = ApprovalPolicy::ReadOnly;
+    request.tools.push(echo_tool());
+    request.input.text = "Call the akh_echo tool exactly once with n set to 7. \
+        Then reply with only the text it returned."
+        .into();
+    let mut host = Witness::default();
+    let output = akh_runtime::run(&config, &request, &mut host, &AtomicBool::new(false)).unwrap();
+    eprintln!("OpenCode answered: {output}");
+    assert_eq!(host.calls, 1);
+    assert!(output.contains('7'));
+    assert!(bound_session(&host).is_some());
+}

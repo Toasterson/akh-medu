@@ -305,9 +305,11 @@ version = "0.1.0"
 dependencies = [
  "akh-session-types",
  "libc",
+ "miette 7.6.0",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

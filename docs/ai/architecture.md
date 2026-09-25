@@ -12,6 +12,8 @@
 > [phase-53 README](phases/phase-53/README.md#follow-up-a-built-in-fleet-memory-pack-for-every-akh-anima-wi-01a0d569-1cf1-item-7).)
 >
 > Previous update: 2026-09-24 (**Phase 53 — every akh runs fully featured**, [ADR
+> Last updated: 2026-09-25 (akhrtd gains the `opencode` native runtime kind —
+> [research](research/2026-09-25-opencode-runtime-integration.md); previously 2026-09-24: **Phase 53 — every akh runs fully featured**, [ADR
 > 113](decisions/113-full-akh-always.md), [plan](plans/2026-09-24-phase53-full-akh-always.md),
 > briefs [docs/ai/phases/phase-53/README.md](phases/phase-53/README.md)): the
 > `core-server` build profile is retired — `akhomed` has one `server` feature
@@ -403,6 +405,12 @@ contains execution and native runtimes only, never cognition. Slices 53a–53e,
 53g step 1, 53h and 53i are implemented on `phase53/full-akh`; 53f is the Roman
 cutover, an operational runbook in
 [`deploy/roman-mini/CUTOVER.md`](../../deploy/roman-mini/CUTOVER.md).
+akhrtd's native runtime kinds are `internal`, `codex`, `claude` and `opencode`.
+OpenCode (`crates/akh-runtime/src/opencode.rs`) runs `opencode acp` per turn and serves
+Akh tools as a token-guarded loopback MCP server. Brokered mode denies and hides every
+native tool through a bridge-owned permission policy and requires the extra
+`native_tools_hidden` conformance check
+([research](research/2026-09-25-opencode-runtime-integration.md)).
 
 - **`core_service` (`src/core_service.rs`, `src/core_service/`, feature
   `core-api`, additive in the one `server` build profile)**: an axum `/v1` HTTP

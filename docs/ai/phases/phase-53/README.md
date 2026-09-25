@@ -243,6 +243,11 @@ numbers before editing, because they drift.
   `crates/akh-runtime/src/codex.rs` and `claude.rs` already support
   `ExecutionMode::Brokered`, and `src/agent/runtime/bridge.rs` ~28,48 hardcodes
   `Colocated`. OpenCode is not a `RuntimeKind`; leave it out of scope and record it.
+  *Follow-up (2026-09-25, Anima WI `01a0d569-1cf1` item 4):* `RuntimeKind::OpenCode`
+  (`"opencode"`) now exists in akhrtd. It uses ACP plus a per-turn loopback MCP server for
+  Akh tools. Brokered mode relies on a bridge-owned deny-all permission policy and needs the
+  extra `native_tools_hidden` conformance check. See
+  [research](../../research/2026-09-25-opencode-runtime-integration.md).
 - **Tests:**
   - wiremock allocate → exec → poll → timeout → cancel; `Unknown` maps to
     `UnknownOutcome`;

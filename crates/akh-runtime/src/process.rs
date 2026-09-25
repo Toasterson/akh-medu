@@ -103,18 +103,27 @@ impl Process {
 
     pub fn recv(&self, cancel: &AtomicBool) -> Result<Value, String> {
         loop {
-            if cancel.load(Ordering::Relaxed) {
-                return Err("coding-agent turn cancelled".into());
+            if let Some(frame) = self.poll(cancel, Duration::from_millis(50))? {
+                return Ok(frame);
             }
-            if Instant::now() >= self.deadline {
-                return Err("coding-agent turn timed out".into());
-            }
-            match self.frames.recv_timeout(Duration::from_millis(50)) {
-                Ok(frame) => return frame,
-                Err(mpsc::RecvTimeoutError::Timeout) => {},
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(
-                    "coding runtime closed before completion; check its installation, login and configuration".into()),
-            }
+        }
+    }
+
+    /// Wait at most `wait` for one frame. `Ok(None)` means nothing arrived in
+    /// time, so a caller can multiplex other work (brokered tool calls) with
+    /// the provider's stdout without giving up cancellation or the deadline.
+    pub fn poll(&self, cancel: &AtomicBool, wait: Duration) -> Result<Option<Value>, String> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("coding-agent turn cancelled".into());
+        }
+        if Instant::now() >= self.deadline {
+            return Err("coding-agent turn timed out".into());
+        }
+        match self.frames.recv_timeout(wait) {
+            Ok(frame) => frame.map(Some),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(
+                "coding runtime closed before completion; check its installation, login and configuration".into()),
         }
     }
 }
