@@ -19,6 +19,28 @@ def capture(command):
     return result.stdout.decode().strip()
 
 
+ANIMA_PAT = '/Users/toasty/.local/bin/anima-pat'
+
+
+def anima_token(root):
+    """The Anima MCP token for a LaunchDaemon, or None.
+
+    `anima-pat` reads the macOS login keychain, which a system LaunchDaemon (the
+    core) cannot reach, so the operator-written `secrets/anima-token` (0600)
+    comes first. `anima-pat` stays the fallback for LaunchAgents, which run in
+    the login session.
+    """
+    path = root / 'secrets' / 'anima-token'
+    if path.exists():
+        token = path.read_text().strip().removeprefix('Bearer ').strip()
+        if token:
+            return token
+    try:
+        return json.loads(capture([ANIMA_PAT, 'get-auth-header']))['Authorization'].removeprefix('Bearer ')
+    except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        return None
+
+
 def main():
     role, root_arg = sys.argv[1:]
     root = Path(root_arg)
@@ -51,7 +73,15 @@ def main():
         # configure_integrations.py); there is no separate Sokar credential yet.
         env['ROMAN_OLLAMA_KEY'] = capture([op, 'read', 'op://Homelab/Ollama API Key Akhrtd Command Group/api key'])
         env['ROMAN_ARCHIVE_TOKEN'] = capture([op, 'read', 'op://Homelab/sia-runtime/SIA_SESHAT__TOKEN'])
-        env['ROMAN_ANIMA_TOKEN'] = json.loads(capture(['/Users/toasty/.local/bin/anima-pat', 'get-auth-header']))['Authorization'].removeprefix('Bearer ')
+        # Unlike the other credentials, a missing Anima token does not stop the
+        # core: the akh starts, and only its `anima` MCP server stays
+        # unavailable (53i retries it lazily) until a token is provided.
+        token = anima_token(root)
+        if token:
+            env['ROMAN_ANIMA_TOKEN'] = token
+        else:
+            print('Roman core: no Anima token (write secrets/anima-token, mode 0600); '
+                  'starting without the anima MCP server', file=sys.stderr)
         for akh in ('janus', 'minerva', 'vesta'):
             env['ROMAN_BOARD_' + akh.upper()] = json.loads((root / 'secrets' / f'board-{akh}.json').read_text())['bearer_token']
         # ADR 113 decision 4 / 53d: Board, Anima and alert events are admitted

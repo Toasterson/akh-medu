@@ -1,0 +1,46 @@
+"""Anima token resolution for the Roman core LaunchDaemon (ADR 113, 53f)."""
+import os
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+import unittest.mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import daemon_credentials as dc  # noqa: E402
+
+
+class AnimaTokenTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / 'secrets').mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_secrets_file_wins_and_bearer_prefix_is_stripped(self):
+        path = self.root / 'secrets' / 'anima-token'
+        path.write_text('Bearer tok-from-file\n')
+        os.chmod(path, 0o600)
+        with unittest.mock.patch.object(dc, 'capture', side_effect=AssertionError('keychain not consulted')):
+            self.assertEqual(dc.anima_token(self.root), 'tok-from-file')
+
+    def test_falls_back_to_anima_pat(self):
+        header = '{"Authorization": "Bearer tok-from-keychain"}'
+        with unittest.mock.patch.object(dc, 'capture', return_value=header):
+            self.assertEqual(dc.anima_token(self.root), 'tok-from-keychain')
+
+    def test_unavailable_keychain_yields_none_instead_of_raising(self):
+        failure = RuntimeError('credential source unavailable: anima-pat')
+        with unittest.mock.patch.object(dc, 'capture', side_effect=failure):
+            self.assertIsNone(dc.anima_token(self.root))
+
+    def test_empty_secrets_file_falls_through(self):
+        (self.root / 'secrets' / 'anima-token').write_text('\n')
+        with unittest.mock.patch.object(dc, 'capture', side_effect=RuntimeError('no keychain')):
+            self.assertIsNone(dc.anima_token(self.root))
+
+
+if __name__ == '__main__':
+    unittest.main()

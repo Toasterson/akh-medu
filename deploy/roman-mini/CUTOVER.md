@@ -48,6 +48,21 @@ Steps 2–8 are scripted in `cutover.sh`. After step 1 (build from main), run
 prints the backup directory for Rollback. Root is needed only for the system
 LaunchDaemons; every other step runs as the deployment owner.
 
+## Anima token for the core
+
+The core is a system LaunchDaemon, so it cannot read the login keychain that
+`anima-pat` uses. Write the token once, from a login session, before the
+cutover (and again whenever the PAT rotates):
+
+```sh
+umask 077
+/Users/toasty/.local/bin/anima-pat get-auth-header | python3 -c \
+  'import json,sys;print(json.load(sys.stdin)["Authorization"].removeprefix("Bearer "))' \
+  > "$ROOT/secrets/anima-token"
+```
+
+Without it the core still starts; only the `anima` MCP server stays unavailable.
+
 ## 0. Preconditions (stop if any fails)
 
 1. The Phase 53 branches are merged to `main` by PR, **including
