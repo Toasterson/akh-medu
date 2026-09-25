@@ -5,6 +5,7 @@ pub mod neural_spans;
 pub mod publication;
 pub mod questions;
 pub mod repository;
+pub mod streaming;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

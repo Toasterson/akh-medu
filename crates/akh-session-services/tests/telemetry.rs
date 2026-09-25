@@ -53,7 +53,7 @@ fn exports_correlated_otlp_logs_spans_and_metrics() {
             let tool = tracing::info_span!("runtime.tool", tool.name = "read");
             let _tool = tool.enter();
             let mut operation = akh_session_services::telemetry::Operation::new("tool");
-            akh_session_services::telemetry::delta("reasoning", "PRIVATE-CONTENT");
+            akh_session_services::telemetry::delta("reasoning", "PRIVATE-CONTENT", 3, "paragraph");
             akh_session_services::telemetry::usage(
                 &serde_json::json!({"prompt_tokens":17,"completion_tokens":3}),
             );
@@ -122,6 +122,14 @@ fn exports_correlated_otlp_logs_spans_and_metrics() {
                 .any(|m| m.name == "akh.runtime.operation.duration")
         );
         assert!(metrics.iter().any(|m| m.name == "akh.runtime.tokens"));
+        for name in [
+            "akh.runtime.delta.bytes",
+            "akh.runtime.delta.chunks",
+            "akh.runtime.delta.coalesced",
+        ] {
+            assert!(metrics.iter().any(|m| m.name == name), "{name}");
+        }
+        assert!(delta.attributes.iter().any(|a| a.key == "delta.coalesced"));
         assert!(!format!("{metrics:?}").contains("test-session"));
         server.abort();
     });

@@ -58,6 +58,8 @@ mod session_publication;
 #[cfg(feature = "session")]
 mod session_snapshot;
 pub mod store;
+#[cfg(feature = "runtime")]
+pub mod streaming;
 #[cfg(feature = "helpers")]
 pub mod workspace;
 
