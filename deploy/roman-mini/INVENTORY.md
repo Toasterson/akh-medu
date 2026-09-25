@@ -23,8 +23,8 @@ Legend for **Status**:
 |---|---|---|---|---|---|
 | `daemon_credentials.py` | Resolves 1Password / file-based credentials into the environment for the daemon it `execve`s into (`runtime*`, `sessions`, `events`, now `core`); never writes secrets to disk. | in: `sys.argv[ROLE, ROOT]`, `op-service-account`, `anima-pat`, `secrets/board-*.json`; out: `execve`s `akhrtd`/`akhsessd`/`akheventd`/(soon) `akhomed` with an augmented env. | `dev.roman-akhs.events`, `.sessions`, `.runtime`, `.runtime-minerva`, `.runtime-vesta` (all exec through it) | drifted → synced (see below) | deploy tooling kept — this is exactly the credential-injection seam ADR 113 decision 10 asks the `core` plist to route through at cutover (53f) |
 | `janus_escalation.py` | Durable outbox broker: turns a `escalate_to_astra` / `dispatch_mergiraf` MCP tool call into a T3/Astra thread; the delivery survives T3 being offline. | in: MCP `tools/call` over loopback HTTP, `config/janus-escalation.json` (registered T3 project IDs), `secrets/janus-escalation.key`; out: T3 `/api/orchestration` thread/turn commands, `state/*.sqlite3` incident ledger. | `dev.roman-akhs.janus-escalation` | drifted → synced (see below) | Janus delegation (53e grants) + skill, per the plan's step-2 list |
-| `laya_controller.py` | **Not in repo before this pass.** Durable event→classification→scoped-fixer controller: reads an observation queue (`state/laya-decisions.sqlite3`), calls `laya_service` to classify a blocker (product/execution/infrastructure/human/wait/investigate), and routes an intervention to the right role (`ROLE` map) or opens a mergiraf/Astra dispatch. Serves a small results API on `127.0.0.1:18447` and calls `laya_service` at `127.0.0.1:18446/decide`. | in: observations from `observer.py` (when `config/laya.json.event_only` is true), `secrets/laya-<role>.key`; out: `laya.<role>.intervention` outbox events, HTTP decisions API. | `dev.roman-akhs.laya-controller` (LaunchAgent) | added | Janus reactor + skill (plan's explicit step-2 item) |
-| `laya_service.py` | **Not in repo before this pass.** Resident, loopback-only classifier (`127.0.0.1:18446`) with no tracker credentials or executors; scores blocker text against the 6 `CHOICES` and validates the returned probability simplex. | in: HTTP `/decide` POST; out: JSON `{choice, probabilities}`. | `dev.roman-akhs.laya` (LaunchAgent) | added | folds into the same Janus reactor/skill as `laya_controller.py` — it's the controller's model call, not a separate capability |
+| `laya_controller.py` | Durable event→classification→scoped-fixer controller: reads an observation queue (`state/laya-decisions.sqlite3`), classifies a blocker (product/execution/infrastructure/human/wait/investigate) and routes an intervention to the right role (`ROLE` map) or opens a mergiraf/Astra dispatch. Serves a small results API on `127.0.0.1:18447`. **`classify()` no longer calls the Laya model** (see "`laya_service.py` retired" below) — it returns `{'choice': 'investigate', 'classifier': 'retired', ...}` synchronously, and `CHOICES`/`digest`/`encoded` (formerly imported from `laya_service`) are now defined in this module. `config/laya.json`'s `model_revision` is still read unchanged (it participates in the decision id). Now installed with `configure_laya.py` on the system `python3` instead of the `experiments/` venv. | in: observations from `observer.py` (when `config/laya.json.event_only` is true), `secrets/laya-<role>.key`; out: `laya.<role>.intervention` outbox events, HTTP decisions API. | `dev.roman-akhs.laya-controller` (LaunchAgent) | in repo | Janus reactor + skill (plan's explicit step-2 item; PR 2 of that step retired the classifier first) |
+| `laya_service.py` | **Retired 2026-09-25** (Phase 53g step-2 plan, PR 2, operator decision D1). Was a resident, loopback-only classifier (`127.0.0.1:18446`) that scored blocker text against the 6 `CHOICES` with a local model and validated the returned probability simplex. **Rationale:** live decision-log evidence showed every one of the 52 complete-input classifications ended in `investigate` with near-uniform per-choice scores (0.10–0.24 against a uniform 1/6); every real route to `product` or `infrastructure` came from `laya_controller.py`'s `host_action` structural rules (which match Anima's phase/parked_reason/session fields), never from the model's score. Deleted from the repo; its `dev.roman-akhs.laya` LaunchAgent is booted out on the Mac side (see Mac-side steps below), not replaced. | — | `dev.roman-akhs.laya` (LaunchAgent, booted out) | retired | n/a — folded into `laya_controller.py`'s structural router, no successor process |
 | `mergiraf_worker.py` | **Not in repo before this pass.** Library (no server, no launchd entry) imported by `janus_escalation.py`; defines the `POLICY` prompt, JSON-schema `TOOLS` (`dispatch_mergiraf`, `mergiraf_status`) and `escalation()` builder for a bounded, typed merge-conflict-resolution job dispatched to an Astra/T3 worker via the same broker. | in: called in-process from `janus_escalation.Broker.submit_merge`; out: a T3 thread prompt + schema-validated job fields (work item, PR, head/base SHAs). | none (imported, not a service) | added | Janus delegation (53e grants) + skill, alongside `janus_escalation.py` |
 | `observer.py` | Polls Anima (rotating 8 projects/min), Grafana and VictoriaMetrics; maintains a deterministic watchdog signal, a durable outbox of `schedule.*`/`anima.*.changed`/`monitoring.changed` events, and (new) `laya.<role>.intervention` events when `event_only` mode is on; serves a read-only `monitoring_snapshot` MCP tool on `127.0.0.1:18436`. | in: Anima MCP, Grafana HTTPS, VictoriaMetrics via `127.0.0.1:18440` tunnel, `config/laya.json`; out: `state/observer.sqlite3` outbox/state, POSTs to akhsessd `127.0.0.1:18431`, board watchdog notices. | `dev.roman-akhs.observer` (LaunchAgent) | drifted → synced (see below) | event production → Rust `akheventd` source; monitoring snapshot → a Vesta tool (both named explicitly in the plan's step-2 list) |
 | `provider_failure.py` | Classifies a provider HTTP/error response into `authentication`/`quota`/`rate_limit`/`unknown` so `observer.py` and `janus_escalation.py` apply the right cooldown (30m/1h/2h/4h, or operator-repair-only for auth). | in: response text/status from a provider call; out: a classification tag consumed by callers. | none (imported library) | in repo | folds into akhomed's provider error taxonomy (explicit step-2 item) |
@@ -175,8 +175,8 @@ folded into the akheventd-source conversion — see the retirement note above.
 | `anima-activity` | `python3 anima-activity.py --config activity.json` (outside `roman-akhs`) | `PATH` | not part of `deploy/roman-mini` — **retired 2026-09-25**, see Anima runner glue above |
 | `grafana-tunnel` | `kubectl -n observability port-forward … mcp-grafana 18441:80` | `KUBECONFIG`, `HOME`, `PATH` | `configure_vesta_actions.py` (in repo) |
 | `janus-escalation` | `python3 janus_escalation.py <root>` | `PATH`, `HOME` | `configure_janus_escalation.py` (in repo) |
-| `laya-controller` | `<repo>/experiments/typed-decisions/.venv-comparison/bin/python laya_controller.py <root>` | `TOKENIZERS_PARALLELISM`, `USE_TF`, `HF_HUB_OFFLINE` | **no renderer in the repo** — follow-up. Note: `ProgramArguments[0]` is a venv interpreter path inside this akh-medu checkout's `experiments/` tree, not a system Python — a real dependency worth resolving before this plist is reproducible from a clean clone. |
-| `laya` | `<repo>/experiments/typed-decisions/.venv-comparison/bin/python laya_service.py <root>` | `TOKENIZERS_PARALLELISM`, `USE_TF`, `HF_HUB_OFFLINE` | **no renderer in the repo** — follow-up (same venv-path note as `laya-controller`) |
+| `laya-controller` | `/usr/bin/python3 laya_controller.py <root>` | `TOKENIZERS_PARALLELISM`, `USE_TF`, `HF_HUB_OFFLINE` | `configure_laya.py` (in repo, this pass). Was `<repo>/experiments/typed-decisions/.venv-comparison/bin/python laya_controller.py <root>` — the venv interpreter loaded the retired classifier's torch/transformers dependency, which the controller no longer imports, so this pass moves it to the system Python like every other roman-akhs LaunchAgent. |
+| `laya` | *(retired 2026-09-25, see `laya_service.py` above)* | `TOKENIZERS_PARALLELISM`, `USE_TF`, `HF_HUB_OFFLINE` | n/a — no successor plist; the Mac-side steps below boot it out and don't replace it |
 | `observer` | `python3 observer.py <root>` | `KUBECONFIG`, `HOME`, `PATH` | `activate.py` (in repo) |
 | `sessions` | `python3 daemon_credentials.py sessions <root>` | `PATH`, `HOME`, `RUST_LOG` | `prepare.py` (in repo) |
 | `t3-activity` | `python3 t3_activity.py --service` | `PATH`, `HOME` | **retired 2026-09-25** — `configure_t3.py` no longer renders it |
@@ -190,13 +190,16 @@ Each of these needs its own work item before it lands (not done in this pass):
    `monitoring_snapshot` MCP tool → a Vesta tool. Also decide whether
    `anima-activity.py` (Anima-runner glue, not `roman-akhs`) folds into the
    same conversion.
-2. **`laya_controller.py` (+ `laya_service.py`) → a Janus reactor plus skill.**
-   The event-driven decision-queue design (`event_only` mode, now the live
-   default path once `config/laya.json` enables it) maps naturally onto
-   ADR 113's "admission belongs to the akh" — this is scheduling logic that
-   belongs inside akhomed's reactor, not a standalone HTTP classifier +
-   controller pair. Also resolve the `experiments/.venv-comparison` dependency
-   noted above (it should not be a load-bearing path for a production plist).
+2. **`laya_controller.py` → a Janus reactor plus skill.** ~~`laya_service.py`
+   (the classifier)~~ **retired 2026-09-25** (PR 2 of this plan, D1 — see the
+   `laya_service.py` inventory row above and the Mac-side steps below); the
+   remaining conversion is `laya_controller.py`'s event-driven decision-queue
+   design (`event_only` mode, now the live default path once
+   `config/laya.json` enables it), which maps naturally onto ADR 113's
+   "admission belongs to the akh" — this is scheduling logic that belongs
+   inside akhomed's reactor, not a standalone controller process. The
+   `experiments/.venv-comparison` dependency noted below is resolved by this
+   pass's `configure_laya.py` (system `python3`).
 3. **`janus_escalation.py` + `mergiraf_worker.py` → Janus delegation (53e
    grants) + skills.** The escalation-outbox pattern (durable, dedup on
    `incident_key`, cooldown-aware) is a good template for how delegated grants
@@ -219,6 +222,14 @@ Each of these needs its own work item before it lands (not done in this pass):
    `laya`) — either extend `prepare.py`/`activate.py` or add small
    `configure_*.py` scripts matching the existing pattern, so these are
    reproducible from a clean clone like the others already are.
+5. **`t3_activity.py` obsolete after the cutover** — no separate "activity"
+   provider transport is needed once T3 speaks ACP directly to akhomed.
+6. **Render the remaining plists with no repo mechanism today**
+   (`otlp-tunnel`, `runtime-minerva`, `runtime-vesta`) — either extend
+   `prepare.py`/`activate.py` or add small `configure_*.py` scripts matching
+   the existing pattern, so these are reproducible from a clean clone like the
+   others already are. `laya-controller` is now covered by `configure_laya.py`
+   (this pass); `laya` has no plist to render — it's retired.
 7. ~~**`daemon_credentials.py`'s new `core` role is not yet wired to
    `dev.roman-akhs.core.plist`.**~~ **Done in 53f prep (repository side):**
    `configure_core.py` now renders the core plist as
@@ -267,3 +278,51 @@ rm -f "$ROOT/bin/t3_activity.py" "$ROOT"/bin/roman-activity-*
    steps is safe and idempotent: it only touches the three named
    `roman-<role>` provider entries and no longer knows about the
    `roman-activity-*` ones, so it will not recreate them.
+
+
+## PR 2 Mac-side steps (`laya_service.py` retirement, D1)
+
+Not done by this repo pass — the architect runs these against the live
+deployment at `~/Library/Application Support/roman-akhs` after this PR merges
+to `origin/main` (deploy-from-main applies: build/copy only from a clean
+checkout of `origin/main`).
+
+1. **Boot out the classifier**, which has no successor process:
+   `launchctl bootout gui/501/dev.roman-akhs.laya`.
+2. **Render the controller's new plist** from a clean `origin/main` checkout:
+   `python3 deploy/roman-mini/configure_laya.py "$HOME/Library/Application Support/roman-akhs"`.
+   This copies the updated `laya_controller.py` into `bin/` and writes
+   `launchd/dev.roman-akhs.laya-controller.plist` under the deployment root
+   (it does not install anything under `~/Library/LaunchAgents` or touch the
+   running daemon).
+3. **Install the rendered plist**:
+   `cp "$HOME/Library/Application Support/roman-akhs/launchd/dev.roman-akhs.laya-controller.plist" ~/Library/LaunchAgents/`.
+4. **Reload the controller** — its `ProgramArguments[0]` changed (venv
+   interpreter → `/usr/bin/python3`), so `launchctl kickstart` alone will not
+   pick that up; boot it out and back in:
+   `launchctl bootout gui/501/dev.roman-akhs.laya-controller` then
+   `launchctl bootstrap gui/501 ~/Library/LaunchAgents/dev.roman-akhs.laya-controller.plist`.
+   (If a later re-render leaves the plist byte-identical to what's already
+   loaded, `launchctl kickstart -k gui/501/dev.roman-akhs.laya-controller` is
+   enough.)
+5. **Verify over 24 h:**
+   - `state/laya-decisions.sqlite3`'s `decisions` table keeps accruing new
+     rows at the same rate as before (`select count(*), max(created_at) from
+     decisions;`) — the queue must not stall.
+   - the `action` distribution in new rows matches the pre-retirement
+     baseline: still dominated by `investigate` (with `product`/
+     `infrastructure` coming from `host_action`'s structural rules exactly as
+     before), since the model already contributed nothing but `investigate` in
+     the live evidence behind D1.
+   - `laya_status` (via the `observer` outbox / `tick()`) keeps reporting
+     `ok: true` with no new `unknown`/`intervention_failed` pileup.
+   - no process is listening on `127.0.0.1:18446` any more
+     (`curl -sf http://127.0.0.1:18446/healthz` fails).
+6. **Rollback** (if the controller misbehaves post-cutover): boot out
+   `dev.roman-akhs.laya-controller`, restore the previous
+   `dev.roman-akhs.laya-controller.plist` (venv interpreter) and the previous
+   `bin/laya_controller.py` from the prior release, `launchctl bootstrap
+   gui/501` it back, and `launchctl bootstrap gui/501` the `dev.roman-akhs.laya`
+   plist again to bring the classifier back. `config/laya.json`'s
+   `model_revision` was never changed by this PR, so no decision is re-decided
+   by rolling back or rolling forward.
