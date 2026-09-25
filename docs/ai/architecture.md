@@ -1,6 +1,9 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-09-26 (**53g PR 7** — Janus escalation and merge repair
+> Last updated: 2026-09-26 (**53g PR 5** — akheventd monitor sources +
+> native `monitoring_snapshot` tool, see "akheventd monitor sources" below).
+>
+> 2026-09-26 (**53g PR 7** — Janus escalation and merge repair
 > move to scoped delegation; see *Escalation delegation (53g PR 7)* below).
 >
 > 2026-09-25 (akhrtd gains the `opencode` native runtime kind —
@@ -496,6 +499,18 @@ native tool through a bridge-owned permission policy and requires the extra
   tools, reports `coordination/status@v1` to a `report_thread` via
   `DjehutyClient`, and a 10-consecutive-no-progress trip-wire pauses the
   schedule rather than looping forever.
+- **akheventd monitor sources (53g PR 5, `crates/akh-session-services/src/monitor.rs`,
+  `crates/akh-session-types/src/monitor.rs`, `src/agent/tools/monitoring_snapshot.rs`)**:
+  `Config.monitors` polls health endpoints (up/down/unknown + latency class),
+  an Alertmanager v2 alert feed and a Prometheus `ALERTS` query per source. The
+  structural signature (health states, alert fingerprints/labels/status,
+  series label sets, feed availability; never text) is hashed with blake3; a
+  change ingests one `{previous, current}` event in the same transaction as
+  the new `monitor_snapshot/<source>` record (first poll = silent baseline). An
+  unreadable feed is `unknown`, never zero alerts. `GET /v1/monitors/{source}`
+  serves the reading (`operator` role, or `event` granted the source). Endpoints
+  may be `anonymous = true` (no bearer). akhomed's native read-only
+  `monitoring_snapshot` tool reads it for akhs with a `[monitoring]` table.
 - **Per-akh static MCP servers (53i, `src/agent/tools/mcp_config.rs`,
   `src/agent/tools/mcp_static.rs`)**: `[[mcp.servers]]` in the workspace TOML
   (`name, url, auth, tools`) wires an `McpClient` into the akh's `ToolRegistry`

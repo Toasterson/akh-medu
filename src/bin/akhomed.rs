@@ -3353,6 +3353,20 @@ impl ServerState {
             tracing::info!(workspace = %name, "OpenClaw self-import surface enabled");
         }
 
+        // Phase 53g PR 5: the native read-only `monitoring_snapshot` tool,
+        // reading this akh's configured akheventd monitor source. Registered
+        // only when the workspace TOML has a `[monitoring]` table.
+        if let Some(monitoring) = akh_config.monitoring.clone() {
+            tracing::info!(
+                workspace = %name,
+                source = %monitoring.source,
+                "monitoring_snapshot tool registered"
+            );
+            agent.register_tool(Box::new(
+                akh_medu::agent::tools::MonitoringSnapshotTool::new(monitoring),
+            ));
+        }
+
         // Phase 53e (ADR 113 D9): the akh's `[delegation]` config, with
         // native-session delegation minting its grants through `/v1`.
         #[cfg(all(feature = "delegation", feature = "core-api"))]

@@ -28,6 +28,8 @@ pub mod http;
 pub mod ingress;
 #[cfg(feature = "session")]
 pub mod mcp;
+#[cfg(feature = "events")]
+pub mod monitor;
 #[cfg(feature = "profiling")]
 pub mod profiling;
 pub mod recovery;

@@ -46,6 +46,9 @@ def fixture(root: Path) -> None:
     keys += [f"t3-{r}" for r in ROLES] + [f"laya-{r}" for r in ROLES]
     for key in keys:
         (root / f"secrets/{key}.key").write_text(f"test-{key}-" + "x" * 32 + "\n")
+    # PR 5 / D2: the Grafana service-account token and the exported lab CA.
+    (root / fa.GRAFANA_TOKEN_FILE).write_text("glsa_" + "x" * 32 + "\n")
+    (root / fa.LAB_CA_FILE).write_text("-----BEGIN CERTIFICATE-----\n")
     endpoints = {
         "anima": {"url": "https://anima.example/mcp", "token_env": "ROMAN_ANIMA_TOKEN"},
         "seshat": {"url": "http://seshat.lab.home/mcp", "token_env": "ROMAN_ARCHIVE_TOKEN", "allow_insecure_http": True},
@@ -158,7 +161,7 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(ws["board"], {"url": "http://127.0.0.1:18089",
                                            "auth": {"token_env": f"ROMAN_BOARD_{role.upper()}"}})
             servers = {s["name"]: s for s in ws["mcp"]["servers"]}
-            expected = {"anima", "seshat", "sokar", "board", "observer", "laya"}
+            expected = {"anima", "seshat", "sokar", "board", "laya"}
             expected |= {"vesta": {"vesta-ops", "grafana"}}.get(role, set())
             self.assertEqual(set(servers), expected)
             self.assertEqual(servers["board"]["auth"], {"token_env": f"ROMAN_BOARD_{role.upper()}"})
@@ -173,6 +176,10 @@ class RenderTests(unittest.TestCase):
                 self.assertNotIn("allow_insecure_http", servers["grafana"])
             else:
                 self.assertNotIn("grafana", servers)
+            self.assertEqual(ws["monitoring"], {
+                "endpoint": "http://127.0.0.1:18435", "source": "roman-alerts",
+                "token_file": str(self.root / "secrets/monitoring-reader.key"),
+                "observer_status_file": str(self.root / "state/observer-status.json")})
             self.assertTrue(ws["system_prompt"].startswith((SOURCE / "roles/common.md").read_text()))
             self.assertIn((SOURCE / f"roles/{role}.md").read_text(), ws["system_prompt"])
         self.assertEqual(self.warnings[1:], [])
@@ -243,6 +250,71 @@ class RenderTests(unittest.TestCase):
         self.assertIn("Never force-push", mergiraf)
         self.assertIn("Never merge the PR", mergiraf)
 
+    def test_observer_monitoring_moves_to_the_native_tool(self):
+        text = (self.root / "core-config/akh-medu/workspaces/vesta.toml").read_text()
+        # [monitoring] is a table after [board] and before [[mcp.servers]].
+        self.assertLess(text.index("\n[board]"), text.index("\n[monitoring]"))
+        self.assertLess(text.index("\n[monitoring]"), text.index("\n[[mcp.servers]]"))
+        self.assertNotIn("observer-tool.key", text)
+        for role in ROLES:
+            prompt = self.toml(f"core-config/akh-medu/workspaces/{role}.toml")["system_prompt"]
+            self.assertNotIn("mcp__observer__", prompt)
+            self.assertIn("monitoring_snapshot is a native read-only tool", prompt)
+        session = json.loads((self.root / "config/sessions.json").read_text())
+        self.assertEqual(fa.tool_renames(session, "vesta")["monitoring_snapshot"], "monitoring_snapshot")
+        self.assertEqual(fa.rename_tools("call mcp__observer__monitoring_snapshot now", {}),
+                         "call monitoring_snapshot now")
+
+    def test_observer_server_stays_for_tools_that_did_not_move(self):
+        session = json.loads((self.root / "config/sessions.json").read_text())
+        session["akhs"]["janus"]["tools"].append(mcp_tool("coverage_report", "observer", "coverage_report"))
+        servers, _ = fa.mcp_servers(session, "janus", self.root)
+        observer = {s["name"]: s for s in servers}["observer"]
+        self.assertEqual(observer["tools"], ["coverage_report"])
+        # A role without the monitoring grant gets no [monitoring] table.
+        session["akhs"]["minerva"]["tools"] = [t for t in session["akhs"]["minerva"]["tools"]
+                                               if t["name"] != "monitoring_snapshot"]
+        self.assertIsNone(fa.monitoring_config(session, "minerva", self.root))
+
+    def test_staged_events_carry_the_roman_alerts_monitor(self):
+        staged = json.loads((self.root / "config/events.akh-target.json").read_text())
+        [monitor] = staged["monitors"]
+        self.assertEqual((monitor["source"], monitor["event_type"], monitor["interval_secs"]),
+                         ("roman-alerts", "monitoring.changed", 60))
+        self.assertEqual([h["name"] for h in monitor["health"]],
+                         ["core", "sessions", "runtime", "runtime-minerva", "runtime-vesta", "events"])
+        endpoints = staged["endpoints"]
+        for check in monitor["health"]:
+            self.assertEqual(endpoints[check["endpoint"]]["anonymous"], True)
+            self.assertNotIn("token_file", endpoints[check["endpoint"]])
+        self.assertEqual(endpoints["health-runtime-vesta"]["url"], "http://127.0.0.1:18443")
+        grafana = endpoints[monitor["alertmanager"]["endpoint"]]
+        self.assertEqual(grafana, {"url": "https://grafana.lab.home",
+                                   "token_file": str(self.root / "secrets/grafana-sa.token"),
+                                   "ca_file": str(self.root / "secrets/lab-ca.pem")})
+        self.assertEqual(monitor["alertmanager"]["path"], "/api/alertmanager/grafana/api/v2/alerts")
+        self.assertEqual(monitor["prometheus"]["query"], 'ALERTS{alertstate="firing"}')
+        self.assertEqual(endpoints["victoriametrics"], {"url": "http://127.0.0.1:18440", "anonymous": True})
+        reader = {p["id"]: p for p in staged["principals"]}["monitoring-reader"]
+        self.assertEqual(reader["roles"], ["operator"])
+        self.assertEqual((self.root / "secrets/monitoring-reader.key").stat().st_mode & 0o777, 0o600)
+        # The Vesta route stays coalescing and the reactor seed is unchanged.
+        route = {r["id"]: r for r in staged["routes"]}["vesta-monitoring.changed"]
+        self.assertTrue(route["coalesce_pending"])
+        self.assertEqual(route["target"], {"kind": "akh", "endpoint": "core", "akh": "vesta"})
+        # Rendering again from the installed config is idempotent.
+        again = fa.render_monitoring_events(staged, self.root)
+        self.assertEqual(again, staged)
+
+    def test_retarget_refuses_until_the_grafana_token_and_ca_exist(self):
+        (self.root / fa.GRAFANA_TOKEN_FILE).unlink()
+        warnings = configure_core.render(self.root, self.prov, self.binary, "0" * 64, source=SOURCE)
+        self.assertTrue(any("grafana-sa.token" in w for w in warnings), warnings)
+        with self.assertRaisesRegex(fa.RenderError, "grafana-sa.token"):
+            retarget_events.retarget(self.root)
+        live = json.loads((self.root / "config/events.json").read_text())
+        self.assertNotIn("monitors", live)
+
     def test_rename_is_single_pass(self):
         renames = {"board__board_agents": "mcp__board__board_agents", "board_agents": "mcp__board__board_agents"}
         self.assertEqual(fa.rename_tools("use board__board_agents or board_agents", renames),
@@ -283,6 +355,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(by_id["events"]["roles"], ["event"])
         self.assertEqual(by_id["events"]["tools"], {"kind": "named", "tools": []})
         self.assertIn("reactor_manage", by_id["operator"]["tools"]["tools"])
+        self.assertIn("monitoring_snapshot", by_id["operator"]["tools"]["tools"])
         self.assertTrue(core["sqlite"])
         self.assertTrue((self.root / "secrets/core-events.key").exists())
         self.assertEqual((self.root / "secrets/core-events.key").stat().st_mode & 0o777, 0o600)

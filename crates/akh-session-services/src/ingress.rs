@@ -2,7 +2,7 @@
 use crate::{
     config::{Config, Principal, RouteTarget},
     http::Client,
-    store::{Store, key},
+    store::{Store, Transaction, key},
     types::*,
 };
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,22 @@ impl Events {
         })
     }
     pub fn ingest(&self, principal: &Principal, event: EventEnvelope) -> Result<IngressReceipt> {
+        self.ingest_with(principal, event, |_| Ok(()))
+    }
+    /// The shared HTTP client over the configured endpoints.
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
+    }
+    /// [`Self::ingest`], plus `also` in the same store transaction. A source
+    /// that keeps its own state (the monitor's last snapshot) records it
+    /// atomically with the event, so a crash can neither lose a change nor
+    /// emit it twice.
+    pub(crate) fn ingest_with(
+        &self,
+        principal: &Principal,
+        event: EventEnvelope,
+        also: impl FnOnce(&mut Transaction<'_>) -> Result<()>,
+    ) -> Result<IngressReceipt> {
         if !principal.has_role("event") && !principal.has_role("scheduler") {
             return Err(Fault::new("forbidden", "event or scheduler role required"));
         }
@@ -102,6 +118,15 @@ impl Events {
             return Err(Fault::invalid("event exceeds 1 MiB"));
         }
         self.store.transaction(|tx| {
+            let receipt = self.record(tx, event)?;
+            also(tx)?;
+            Ok(receipt)
+        })
+    }
+    /// Record one validated event and its route deliveries (idempotent on the
+    /// source event ID).
+    fn record(&self, tx: &mut Transaction<'_>, event: EventEnvelope) -> Result<IngressReceipt> {
+        {
             let k = key("ingress", &[&event.source, &event.id]);
             if let Some(old) = tx.get::<IngressReceipt>(&k)? {
                 if old.event != event {
@@ -146,9 +171,9 @@ impl Events {
             let receipt = IngressReceipt { event, deliveries };
             tx.put(&k, &receipt)?;
             Ok(receipt)
-        })
+        }
     }
-    fn coalesce_pending(&self) -> Result<()> {
+    pub(crate) fn coalesce_pending(&self) -> Result<()> {
         self.store.transaction(|tx| {
             let deliveries = tx.scan::<Delivery>("delivery/")?;
             for route in self.config.routes.iter().filter(|r| r.coalesce_pending) {
@@ -239,6 +264,10 @@ impl Events {
         }
     }
     pub fn sources(&self) {
+        for source in self.config.monitors.clone() {
+            let service = self.clone();
+            tokio::spawn(crate::monitor::run(service, source));
+        }
         for source in self.config.djehuty_inboxes.clone() {
             if !source.enabled {
                 continue;

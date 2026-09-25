@@ -26,7 +26,7 @@ Legend for **Status**:
 | `laya_controller.py` | Durable event→classification→scoped-fixer controller: reads an observation queue (`state/laya-decisions.sqlite3`), classifies a blocker (product/execution/infrastructure/human/wait/investigate) and routes an intervention to the right role (`ROLE` map) or opens a mergiraf/Astra dispatch. Serves a small results API on `127.0.0.1:18447`. **`classify()` no longer calls the Laya model** (see "`laya_service.py` retired" below) — it returns `{'choice': 'investigate', 'classifier': 'retired', ...}` synchronously, and `CHOICES`/`digest`/`encoded` (formerly imported from `laya_service`) are now defined in this module. `config/laya.json`'s `model_revision` is still read unchanged (it participates in the decision id). Now installed with `configure_laya.py` on the system `python3` instead of the `experiments/` venv. | in: observations from `observer.py` (when `config/laya.json.event_only` is true), `secrets/laya-<role>.key`; out: `laya.<role>.intervention` outbox events, HTTP decisions API. | `dev.roman-akhs.laya-controller` (LaunchAgent) | in repo | Janus reactor + skill (plan's explicit step-2 item; PR 2 of that step retired the classifier first) |
 | `laya_service.py` | **Retired 2026-09-25** (Phase 53g step-2 plan, PR 2, operator decision D1). Was a resident, loopback-only classifier (`127.0.0.1:18446`) that scored blocker text against the 6 `CHOICES` with a local model and validated the returned probability simplex. **Rationale:** live decision-log evidence showed every one of the 52 complete-input classifications ended in `investigate` with near-uniform per-choice scores (0.10–0.24 against a uniform 1/6); every real route to `product` or `infrastructure` came from `laya_controller.py`'s `host_action` structural rules (which match Anima's phase/parked_reason/session fields), never from the model's score. Deleted from the repo; its `dev.roman-akhs.laya` LaunchAgent is booted out on the Mac side (see Mac-side steps below), not replaced. | — | `dev.roman-akhs.laya` (LaunchAgent, booted out) | retired | n/a — folded into `laya_controller.py`'s structural router, no successor process |
 | `mergiraf_worker.py` | **Not in repo before this pass.** Library (no server, no launchd entry) imported by `janus_escalation.py`; defines the `POLICY` prompt, JSON-schema `TOOLS` (`dispatch_mergiraf`, `mergiraf_status`) and `escalation()` builder for a bounded, typed merge-conflict-resolution job dispatched to an Astra/T3 worker via the same broker. | in: called in-process from `janus_escalation.Broker.submit_merge`; out: a T3 thread prompt + schema-validated job fields (work item, PR, head/base SHAs). | none (imported, not a service) | added; **converted (53g PR 7)** — replaced by the native `dispatch_merge_repair` tool and the `skills/mergiraf` skillpack (D4 in its procedures and in the `require_existing_branch` publication profile); kept until the verified Mac cutover, then deleted | Janus delegation (53e grants) + skill — **done** |
-| `observer.py` | Polls Anima (rotating 8 projects/min), Grafana and VictoriaMetrics; maintains a deterministic watchdog signal, a durable outbox of `schedule.*`/`anima.*.changed`/`monitoring.changed` events, and (new) `laya.<role>.intervention` events when `event_only` mode is on; serves a read-only `monitoring_snapshot` MCP tool on `127.0.0.1:18436`. | in: Anima MCP, Grafana HTTPS, VictoriaMetrics via `127.0.0.1:18440` tunnel, `config/laya.json`; out: `state/observer.sqlite3` outbox/state, POSTs to akhsessd `127.0.0.1:18431`, board watchdog notices. | `dev.roman-akhs.observer` (LaunchAgent) | drifted → synced (see below) | event production → Rust `akheventd` source; monitoring snapshot → a Vesta tool (both named explicitly in the plan's step-2 list) |
+| `observer.py` | **PR 5:** monitoring (health, Grafana, VictoriaMetrics) and the `monitoring_snapshot` MCP server moved to akheventd's `roman-alerts` monitor source + akhomed's native tool (see "PR 5" below); the watchdog reads `GET /v1/monitors/roman-alerts`. Before PR 5: polls Anima (rotating 8 projects/min), Grafana and VictoriaMetrics; maintains a deterministic watchdog signal, a durable outbox of `schedule.*`/`anima.*.changed`/`monitoring.changed` events, and (new) `laya.<role>.intervention` events when `event_only` mode is on; serves a read-only `monitoring_snapshot` MCP tool on `127.0.0.1:18436`. | in: Anima MCP, Grafana HTTPS, VictoriaMetrics via `127.0.0.1:18440` tunnel, `config/laya.json`; out: `state/observer.sqlite3` outbox/state, POSTs to akhsessd `127.0.0.1:18431`, board watchdog notices. | `dev.roman-akhs.observer` (LaunchAgent) | drifted → synced (see below) | event production → Rust `akheventd` source; monitoring snapshot → a Vesta tool (both named explicitly in the plan's step-2 list) |
 | `provider_failure.py` | Classifies a provider HTTP/error response into `authentication`/`quota`/`rate_limit`/`unknown` so `observer.py` and `janus_escalation.py` apply the right cooldown (30m/1h/2h/4h, or operator-repair-only for auth). | in: response text/status from a provider call; out: a classification tag consumed by callers. | none (imported library) | in repo | folds into akhomed's provider error taxonomy (explicit step-2 item) |
 | `t3_activity.py` | T3 ACP driver used as the transport for the "autonomous activity" provider instances (`roman-activity-<role>`); also runs as a background `--service` LaunchAgent. | in: T3 CLI invocation or `--service` mode; out: ACP session against akhsessd `127.0.0.1:18431`, reads `secrets/operator.key`. | `dev.roman-akhs.t3-activity` (LaunchAgent) | **retired 2026-09-25** (ADR 113 / 53g plan PR 1 — see below) | done — once T3 speaks ACP directly to akhomed there is no separate "activity" transport to shim |
 | `t3_entrypoint.py` | T3 ACP driver used as the transport for the three named Roman provider instances (`roman-janus`/`roman-minerva`/`roman-vesta`); dispatches on `sys.argv[0]`'s basename. | in: T3 CLI invocation, `secrets/t3-<role>.key`; out: `akh-acp` subprocess against `ws://127.0.0.1:18431/acp` (akhsessd) today. | n/a (invoked by T3, not launchd) | drifted → synced (see below); **also changed in this pass** — see "t3_entrypoint.py ACP endpoint" below | akhomed ACP once 53d/53f land; this pass adds the seam, doesn't flip the default |
@@ -187,7 +187,9 @@ folded into the akheventd-source conversion — see the retirement note above.
 Each of these needs its own work item before it lands (not done in this pass):
 
 1. **`observer.py` event production → Rust `akheventd` source**, and its
-   `monitoring_snapshot` MCP tool → a Vesta tool. Also decide whether
+   `monitoring_snapshot` MCP tool → a Vesta tool. *(Monitoring half done in
+   PR 5: akheventd monitor source + native `monitoring_snapshot`; the Anima
+   scan half is PR 6.)* Also decide whether
    `anima-activity.py` (Anima-runner glue, not `roman-akhs`) folds into the
    same conversion.
 2. **`laya_controller.py` → a Janus reactor plus skill.** ~~`laya_service.py`
@@ -679,3 +681,237 @@ core; remove them (and restart) afterwards. Call
   credential failure classifies as `unknown` unless its fault code is listed
   in Janus's `[provider]` lexicon. A follow-up should surface Codex's
   structured error code as the fault code in `akh-runtime`.
+
+
+## PR 5: observer monitoring becomes an akheventd monitor source (D2)
+
+Per the [step-2 plan](../../docs/ai/plans/2026-09-25-phase53g-roman-glue-conversion.md)'s
+PR 5 (Anima WI `01a0d569-1cf1` item 5).
+
+**What moved.**
+
+- **akheventd:** the `roman-alerts` monitor source (`Config.monitors`,
+  `crates/akh-session-services/src/monitor.rs`) replaces `observer.py`'s
+  `monitoring()`. It polls every 60 s:
+  - the six health endpoints the observer probed (core 18430, sessions 18431,
+    runtime 18432, runtime-minerva 18442, runtime-vesta 18443, events 18435),
+    as `anonymous` endpoints that receive no token;
+  - Grafana's Alertmanager feed (`https://grafana.lab.home/api/alertmanager/grafana/api/v2/alerts`)
+    with a Viewer service-account token and the exported lab CA (D2);
+  - VictoriaMetrics `ALERTS{alertstate="firing"}` through the `metrics-tunnel`
+    (`127.0.0.1:18440`, anonymous).
+- **Signature and events:** the signature is structural. It covers health
+  up/down/unknown, alert fingerprint, labels and `state`/`silencedBy`/`inhibitedBy`,
+  series label sets and feed availability; annotations and latency are
+  excluded. It is hashed with blake3. The first poll is a silent baseline.
+  After that, each change ingests one `monitoring.changed` event with data
+  `{previous, current, previous_signature, signature, transition, observed_at_utc}`
+  into the existing `vesta-monitoring.changed` route, which still has
+  `coalesce_pending: true`. The Vesta reactor seed is unchanged.
+- **Unknown is not zero:** a feed that cannot be read is `unknown`, never zero
+  alerts.
+- **Monitor reads:** `GET /v1/monitors/roman-alerts` serves the latest reading.
+  The new `monitoring-reader` principal (role `operator`, monitor reads only)
+  and the observer principal (`event`, granted `roman-alerts`) may read it.
+- **akhomed:** a native read-only `monitoring_snapshot` tool replaces
+  `mcp__observer__monitoring_snapshot`, and `[[mcp.servers]] observer` is gone
+  from all three workspaces. Each workspace gets a `[monitoring]` table
+  (`endpoint`, `source`, `token_file = secrets/monitoring-reader.key`,
+  `observer_status_file = state/observer-status.json`). The tool returns the
+  old top-level keys: `monitoring{local_services, grafana, victoriametrics}`,
+  `monitoring_at`, the observer status keys and `read_at(_utc)`, plus
+  `observer_status` and `monitor`. `local_services` values are now
+  `up`/`down`/`unknown` instead of `up`/`unavailable`. The operator core
+  principal may call the tool, so you can verify it.
+- **`observer.py`:** `monitoring()`, `monitoring_signature` and the MCP server
+  on `127.0.0.1:18436` are deleted.
+  - The watchdog reads `GET /v1/monitors/roman-alerts`. It adds
+    `monitor_available`, which is false when akheventd is unreachable or the
+    reading is more than 5 minutes old, and that counts as degraded.
+  - Each tick writes `state/observer-status.json` (mode 0600) for the tool.
+  - The Anima scan, laya queue and watchdog post are unchanged. PR 6 retires
+    them.
+- **Backpressure moved:** monitoring wakes no longer wait for the observer's
+  `role_ready('vesta')`. akhomed's reactor coalescing and the PR 4
+  `ProviderGate` now bound them.
+
+### Operator action for D2 (do this first; not in this repo)
+
+akheventd reads every endpoint CA file and every principal token file at
+start. If `secrets/lab-ca.pem` is missing, akheventd does not start at all,
+and **all** Roman event routing goes down, not just monitoring.
+`retarget_events.py` refuses to install the new config until both files
+exist, and `configure_core.py` prints a warning naming the missing ones.
+
+Set `ROOT="$HOME/Library/Application Support/roman-akhs"`.
+
+1. **Export the lab CA.** It is the `pki-ca-secret` in the `default`
+   namespace, the same CA the observer used to load on every start.
+
+   ```sh
+   umask 077
+   kubectl -n default get secret pki-ca-secret -o jsonpath='{.data.tls\.crt}' \
+     | base64 -d > "$ROOT/secrets/lab-ca.pem"
+   chmod 600 "$ROOT/secrets/lab-ca.pem"
+   openssl x509 -in "$ROOT/secrets/lab-ca.pem" -noout -subject -enddate
+   ```
+
+2. **Create a Grafana service account with the Viewer role, plus a token.**
+   Use the Grafana UI at <https://grafana.lab.home>:
+   1. Go to *Administration → Users and access → Service accounts → Add
+      service account*. Name it `roman-akheventd`, give it role **Viewer**,
+      and click *Create*.
+   2. Click *Add service account token* and name the token `akheventd`. Pick
+      an expiry you will track: when the token expires, the alert feed turns
+      `unknown` (reason `unauthorized`) and the watchdog posts `blocked`.
+      Nothing fails silently.
+   3. Copy the token once and write it without echoing it:
+
+      ```sh
+      umask 077
+      read -rs GRAFANA_SA_TOKEN   # paste, then Enter
+      printf '%s' "$GRAFANA_SA_TOKEN" > "$ROOT/secrets/grafana-sa.token"; unset GRAFANA_SA_TOKEN
+      chmod 600 "$ROOT/secrets/grafana-sa.token"
+      ```
+
+   You can use the API instead of the UI, one time, with the admin secret.
+   Nothing stores the admin credential:
+
+   ```sh
+   ADMIN="$(kubectl -n observability get secret grafana-admin -o jsonpath='{.data.admin-user}' | base64 -d):$(kubectl -n observability get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d)"
+   SA=$(curl -sf --cacert "$ROOT/secrets/lab-ca.pem" -u "$ADMIN" -H 'Content-Type: application/json' \
+     -d '{"name":"roman-akheventd","role":"Viewer"}' https://grafana.lab.home/api/serviceaccounts \
+     | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+   (umask 077; curl -sf --cacert "$ROOT/secrets/lab-ca.pem" -u "$ADMIN" -H 'Content-Type: application/json' \
+     -d '{"name":"akheventd"}' "https://grafana.lab.home/api/serviceaccounts/$SA/tokens" \
+     | python3 -c 'import json,sys;print(json.load(sys.stdin)["key"],end="")' > "$ROOT/secrets/grafana-sa.token")
+   unset ADMIN SA
+   ```
+
+   Also check that Grafana keeps its database across pod restarts. A service
+   account in an ephemeral database disappears with the pod, and the feed then
+   reads `unauthorized`.
+
+3. **Check both files together.** This prints only an alert count:
+
+   ```sh
+   curl -sf --cacert "$ROOT/secrets/lab-ca.pem" \
+     -H "Authorization: Bearer $(cat "$ROOT/secrets/grafana-sa.token")" \
+     https://grafana.lab.home/api/alertmanager/grafana/api/v2/alerts \
+     | python3 -c 'import json,sys;print(len(json.load(sys.stdin)),"alerts")'
+   ```
+
+### Mac-side steps (not run by this pass)
+
+Deploy from `origin/main` only (`.claude/rules/deploy-from-main.md`). akheventd
+and the core must both come from the PR 5 merge commit or later.
+
+1. **Build from a clean checkout of origin/main.** Quote both provenance lines
+   in the deploy report.
+
+   ```sh
+   cd "$REPO" && git fetch origin && git checkout --detach origin/main
+   test -z "$(git status --porcelain)" && echo clean
+   git merge-base --is-ancestor HEAD origin/main && echo "HEAD $(git rev-parse --short=12 HEAD) is on origin/main"
+   SHA=$(git rev-parse --short=12 HEAD); export CARGO_TARGET_DIR="$REPO/target"
+   cargo build --release --locked --features server --bin akhomed
+   cargo build --release --locked -p akh-session-services --features events --bin akheventd
+   ```
+
+   Only akheventd changes among the session services. `Endpoint.anonymous` is
+   optional and omitted when false, so akhsessd, akhrtd, akhsbxd and akhexecd
+   stay as they are.
+2. **Back up** everything this PR replaces:
+
+   ```sh
+   BK="$ROOT/evidence/pr5-$(date +%s)"; mkdir -p "$BK"
+   cp -p "$ROOT/config/events.json" "$ROOT/config/core.json" "$ROOT/bin/observer.py" "$ROOT/bin/akheventd" "$BK/"
+   cp -a "$ROOT/core-config/akh-medu/workspaces" "$BK/workspaces"
+   ```
+
+   `retarget_events.py --rollback` restores the **pre-Phase-53** file, not this
+   one, so roll back from `$BK`.
+3. **Do the D2 operator action** above if you have not already.
+4. **Render:** `python3 deploy/roman-mini/configure_core.py --root "$ROOT"
+   --binaries "$CARGO_TARGET_DIR/release" --repo "$REPO"`. This:
+   - installs `bin/akhomed-main-$SHA`;
+   - rewrites the three workspace TOMLs: no `observer` server, a new
+     `[monitoring]` table, and addenda that name the native tool;
+   - rewrites `core.json`, adding `monitoring_snapshot` to the operator
+     principal;
+   - writes `config/events.akh-target.json` with the monitor, its endpoints
+     and the `monitoring-reader` principal;
+   - creates `secrets/monitoring-reader.key` (mode 0600).
+
+   There must be no "akheventd would not start" warning.
+5. **Install the events config:** `python3 deploy/roman-mini/retarget_events.py
+   "$ROOT"`. It refuses if a CA or token file is missing.
+6. **Install akheventd.** It is a system LaunchDaemon, so this needs sudo.
+
+   ```sh
+   git -C "$REPO" merge-base --is-ancestor "$SHA" origin/main && echo "akheventd $SHA on origin/main"
+   sudo launchctl bootout system/dev.roman-akhs.events
+   install -m 755 "$CARGO_TARGET_DIR/release/akheventd" "$ROOT/bin/akheventd"
+   shasum -a 256 "$ROOT/bin/akheventd" > "$ROOT/evidence/akheventd-main-$SHA.sha256"
+   sudo launchctl bootstrap system /Library/LaunchDaemons/dev.roman-akhs.events.plist
+   ```
+
+7. **Restart the core** so it loads the new workspaces and the new binary. The
+   core's `KeepAlive` brings it back, so `kill $(pgrep -f akhomed-main-)` is
+   enough.
+8. **Kickstart the observer.** It is a LaunchAgent, so no sudo:
+   `cp -p deploy/roman-mini/observer.py "$ROOT/bin/observer.py" &&
+   launchctl kickstart -k gui/501/dev.roman-akhs.observer`.
+9. **Verify:**
+   - **Monitor reading:** run
+     `curl -s -H "Authorization: Bearer $(cat "$ROOT/secrets/monitoring-reader.key")" http://127.0.0.1:18435/v1/monitors/roman-alerts | python3 -m json.tool | head -40`.
+     `feeds.alertmanager` and `feeds.prometheus` should be `available`, the
+     health states should match the observer's last `local_services` (in the
+     2026-09-26 smoke test the three `runtime*` probes were already down in
+     both), and `transitions` should be 0 (the baseline).
+     `logs/events.err.log` should show no `monitor poll deferred` line.
+   - **One delivery per change:** create a Grafana silence for one firing
+     alert (*Alerting → Silences*, 10 minutes). If nothing is firing, run
+     `sudo launchctl bootout system/dev.roman-akhs.metrics-tunnel` instead,
+     which turns the Prometheus feed `unknown`. Within about 60 s:
+     - `transitions` becomes 1;
+     - `GET /v1/deliveries` (operator token) shows exactly one new delivery on
+       route `vesta-monitoring.changed`;
+     - its `event_admission.schedules_woken` contains
+       `roman-vesta-monitoring.changed`.
+
+     Then expire the silence or run `sudo launchctl bootstrap system
+     /Library/LaunchDaemons/dev.roman-akhs.metrics-tunnel.plist`. That yields
+     the next transition.
+   - **Tool shape:** call the tool through the core API:
+
+     ```sh
+     curl -s -H "Authorization: Bearer $(cat "$ROOT/secrets/operator.key")" -H 'Content-Type: application/json' \
+       -d '{"request_id":"'"$(uuidgen)"'","session_id":"pr5-verify","akh":"vesta","tool":"monitoring_snapshot","arguments":{}}' \
+       http://127.0.0.1:18430/v1/tools/call
+     ```
+
+     The result must carry `monitoring.{local_services,grafana,victoriametrics}`,
+     `monitoring_at`, `coverage`, `anima_status`, `provider_availability`,
+     `read_at` and `read_at_utc`, and `observer_status.available` must be
+     `true`. `logs/core.out.log` shows `monitoring_snapshot tool registered`
+     for all three akhs and no `observer` MCP discovery line.
+   - **Watchdog:** it posts once to the status thread, because the new
+     `monitor_available` key changes the signal. `state/observer.sqlite3`
+     shows `board_watchdog_status.ok = true`. Nothing listens on
+     `127.0.0.1:18436` any more.
+10. **Rollback.** A partial rollback is not supported: the old core expects the
+    observer MCP server, and the new observer no longer serves it.
+    1. Restore `$BK/events.json` to `config/events.json`, `$BK/core.json` to
+       `config/core.json` and `$BK/workspaces` to
+       `core-config/akh-medu/workspaces`.
+    2. Point `config/core-release.json` back at the previous `akhomed-main-*`
+       binary.
+    3. Restore `$BK/akheventd` and `$BK/observer.py`.
+    4. Restart the services: `sudo launchctl bootout` and then `bootstrap` for
+       `system/dev.roman-akhs.events`, `kill $(pgrep -f akhomed-main-)`, and
+       `launchctl kickstart -k gui/501/dev.roman-akhs.observer`.
+
+    The observer then probes Grafana with kubectl again. The D2 files can stay;
+    nothing else reads them.
+

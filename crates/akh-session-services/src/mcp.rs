@@ -452,6 +452,7 @@ mod tests {
                     ca_file: None,
                     allow_insecure_http: false,
                     request_timeout_secs: None,
+                    anonymous: false,
                 },
                 "operation",
                 "tool",

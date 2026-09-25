@@ -106,6 +106,10 @@ pub enum AkhConfigError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Board(#[from] crate::agent::djehuty::BoardConfigError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Monitoring(#[from] crate::agent::tools::monitoring_snapshot::MonitoringConfigError),
 }
 
 /// One unrecognized key found while loading an `akh.toml`, surfaced so the
@@ -955,6 +959,19 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board: Option<crate::agent::djehuty::BoardConfig>,
 
+    /// Where the native read-only `monitoring_snapshot` tool reads an
+    /// akheventd monitor source (Phase 53g PR 5). The tool is registered only
+    /// when this table is present.
+    ///
+    /// ```toml
+    /// [monitoring]
+    /// endpoint = "http://127.0.0.1:18435"
+    /// source = "roman-alerts"
+    /// token_file = "/…/secrets/monitoring-reader.key"
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitoring: Option<crate::agent::tools::monitoring_snapshot::MonitoringConfig>,
+
     /// Memory hygiene: contradiction policy and hygiene batch (Phase 53j).
     #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
     pub memory: MemoryConfig,
@@ -1021,6 +1038,7 @@ impl Default for AkhConfig {
             autonomy: AutonomyConfig::default(),
             mcp: McpConfig::default(),
             board: None,
+            monitoring: None,
             memory: MemoryConfig::default(),
             provider: crate::agent::provider_failure::ProviderConfig::default(),
             delegation: None,
@@ -1128,6 +1146,9 @@ impl AkhConfig {
         if let Some(board) = &cfg.board {
             board.validate(cfg.name())?;
         }
+        if let Some(monitoring) = &cfg.monitoring {
+            monitoring.validate(cfg.name())?;
+        }
         Ok((cfg, Self::unknown_keys(&raw)))
     }
 
@@ -1175,6 +1196,10 @@ impl AkhConfig {
             ("mcp", &["require_pushed_mcp", "servers"]),
             // `auth` is checked by serde (`deny_unknown_fields` on `BoardAuth`).
             ("board", &["url", "auth", "agent_id", "allow_insecure_http"]),
+            (
+                "monitoring",
+                &["endpoint", "source", "token_file", "observer_status_file"],
+            ),
             (
                 "agent_runtime",
                 &[
@@ -2819,6 +2844,46 @@ auth = { token_file = "/tmp/observer.key" }
             "{:?}",
             AkhConfig::unknown_keys(&raw)
         );
+    }
+
+    #[test]
+    fn monitoring_table_loads_round_trips_and_validates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vesta.toml");
+        let text = "name = \"vesta\"\nmodel = \"glm-5.3\"\n\
+             [monitoring]\nendpoint = \"http://127.0.0.1:18435\"\nsource = \"roman-alerts\"\n\
+             token_file = \"/secrets/monitoring-reader.key\"\n\
+             observer_status_file = \"/state/observer-status.json\"\n";
+        std::fs::write(&path, text).expect("write");
+        let (cfg, unknown) = AkhConfig::load_checked(&path).expect("load");
+        assert!(unknown.is_empty(), "{unknown:?}");
+        let monitoring = cfg.monitoring.clone().expect("[monitoring] parsed");
+        assert_eq!(monitoring.source, "roman-alerts");
+        // Saving keeps every scalar above the first table (TOML ordering).
+        let rendered = toml::to_string(&cfg).expect("serialize");
+        let reparsed: AkhConfig = toml::from_str(&rendered).expect("reparse");
+        assert_eq!(reparsed.monitoring, Some(monitoring));
+        assert_eq!(reparsed.model.as_deref(), Some("glm-5.3"));
+        // Absent table: no tool.
+        let bare: AkhConfig = toml::from_str("name = \"a\"\n").expect("parse");
+        assert!(bare.monitoring.is_none());
+        // A plain-http non-loopback endpoint is refused with a diagnostic.
+        std::fs::write(
+            &path,
+            text.replace("http://127.0.0.1:18435", "http://events.lab.home"),
+        )
+        .expect("write");
+        let err = AkhConfig::load_checked(&path).unwrap_err();
+        assert!(matches!(err, AkhConfigError::Monitoring(_)), "{err:?}");
+        use miette::Diagnostic;
+        assert_eq!(
+            err.code().map(|c| c.to_string()).as_deref(),
+            Some("akh::monitoring::config::insecure_http")
+        );
+        // A typo inside the table is reported, not silently dropped.
+        let raw: toml::Value =
+            toml::from_str("name = \"a\"\n[monitoring]\nsorce = \"x\"\n").expect("parse");
+        assert_eq!(AkhConfig::unknown_keys(&raw)[0].path, "monitoring.sorce");
     }
 
     #[test]
