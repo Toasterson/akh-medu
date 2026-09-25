@@ -1329,3 +1329,95 @@ with the operator key
 - The `monitoring_snapshot` tool then has no observer status keys. The Anima
   coverage it used to carry is at `GET /v1/anima/roman-anima`. Extending the
   tool to read it is a separate item.
+
+## PR 8: Vesta's side effects move to akhsbxd/akhexecd sandboxes (D5)
+
+Per the [step-2 plan](../../docs/ai/plans/2026-09-25-phase53g-roman-glue-conversion.md)'s
+PR 8; discovery in
+[docs/ai/research/2026-09-26-vesta-sandbox-execution.md](../../docs/ai/research/2026-09-26-vesta-sandbox-execution.md).
+The cluster side is the talos branch `feat/vesta-sandbox-rbac`
+(`clusters/talos.wegmueller.it/{agent-sandbox,vesta-sandbox}/`, operator
+steps in `vesta-sandbox/README.md`). Rendering only: nothing on the Mac
+changes until the operator writes `config/vesta-sandbox.json` (the cutover
+switch) and re-renders.
+
+| Former broker tool | After cutover | Where authority is enforced |
+|---|---|---|
+| `gitops_exec` (`docker exec` into `roman-vesta-gitops`) | `shell_exec` / `file_io` / `edit` / `glob` / `grep` in akhsbxd profile `vesta-gitops` (`[exec] kind = "execd"`) | the pod: no ServiceAccount token, no key in the executor container, Cilium egress DNS + github.com:22 only |
+| `homelab_inspect` (host kubectl, cluster-admin) | `sandbox_exec` `ops`: `kubectl get/describe/logs` | ClusterRole `vesta-inspect` |
+| `homelab_write` (host kubectl, cluster-admin) | `sandbox_exec` `ops`: `kubectl apply/patch/delete/scale/rollout restart/cordon/uncordon` | ClusterRole `vesta-write` + ValidatingAdmissionPolicies `vesta-*` |
+| `gitops_publish` (host git push, unrestricted identity) | `git format-patch` in `vesta-gitops`, `git am` + tree check + non-force `git push` to `vesta/<topic>` in `ops` | deploy key + GitHub rulesets (only `refs/heads/vesta/**`, no force) |
+
+Rendering (`full_akh.py`, `configure_core.py`):
+
+- `config/vesta-sandbox.json` absent: Vesta renders exactly as before
+  (`[exec] kind = "none"`, all four `vesta-ops` tools, `roles/addenda/vesta.md`).
+- present (`{"token_file": "<root>/secrets/vesta-sandbox.key"}`, optional
+  `sandbox_url` (default `http://vesta-sandbox.lab.home`) and
+  `allow_insecure_http`): Vesta's `[exec]` becomes `execd` on `vesta-gitops`
+  with `[[exec.sandboxes]] name = "ops", profile = "vesta-ops"`; the
+  `vesta-ops` MCP allowlist drops `gitops_exec`, `homelab_write` and
+  `gitops_publish` (`homelab_inspect` stays until the broker is retired); her
+  policy prompt is `skills/vesta-remediation/procedures.md` instead of the
+  broker addendum. A malformed file or a missing token file fails rendering
+  closed.
+- `skills/` is copied to `<root>/skills/` on every render.
+- `vesta_ops.py`, `vesta_actions.py`, `configure_vesta*.py` and the
+  `dev.roman-akhs.vesta-ops` LaunchAgent stay until the cutover is verified;
+  their retirement is a follow-up.
+
+akh-side code: `[[exec.sandboxes]]` (`src/akh_config.rs`) and the native
+`sandbox_exec` tool (`src/agent/tools/sandbox_exec.rs`, parameters `sandbox`,
+`command`, `timeout` 1..=600 s, `stdin` ≤ 1 MiB), allocated lazily so a
+down `ops` sandbox never blocks Vesta from loading.
+
+### Mac-side steps (not run by this pass; after the talos rollout is green)
+
+1. Cluster first: talos `vesta-sandbox/README.md` "Operator steps" 1–7 (1Password
+   items, image, deploy keys, rulesets, admission dry run, unsuspend Flux,
+   verification). The raw Vesta token goes to
+   `~/Library/Application Support/roman-akhs/secrets/vesta-sandbox.key` (0600).
+2. Check the LAN route: `curl -s -o /dev/null -w '%{http_code}\n'
+   http://vesta-sandbox.lab.home/v1/allocations/probe` answers `401`.
+3. Back up: `cp -a core-config/akh-medu/workspaces core-config/akh-medu/workspaces.bak-$(date +%s)`.
+4. Write the switch: `printf '{"token_file": "%s"}\n' "$ROOT/secrets/vesta-sandbox.key" > "$ROOT/config/vesta-sandbox.json"; chmod 600 "$ROOT/config/vesta-sandbox.json"`.
+5. Re-render from a clean `origin/main` checkout that contains this PR
+   (`configure_core.py --root … --binaries … --repo …`) and install the new
+   akhomed built from main. It must know `[[exec.sandboxes]]` and
+   `sandbox_exec`: an older binary at best reports the key as unknown and
+   runs Vesta without her `ops` sandbox.
+6. Restart the core (`kill $(pgrep -f akhomed-main-)`; KeepAlive restarts it).
+   Vesta's load allocates `vesta-gitops`; a failure stops Vesta's load with
+   the execd diagnostic in `logs/core.err.log` (fail loud, no local fallback).
+
+### Verification (parity per former tool)
+
+Run each as a Vesta turn (or through `/v1/tools/call` with the operator
+token) and compare with the broker's result for the same input:
+
+| Former call | Parity check |
+|---|---|
+| `gitops_exec {"command": "git -C talos status"}` | `shell_exec` `git clone /seed/talos talos && git -C talos status`; the receipt's binding says profile `vesta-gitops`, confinement `container:…`; `env \| grep -i -e token -e key` and `ls /run/vesta /var/run/secrets 2>&1` show no credential |
+| `homelab_inspect {"action": "get", "resource": "pods", "namespace": "akh-medu"}` | `sandbox_exec {"sandbox": "ops", "command": "kubectl get pods -n akh-medu -o wide"}` returns the same pod list |
+| `homelab_inspect` logs | `kubectl logs <pod> -n <ns> --tail=200 --limit-bytes=65536` |
+| `homelab_write {"action": "patch", …, "dry_run": true}` | `kubectl patch … --dry-run=server -o name` succeeds in an app namespace and is refused in `flux-system` for a pod-spec change |
+| `homelab_write` scale / rollout_restart / cordon | each with `--dry-run=server`: allowed |
+| Secret read (must fail) | `sandbox_exec ops "kubectl get secret -n akh-medu"` → `Forbidden`; `kubectl auth can-i get secrets -A` → `no`; `kubectl exec` → `Forbidden` |
+| `gitops_publish {"dry_run": true}` | skillpack publish steps with `git push --dry-run … HEAD:refs/heads/vesta/pr8-probe` accepted, and `HEAD:refs/heads/main` rejected by the ruleset |
+
+Then confirm `mcp__vesta-ops__{gitops_exec,homelab_write,gitops_publish}`
+are absent from `GET /v1/akhs/vesta/tools` and `sandbox_exec` is present.
+
+### Rollback
+
+1. `rm "$ROOT/config/vesta-sandbox.json"` and re-render (or restore the
+   workspace backup from step 3): Vesta returns to `[exec] kind = "none"`,
+   the four broker tools and the broker addendum.
+2. Restart the core. The broker (`dev.roman-akhs.vesta-ops`, container
+   `roman-vesta-gitops`) was never stopped; if it was, re-bootstrap it:
+   `launchctl bootstrap gui/501 ~/Library/LaunchAgents/dev.roman-akhs.vesta-ops.plist`
+   (plist in `$ROOT/launchd/`), `docker start roman-vesta-gitops`, then
+   `launchctl kickstart -k gui/501/dev.roman-akhs.vesta-ops`.
+3. Cluster side: suspend the `vesta-sandbox` Flux Kustomization; delete the
+   publish deploy key on GitHub to revoke push authority at once.
+

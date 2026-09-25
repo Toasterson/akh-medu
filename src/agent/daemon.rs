@@ -2483,7 +2483,7 @@ impl AgentDaemon {
                                 matches!(
                                     message,
                                     AkhMessage::ToolResult { tool, success: true, .. }
-                                        if matches!(tool.as_str(), "file_io" | "edit" | "shell_exec")
+                                        if matches!(tool.as_str(), "file_io" | "edit" | "shell_exec" | "sandbox_exec")
                                 )
                             });
                             run_outcome =

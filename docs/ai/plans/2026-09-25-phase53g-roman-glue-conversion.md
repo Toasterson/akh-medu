@@ -172,6 +172,11 @@ Restart privileges: akheventd and core are system LaunchDaemons. The core can al
 - **Writes:** a second profile runs under an RBAC-scoped ServiceAccount with a deploy key limited to `vesta/*`.
 - **Procedures** move to a `vesta-remediation` skillpack.
 - **Order:** last, and only after PR 3.
+- **Implemented (2026-09-26, branch `feat/53g-pr8-vesta-sandbox`, render only):**
+  - discovery: [research/2026-09-26-vesta-sandbox-execution](../research/2026-09-26-vesta-sandbox-execution.md). akhsbxd's Kubernetes provisioner (SIG agent-sandbox) already exists and runs on Archibald; Vesta's sandboxes go on the home cluster, where the `vesta` ServiceAccount's RBAC applies.
+  - akh: `[[exec.sandboxes]]` in the execd `[exec]` table plus the native `sandbox_exec` tool (lazy allocation); `full_akh.py` renders Vesta's `execd` exec (`vesta-gitops`, sandbox `ops` = `vesta-ops`) and drops `gitops_exec`/`homelab_write`/`gitops_publish` from the `vesta-ops` allowlist once `config/vesta-sandbox.json` exists; procedures in the `vesta-remediation` skillpack.
+  - cluster: talos branch `feat/vesta-sandbox-rbac` (`clusters/talos.wegmueller.it/{agent-sandbox,vesta-sandbox}/`), ClusterRoles `vesta-inspect`/`vesta-write` derived from `vesta_ops.py`/`vesta_actions.py`, admission guards, akhsbxd + two Sandbox profiles, both Flux Kustomizations committed suspended.
+  - **On the Mac / cluster:** talos `vesta-sandbox/README.md` steps 1–7 (1Password items, image, deploy keys, GitHub rulesets limiting the write key to `vesta/**`, admission dry run, unsuspend Flux, verify), then `deploy/roman-mini/INVENTORY.md` "PR 8" (switch file, re-render, restart, parity checks, rollback). `vesta_ops.py` is retired only after that verification.
 
 ## Dependencies
 

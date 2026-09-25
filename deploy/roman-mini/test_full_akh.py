@@ -74,7 +74,8 @@ def fixture(root: Path) -> None:
             tools += [mcp_tool(name, "janus-escalation", name) for name in
                       ("escalate_to_astra", "astra_escalation_status", "dispatch_mergiraf", "mergiraf_status")]
         if role == "vesta":
-            tools += [mcp_tool("homelab_inspect", "vesta-ops", "homelab_inspect")]
+            tools += [mcp_tool(name, "vesta-ops", name) for name in
+                      ("gitops_exec", "homelab_inspect", "homelab_write", "gitops_publish")]
         akhs[role] = {"core_service": "core", "instructions": "", "tools": tools, "workspace_profiles": [role]}
         if role == "janus":
             akhs[role]["workspace_profiles"] += ["janus-worker-akh-medu", "janus-worker-droneworld"]
@@ -566,6 +567,126 @@ class DelegationTests(unittest.TestCase):
         session["akhs"]["janus"]["tools"].append(mcp_tool("new_tool", "janus-escalation", "new_tool"))
         with self.assertRaises(fa.RenderError):
             fa.tool_renames(session, "janus")
+
+
+@NEEDS_TOMLLIB
+class VestaSandboxTests(unittest.TestCase):
+    """53g PR 8: Vesta's side effects move to akhsbxd/akhexecd sandboxes."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        fixture(self.root)
+        self.prov = fa.Provenance(commit="c" * 40, short="c" * 12, origin_main="c" * 40, committed_at=0)
+        self.binary = self.root / "bin" / self.prov.binary_name
+        self.binary.write_text("#!/bin/sh\n")
+        self.token = self.root / "secrets/vesta-sandbox.key"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def cutover(self, **settings):
+        self.token.write_text("t" * 48 + "\n")
+        (self.root / fa.VESTA_SANDBOX_FILE).write_text(json.dumps({"token_file": str(self.token), **settings}))
+
+    def render(self):
+        return configure_core.render(self.root, self.prov, self.binary, "0" * 64, source=SOURCE)
+
+    def workspace(self, role):
+        return tomllib.loads((self.root / f"core-config/akh-medu/workspaces/{role}.toml").read_text())
+
+    def vesta_ops_tools(self):
+        servers = {s["name"]: s for s in self.workspace("vesta")["mcp"]["servers"]}
+        return servers["vesta-ops"]["tools"]
+
+    def test_before_cutover_vesta_keeps_the_broker_and_no_exec(self):
+        self.render()
+        vesta = self.workspace("vesta")
+        self.assertEqual(vesta["exec"], {"kind": "none"})
+        self.assertEqual(self.vesta_ops_tools(),
+                         ["gitops_exec", "gitops_publish", "homelab_inspect", "homelab_write"])
+        self.assertIn((SOURCE / "roles/addenda/vesta.md").read_text(), vesta["system_prompt"])
+
+    def test_cutover_renders_execd_with_both_sandbox_profiles(self):
+        self.cutover()
+        self.render()
+        exec_table = self.workspace("vesta")["exec"]
+        self.assertEqual(exec_table, {
+            "kind": "execd", "sandbox_url": "http://vesta-sandbox.lab.home",
+            "sandbox_token_file": str(self.token), "profile": "vesta-gitops", "principal": "vesta",
+            "allow_insecure_http": True,
+            "sandboxes": [{"name": "ops", "profile": "vesta-ops",
+                           "description": fa.VESTA_OPS_SANDBOX["description"]}]})
+        text = (self.root / "core-config/akh-medu/workspaces/vesta.toml").read_text()
+        exec_start = text.index("\n[exec]\n")
+        self.assertIn("\n[[exec.sandboxes]]\n", text[exec_start:])
+        # Scalars of [exec] precede its array of tables (the TOML ordering gotcha).
+        self.assertLess(text.index('principal = "vesta"', exec_start),
+                        text.index("\n[[exec.sandboxes]]\n", exec_start))
+        for role in ("janus", "minerva"):
+            self.assertEqual(self.workspace(role)["exec"], {"kind": "none"})
+
+    def test_cutover_removes_the_broker_write_tools_only(self):
+        self.cutover()
+        self.render()
+        self.assertEqual(self.vesta_ops_tools(), ["homelab_inspect"])
+        for tool in fa.VESTA_SANDBOXED_TOOLS:
+            self.assertNotIn(tool, self.vesta_ops_tools())
+        # vesta_ops.py itself stays until the cutover is verified.
+        self.assertTrue((SOURCE / "vesta_ops.py").exists())
+
+    def test_cutover_prompt_is_the_skillpack_not_the_broker_addendum(self):
+        self.cutover()
+        self.render()
+        prompt = self.workspace("vesta")["system_prompt"]
+        procedures = (SOURCE / "skills/vesta-remediation/procedures.md").read_text()
+        self.assertIn(procedures, prompt)
+        self.assertNotIn((SOURCE / "roles/addenda/vesta.md").read_text(), prompt)
+        for tool in fa.VESTA_SANDBOXED_TOOLS:
+            self.assertNotIn(tool, prompt)
+        self.assertIn("sandbox_exec", prompt)
+        # Janus and Minerva prompts are unchanged by Vesta's cutover.
+        self.assertNotIn(procedures, self.workspace("janus")["system_prompt"])
+
+    def test_skillpack_is_present_and_installed(self):
+        manifest = json.loads((SOURCE / "skills/vesta-remediation/skill.json").read_text())
+        self.assertEqual(manifest["id"], "vesta-remediation")
+        self.assertEqual(manifest["procedures_file"], "procedures.md")
+        self.assertTrue(fa.skill_procedures(SOURCE / "skills/vesta-remediation").strip())
+        self.render()
+        self.assertTrue((self.root / "skills/vesta-remediation/procedures.md").exists())
+
+    def test_explicit_settings_override_the_defaults(self):
+        self.cutover(sandbox_url="https://sandbox.example", allow_insecure_http=False)
+        self.render()
+        exec_table = self.workspace("vesta")["exec"]
+        self.assertEqual(exec_table["sandbox_url"], "https://sandbox.example")
+        self.assertNotIn("allow_insecure_http", exec_table)
+
+    def test_bad_cutover_files_fail_closed(self):
+        cases = [({"token_file": "relative/key"}, "absolute path"),
+                 ({"token_file": str(self.root / "secrets/missing.key")}, "does not exist"),
+                 ({"token_file": "/x", "extra": 1}, "unknown keys"),
+                 ({"token_file": str(self.root / "secrets/core.key"), "sandbox_url": "ftp://x"}, "http"),
+                 ({"token_file": str(self.root / "secrets/core.key"), "allow_insecure_http": "yes"}, "boolean")]
+        for settings, message in cases:
+            (self.root / fa.VESTA_SANDBOX_FILE).write_text(json.dumps(settings))
+            with self.subTest(settings=settings), self.assertRaisesRegex(fa.RenderError, message):
+                self.render()
+        (self.root / fa.VESTA_SANDBOX_FILE).write_text("[not json")
+        with self.assertRaisesRegex(fa.RenderError, "not valid JSON"):
+            self.render()
+
+    def test_skill_procedures_refuse_escaping_paths(self):
+        skill = self.root / "skill"
+        skill.mkdir()
+        (skill / "skill.json").write_text(json.dumps({"id": "x", "procedures_file": "../secrets/core.key"}))
+        with self.assertRaisesRegex(fa.RenderError, "inside the skill directory"):
+            fa.skill_procedures(skill)
+        (skill / "skill.json").write_text(json.dumps({"id": "x"}))
+        (skill / "procedures.md").write_text("  \n")
+        with self.assertRaisesRegex(fa.RenderError, "empty"):
+            fa.skill_procedures(skill)
 
 
 class WakePromptTests(unittest.TestCase):

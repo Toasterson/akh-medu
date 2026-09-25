@@ -354,7 +354,10 @@ impl Agent {
         if is_dispatch
             && !turn.trace.iter().any(|t| {
                 t["ok"] == true
-                    && matches!(t["tool"].as_str(), Some("file_io" | "edit" | "shell_exec"))
+                    && matches!(
+                        t["tool"].as_str(),
+                        Some("file_io" | "edit" | "shell_exec" | "sandbox_exec")
+                    )
             })
         {
             return fail("Dispatch completion requires successful Akh execution evidence; native provider activity alone is not a release witness".into());
