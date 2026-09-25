@@ -105,7 +105,7 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
                 "/opt/homebrew/bin/python3 (cutover.sh selects one automatically)."
             )
         existing = tomllib.loads(path.read_text()) if path.exists() else None
-        servers, server_warnings = fa.mcp_servers(session, role)
+        servers, server_warnings = fa.mcp_servers(session, role, root)
         warnings.extend(server_warnings)
         doc = fa.render_workspace(existing, role, fa.system_prompt(source / "roles", role), servers,
                                   fa.board_identity(events, role))

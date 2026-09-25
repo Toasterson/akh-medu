@@ -30,8 +30,8 @@ Legend for **Status**:
 | `provider_failure.py` | Classifies a provider HTTP/error response into `authentication`/`quota`/`rate_limit`/`unknown` so `observer.py` and `janus_escalation.py` apply the right cooldown (30m/1h/2h/4h, or operator-repair-only for auth). | in: response text/status from a provider call; out: a classification tag consumed by callers. | none (imported library) | in repo | folds into akhomed's provider error taxonomy (explicit step-2 item) |
 | `t3_activity.py` | T3 ACP driver used as the transport for the "autonomous activity" provider instances (`roman-activity-<role>`); also runs as a background `--service` LaunchAgent. | in: T3 CLI invocation or `--service` mode; out: ACP session against akhsessd `127.0.0.1:18431`, reads `secrets/operator.key`. | `dev.roman-akhs.t3-activity` (LaunchAgent) | **retired 2026-09-25** (ADR 113 / 53g plan PR 1 — see below) | done — once T3 speaks ACP directly to akhomed there is no separate "activity" transport to shim |
 | `t3_entrypoint.py` | T3 ACP driver used as the transport for the three named Roman provider instances (`roman-janus`/`roman-minerva`/`roman-vesta`); dispatches on `sys.argv[0]`'s basename. | in: T3 CLI invocation, `secrets/t3-<role>.key`; out: `akh-acp` subprocess against `ws://127.0.0.1:18431/acp` (akhsessd) today. | n/a (invoked by T3, not launchd) | drifted → synced (see below); **also changed in this pass** — see "t3_entrypoint.py ACP endpoint" below | akhomed ACP once 53d/53f land; this pass adds the seam, doesn't flip the default |
-| `vesta_actions.py` | Grafana MCP passthrough (`grafana__*` tool names) plus the `gitops_publish`/`homelab_write` action tools for Vesta's sandbox; talks to the Grafana MCP tunnel on `127.0.0.1:18441`. | in: MCP `tools/call`; out: Grafana RPC, GitOps sandbox operations. | none (imported by `vesta_ops.py`/`configure_vesta_actions.py`) | in repo | Vesta skill (homelab remediation stays a skill under the akh-native Vesta, not a separate broker) |
-| `vesta_ops.py` | `homelab_inspect` (read-only kubectl get/describe/logs) MCP broker for Vesta, serving on a loopback port; the read-only counterpart to `vesta_actions.py`'s write path. | in: MCP `tools/call`; out: bounded `kubectl` invocations. | `dev.roman-akhs.vesta-ops` (LaunchAgent) | in repo | Vesta skill, same as `vesta_actions.py` |
+| `vesta_actions.py` | **PR 3 landed:** the `grafana_rpc` JSON-RPC client to the Grafana MCP tunnel (`127.0.0.1:18441`) is now used only by `configure_vesta_actions.py`'s discovery step (writing `config/vesta-grafana-tools.json`); `vesta_ops.py` no longer calls it to proxy tool calls. Still provides the `gitops_publish`/`homelab_write` action tools for Vesta's sandbox. | in: MCP `tools/call` (action tools), Grafana `tools/list` (discovery only); out: Grafana RPC, GitOps sandbox operations. | none (imported by `vesta_ops.py`/`configure_vesta_actions.py`) | in repo | Vesta skill (homelab remediation stays a skill under the akh-native Vesta, not a separate broker) |
+| `vesta_ops.py` | `homelab_inspect` (read-only kubectl get/describe/logs) MCP broker for Vesta, serving on a loopback port; the read-only counterpart to `vesta_actions.py`'s write path. **PR 3 landed:** dropped its `grafana__*` passthrough tools and the `grafana_rpc` import — Vesta now reaches Grafana through a direct `[[mcp.servers]] name = "grafana"` entry pointed at the tunnel (`http://127.0.0.1:18441/mcp`, no auth) instead of this broker. | in: MCP `tools/call`; out: bounded `kubectl` invocations. | `dev.roman-akhs.vesta-ops` (LaunchAgent) | in repo | Vesta skill, same as `vesta_actions.py` |
 
 ### Drift summaries (live vs. previous repo copy)
 
@@ -326,3 +326,57 @@ checkout of `origin/main`).
    plist again to bring the classifier back. `config/laya.json`'s
    `model_revision` was never changed by this PR, so no decision is re-decided
    by rolling back or rolling forward.
+
+
+## PR 3 (landed): Grafana passthrough becomes a direct MCP server
+
+Per the [step-2 plan](../../docs/ai/plans/2026-09-25-phase53g-roman-glue-conversion.md)'s
+PR 3. Vesta reaches Grafana through its own `[[mcp.servers]] name = "grafana"`
+entry (`http://127.0.0.1:18441/mcp`, no auth — the `grafana-tunnel` LaunchAgent
+is already loopback-only) instead of the `vesta-ops` broker passthrough.
+`vesta_ops.py` dropped the `grafana__*` tools and the `grafana_rpc` import;
+`vesta_actions.py`'s `grafana_rpc` now serves only `configure_vesta_actions.py`'s
+discovery step (`config/vesta-grafana-tools.json`, still the source of the new
+server's `tools` allowlist). `full_akh.py` renders the entry for Vesta only and
+rewrites the prose `Grafana MCP tools prefixed grafana__` to `prefixed
+mcp__grafana__` (`roles/addenda/vesta.md` updated to match); rendering refuses
+with a `RenderError` if `config/vesta-grafana-tools.json` is missing or empty,
+rather than silently registering zero or unbounded tools.
+
+Naming before/after: `mcp__vesta-ops__grafana__query_prometheus` (proxied) →
+`mcp__grafana__query_prometheus` (direct).
+
+### Mac-side steps (not run by this pass)
+
+1. Re-render from a clean `origin/main` checkout so this PR is on the box:
+   `python3 configure_core.py --root ~/Library/Application\ Support/roman-akhs
+   --binaries <clean-checkout>/target/release --repo <clean-checkout>`. This
+   rewrites `core-config/akh-medu/workspaces/vesta.toml` (adds `[[mcp.servers]]
+   name = "grafana"`) and the reactor seed prompts; it does not start anything.
+   `config/vesta-grafana-tools.json` must already exist from a prior
+   `configure_vesta_actions.py` run — rendering fails closed with a clear
+   message if it's missing.
+2. Copy the updated `vesta_ops.py` into `bin/`: `cp deploy/roman-mini/vesta_ops.py
+   ~/Library/Application\ Support/roman-akhs/bin/vesta_ops.py`.
+3. Restart the core so it picks up the new workspace TOML. The core plist has
+   `KeepAlive`, so `kill $(pgrep -f akhomed-main-)` is enough — launchd
+   restarts it from the (already rewritten) config; no sudo needed.
+4. Restart the `vesta-ops` broker so it drops the Grafana passthrough tools:
+   `launchctl kickstart -k gui/501/dev.roman-akhs.vesta-ops`.
+5. Verify: `GET /v1/akhs/vesta/tools` with the operator token should list
+   `mcp__grafana__*` tools and no `mcp__vesta-ops__grafana__*` ones; or check
+   `logs/core.out.log`/`logs/core.err.log` for the `akh::mcp` discovery line
+   for Vesta showing a `grafana` server with the expected tool count (matching
+   `config/vesta-grafana-tools.json`'s length). Confirm `vesta-ops`'s own
+   `tools/list` (`curl -s -H "Authorization: Bearer $(cat
+   secrets/vesta-ops.key)" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+   http://127.0.0.1:18437/mcp`) no longer returns any `grafana__*` name.
+6. **Rollback:** restore the previous `core-config/akh-medu/workspaces/vesta.toml`
+   and `bin/vesta_ops.py` from the pre-render backup (`configure_core.py`
+   preserves unrelated keys but does not itself keep a dated backup; take one
+   before step 1, e.g. `cp -a core-config/akh-medu/workspaces
+   core-config/akh-medu/workspaces.bak-$(date +%s)`), then repeat steps 3–4 to
+   restart the core and kickstart `vesta-ops`. Grafana access degrades to
+   "no Grafana tools" during either direction of the switch, never to a
+   half-registered state — the workspace TOML and `vesta_ops.py` change
+   together in the same restart.

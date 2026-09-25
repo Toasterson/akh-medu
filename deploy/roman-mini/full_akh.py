@@ -56,6 +56,13 @@ ROLE_SERVERS = {
 SERVER_TIMEOUTS = {"observer": 60, "janus-escalation": 60, "vesta-ops": 300}
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
+# Vesta-only direct Grafana MCP server (PR 3 of the step-2 plan): no broker,
+# no auth, loopback-only via the grafana-tunnel LaunchAgent
+# (`kubectl -n observability port-forward … mcp-grafana 18441:80`).
+GRAFANA_SERVER_NAME = "grafana"
+GRAFANA_URL = "http://127.0.0.1:18441/mcp"
+GRAFANA_TOOLS_FILE = "config/vesta-grafana-tools.json"
+
 
 class RenderError(RuntimeError):
     """A rendering precondition failed; the message says what to fix."""
@@ -265,12 +272,14 @@ def tool_renames(session: dict, role: str) -> dict[str, str]:
 
 def rename_tools(text: str, renames: dict[str, str]) -> str:
     """Rewrite tool names in `text` in one pass (longest name first)."""
-    if not renames:
-        return text
-    names = sorted(renames, key=len, reverse=True)
-    pattern = re.compile(r"(?<![\w-])(" + "|".join(map(re.escape, names)) + r")(?![\w])")
-    text = pattern.sub(lambda m: renames[m.group(1)], text)
-    return text.replace("prefixed grafana__", "prefixed mcp__vesta-ops__grafana__")
+    if renames:
+        names = sorted(renames, key=len, reverse=True)
+        pattern = re.compile(r"(?<![\w-])(" + "|".join(map(re.escape, names)) + r")(?![\w])")
+        text = pattern.sub(lambda m: renames[m.group(1)], text)
+    # Grafana moved from a `vesta-ops` passthrough to its own direct MCP server
+    # (PR 3): the prose describes a prefix, not an exact tool name, so it isn't
+    # covered by the per-tool `renames` map above and must always be checked.
+    return text.replace("prefixed grafana__", "prefixed mcp__grafana__")
 
 
 # ── Workspace TOML ───────────────────────────────────────────────────────────
@@ -280,12 +289,14 @@ def _is_loopback(url: str) -> bool:
     return (urlparse(url).hostname or "") in LOOPBACK_HOSTS
 
 
-def mcp_servers(session: dict, role: str) -> tuple[list[dict], list[str]]:
+def mcp_servers(session: dict, role: str, root: Path) -> tuple[list[dict], list[str]]:
     """`[[mcp.servers]]` entries mirroring the role's current broker grants.
 
     Returns the entries and warnings for servers that were skipped. Each
     server gets a `tools` allowlist of exactly the remote tools the role holds
-    today, so the cutover neither widens nor narrows a grant.
+    today, so the cutover neither widens nor narrows a grant. Vesta also gets
+    a direct Grafana server (`grafana_server`), which isn't a session broker
+    grant and so isn't covered by the loop below.
     """
     servers, warnings = [], []
     for name in ROLE_SERVERS[role]:
@@ -314,7 +325,32 @@ def mcp_servers(session: dict, role: str) -> tuple[list[dict], list[str]]:
         entry["auth"] = auth
         entry["tools"] = tools
         servers.append(entry)
+    if role == "vesta":
+        servers.append(grafana_server(root))
     return servers, warnings
+
+
+def grafana_server(root: Path) -> dict:
+    """Vesta's direct Grafana `[[mcp.servers]]` entry (PR 3, ADR 113 decision 10).
+
+    No broker, no auth: the akh talks straight to the `mcp-grafana` tunnel on
+    `127.0.0.1:18441` (loopback, so `allow_insecure_http` is not needed). The
+    tool allowlist mirrors the catalog `configure_vesta_actions.py` discovers
+    from that server into `config/vesta-grafana-tools.json`; a missing file
+    means the tunnel was never provisioned on this deployment root, and
+    rendering refuses rather than silently registering zero (or, if `tools`
+    were simply omitted, every) tool.
+    """
+    path = root / GRAFANA_TOOLS_FILE
+    if not path.exists():
+        raise RenderError(
+            f"{path} is missing; run configure_vesta_actions.py <root> once to provision the "
+            "grafana-tunnel LaunchAgent and discover Vesta's Grafana MCP tool catalog before "
+            "rendering the core")
+    names = sorted({tool["name"] for tool in json.loads(path.read_text())})
+    if not names:
+        raise RenderError(f"{path} lists no Grafana tools; rerun configure_vesta_actions.py <root>")
+    return {"name": GRAFANA_SERVER_NAME, "url": GRAFANA_URL, "tools": names}
 
 
 def board_identity(events: dict, role: str) -> dict:
