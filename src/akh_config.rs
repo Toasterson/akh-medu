@@ -215,6 +215,7 @@ pub struct McpConfig {
 /// [memory]
 /// contradiction_policy = "warn"   # "warn" (default) | "replace" | "reject"
 /// hygiene_batch = 1000            # max graph mutations per hygiene pass
+/// default_pack = true             # install the built-in fleet memory pack
 /// ```
 ///
 /// `contradiction_policy` sets what `add_triple` does with a detected
@@ -232,10 +233,21 @@ pub struct MemoryConfig {
     /// pass report-only.
     #[serde(default = "default_hygiene_batch")]
     pub hygiene_batch: usize,
+    /// Install the built-in fleet memory pack (`fleet-memory`,
+    /// [`crate::schema::builtin`]) when the akh's engine opens, and keep it
+    /// at this binary's version. `false` opts out and retires an installed
+    /// copy. The akh's own schema packs override it relation by relation
+    /// either way.
+    #[serde(default = "default_default_pack")]
+    pub default_pack: bool,
 }
 
 fn default_hygiene_batch() -> usize {
     crate::schema::DEFAULT_HYGIENE_BATCH
+}
+
+const fn default_default_pack() -> bool {
+    true
 }
 
 impl Default for MemoryConfig {
@@ -243,11 +255,17 @@ impl Default for MemoryConfig {
         Self {
             contradiction_policy: crate::engine::ContradictionPolicy::default(),
             hygiene_batch: default_hygiene_batch(),
+            default_pack: default_default_pack(),
         }
     }
 }
 
 impl MemoryConfig {
+    /// The built-in pack policy this table selects.
+    pub fn default_pack_policy(&self) -> crate::schema::DefaultPackPolicy {
+        self.default_pack.into()
+    }
+
     /// Whether every field is at its default (the table is then omitted
     /// when the config is saved).
     pub fn is_default(&self) -> bool {
@@ -1182,7 +1200,10 @@ impl AkhConfig {
                 "autonomy",
                 &["enabled", "tasks", "budget", "idle_cycle_tools"],
             ),
-            ("memory", &["contradiction_policy", "hygiene_batch"]),
+            (
+                "memory",
+                &["contradiction_policy", "hygiene_batch", "default_pack"],
+            ),
             (
                 "provider",
                 &[
@@ -1909,6 +1930,30 @@ mod tests {
             unknown.iter().any(|k| k.path == "memory.model"
                 && k.misplaced_under_table.as_deref() == Some("memory"))
         );
+    }
+
+    /// The built-in fleet memory pack is on unless `[memory] default_pack =
+    /// false`; the key is known, and an opted-out config round-trips.
+    #[test]
+    fn memory_default_pack_is_on_unless_opted_out() {
+        use crate::schema::DefaultPackPolicy;
+
+        let cfg: AkhConfig = toml::from_str(r#"name = "vesta""#).unwrap();
+        assert!(cfg.memory.default_pack);
+        assert_eq!(cfg.memory.default_pack_policy(), DefaultPackPolicy::Enabled);
+
+        let src = "name = \"vesta\"\n[memory]\ndefault_pack = false\n";
+        let cfg: AkhConfig = toml::from_str(src).unwrap();
+        assert!(!cfg.memory.default_pack);
+        assert_eq!(
+            cfg.memory.default_pack_policy(),
+            DefaultPackPolicy::Disabled
+        );
+        assert!(!cfg.memory.is_default(), "an opt-out is written back");
+        let raw: toml::Value = toml::from_str(src).unwrap();
+        assert!(AkhConfig::unknown_keys(&raw).is_empty());
+        let back: AkhConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.memory, cfg.memory);
     }
 
     #[test]

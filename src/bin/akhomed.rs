@@ -2989,6 +2989,33 @@ impl ServerState {
         // Phase 38b: install the mutation WAL (no-op in local-only mode).
         self.wire_wal(name, &engine, residency_epoch).await;
 
+        // Built-in fleet memory pack (`[memory] default_pack`, default on):
+        // installed, upgraded or retired after the WAL is wired so the
+        // change is durable like any other install. Idempotent, and it runs
+        // before the engine is published, so nothing writes concurrently.
+        // A failure is logged and never refuses the akh: it only means the
+        // default declarations are missing until the next open.
+        match akh_medu::schema::ensure_builtin_packs(&engine, name, memory.default_pack_policy()) {
+            Ok(outcomes) => {
+                for (pack, outcome) in outcomes.iter().filter(|(_, o)| o.mutated()) {
+                    tracing::info!(
+                        workspace = %name,
+                        %pack,
+                        outcome = ?outcome,
+                        "built-in schema pack ensured"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    workspace = %name,
+                    %error,
+                    "built-in schema pack could not be ensured; default memory declarations \
+                     are missing until the next open"
+                );
+            }
+        }
+
         let engine = Arc::new(engine);
         let mut map = self.workspaces.write().await;
         map.insert(name.to_string(), Arc::clone(&engine));
@@ -5504,6 +5531,10 @@ mod control_plane_tests {
         let config_path = state.paths.workspace_config_file("alpha");
         let mut config = AkhConfig::load(&config_path).unwrap();
         config.memory.contradiction_policy = akh_medu::engine::ContradictionPolicy::Replace;
+        // This test exercises undeclared spelling collisions; the built-in
+        // fleet pack would declare `next_check`/`state` (covered by
+        // `get_engine_installs_the_fleet_memory_pack_unless_opted_out`).
+        config.memory.default_pack = false;
         config.save(&config_path).unwrap();
 
         let engine = state.get_engine("alpha").await.unwrap();
@@ -5572,6 +5603,40 @@ mod control_plane_tests {
                 .unwrap_err()
                 .contains("workspace")
         );
+    }
+
+    /// Phase 53 follow-up (WI 01a0d569-1cf1 item 7): opening an akh installs
+    /// the built-in fleet memory pack; `[memory] default_pack = false` keeps
+    /// it off (and retires a copy installed earlier).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_engine_installs_the_fleet_memory_pack_unless_opted_out() {
+        let (_tmp, state) = temp_state();
+        for name in ["with-pack", "opted-out"] {
+            state
+                .dispatch("_akh/workspace/create", &json!({ "name": name }))
+                .await
+                .unwrap();
+        }
+        let config_path = state.paths.workspace_config_file("opted-out");
+        let mut config = AkhConfig::load(&config_path).unwrap();
+        config.memory.default_pack = false;
+        config.save(&config_path).unwrap();
+
+        let declared = |engine: &akh_medu::engine::Engine| {
+            engine
+                .lookup_symbol("next_check")
+                .map(|p| akh_medu::schema::declared_cardinality(engine, p).is_single_valued())
+                .unwrap_or(false)
+        };
+        let with_pack = state.get_engine("with-pack").await.unwrap();
+        assert!(declared(&with_pack), "a default akh gets the fleet pack");
+        assert!(
+            with_pack
+                .lookup_symbol("mt:schema/builtin/fleet-memory@1.0.0")
+                .is_ok()
+        );
+        let opted_out = state.get_engine("opted-out").await.unwrap();
+        assert!(!declared(&opted_out), "an opted-out akh does not");
     }
 
     /// Phase 53e: `_akh/delegation/grant/*` over the ACP control plane.

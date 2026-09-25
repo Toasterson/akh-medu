@@ -105,7 +105,8 @@ pub struct PredicateSpelling {
     pub label: String,
     /// Live triples using it.
     pub live_triples: usize,
-    /// Declared as a relation by a schema/seed pack.
+    /// Declared as a relation by a schema/seed pack or a built-in default
+    /// pack ([`super::cardinality::is_declared_relation`]).
     pub declared: bool,
     /// The relation this spelling is a declared alias of, if any.
     #[serde(serialize_with = "serialize_opt_symbol")]
@@ -281,13 +282,19 @@ pub fn collisions(engine: &Engine) -> Vec<PredicateFamily> {
     for triple in engine.all_triples() {
         *counts.entry(triple.predicate).or_default() += 1;
     }
-    // Declared relations without live triples still join their family.
-    if let (Ok(is_a), Ok(marker)) = (
-        engine.lookup_symbol(super::compile::PRED_IS_A),
-        engine.lookup_symbol(super::compile::RELATION_MARKER),
-    ) {
+    // Declared relations without live triples still join their family, from
+    // either declaration tier (`is-a relation` or a built-in default pack's
+    // `onto:default-relation relation`).
+    if let Ok(marker) = engine.lookup_symbol(super::compile::RELATION_MARKER) {
+        let declaring: Vec<SymbolId> = [
+            super::compile::PRED_IS_A,
+            super::compile::PRED_DEFAULT_RELATION,
+        ]
+        .into_iter()
+        .filter_map(|label| engine.lookup_symbol(label).ok())
+        .collect();
         for edge in engine.triples_to(marker) {
-            if edge.predicate == is_a {
+            if declaring.contains(&edge.predicate) {
                 counts.entry(edge.subject).or_default();
             }
         }

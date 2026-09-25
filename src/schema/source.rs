@@ -154,12 +154,17 @@ pub struct RelationDef {
     #[serde(default)]
     pub description: Option<String>,
     /// How many live objects a subject may hold for this relation
-    /// (Phase 53j). Defaults to [`Cardinality::Multi`].
-    #[serde(default)]
-    pub cardinality: Cardinality,
+    /// (Phase 53j). Absent means multi-valued and lowers to no triple, so
+    /// packs that never mention cardinality keep their checksums. An
+    /// explicit `"multi"` is a declaration: it lowers to
+    /// `onto:cardinality/multi` and overrides a built-in default pack's
+    /// single-valued declaration of the same relation
+    /// ([`super::builtin`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cardinality: Option<Cardinality>,
     /// The relation records time-varying state (Phase 53j): a superseded
     /// value is history that stopped holding when its successor was
-    /// asserted, not a correction. Only valid with
+    /// asserted, not a correction. Only valid with an explicit
     /// [`Cardinality::SingleValued`].
     #[serde(default)]
     pub temporal: bool,
@@ -174,8 +179,9 @@ pub struct RelationDef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Cardinality {
-    /// A subject may hold any number of objects (the default, and the
-    /// behaviour of every undeclared predicate).
+    /// A subject may hold any number of objects (the behaviour of every
+    /// undeclared predicate; declaring it explicitly overrides a built-in
+    /// default pack).
     #[default]
     Multi,
     /// A subject holds exactly one live object: the newest assertion
@@ -285,7 +291,7 @@ pub fn validate(source: &SchemaPackSource) -> SchemaResult<()> {
         source.relations.iter().map(|r| r.name.as_str()).collect();
     let mut alias_owner: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for r in &source.relations {
-        if r.temporal && r.cardinality != Cardinality::SingleValued {
+        if r.temporal && r.cardinality != Some(Cardinality::SingleValued) {
             return Err(SchemaError::TemporalRequiresSingleValued {
                 relation: r.name.clone(),
             });
@@ -371,10 +377,19 @@ mod tests {
                   {"name": "tag"}]}"#,
         )
         .unwrap();
-        assert_eq!(src.relations[0].cardinality, Cardinality::SingleValued);
+        assert_eq!(
+            src.relations[0].cardinality,
+            Some(Cardinality::SingleValued)
+        );
         assert!(src.relations[0].temporal);
         assert_eq!(src.relations[0].aliases.len(), 2);
-        assert_eq!(src.relations[1].cardinality, Cardinality::Multi);
+        assert_eq!(src.relations[1].cardinality, None, "absent is not declared");
+        let explicit = parse_source(
+            r#"{"pack": {"name": "p", "version": "1"},
+                "relations": [{"name": "tag", "cardinality": "multi"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(explicit.relations[0].cardinality, Some(Cardinality::Multi));
 
         let bad = |relations: &str| {
             parse_source(&format!(
@@ -383,6 +398,10 @@ mod tests {
         };
         assert!(matches!(
             bad(r#"[{"name": "a", "temporal": true}]"#),
+            Err(SchemaError::TemporalRequiresSingleValued { .. })
+        ));
+        assert!(matches!(
+            bad(r#"[{"name": "a", "cardinality": "multi", "temporal": true}]"#),
             Err(SchemaError::TemporalRequiresSingleValued { .. })
         ));
         assert!(matches!(

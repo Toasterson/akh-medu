@@ -1,0 +1,75 @@
+{
+  "pack": {
+    "name": "fleet-memory",
+    "version": "1.0.0",
+    "scope": "shared",
+    "source_url": "https://github.com/Toasterson/akh-medu/blob/main/data/schema-packs/fleet-memory.json",
+    "description": "Built-in fleet memory-hygiene defaults (Phase 53 follow-up, Anima WI 01a0d569-1cf1 item 7). Compiled into the binary and installed on every akh as the default declaration tier; review of this file is its ADR 081 admission. Only predicates that hold one current value per subject by construction: the generic state predicates the Roman pack (deploy/roman-mini/schemas/roman-memory.json) proved on the 2026-09-24 store, and the two tool-manifest predicates the engine itself re-registers on every start. agent:* state predicates are excluded: the namespace is reserved and goal.rs already removes the old value before writing a new one (no multi-valued agent:has_status/has_priority subject in the 2026-09-25 store). Legitimately multi-valued predicates (agent:has_tag, agent:learned, tool:access, is-a, part-of, ...) are never declared. An akh's own pack overrides any relation here, including with an explicit \"cardinality\": \"multi\"."
+  },
+  "relations": [
+    {
+      "name": "status",
+      "cardinality": "single_valued",
+      "temporal": true,
+      "description": "Current status of a subject (e.g. active -> resolved). Roman 2026-09-24: 44 live, 40 subjects, 4 multi-valued (max 2), all successive updates."
+    },
+    {
+      "name": "state",
+      "cardinality": "single_valued",
+      "temporal": true,
+      "description": "Current state of a subject. Roman 2026-09-24: 50 live, 47 subjects, 3 multi-valued (max 2)."
+    },
+    {
+      "name": "has_state",
+      "cardinality": "single_valued",
+      "temporal": true,
+      "aliases": ["has-state", "has state"],
+      "description": "Current state, has_ spelling (kept distinct from `state`, as in the Roman pack). Roman 2026-09-24: 62 live, 57 subjects, 3 multi-valued (max 3)."
+    },
+    {
+      "name": "current_state",
+      "cardinality": "single_valued",
+      "temporal": true,
+      "aliases": ["current-state", "current state"],
+      "description": "Observed current state. Roman 2026-09-24: 12 live, 8 subjects, 3 multi-valued (max 3)."
+    },
+    {
+      "name": "current_phase",
+      "cardinality": "single_valued",
+      "temporal": true,
+      "aliases": ["current-phase", "current phase"],
+      "description": "Current phase of a work item or process. Roman 2026-09-24: 31 live, 24 subjects, 4 multi-valued (max 4)."
+    },
+    {
+      "name": "next_action",
+      "cardinality": "single_valued",
+      "temporal": true,
+      "aliases": ["next-action", "next action"],
+      "description": "The committed next step for a subject. Roman 2026-09-24: 61 live, 37 subjects, 6 multi-valued (max 9)."
+    },
+    {
+      "name": "next_check",
+      "cardinality": "single_valued",
+      "temporal": true,
+      "aliases": ["next-check", "next check", "has_next_check", "has-next-check", "has next check"],
+      "description": "When or what is checked next. Roman 2026-09-24: 478 live over five spellings, 230 subjects, 53 multi-valued (max 46)."
+    },
+    {
+      "name": "planned_action",
+      "cardinality": "single_valued",
+      "temporal": true,
+      "aliases": ["planned-action", "planned action"],
+      "description": "The currently planned action. Roman 2026-09-24: 28 live, 21 subjects, 3 multi-valued (max 4)."
+    },
+    {
+      "name": "tool:danger_level",
+      "cardinality": "single_valued",
+      "description": "Tool manifest danger level, re-registered by the engine (agent/tool_graph.rs) on every start. Roman 2026-09-25: 117 live, 111 tool subjects, 6 multi-valued (a Safe value left live next to the reclassified Cautious one, e.g. tool:task_list, tool:inference_config)."
+    },
+    {
+      "name": "tool:schema",
+      "cardinality": "single_valued",
+      "description": "Tool manifest JSON parameter schema, re-registered by the engine on every start. Roman 2026-09-25: 117 live, 111 tool subjects, 6 multi-valued (the pre-change schema of tool:delegate and tool:reactor_manage left live)."
+    }
+  ]
+}

@@ -21,7 +21,7 @@ use super::compile::{CompiledSchemaPack, PRED_ALIAS_OF, PRED_IS_A, RELATION_MARK
 use super::{SchemaError, SchemaResult};
 
 /// Marker predicate: `(mt-symbol, akh:schema-installed, name@version)`.
-const INSTALLED_PREDICATE: &str = "akh:schema-installed";
+pub(crate) const INSTALLED_PREDICATE: &str = "akh:schema-installed";
 
 /// The deterministic label for a workspace's effective-schema import context
 /// — the target of every `ctx:specializes` activation edge installed for
