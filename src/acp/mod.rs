@@ -28,6 +28,19 @@
 //! also require a credential-safe design for the session's MCP configuration,
 //! which is outside WI-337's live-daemon resume boundary.
 //!
+//! # Session ownership
+//!
+//! A session belongs to the owner that created it ([`SessionOwner`]: the
+//! connection's `[[acp.principals]]` principal, `legacy` for the unscoped
+//! shared secret, `local` for the Unix socket). `session/load`,
+//! `session/prompt` and `session/cancel` refuse other callers with
+//! `akh::acp::session_not_owned` before any side effect; session operators
+//! (`control = true`, the legacy secret, the local socket) may use any session
+//! on an akh they are granted, logged at `info`. See [`auth`] for the oracle
+//! rule. Because sessions are memory-only there is no stored session without
+//! an owner; one restored from pre-ownership state would be `legacy`. Session
+//! ids are `akh-<UUIDv4>` from the OS CSPRNG, so they cannot be guessed.
+//!
 //! # Transport
 //!
 //! `agent-client-protocol` is `futures`-based: its [`ByteStreams`] transport
@@ -91,6 +104,7 @@ pub mod control;
 pub mod mcp_bridge;
 pub use auth::{
     AcpAccess, AcpAuthError, AcpGrant, AcpIngressAuth, AcpPrincipalConfig, AkhScope, PrincipalAuth,
+    SessionOwner, SessionUse,
 };
 pub use control::{
     CONTROL_METHODS, ControlFuture, EngineHandle, ResolveEngineFuture, ResolveFuture,
@@ -483,10 +497,12 @@ pub struct AkhAcpAgent {
     /// Default workspace used when a request names none (the daemon's bound
     /// `[acp].workspace`; the held workspace's name in embedded mode).
     default_ws: String,
-    /// Chat session → workspace map. `session/new` records the workspace (from
-    /// the request `cwd` sentinel) so each `session/prompt` routes to the right
-    /// akh — the data-plane `-w` for chat.
-    sessions: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    /// Chat session → route (workspace + owner). `session/new` records the
+    /// workspace (from the request `cwd` sentinel) so each `session/prompt`
+    /// routes to the right akh — the data-plane `-w` for chat — and the
+    /// [`SessionOwner`] that created it, which `session/load`, `session/prompt`
+    /// and `session/cancel` check before touching the session.
+    sessions: Arc<Mutex<std::collections::HashMap<String, SessionRoute>>>,
     /// Chat session → dispatch mode flag. Recorded at `session/new` from the
     /// request `cwd` pattern (WI-280): if the cwd matches Anima's worktree path
     /// (`/var/lib/anima-runner/worktrees/<UUID>`), the session is an autonomous
@@ -671,11 +687,23 @@ fn require_pushed_mcp_effective(per_workspace_default: bool) -> bool {
         .unwrap_or(per_workspace_default)
 }
 
+/// Where a tracked session routes and who may use it. Written once at
+/// `session/new`; session ids are random and never reused, so the owner of an
+/// id cannot change between an ownership check and the checkout that follows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionRoute {
+    workspace: String,
+    owner: SessionOwner,
+}
+
 /// Immutable metadata captured atomically when `session/new` registers a
 /// protocol session.
 #[derive(Default)]
 struct SessionRegistration {
     workspace: Option<String>,
+    /// The creating connection's owner; defaults to [`SessionOwner::Legacy`]
+    /// (usable only by the legacy secret and session operators).
+    owner: SessionOwner,
     is_dispatch: bool,
     mcp_cfgs: Vec<mcp_bridge::SessionMcpServerCfg>,
     cwd: Option<PathBuf>,
@@ -839,7 +867,7 @@ impl AkhAcpAgent {
     /// successful `initialize`.
     fn access(&self) -> Result<AcpAccess, AcpAuthError> {
         if self.ingress_auth.is_none() {
-            return Ok(AcpAccess::Unrestricted);
+            return Ok(AcpAccess::Local);
         }
         self.connection_access
             .lock()
@@ -866,18 +894,53 @@ impl AkhAcpAgent {
         result
     }
 
-    /// Refuse access to `session_id` unless this connection is granted the
-    /// session's workspace. An unknown id needs an authenticated connection
-    /// only; the caller then reports it as unknown.
-    fn authorize_session_access(&self, session_id: &str) -> Result<(), AcpAuthError> {
-        match self.session_workspace_of(session_id) {
-            Some(ws) => self.authorize_workspace(&ws),
-            None => self.access().map(|_| ()),
+    /// Authorize this connection to use the existing session `session_id`
+    /// for `method`. Call it before any side effect (checkout, LRU touch,
+    /// active marking, cancel flag).
+    ///
+    /// Ownership is checked first ([`AcpAccess::authorize_session`]): a
+    /// non-operator gets `akh::acp::session_not_owned` for another owner's
+    /// session and for an unknown id alike, so it learns neither that the id
+    /// exists nor which akh it is on. Then the session's akh must be granted
+    /// (a session operator is still limited to its own akhs). An operator
+    /// using someone else's session is logged at `info`.
+    /// `Ok(SessionUse::Unknown)` is returned to operators only; the caller
+    /// then reports the id as unknown.
+    fn authorize_session_access(
+        &self,
+        session_id: &str,
+        method: &str,
+    ) -> Result<SessionUse, AcpAuthError> {
+        let access = self.access()?;
+        let route = self.session_route_of(session_id);
+        let session_use = access
+            .authorize_session(session_id, route.as_ref().map(|r| &r.owner))
+            .inspect_err(|error| {
+                tracing::warn!(
+                    session = session_id,
+                    method,
+                    exists = route.is_some(),
+                    error = %error,
+                    "ACP request refused: session belongs to another owner or is unknown"
+                );
+            })?;
+        if let Some(route) = &route {
+            self.authorize_workspace(&route.workspace)?;
         }
+        if let SessionUse::Operator { owner } = &session_use {
+            tracing::info!(
+                session = session_id,
+                method,
+                caller = %access.session_owner(),
+                owner = %owner,
+                "ACP session operator is using a session created by another owner"
+            );
+        }
+        Ok(session_use)
     }
 
-    /// The workspace a tracked session routes to, if the session exists.
-    fn session_workspace_of(&self, session_id: &str) -> Option<String> {
+    /// The route (workspace + owner) of a tracked session, if it exists.
+    fn session_route_of(&self, session_id: &str) -> Option<SessionRoute> {
         self.sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1040,7 +1103,13 @@ impl AkhAcpAgent {
         self.sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(session_id.to_string(), workspace);
+            .insert(
+                session_id.to_string(),
+                SessionRoute {
+                    workspace,
+                    owner: registration.owner,
+                },
+            );
         self.session_is_dispatch
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1161,7 +1230,7 @@ impl AkhAcpAgent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(session_id)
-            .cloned();
+            .map(|route| route.workspace.clone());
         let conversation = self
             .session_conversations
             .lock()
@@ -4827,7 +4896,19 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                 move |req: NewSessionRequest, responder: Responder<NewSessionResponse>, _cx| {
                     let me = me.clone();
                     async move {
-                        let session_id = SessionId::new(format!("akh-{}", next_session_suffix()));
+                        let session_id = match mint_session_id() {
+                            Ok(id) => id,
+                            Err(error) => {
+                                tracing::error!(%error, "session/new: the OS random source failed");
+                                return responder.respond_with_error(
+                                    agent_client_protocol::Error::internal_error().data(format!(
+                                        "cannot mint an ACP session id: the OS random source \
+                                         failed ({error}); nothing was created, retry the \
+                                         session/new"
+                                    )),
+                                );
+                            }
+                        };
                         // Resolve the target workspace, in precedence order:
                         // (1) an explicit `_meta["akh/workspace"]` string —
                         //     additive (A4): a client that can't/won't stuff
@@ -4861,6 +4942,13 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                         if let Err(error) = me.authorize_workspace(effective) {
                             return responder.respond_with_error(error.rpc_error());
                         }
+                        // The session belongs to whoever creates it: this
+                        // connection's principal (`legacy` for the shared
+                        // secret, `local` for the Unix socket).
+                        let owner = match me.access() {
+                            Ok(access) => access.session_owner(),
+                            Err(error) => return responder.respond_with_error(error.rpc_error()),
+                        };
                         // WI-280: Detect dispatch mode from the session cwd. Anima
                         // dispatches work from worktree paths matching the pattern
                         // `/var/lib/anima-runner/worktrees/<UUID>`. The env var
@@ -4913,6 +5001,7 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                             &session_id.to_string(),
                             SessionRegistration {
                                 workspace,
+                                owner,
                                 is_dispatch,
                                 mcp_cfgs,
                                 cwd,
@@ -4940,9 +5029,13 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                     let me = me.clone();
                     async move {
                         let session_key = req.session_id.to_string();
-                        // Unknown ids still need an authenticated connection;
-                        // `load_retained_session` then reports them as unknown.
-                        if let Err(error) = me.authorize_session_access(&session_key) {
+                        // Ownership and akh before the LRU touch. A
+                        // non-operator gets one refusal for foreign and unknown
+                        // ids alike; an operator's unknown id falls through to
+                        // `load_retained_session`, which reports it as unknown.
+                        if let Err(error) =
+                            me.authorize_session_access(&session_key, "session/load")
+                        {
                             return responder.respond_with_error(error.rpc_error());
                         }
                         match me.load_retained_session(&session_key) {
@@ -5015,12 +5108,13 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                         };
                         let text = prompt.text;
 
-                        // Authorize before touching the session: an
-                        // unauthorized client must not be able to mark a
-                        // session active (or probe ids) by prompting it. Same
-                        // rule as `session/load`; unknown ids still need an
-                        // authenticated connection and then fail as unknown.
-                        if let Err(error) = me.authorize_session_access(&session_key) {
+                        // Authorize before touching the session: a client that
+                        // does not own it (and is no session operator) must not
+                        // be able to mark it active, touch its recency or probe
+                        // ids by prompting it. Same rule as `session/load`.
+                        if let Err(error) =
+                            me.authorize_session_access(&session_key, "session/prompt")
+                        {
                             return responder.respond_with_error(error.rpc_error());
                         }
 
@@ -6020,8 +6114,12 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                     let me = me.clone();
                     async move {
                         let session_id = n.session_id.to_string();
-                        if let Some(ws) = me.session_workspace_of(&session_id)
-                            && me.authorize_workspace(&ws).is_err()
+                        // A notification has no response, so a refusal (not
+                        // the owner, akh not granted) is logged and dropped
+                        // before the cancel flag is touched.
+                        if me
+                            .authorize_session_access(&session_id, "session/cancel")
+                            .is_err()
                         {
                             return Ok(());
                         }
@@ -6239,16 +6337,17 @@ fn decode_prompt(blocks: &[ContentBlock]) -> Result<DecodedPrompt, String> {
     Ok(DecodedPrompt { text, images })
 }
 
-/// Monotonic-ish suffix for session ids within a process.
-fn next_session_suffix() -> u128 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    nanos.wrapping_add(u128::from(n))
+/// Mint a fresh, unguessable ACP session id: `akh-<UUIDv4>`, 122 bits from
+/// the OS CSPRNG. The format keeps the `akh-` prefix and an opaque suffix (it
+/// used to be a nanosecond timestamp, which another principal on the same akh
+/// could guess). Ownership is what protects a session; an unguessable id keeps
+/// it from being a handle anyone can name in the first place.
+fn mint_session_id() -> Result<SessionId, rand::Error> {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.try_fill_bytes(&mut bytes)?;
+    let id = uuid::Builder::from_random_bytes(bytes).into_uuid();
+    Ok(SessionId::new(format!("akh-{id}")))
 }
 
 /// Grace given to a connection after the peer's read side reaches EOF, so an
@@ -8025,7 +8124,13 @@ tags = []
         me.sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(victim.clone(), "some-workspace".into());
+            .insert(
+                victim.clone(),
+                SessionRoute {
+                    workspace: "some-workspace".into(),
+                    owner: SessionOwner::Legacy,
+                },
+            );
         me.session_conversations
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -9973,8 +10078,8 @@ tags = []
             .await
     }
 
-    /// Phase 53 review: `session/prompt` authorizes the session's akh before
-    /// checking the session out, so another principal can neither mark it
+    /// Phase 53 review: `session/prompt` authorizes the session (owner, then
+    /// akh) before checking it out, so another principal can neither mark it
     /// active nor touch its recency (nor learn more than `session/load` does).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn session_prompt_authorizes_before_touching_the_session() {
@@ -10023,9 +10128,11 @@ tags = []
         })
         .await
         .expect_err("vesta must not prompt a janus session");
+        // Ownership is checked first, so the refusal does not even reveal
+        // that the id exists on an akh vesta is not granted.
         assert_eq!(
             error_code(&refused).as_deref(),
-            Some("akh::acp::workspace_not_granted")
+            Some("akh::acp::session_not_owned")
         );
         let order_after: Vec<String> = observer
             .session_order
@@ -10046,6 +10153,267 @@ tags = []
 
         let _ = shutdown_tx.send(true);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    const JANUS_BOT_TOKEN: &str = "janus-bot-token-cccccccccccccccccc";
+    const OPERATOR_TOKEN: &str = "operator-token-dddddddddddddddddddd";
+
+    /// Two principals granted the same akh (`janus`) plus an operator
+    /// (`akhs = ["*"]`, `control = true`).
+    fn shared_akh_principals(dir: &Path) -> PrincipalAuth {
+        let entry = |id: &str, token: &str, akhs: &[&str], control: bool| {
+            let token_file = dir.join(format!("{id}.key"));
+            std::fs::write(&token_file, format!("{token}\n")).unwrap();
+            AcpPrincipalConfig {
+                id: id.into(),
+                token_file,
+                akhs: akhs.iter().map(|a| (*a).to_string()).collect(),
+                control,
+            }
+        };
+        PrincipalAuth::from_config(&[
+            entry("t3-janus", JANUS_TOKEN, &["janus"], false),
+            entry("janus-bot", JANUS_BOT_TOKEN, &["janus"], false),
+            entry("operator", OPERATOR_TOKEN, &["*"], true),
+        ])
+        .unwrap()
+    }
+
+    fn session_order_snapshot(me: &AkhAcpAgent) -> Vec<String> {
+        me.session_order.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// `session/load`, then a `session/cancel` for the same id, then a
+    /// `_akh/health` so the notification has been handled before returning.
+    async fn load_then_cancel(
+        addr: std::net::SocketAddr,
+        bearer: &str,
+        session_id: String,
+    ) -> Result<Result<(), agent_client_protocol::Error>, agent_client_protocol::Error> {
+        scoped_tcp_session(addr, bearer, move |cx| async move {
+            let loaded = cx
+                .send_request(LoadSessionRequest::new(
+                    SessionId::new(session_id.clone()),
+                    PathBuf::from("/tmp"),
+                ))
+                .block_task()
+                .await
+                .map(|_| ());
+            cx.send_notification(CancelNotification::new(session_id))?;
+            cx.send_request(AkhExtRequest {
+                method: "_akh/health".into(),
+                params: serde_json::json!({ "workspace": "janus" }),
+            })
+            .block_task()
+            .await?;
+            Ok(loaded)
+        })
+        .await
+    }
+
+    /// Phase 53 follow-up (WI 01a0d569-1cf1 item 2): a session belongs to the
+    /// principal that created it. Another principal granted the same akh is
+    /// refused on load, prompt and cancel with `akh::acp::session_not_owned`
+    /// and leaves no trace (recency, active marking, cancel flag); the owner
+    /// and a control principal succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sessions_belong_to_the_principal_that_created_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+        let addr = listener.local_addr().expect("local addr");
+        let me = workspace().with_ingress_auth(shared_akh_principals(dir.path()));
+        let observer = me.clone();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_tcp_loop(me, listener, shutdown_rx).await });
+
+        // Janus opens two sessions on akh `janus`; the first is the older one.
+        let (first, second) = scoped_tcp_session(addr, JANUS_TOKEN, |cx| async move {
+            let mut ids = Vec::new();
+            for _ in 0..2 {
+                let mut meta = Meta::new();
+                meta.insert("akh/workspace".into(), "janus".into());
+                let created = cx
+                    .send_request(NewSessionRequest::new(PathBuf::from("/tmp")).meta(meta))
+                    .block_task()
+                    .await?;
+                ids.push(created.session_id.to_string());
+            }
+            Ok((ids[0].clone(), ids[1].clone()))
+        })
+        .await
+        .expect("janus opens sessions");
+        assert_eq!(
+            observer.session_route_of(&first).map(|r| r.owner),
+            Some(SessionOwner::Principal("t3-janus".into())),
+            "session/new records the creating principal"
+        );
+        // Stand in for an in-flight turn, the way `session/prompt` registers it.
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        observer
+            .session_cancels
+            .lock()
+            .unwrap()
+            .insert(first.clone(), Arc::clone(&flag));
+        let order_before = session_order_snapshot(&observer);
+
+        // janus-bot holds akh `janus` too, but did not create the session.
+        let foreign = load_then_cancel(addr, JANUS_BOT_TOKEN, first.clone())
+            .await
+            .expect("janus-bot initializes")
+            .expect_err("janus-bot must not load a janus session");
+        assert_eq!(
+            error_code(&foreign).as_deref(),
+            Some("akh::acp::session_not_owned")
+        );
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::Relaxed),
+            "a foreign session/cancel must not set the turn's cancel flag"
+        );
+        let target = first.clone();
+        let prompt_refused = scoped_tcp_session(addr, JANUS_BOT_TOKEN, move |cx| async move {
+            cx.send_request(PromptRequest::new(
+                SessionId::new(target),
+                vec![ContentBlock::from("hello")],
+            ))
+            .block_task()
+            .await
+            .map(|_| ())
+        })
+        .await
+        .expect_err("janus-bot must not prompt a janus session");
+        assert_eq!(
+            error_code(&prompt_refused).as_deref(),
+            Some("akh::acp::session_not_owned")
+        );
+        assert_eq!(
+            order_before,
+            session_order_snapshot(&observer),
+            "refused load/prompt must not touch the session's recency"
+        );
+        assert!(observer.session_active_turns.lock().unwrap().is_empty());
+
+        // No existence oracle: an unknown id is refused identically.
+        let unknown = "akh-00000000-0000-4000-8000-000000000000".to_string();
+        let unknown_refusal = load_then_cancel(addr, JANUS_BOT_TOKEN, unknown.clone())
+            .await
+            .expect("janus-bot initializes")
+            .expect_err("unknown id is refused");
+        assert_eq!(unknown_refusal.code, foreign.code);
+        assert_eq!(
+            unknown_refusal.message.replace(&unknown, "<id>"),
+            foreign.message.replace(&first, "<id>")
+        );
+        let redact = |e: &agent_client_protocol::Error, id: &str| {
+            e.data.as_ref().map(|d| d.to_string().replace(id, "<id>"))
+        };
+        assert_eq!(redact(&unknown_refusal, &unknown), redact(&foreign, &first));
+
+        // The owner loads and cancels its own session.
+        load_then_cancel(addr, JANUS_TOKEN, first.clone())
+            .await
+            .expect("janus initializes")
+            .expect("the owner loads its session");
+        assert!(
+            flag.swap(false, std::sync::atomic::Ordering::Relaxed),
+            "the owner's session/cancel sets the flag"
+        );
+
+        // A control principal is a session operator.
+        load_then_cancel(addr, OPERATOR_TOKEN, second.clone())
+            .await
+            .expect("operator initializes")
+            .expect("a control principal may load any session");
+        load_then_cancel(addr, OPERATOR_TOKEN, first.clone())
+            .await
+            .expect("operator initializes")
+            .expect("a control principal may load any session");
+        assert!(
+            flag.load(std::sync::atomic::Ordering::Relaxed),
+            "a control principal's session/cancel sets the flag"
+        );
+        // An operator still learns that an unknown id is unknown.
+        let operator_unknown = load_then_cancel(addr, OPERATOR_TOKEN, unknown)
+            .await
+            .expect("operator initializes")
+            .expect_err("unknown id stays unknown for operators");
+        assert_ne!(
+            error_code(&operator_unknown).as_deref(),
+            Some("akh::acp::session_not_owned")
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// A session without a recorded owner (the `SessionRegistration` default,
+    /// standing in for state that predates ownership) is `legacy`: the legacy
+    /// shared secret, the local socket and control principals may use it; a
+    /// scoped principal without `control` may not.
+    #[test]
+    fn legacy_owned_sessions_are_for_operators_and_the_legacy_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = shared_akh_principals(dir.path());
+        let me = workspace().with_ingress_auth(auth.clone());
+        let id = "akh-legacy-owned";
+        me.track_new_session(
+            id,
+            SessionRegistration {
+                workspace: Some("janus".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            me.session_route_of(id).map(|r| r.owner),
+            Some(SessionOwner::Legacy)
+        );
+        let connect = |access: AcpAccess| {
+            let conn = me.for_connection();
+            *conn.connection_access.lock().unwrap() = Some(access);
+            conn
+        };
+        let ingress = AcpIngressAuth::from(auth);
+        let resolve = |token: &str| ingress.authenticate(token).expect("token resolves");
+
+        let refused = connect(resolve(JANUS_TOKEN))
+            .authorize_session_access(id, "session/load")
+            .expect_err("a scoped principal may not use a legacy session");
+        assert_eq!(refused.code_str(), "akh::acp::session_not_owned");
+        assert_eq!(
+            connect(AcpAccess::SharedSecret)
+                .authorize_session_access(id, "session/load")
+                .unwrap(),
+            SessionUse::Owner
+        );
+        assert!(matches!(
+            connect(resolve(OPERATOR_TOKEN))
+                .authorize_session_access(id, "session/load")
+                .unwrap(),
+            SessionUse::Operator {
+                owner: SessionOwner::Legacy
+            }
+        ));
+        // The Unix socket (no ingress auth) is a local operator.
+        assert!(matches!(
+            workspace().authorize_session_access("akh-missing", "session/load"),
+            Ok(SessionUse::Unknown)
+        ));
+        // Nothing above touched the session's recency or turn gate.
+        assert!(me.session_active_turns.lock().unwrap().is_empty());
+    }
+
+    /// New session ids are `akh-<UUIDv4>` from the OS CSPRNG, not a timestamp.
+    #[test]
+    fn minted_session_ids_are_random_uuids() {
+        let ids: std::collections::HashSet<String> = (0..1000)
+            .map(|_| mint_session_id().expect("OS rng").to_string())
+            .collect();
+        assert_eq!(ids.len(), 1000, "ids must not repeat");
+        for id in &ids {
+            let suffix = id.strip_prefix("akh-").expect("akh- prefix kept");
+            let uuid = uuid::Uuid::parse_str(suffix).expect("suffix is a UUID");
+            assert_eq!(uuid.get_version(), Some(uuid::Version::Random));
+        }
     }
 
     /// Phase 53 review (architect decision): switching an akh's permission
