@@ -28,7 +28,7 @@ Legend for **Status**:
 | `mergiraf_worker.py` | **Not in repo before this pass.** Library (no server, no launchd entry) imported by `janus_escalation.py`; defines the `POLICY` prompt, JSON-schema `TOOLS` (`dispatch_mergiraf`, `mergiraf_status`) and `escalation()` builder for a bounded, typed merge-conflict-resolution job dispatched to an Astra/T3 worker via the same broker. | in: called in-process from `janus_escalation.Broker.submit_merge`; out: a T3 thread prompt + schema-validated job fields (work item, PR, head/base SHAs). | none (imported, not a service) | added | Janus delegation (53e grants) + skill, alongside `janus_escalation.py` |
 | `observer.py` | Polls Anima (rotating 8 projects/min), Grafana and VictoriaMetrics; maintains a deterministic watchdog signal, a durable outbox of `schedule.*`/`anima.*.changed`/`monitoring.changed` events, and (new) `laya.<role>.intervention` events when `event_only` mode is on; serves a read-only `monitoring_snapshot` MCP tool on `127.0.0.1:18436`. | in: Anima MCP, Grafana HTTPS, VictoriaMetrics via `127.0.0.1:18440` tunnel, `config/laya.json`; out: `state/observer.sqlite3` outbox/state, POSTs to akhsessd `127.0.0.1:18431`, board watchdog notices. | `dev.roman-akhs.observer` (LaunchAgent) | drifted → synced (see below) | event production → Rust `akheventd` source; monitoring snapshot → a Vesta tool (both named explicitly in the plan's step-2 list) |
 | `provider_failure.py` | Classifies a provider HTTP/error response into `authentication`/`quota`/`rate_limit`/`unknown` so `observer.py` and `janus_escalation.py` apply the right cooldown (30m/1h/2h/4h, or operator-repair-only for auth). | in: response text/status from a provider call; out: a classification tag consumed by callers. | none (imported library) | in repo | folds into akhomed's provider error taxonomy (explicit step-2 item) |
-| `t3_activity.py` | T3 ACP driver used as the transport for the "autonomous activity" provider instances (`roman-activity-<role>`); also runs as a background `--service` LaunchAgent. | in: T3 CLI invocation or `--service` mode; out: ACP session against akhsessd `127.0.0.1:18431`, reads `secrets/operator.key`. | `dev.roman-akhs.t3-activity` (LaunchAgent) | in repo | obsolete after cutover — once T3 speaks ACP directly to akhomed there is no separate "activity" transport to shim |
+| `t3_activity.py` | T3 ACP driver used as the transport for the "autonomous activity" provider instances (`roman-activity-<role>`); also runs as a background `--service` LaunchAgent. | in: T3 CLI invocation or `--service` mode; out: ACP session against akhsessd `127.0.0.1:18431`, reads `secrets/operator.key`. | `dev.roman-akhs.t3-activity` (LaunchAgent) | **retired 2026-09-25** (ADR 113 / 53g plan PR 1 — see below) | done — once T3 speaks ACP directly to akhomed there is no separate "activity" transport to shim |
 | `t3_entrypoint.py` | T3 ACP driver used as the transport for the three named Roman provider instances (`roman-janus`/`roman-minerva`/`roman-vesta`); dispatches on `sys.argv[0]`'s basename. | in: T3 CLI invocation, `secrets/t3-<role>.key`; out: `akh-acp` subprocess against `ws://127.0.0.1:18431/acp` (akhsessd) today. | n/a (invoked by T3, not launchd) | drifted → synced (see below); **also changed in this pass** — see "t3_entrypoint.py ACP endpoint" below | akhomed ACP once 53d/53f land; this pass adds the seam, doesn't flip the default |
 | `vesta_actions.py` | Grafana MCP passthrough (`grafana__*` tool names) plus the `gitops_publish`/`homelab_write` action tools for Vesta's sandbox; talks to the Grafana MCP tunnel on `127.0.0.1:18441`. | in: MCP `tools/call`; out: Grafana RPC, GitOps sandbox operations. | none (imported by `vesta_ops.py`/`configure_vesta_actions.py`) | in repo | Vesta skill (homelab remediation stays a skill under the akh-native Vesta, not a separate broker) |
 | `vesta_ops.py` | `homelab_inspect` (read-only kubectl get/describe/logs) MCP broker for Vesta, serving on a loopback port; the read-only counterpart to `vesta_actions.py`'s write path. | in: MCP `tools/call`; out: bounded `kubectl` invocations. | `dev.roman-akhs.vesta-ops` (LaunchAgent) | in repo | Vesta skill, same as `vesta_actions.py` |
@@ -100,18 +100,13 @@ Resolved in 53d/53f prep: akhomed's TCP ACP does not read `_meta.akh`, so
 when that file exists `t3_entrypoint.py` execs `akh-acp --akhomed ... --t3-compat`
 without `--workspace-profile`. Deleting the file is the rollback.
 
-## Shell-wrapper "scripts" (`roman-janus`, `roman-minerva`, `roman-vesta`, `roman-activity-*`)
+## Shell-wrapper "scripts" (`roman-janus`, `roman-minerva`, `roman-vesta`)
 
 These are not independently maintained scripts. `configure_t3.py`
-(`shutil.copy2(source / 't3_entrypoint.py', binary)` /
-`.../'t3_activity.py'`) installs one physical copy of `t3_entrypoint.py` per
-role as `bin/roman-<role>` and one copy of `t3_activity.py` per role as
-`bin/roman-activity-<role>` (plus `bin/t3_activity.py` itself for the
-`--service` LaunchAgent); the role is selected at runtime from
-`sys.argv[0]`'s basename. Confirmed live:
+(`shutil.copy2(source / 't3_entrypoint.py', binary)`) installs one physical
+copy of `t3_entrypoint.py` per role as `bin/roman-<role>`; the role is
+selected at runtime from `sys.argv[0]`'s basename. Confirmed live:
 
-- `roman-activity-janus/minerva/vesta` are byte-identical to live
-  `t3_activity.py` (0-line diff) — current.
 - `roman-janus/minerva/vesta` differ from live `t3_entrypoint.py` by exactly
   the same stale "GLM-5.3" vs. "Mistral Large 3" string noted above — they
   were installed before that repo/live edit and `configure_t3.py` has not been
@@ -120,7 +115,15 @@ role as `bin/roman-<role>` and one copy of `t3_activity.py` per role as
   `t3_entrypoint.py`.
 
 No separate files are added to the repo for these; they are covered by keeping
-`t3_entrypoint.py` / `t3_activity.py` current and re-running `configure_t3.py`.
+`t3_entrypoint.py` current and re-running `configure_t3.py`.
+
+**Retired 2026-09-25 (ADR 113 / 53g plan PR 1):** `roman-activity-janus`,
+`roman-activity-minerva` and `roman-activity-vesta` — the byte-identical
+`t3_activity.py` copies installed alongside the three `roman-<role>`
+entrypoints above. `configure_t3.py` no longer renders them, their
+`providerInstances` entries, or `bin/t3_activity.py`/the `t3-activity`
+LaunchAgent plist. See "Mac-side steps for PR 1" below for removing what a
+previous `configure_t3.py` run already installed on the live Mac.
 
 ## Anima runner glue outside the deployment root (inventoried, not copied)
 
@@ -129,20 +132,23 @@ Lives at `~/.config/anima-runner/roman-chat/`, a separate mechanism from
 Not trivially safe to fold into `deploy/roman-mini` in this pass — it has its
 own binary/config lifecycle and no existing renderer here to extend.
 
+**`anima-activity.py` retired 2026-09-25 (D6, ADR 113 / 53g plan PR 1):** it
+lives outside this repo (under `~/.config/anima-runner/roman-chat/`, not
+`deploy/roman-mini`), so there is no repo-side change for it — this pass
+records the retirement decision and the Mac-side step (boot out
+`dev.roman-akhs.anima-activity`) in "Mac-side steps for PR 1" below.
+
 | File | Purpose | Launchd label |
 |---|---|---|
-| `anima-activity.py` | Projects existing Roman automation wakes into Anima as AKH-authored messages (never human prompts); read-only against Akh sessions/tools, with a local outbox for ambiguous deliveries. | `dev.roman-akhs.anima-activity` (LaunchAgent, `gui/<uid>`) |
+| `anima-activity.py` | Projects existing Roman automation wakes into Anima as AKH-authored messages (never human prompts); read-only against Akh sessions/tools, with a local outbox for ambiguous deliveries. | `dev.roman-akhs.anima-activity` (LaunchAgent, `gui/<uid>`) — **retired 2026-09-25** |
 | `roman-chat.py` | Chat-only Anima connector to the existing Mac Roman akhs; `--runner` mode starts the Anima-side runner, `janus`/`minerva`/`vesta` mode `execv`s `akh-acp` against akhsessd exactly like `t3_entrypoint.py`. Starts no provider/cognitive daemon itself. | none directly (invoked by the `anima-runner` binary) |
 | `anima-runner` (binary) | Vendored runner executable (not a script); out of scope for a python-glue sync. | — |
 | `activity.json`, `activity-credential.json`, `activity-token`, `runner-token` | Config + credential files (paths/URLs and a narrow PAT the runner authenticates with); **not inspected for values**, only confirmed to be file-based, not embedded in a script. | — |
 | `state/`, `logs/`, `proto/` | Runtime state, logs, and gRPC proto defs for the runner. | — |
 
-**Follow-up (filed as a to-do, not done in this pass):** decide whether
-`anima-activity.py` becomes part of the same akheventd-source conversion as
-`observer.py` (it is doing an adjacent job — projecting Roman activity into
-Anima) or stays a separate Anima-runner-owned mechanism, and if it moves,
-bring `roman-chat.py`/`anima-activity.py` and a renderer for
-`dev.roman-akhs.anima-activity.plist` into `deploy/roman-mini`.
+**Resolved 2026-09-25 (D6):** `anima-activity.py` is retired with PR 1, not
+folded into the akheventd-source conversion — see the retirement note above.
+`roman-chat.py` (the chat-only Anima connector) is unaffected and stays as is.
 
 ## Launchd plists (names / program / env-var **names** only — no values read)
 
@@ -166,14 +172,14 @@ bring `roman-chat.py`/`anima-activity.py` and a renderer for
 
 | Label | Program | Env var names | Rendered by |
 |---|---|---|---|
-| `anima-activity` | `python3 anima-activity.py --config activity.json` (outside `roman-akhs`) | `PATH` | not part of `deploy/roman-mini` — see Anima runner glue above |
+| `anima-activity` | `python3 anima-activity.py --config activity.json` (outside `roman-akhs`) | `PATH` | not part of `deploy/roman-mini` — **retired 2026-09-25**, see Anima runner glue above |
 | `grafana-tunnel` | `kubectl -n observability port-forward … mcp-grafana 18441:80` | `KUBECONFIG`, `HOME`, `PATH` | `configure_vesta_actions.py` (in repo) |
 | `janus-escalation` | `python3 janus_escalation.py <root>` | `PATH`, `HOME` | `configure_janus_escalation.py` (in repo) |
 | `laya-controller` | `<repo>/experiments/typed-decisions/.venv-comparison/bin/python laya_controller.py <root>` | `TOKENIZERS_PARALLELISM`, `USE_TF`, `HF_HUB_OFFLINE` | **no renderer in the repo** — follow-up. Note: `ProgramArguments[0]` is a venv interpreter path inside this akh-medu checkout's `experiments/` tree, not a system Python — a real dependency worth resolving before this plist is reproducible from a clean clone. |
 | `laya` | `<repo>/experiments/typed-decisions/.venv-comparison/bin/python laya_service.py <root>` | `TOKENIZERS_PARALLELISM`, `USE_TF`, `HF_HUB_OFFLINE` | **no renderer in the repo** — follow-up (same venv-path note as `laya-controller`) |
 | `observer` | `python3 observer.py <root>` | `KUBECONFIG`, `HOME`, `PATH` | `activate.py` (in repo) |
 | `sessions` | `python3 daemon_credentials.py sessions <root>` | `PATH`, `HOME`, `RUST_LOG` | `prepare.py` (in repo) |
-| `t3-activity` | `python3 t3_activity.py --service` | `PATH`, `HOME` | `configure_t3.py` (in repo) |
+| `t3-activity` | `python3 t3_activity.py --service` | `PATH`, `HOME` | **retired 2026-09-25** — `configure_t3.py` no longer renders it |
 | `vesta-ops` | `python3 vesta_ops.py <root>` | `KUBECONFIG`, `HOME`, `PATH` | `configure_vesta.py` (in repo) |
 
 ## Follow-up work items (step 2, filed per the plan's explicit list)
@@ -201,8 +207,13 @@ Each of these needs its own work item before it lands (not done in this pass):
    operator repair and don't expire on a timer, cooldown ladder 30m/1h/2h/4h)
    should become part of the engine's own provider-error handling rather than
    a shared Python import three scripts each read independently.
-5. **`t3_activity.py` obsolete after the cutover** — no separate "activity"
-   provider transport is needed once T3 speaks ACP directly to akhomed.
+5. ~~**`t3_activity.py` obsolete after the cutover** — no separate "activity"
+   provider transport is needed once T3 speaks ACP directly to akhomed.~~
+   **Done 2026-09-25** (ADR 113 / 53g plan PR 1): `t3_activity.py` and
+   `test_t3_activity.py` are deleted, `configure_t3.py` no longer renders the
+   `roman-activity-<role>` providers or the `t3-activity` plist, and
+   `anima-activity.py` (D6) is retired alongside it. See "Mac-side steps for
+   PR 1" below for the operator's live-deployment cleanup.
 6. **Render the five plists with no repo mechanism today**
    (`otlp-tunnel`, `runtime-minerva`, `runtime-vesta`, `laya-controller`,
    `laya`) — either extend `prepare.py`/`activate.py` or add small
@@ -219,3 +230,40 @@ Each of these needs its own work item before it lands (not done in this pass):
    whether that's intentional (shared token good enough for Sokar's current
    scope) or whether Sokar needs its own 1Password reference before 53i's
    `[[mcp.servers]]` wiring goes live.
+
+## Mac-side steps for PR 1 (operator, after merge)
+
+Repo-side, PR 1 deletes `t3_activity.py`/`test_t3_activity.py` and stops
+`configure_t3.py` from rendering the `roman-activity-<role>` providers, the
+`bin/t3_activity.py` copy and the `dev.roman-akhs.t3-activity` plist. Nothing
+in this PR touches the live `~/Library/Application Support/roman-akhs`
+deployment, launchd, or T3 — the operator does the following by hand, after
+merging, on the Mac. None of it needs `sudo`: every LaunchAgent here runs in
+`gui/501`, not as a system LaunchDaemon.
+
+```sh
+# 1. Stop and unregister the t3-activity LaunchAgent, then remove its plist.
+launchctl bootout gui/501/dev.roman-akhs.t3-activity 2>/dev/null
+rm -f ~/Library/LaunchAgents/dev.roman-akhs.t3-activity.plist
+
+# 2. Stop and unregister the anima-activity LaunchAgent (D6; lives outside
+#    roman-akhs, under ~/.config/anima-runner/roman-chat/).
+launchctl bootout gui/501/dev.roman-akhs.anima-activity 2>/dev/null
+rm -f ~/Library/LaunchAgents/dev.roman-akhs.anima-activity.plist
+
+# 3. Remove the physical activity binaries a previous configure_t3.py run
+#    installed (the ROOT below is the roman-akhs deployment root).
+ROOT="$HOME/Library/Application Support/roman-akhs"
+rm -f "$ROOT/bin/t3_activity.py" "$ROOT"/bin/roman-activity-*
+```
+
+4. **In T3**, delete the three `roman-activity-<role>` provider instances
+   (Settings → Providers → remove `roman-activity-janus`,
+   `roman-activity-minerva`, `roman-activity-vesta`). The three named
+   `roman-janus`/`roman-minerva`/`roman-vesta` providers are untouched — they
+   keep working exactly as before, rendered by the same, still-present
+   `t3_entrypoint.py` path in `configure_t3.py`.
+5. Re-running `configure_t3.py ROOT ~/.t3/userdata/settings.json` after these
+   steps is safe and idempotent: it only touches the three named
+   `roman-<role>` provider entries and no longer knows about the
+   `roman-activity-*` ones, so it will not recreate them.

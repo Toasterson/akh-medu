@@ -229,23 +229,14 @@ the exact request hash and retired through the session API; failed evidence is
 retained. The renderer now uses the required `sandboxes` alias and runtime
 callback principal.
 
-### Autonomous activity in T3
+### Autonomous activity in T3 (retired)
 
-`configure_t3.py` also installs three activity ACP providers and a
-`t3-activity` LaunchAgent. Its supported T3 auth CLI issues a short-lived token
-held only in memory; HTTP orchestration creates the **Roman autonomous activity**
-project and one thread per role. Private SQLite records submitted session IDs,
-and deterministic command IDs make retries idempotent. It never edits T3 tables.
-The ACP viewer reads only sessions owned by that role's scoped T3 principal,
-streams reasoning and tool receipt events, and reports terminal outcomes. Watching
-or cancelling a feed does not start, repeat, or cancel the bot's actual job.
-Messages typed into an activity thread are forwarded to that bot as scoped user
-turns. Durable request IDs prevent duplicate admission after response loss. The
-initial acknowledgment confirms delivery, not memory storage; the bot must record
-the correction and its tool receipt provides proof. Watching alone starts no work.
-Use the original role providers for longer direct conversations. Historical attempts and
-errors remain visible. Model credentials and project filesystem access are never
-provided to these viewers.
+`t3_activity.py`, its three `roman-activity-<role>` ACP providers and the
+`t3-activity` LaunchAgent are retired (2026-09-25, ADR 113 / Phase 53g step 2
+PR 1 — see `docs/ai/plans/2026-09-25-phase53g-roman-glue-conversion.md`). Once
+T3 speaks ACP directly to akhomed (the `roman-<role>` providers above) there is
+no separate "activity" transport to shim. See `INVENTORY.md` for the retired
+entry and the Mac-side removal steps.
 
 ### Vesta GitOps sandbox and homelab diagnostics
 
