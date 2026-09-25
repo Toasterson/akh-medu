@@ -1,7 +1,21 @@
 #!/usr/bin/env python3
-"""Durable event-to-scoped-fixer controller; all Anima access is through MCP."""
+"""Durable event-to-scoped-fixer controller; all Anima access is through MCP.
+
+The Laya classifier (formerly `laya_service.py`, a resident HTTP model server
+on 127.0.0.1:18446) is retired as of 2026-09-25 (Phase 53g step-2 plan, PR 2,
+operator decision D1): every one of the 52 complete-input classifications in
+the live decision log ended in `investigate` with near-uniform per-choice
+scores (0.10-0.24 against a uniform 1/6), and every real route to `product` or
+`infrastructure` came from `host_action`'s structural rules below, which match
+Anima's own machine-readable fields (phase, parked_reason, sessions) rather
+than the model's score. `classify()` below reproduces the same result shape
+with no HTTP call and no model load. `CHOICES`, `digest` and `encoded` (used
+to move here from `laya_service`) are the only pieces of that module this
+controller ever needed.
+"""
 import fcntl
 from datetime import datetime, timezone
+import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -11,7 +25,24 @@ import sys
 import threading
 import time
 
-from laya_service import CHOICES, digest, encoded
+SCHEMA_VERSION = 1
+CHOICES = {
+    'product': 'Scope, requirements, acceptance criteria or decomposition need a product owner.',
+    'execution': 'Code, review, publication or workflow bug needs a project manager.',
+    'infrastructure': 'Provider, runner, service, network or toolchain failure needs an operator.',
+    'human': 'An explicit human decision, permission or secret is required.',
+    'wait': 'A known dependency or live owner is making progress; wait for its result.',
+    'investigate': 'Evidence is missing or contradictory; investigate before choosing a fix.',
+}
+
+
+def encoded(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+
+
+def digest(value):
+    return hashlib.sha256(encoded(value).encode()).hexdigest()
+
 
 ROLE = {'product': 'minerva', 'execution': 'janus', 'infrastructure': 'vesta',
         'human': 'janus', 'wait': 'janus', 'investigate': 'janus'}
@@ -155,17 +186,19 @@ class Controller:
         return snapshot
 
     def classify(self, snapshot):
-        from observer import fetch
-        token = (self.root/'secrets/laya.key').read_text().strip()
+        # The Laya model is retired (see module docstring, D1): no HTTP call,
+        # no model load. This keeps the exact result shape `evaluate_one` and
+        # the persisted decision record expect (`choice`, `input_complete`,
+        # `authorizes_mutation`, plus the informational `model_revision`/
+        # `scores`/`chunks` fields), with a new `classifier: retired` marker.
+        # `host_action` below is the real router; it always turns this
+        # `investigate` proposal into its own structural decision.
         sid = digest(snapshot)
-        try:
-            result = fetch('http://127.0.0.1:18446/decide', {'Authorization': 'Bearer '+token, 'Content-Type': 'application/json'},
-                           {'schema_version': 1, 'snapshot_id': sid, 'evidence': snapshot}, timeout=45)
-            if result.get('snapshot_id') != sid or result.get('schema_version') != 1 or result.get('choice') not in CHOICES or result.get('authorizes_mutation') is not False:
-                raise ValueError('invalid or stale inference result')
-            return result
-        except Exception as error:
-            return {'choice': 'investigate', 'error': type(error).__name__, 'snapshot_id': sid, 'authorizes_mutation': False}
+        return {'schema_version': SCHEMA_VERSION, 'snapshot_id': sid,
+                'model_revision': self.config['model_revision'], 'choice': 'investigate',
+                'classifier': 'retired', 'scores': {}, 'chunks': [],
+                'input_complete': True, 'calibrated': False,
+                'authorizes_mutation': False, 'elapsed_ms': 0.0}
 
     def evaluate_one(self):
         row = self.queue.db.execute('select entity,change_json,revision from queue where queued_at<=? order by queued_at limit 1', (time.time(),)).fetchone()
@@ -190,6 +223,10 @@ class Controller:
                 with self.queue.db: self.queue.db.execute('delete from queue where entity=? and revision=?', (entity, revision))
                 return True
             with self.queue.db: self.queue.db.execute('delete from metadata where key=?', ('wait:'+entity,))
+        # `config['model_revision']` (config/laya.json) participates in the
+        # decision id below and is unchanged by the D1 retirement: bumping it
+        # would make every existing decision look stale and re-decide it.
+        # Read it verbatim, exactly as before.
         ident = digest({'entity': entity, 'snapshot_id': sid, 'policy': 1, 'model': self.config['model_revision']})
         prior = self.queue.db.execute('select state from decisions where id=?', (ident,)).fetchone()
         if prior and prior[0] == 'turn_completed':
