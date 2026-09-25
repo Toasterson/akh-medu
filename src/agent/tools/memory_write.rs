@@ -137,7 +137,13 @@ impl Tool for MemoryWriteTool {
 
         // Summary.
         let summary_label = if summary.len() > 80 {
-            format!("summary:{}", &summary[..80])
+            // Cut on a char boundary: a byte index can land inside a multi-byte
+            // character (for example an em dash) and panic the tool call.
+            let mut cut = 80;
+            while !summary.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            format!("summary:{}", &summary[..cut])
         } else {
             format!("summary:{summary}")
         };
@@ -508,6 +514,27 @@ mod tests {
             r.kind,
             DerivationKind::AgentConsolidation { .. } | DerivationKind::OpenClawImport { .. }
         )));
+    }
+
+    /// A summary whose 80th byte falls inside a multi-byte character (the em
+    /// dash spans bytes 79..82 here) must not panic the tool call.
+    #[test]
+    fn long_summary_is_cut_on_a_char_boundary() {
+        let engine = test_engine();
+        let tool = MemoryWriteTool::new(AgentPredicates::init(&engine).unwrap());
+        let summary = format!("{}\u{2014}{}", "a".repeat(79), "b".repeat(40));
+        let out = tool
+            .execute(
+                &engine,
+                ToolInput::new()
+                    .with_value("summary", summary.as_str())
+                    .with_value("source", "test"),
+            )
+            .unwrap();
+        assert!(out.success, "expected success, got: {}", out.result);
+        assert!(engine
+            .resolve_symbol(&format!("summary:{}", "a".repeat(79)))
+            .is_ok());
     }
 
     #[test]
