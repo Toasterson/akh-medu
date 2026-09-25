@@ -565,6 +565,7 @@ pub fn capture_snapshot_at_fence(
     );
     let reactor_metadata = capture_reactor_metadata(engine)?;
     let budget_ledger = capture_budget_ledger(engine);
+    let last_run = capture_last_run_log(engine);
     let extra = serde_json::json!({
         "provenance_snapshot_version": PROVENANCE_SNAPSHOT_VERSION,
         "audience": agent.audience,
@@ -578,6 +579,7 @@ pub fn capture_snapshot_at_fence(
         },
         "autonomy": {
             "budget_ledger": budget_ledger,
+            "last_run": last_run,
         },
     });
 
@@ -978,6 +980,7 @@ pub async fn wake(
         restore_extra(&store, state.extra.as_ref());
         restore_reactor_metadata(&store, state.extra.as_ref())?;
         restore_budget_ledger(&store, state.extra.as_ref());
+        restore_last_run_log(&store, state.extra.as_ref());
     }
 
     // 4. Open the engine over the reconstructed redb (registry + allocator come
@@ -1972,6 +1975,69 @@ fn restore_budget_ledger(store: &TieredStore, extra: Option<&serde_json::Value>)
     };
     if let Err(error) = store.put_meta(BUDGET_LEDGER_KEY, &bytes) {
         tracing::warn!(error = %error, "wake: autonomy budget ledger not restored");
+    }
+}
+
+/// Capture the daemon last-run log (`daemon:last_run:v1`) so a relocated or
+/// re-woken akh resumes its long-period tasks (the daily librarian) instead
+/// of pushing each one a full period out. `None` when the akh has no log yet;
+/// an unreadable log is logged and left out (each long-period task then
+/// waits one period after the wake, never runs early).
+fn capture_last_run_log(engine: &Engine) -> Option<crate::agent::autonomy::LastRunLog> {
+    use crate::agent::autonomy::{LAST_RUN_LOG_KEY, LastRunLog};
+    match engine.store().get_meta(LAST_RUN_LOG_KEY) {
+        Ok(Some(bytes)) => match serde_json::from_slice::<LastRunLog>(&bytes) {
+            Ok(log) => Some(log),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "snapshot: daemon last-run log is corrupt; not captured"
+                );
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "snapshot: daemon last-run log unreadable; not captured"
+            );
+            None
+        }
+    }
+}
+
+/// Restore the daemon last-run log captured by [`capture_last_run_log`]. An
+/// older snapshot without one leaves the store untouched; a malformed one is
+/// logged and skipped rather than failing the wake.
+fn restore_last_run_log(store: &TieredStore, extra: Option<&serde_json::Value>) {
+    use crate::agent::autonomy::{LAST_RUN_LOG_KEY, LastRunLog};
+    let Some(value) = extra
+        .and_then(|extra| extra.get("autonomy"))
+        .and_then(|autonomy| autonomy.get("last_run"))
+        .filter(|value| !value.is_null())
+    else {
+        return;
+    };
+    let log = match serde_json::from_value::<LastRunLog>(value.clone()) {
+        Ok(log) => log,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "wake: daemon last-run log in the snapshot is malformed; long-period tasks wait one period"
+            );
+            return;
+        }
+    };
+    let bytes = match serde_json::to_vec(&log) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(error = %error, "wake: daemon last-run log could not be encoded");
+            return;
+        }
+    };
+    if let Err(error) = store.put_meta(LAST_RUN_LOG_KEY, &bytes) {
+        tracing::warn!(error = %error, "wake: daemon last-run log not restored");
     }
 }
 
@@ -4367,6 +4433,58 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<BudgetLedger>(&bytes).unwrap(),
             ledger
+        );
+    }
+
+    #[test]
+    fn last_run_log_roundtrips_through_snapshot_extra() {
+        use crate::agent::autonomy::{
+            DaemonTask, LAST_RUN_LOG_KEY, LastRun, LastRunCause, LastRunLog, LastRunStore, UnixSecs,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(
+            Engine::new(EngineConfig {
+                data_dir: Some(dir.path().to_path_buf()),
+                ..EngineConfig::default()
+            })
+            .unwrap(),
+        );
+        assert_eq!(capture_last_run_log(&engine), None, "no log yet");
+        let ran = LastRun {
+            at: UnixSecs::from_secs(1_790_251_200),
+            cause: LastRunCause::Ran,
+        };
+        LastRunStore::open(&engine)
+            .unwrap()
+            .record(DaemonTask::Librarian, ran)
+            .unwrap();
+        let captured = capture_last_run_log(&engine).expect("captured");
+        assert_eq!(captured.get(DaemonTask::Librarian), Some(ran));
+
+        let extra = serde_json::json!({ "autonomy": { "last_run": captured } });
+        let restored_dir = tempfile::tempdir().unwrap();
+        let store =
+            TieredStore::with_persistence(restored_dir.path(), "snapshot-last-run").unwrap();
+        restore_last_run_log(&store, Some(&extra));
+        let bytes = store.get_meta(LAST_RUN_LOG_KEY).unwrap().expect("restored");
+        let restored: LastRunLog = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored, captured);
+
+        // Older snapshots (no envelope, or a null log) leave the store alone;
+        // a malformed log is skipped, not fatal.
+        restore_last_run_log(&store, Some(&serde_json::json!({})));
+        restore_last_run_log(
+            &store,
+            Some(&serde_json::json!({ "autonomy": { "last_run": null } })),
+        );
+        restore_last_run_log(
+            &store,
+            Some(&serde_json::json!({ "autonomy": { "last_run": "bogus" } })),
+        );
+        let bytes = store.get_meta(LAST_RUN_LOG_KEY).unwrap().expect("kept");
+        assert_eq!(
+            serde_json::from_slice::<LastRunLog>(&bytes).unwrap(),
+            captured
         );
     }
 

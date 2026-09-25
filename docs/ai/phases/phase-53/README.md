@@ -829,3 +829,33 @@ other's sessions by id, and ids were nanosecond timestamps.
 - Code: `SessionOwner`, `SessionUse`, `AcpAccess::{Local, SharedSecret}` and
   `AcpAccess::authorize_session` in `src/acp/auth.rs`; `SessionRoute` and
   `AkhAcpAgent::authorize_session_access` in `src/acp/mod.rs`.
+
+
+## Follow-up: long-period cadence survives restarts (Anima WI 01a0d569-1cf1, item 1)
+
+The staggered start made every heavy task wait one full period after each
+start, so a task whose period is longer than the gap between restarts (the
+24 h librarian on an akh redeployed daily) never ran.
+
+- **Which tasks.** `DaemonTask::cadence(period)`: a task with
+  `FirstTick::AfterOnePeriod` and a configured period of at least
+  `RESUMABLE_MIN_PERIOD` (15 min) is `Cadence::Resumable`. At the default
+  intervals that is schema_discovery, gap_analysis, continuous_learning,
+  knowledge_extraction, bridge_training, openclaw_sync,
+  knowledge_elicitation, kg_compaction (opt-in), relation_enrichment,
+  librarian, seshat_curation and heka_curation. Shorter tasks, infrastructure
+  and the sleep tick (harvest, memory hygiene, sleep cycle) are unchanged.
+- **Where.** A `LastRunLog` (task → `{at: unix secs, cause}`) in engine meta
+  `daemon:last_run:v1`, in memory when the engine has no durable tier (same
+  fallback as the budget ledger), and in snapshot `extra.autonomy.last_run`
+  so relocation and wake keep it.
+- **First tick.** `clamp(last.at + period - now, RESUME_MIN_DELAY (60 s), period)`:
+  overdue tasks run after 60 s, so a restart storm cannot burst them, and a
+  clock that stepped back never postpones a task past one period.
+- **Never run.** At its first start the daemon writes a `first_seen` mark for
+  every enabled resumable task without one. The task waits one period from
+  that first start (as before), but later restarts no longer push it out.
+  Gated-off tasks get no mark until they are enabled.
+- **Marks.** Written when a tick finishes `Ran` or `Failed`. A failure is
+  marked like a run so a failing heavy task is retried once per period, not
+  after every restart. Skips (gated, over budget, contended) leave the mark.
