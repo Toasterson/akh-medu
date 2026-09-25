@@ -48,7 +48,7 @@ Steps 2–8 are scripted in `cutover.sh`. After step 1 (build from main), run
 prints the backup directory for Rollback. Root is needed only for the system
 LaunchDaemons; every other step runs as the deployment owner.
 
-## Anima token for the core
+## Core secrets as files
 
 The core is a system LaunchDaemon, so it cannot read the login keychain that
 `anima-pat` uses. Write the token once, from a login session, before the
@@ -61,7 +61,12 @@ umask 077
   > "$ROOT/secrets/anima-token"
 ```
 
-Without it the core still starts; only the `anima` MCP server stays unavailable.
+Do the same for `secrets/ollama-key` and `secrets/archive-token`
+(`op-service-account read` of the references in `daemon_credentials.py`). The
+core reads these files first and calls 1Password only as a fallback: a
+KeepAlive crash loop that reads 1Password on every start exhausts the service
+account's rate limit (2026-09-25). A missing credential is logged and the core
+starts without it.
 
 ## 0. Preconditions (stop if any fails)
 

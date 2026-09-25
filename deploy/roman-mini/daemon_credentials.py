@@ -20,6 +20,34 @@ def capture(command):
 
 
 ANIMA_PAT = '/Users/toasty/.local/bin/anima-pat'
+OP = '/Users/toasty/.local/bin/op-service-account'
+
+
+def secret_file(root, name):
+    """An operator-written `secrets/<name>` (0600), stripped, or None."""
+    path = root / 'secrets' / name
+    if path.exists():
+        value = path.read_text().strip().removeprefix('Bearer ').strip()
+        if value:
+            return value
+    return None
+
+
+def core_secret(root, name, reference):
+    """A core credential: the secrets file first, 1Password only as fallback.
+
+    The core is a KeepAlive LaunchDaemon. Reading 1Password on every start let
+    a crash loop exhaust the service account's rate limit on 2026-09-25, so a
+    healthy restart must not call 1Password at all. Returns None when neither
+    source works; the caller starts the core without that credential.
+    """
+    value = secret_file(root, name)
+    if value:
+        return value
+    try:
+        return capture([OP, 'read', reference])
+    except (RuntimeError, OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def anima_token(root):
@@ -30,11 +58,9 @@ def anima_token(root):
     comes first. `anima-pat` stays the fallback for LaunchAgents, which run in
     the login session.
     """
-    path = root / 'secrets' / 'anima-token'
-    if path.exists():
-        token = path.read_text().strip().removeprefix('Bearer ').strip()
-        if token:
-            return token
+    token = secret_file(root, 'anima-token')
+    if token:
+        return token
     try:
         return json.loads(capture([ANIMA_PAT, 'get-auth-header']))['Authorization'].removeprefix('Bearer ')
     except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
@@ -71,8 +97,16 @@ def main():
         # sessions and events roles already read. ROMAN_ARCHIVE_TOKEN also
         # authenticates the Sokar MCP endpoint today (see the `services` map in
         # configure_integrations.py); there is no separate Sokar credential yet.
-        env['ROMAN_OLLAMA_KEY'] = capture([op, 'read', 'op://Homelab/Ollama API Key Akhrtd Command Group/api key'])
-        env['ROMAN_ARCHIVE_TOKEN'] = capture([op, 'read', 'op://Homelab/sia-runtime/SIA_SESHAT__TOKEN'])
+        for var, name, reference in (
+            ('ROMAN_OLLAMA_KEY', 'ollama-key', 'op://Homelab/Ollama API Key Akhrtd Command Group/api key'),
+            ('ROMAN_ARCHIVE_TOKEN', 'archive-token', 'op://Homelab/sia-runtime/SIA_SESHAT__TOKEN'),
+        ):
+            value = core_secret(root, name, reference)
+            if value:
+                env[var] = value
+            else:
+                print(f'Roman core: {var} unavailable (write secrets/{name}, mode 0600); '
+                      'starting without it', file=sys.stderr)
         # Unlike the other credentials, a missing Anima token does not stop the
         # core: the akh starts, and only its `anima` MCP server stays
         # unavailable (53i retries it lazily) until a token is provided.

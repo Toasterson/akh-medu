@@ -42,5 +42,30 @@ class AnimaTokenTests(unittest.TestCase):
             self.assertIsNone(dc.anima_token(self.root))
 
 
+class CoreSecretTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / 'secrets').mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_secrets_file_means_no_1password_call(self):
+        (self.root / 'secrets' / 'ollama-key').write_text('key-from-file\n')
+        with unittest.mock.patch.object(dc, 'capture', side_effect=AssertionError('1Password called')):
+            self.assertEqual(dc.core_secret(self.root, 'ollama-key', 'op://x/y/z'), 'key-from-file')
+
+    def test_falls_back_to_1password(self):
+        with unittest.mock.patch.object(dc, 'capture', return_value='key-from-op') as capture:
+            self.assertEqual(dc.core_secret(self.root, 'ollama-key', 'op://x/y/z'), 'key-from-op')
+        capture.assert_called_once_with([dc.OP, 'read', 'op://x/y/z'])
+
+    def test_rate_limited_1password_yields_none(self):
+        failure = RuntimeError('credential source unavailable: op-service-account')
+        with unittest.mock.patch.object(dc, 'capture', side_effect=failure):
+            self.assertIsNone(dc.core_secret(self.root, 'archive-token', 'op://x/y/z'))
+
+
 if __name__ == '__main__':
     unittest.main()
