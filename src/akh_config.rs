@@ -1109,6 +1109,9 @@ impl AkhConfig {
             "max_triples",
             "seed_packs",
             "shared_partitions",
+            // Wave R3 power-state switch (`WorkspaceConfig::enabled`); always
+            // serialized, so omitting it here warned on every saved config.
+            "enabled",
             // AkhConfig scalars
             "model",
             "reasoning_effort",
@@ -2293,6 +2296,44 @@ mod tests {
         "#;
         let raw: toml::Value = toml::from_str(toml_src).unwrap();
         assert!(AkhConfig::unknown_keys(&raw).is_empty());
+    }
+
+    /// Every key `save()` writes must be a known key: a saved config loads
+    /// with no unknown-key warning (regression: the flattened
+    /// `WorkspaceConfig::enabled` was written top-level but missing from
+    /// the known list, so every load warned "value was dropped: enabled").
+    #[test]
+    fn saved_config_has_no_unknown_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+
+        let plain = AkhConfig::with_name("janus");
+        plain.save(&path).expect("save default akh.toml");
+        let raw = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            raw.lines().any(|line| line.starts_with("enabled")),
+            "save writes the workspace power switch top-level:\n{raw}"
+        );
+        let (loaded, unknown) = AkhConfig::load_checked(&path).expect("load");
+        assert!(
+            unknown.is_empty(),
+            "unknown keys in saved config: {unknown:?}"
+        );
+        assert!(loaded.workspace.enabled);
+
+        let mut disabled = AkhConfig::with_name("vesta");
+        disabled.workspace.enabled = false;
+        disabled.model = Some("glm".into());
+        disabled.context_strategy = Some("virtual".into());
+        disabled.autonomy.enabled = false;
+        disabled.save(&path).expect("save disabled akh.toml");
+        let (loaded, unknown) = AkhConfig::load_checked(&path).expect("load");
+        assert!(
+            unknown.is_empty(),
+            "unknown keys in saved config: {unknown:?}"
+        );
+        assert!(!loaded.workspace.enabled, "power switch round-trips");
+        assert!(!loaded.autonomy.enabled);
     }
 
     #[test]
