@@ -153,6 +153,10 @@ pub enum OpenAiError {
         status: u16,
         model: String,
         body: String,
+        /// `Retry-After` and structured `error.code`/`error.type`, for the
+        /// provider-failure taxonomy (Phase 53g PR 4). Not part of the message.
+        /// Boxed so the error stays small on every `Result` path.
+        detail: Box<super::provider_failure::ProviderErrorDetail>,
     },
 
     /// A 2xx response that did not match the OpenAI response contract.
@@ -179,6 +183,22 @@ pub enum OpenAiError {
         )
     )]
     NoApiKey { url: String },
+}
+
+impl OpenAiError {
+    /// What this failure says about the provider, for the provider gate.
+    /// `None` for failures on the akh's side (no key, an unparseable 2xx).
+    pub fn provider_evidence(&self) -> Option<super::provider_failure::ProviderFailureEvidence> {
+        use super::provider_failure::ProviderFailureEvidence;
+        match self {
+            Self::RequestFailed { status, detail, .. } => Some(ProviderFailureEvidence::Http {
+                status: *status,
+                detail: detail.as_ref().clone(),
+            }),
+            Self::Unreachable { .. } => Some(ProviderFailureEvidence::Transport),
+            Self::ParseFailed { .. } | Self::NoApiKey { .. } => None,
+        }
+    }
 }
 
 /// Result alias for this module.
@@ -687,12 +707,17 @@ impl OpenAiClient {
     /// Narrow a `ureq` transport error into the right [`OpenAiError`].
     fn map_transport(&self, e: ureq::Error, url: &str) -> OpenAiError {
         match e {
-            ureq::Error::Status(status, resp) => OpenAiError::RequestFailed {
-                url: url.to_string(),
-                status,
-                model: self.config.model.clone(),
-                body: resp.into_string().unwrap_or_default(),
-            },
+            ureq::Error::Status(status, resp) => {
+                let (body, detail) =
+                    super::provider_failure::ProviderErrorDetail::from_response(resp);
+                OpenAiError::RequestFailed {
+                    url: url.to_string(),
+                    status,
+                    model: self.config.model.clone(),
+                    body,
+                    detail: Box::new(detail),
+                }
+            }
             other => OpenAiError::Unreachable {
                 url: url.to_string(),
                 reason: other.to_string(),
@@ -845,10 +870,7 @@ impl ChatBackend for OpenAiChatBackend {
     ) -> Result<AssistantTurn, ChatBackendError> {
         self.client
             .chat(&self.prompt(), conversation, tools, request_seq)
-            .map_err(|e| ChatBackendError::TurnFailed {
-                backend: "openai".into(),
-                reason: e.to_string(),
-            })
+            .map_err(|e| ChatBackendError::from_provider("openai", &e, e.provider_evidence()))
     }
 
     fn chat_with_tools_prepared(
@@ -866,10 +888,7 @@ impl ChatBackend for OpenAiChatBackend {
                 tools,
                 request_seq,
             )
-            .map_err(|e| ChatBackendError::TurnFailed {
-                backend: "openai".into(),
-                reason: e.to_string(),
-            })
+            .map_err(|e| ChatBackendError::from_provider("openai", &e, e.provider_evidence()))
     }
 
     fn chat_with_tools_streaming(
@@ -882,10 +901,7 @@ impl ChatBackend for OpenAiChatBackend {
     ) -> Result<AssistantTurn, ChatBackendError> {
         self.client
             .chat_stream(&self.prompt(), conversation, tools, request_seq, on_event)
-            .map_err(|e| ChatBackendError::TurnFailed {
-                backend: "openai".into(),
-                reason: e.to_string(),
-            })
+            .map_err(|e| ChatBackendError::from_provider("openai", &e, e.provider_evidence()))
     }
 
     fn chat_with_tools_streaming_prepared(
@@ -905,10 +921,7 @@ impl ChatBackend for OpenAiChatBackend {
                 request_seq,
                 on_event,
             )
-            .map_err(|e| ChatBackendError::TurnFailed {
-                backend: "openai".into(),
-                reason: e.to_string(),
-            })
+            .map_err(|e| ChatBackendError::from_provider("openai", &e, e.provider_evidence()))
     }
 }
 
@@ -921,6 +934,58 @@ mod tests {
             model: "DeepSeek-V4-Flash-0731".into(),
             ..Default::default()
         }
+    }
+
+    /// Phase 53g PR 4: an HTTP error keeps its message but also captures
+    /// the status, `Retry-After` and structured `error.code` for the provider
+    /// gate, and the backend boundary carries them as `ProviderFailed`.
+    #[test]
+    fn http_errors_capture_provider_evidence() {
+        use crate::agent::provider_failure::{
+            ProviderErrorDetail, ProviderFailureEvidence, RetryAfter,
+        };
+        let body = r#"{"error":{"message":"You exceeded your current quota","type":"insufficient_quota","code":"insufficient_quota"}}"#;
+        let raw = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response: ureq::Response = raw.parse().unwrap();
+        let client = OpenAiClient::new(cfg());
+        let error = client.map_transport(ureq::Error::Status(429, response), "http://h/v1");
+        assert_eq!(
+            error.to_string(),
+            "OpenAI-compatible request to http://h/v1 failed with HTTP 429",
+            "the message is unchanged"
+        );
+        let expected = ProviderFailureEvidence::Http {
+            status: 429,
+            detail: ProviderErrorDetail {
+                retry_after: Some(RetryAfter::Delay(std::time::Duration::from_secs(30))),
+                error_code: Some("insufficient_quota".into()),
+                error_type: Some("insufficient_quota".into()),
+            },
+        };
+        assert_eq!(error.provider_evidence(), Some(expected.clone()));
+
+        let narrowed = ChatBackendError::from_provider("openai", &error, error.provider_evidence());
+        assert_eq!(narrowed.provider_evidence(), Some(&expected));
+        assert_eq!(
+            narrowed.to_string(),
+            format!("chat backend \"openai\" turn failed: {error}")
+        );
+        // Failures on the akh's side are not provider evidence.
+        assert_eq!(
+            OpenAiError::NoApiKey { url: "u".into() }.provider_evidence(),
+            None
+        );
+        assert_eq!(
+            OpenAiError::Unreachable {
+                url: "u".into(),
+                reason: "connection refused".into()
+            }
+            .provider_evidence(),
+            Some(ProviderFailureEvidence::Transport)
+        );
     }
 
     #[test]

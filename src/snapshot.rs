@@ -566,6 +566,7 @@ pub fn capture_snapshot_at_fence(
     let reactor_metadata = capture_reactor_metadata(engine)?;
     let budget_ledger = capture_budget_ledger(engine);
     let last_run = capture_last_run_log(engine);
+    let provider_gate = capture_provider_gate(engine);
     let extra = serde_json::json!({
         "provenance_snapshot_version": PROVENANCE_SNAPSHOT_VERSION,
         "audience": agent.audience,
@@ -580,6 +581,9 @@ pub fn capture_snapshot_at_fence(
         "autonomy": {
             "budget_ledger": budget_ledger,
             "last_run": last_run,
+        },
+        "provider": {
+            "gate": provider_gate,
         },
     });
 
@@ -981,6 +985,7 @@ pub async fn wake(
         restore_reactor_metadata(&store, state.extra.as_ref())?;
         restore_budget_ledger(&store, state.extra.as_ref());
         restore_last_run_log(&store, state.extra.as_ref());
+        restore_provider_gate(&store, state.extra.as_ref());
     }
 
     // 4. Open the engine over the reconstructed redb (registry + allocator come
@@ -2038,6 +2043,60 @@ fn restore_last_run_log(store: &TieredStore, extra: Option<&serde_json::Value>) 
     };
     if let Err(error) = store.put_meta(LAST_RUN_LOG_KEY, &bytes) {
         tracing::warn!(error = %error, "wake: daemon last-run log not restored");
+    }
+}
+
+/// Capture the provider gate (`provider:gate:v1`, Phase 53g PR 4) so a
+/// relocated or re-woken akh keeps backing off a rate-limited, exhausted or
+/// credential-rejecting provider. `None` when the akh has no gate record; an
+/// unreadable one is logged and left out (the gate then starts open, which
+/// costs at most one failed model call per occurrence).
+fn capture_provider_gate(
+    engine: &Engine,
+) -> Option<crate::agent::provider_failure::ProviderGateState> {
+    match crate::agent::provider_failure::load_persisted(engine) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "snapshot: provider gate unreadable or corrupt; not captured"
+            );
+            None
+        }
+    }
+}
+
+/// Restore the provider gate captured by [`capture_provider_gate`]. An older
+/// snapshot without one leaves the store untouched; a malformed one is
+/// logged and skipped rather than failing the wake.
+fn restore_provider_gate(store: &TieredStore, extra: Option<&serde_json::Value>) {
+    use crate::agent::provider_failure::{PROVIDER_GATE_KEY, ProviderGateState};
+    let Some(value) = extra
+        .and_then(|extra| extra.get("provider"))
+        .and_then(|provider| provider.get("gate"))
+        .filter(|value| !value.is_null())
+    else {
+        return;
+    };
+    let state = match serde_json::from_value::<ProviderGateState>(value.clone()) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "wake: provider gate in the snapshot is malformed; the gate starts open"
+            );
+            return;
+        }
+    };
+    let bytes = match serde_json::to_vec(&state) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(error = %error, "wake: provider gate could not be encoded");
+            return;
+        }
+    };
+    if let Err(error) = store.put_meta(PROVIDER_GATE_KEY, &bytes) {
+        tracing::warn!(error = %error, "wake: provider gate not restored");
     }
 }
 
@@ -4438,6 +4497,68 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<BudgetLedger>(&bytes).unwrap(),
             ledger
+        );
+    }
+
+    #[test]
+    fn provider_gate_roundtrips_through_snapshot_extra() {
+        use crate::agent::autonomy::UnixSecs;
+        use crate::agent::provider_failure::{
+            CooldownLadder, CoolingCause, PROVIDER_GATE_KEY, ProviderFailureClass, ProviderGate,
+            ProviderGateState,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(
+            Engine::new(EngineConfig {
+                data_dir: Some(dir.path().to_path_buf()),
+                ..EngineConfig::default()
+            })
+            .unwrap(),
+        );
+        assert_eq!(capture_provider_gate(&engine), None, "no gate yet");
+        let now = UnixSecs::from_secs(1_790_251_200);
+        let gate = ProviderGate::open(&engine, CooldownLadder::default()).unwrap();
+        gate.record_failure(ProviderFailureClass::Quota, now)
+            .unwrap();
+        let captured = capture_provider_gate(&engine).expect("captured");
+        assert!(matches!(
+            captured,
+            ProviderGateState::Cooling {
+                cause: CoolingCause::Quota,
+                step: 0,
+                ..
+            }
+        ));
+
+        let extra = serde_json::json!({ "provider": { "gate": captured } });
+        let restored_dir = tempfile::tempdir().unwrap();
+        let store =
+            TieredStore::with_persistence(restored_dir.path(), "snapshot-provider-gate").unwrap();
+        restore_provider_gate(&store, Some(&extra));
+        let bytes = store
+            .get_meta(PROVIDER_GATE_KEY)
+            .unwrap()
+            .expect("restored");
+        assert_eq!(
+            serde_json::from_slice::<ProviderGateState>(&bytes).unwrap(),
+            captured
+        );
+
+        // Older snapshots (no envelope, or a null gate) leave the store alone;
+        // a malformed gate is skipped, not fatal.
+        restore_provider_gate(&store, Some(&serde_json::json!({})));
+        restore_provider_gate(
+            &store,
+            Some(&serde_json::json!({ "provider": { "gate": null } })),
+        );
+        restore_provider_gate(
+            &store,
+            Some(&serde_json::json!({ "provider": { "gate": "bogus" } })),
+        );
+        let bytes = store.get_meta(PROVIDER_GATE_KEY).unwrap().expect("kept");
+        assert_eq!(
+            serde_json::from_slice::<ProviderGateState>(&bytes).unwrap(),
+            captured
         );
     }
 

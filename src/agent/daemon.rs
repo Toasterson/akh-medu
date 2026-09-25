@@ -380,6 +380,15 @@ pub struct AgentDaemon {
     exec: ExecPlacement,
     /// Daily LLM budget for this akh (Phase 53b).
     governor: AutonomyGovernor,
+    /// `[provider]` settings: the structured error-code lexicon the gate
+    /// classifies with (Phase 53g PR 4).
+    provider: super::provider_failure::ProviderConfig,
+    /// This akh's provider gate: autonomous model turns wait while the
+    /// provider is rate limited, out of quota or rejecting the credential.
+    provider_gate: super::provider_failure::ProviderGate,
+    /// Whether the authentication-blocked diagnostic was already logged for
+    /// the current blocked episode.
+    provider_auth_warned: AtomicBool,
     /// Last-run marks of the long-period tasks, so their cadence survives
     /// restarts (see [`DaemonTask::cadence`]).
     last_runs: LastRunStore,
@@ -446,11 +455,18 @@ impl AgentDaemon {
         let engine = Arc::clone(&agent.read().unwrap_or_else(|e| e.into_inner()).engine);
         let governor = AutonomyGovernor::open_or_reset(&engine, AutonomyBudget::default());
         let last_runs = LastRunStore::open_or_reset(&engine);
+        let provider_gate = super::provider_failure::ProviderGate::open_or_reset(
+            &engine,
+            super::provider_failure::CooldownLadder::default(),
+        );
         Self {
             agent,
             config,
             exec: ExecPlacement::InProcess,
             governor,
+            provider: super::provider_failure::ProviderConfig::default(),
+            provider_gate,
+            provider_auth_warned: AtomicBool::new(false),
             last_runs,
             engine,
             workspace: "unnamed".to_owned(),
@@ -538,6 +554,20 @@ impl AgentDaemon {
         self.governor.set_budget(autonomy.budget);
         self.autonomy = autonomy;
         self
+    }
+
+    /// Set the per-akh `[provider]` settings (cooldown ladder and error-code
+    /// lexicon). A persisted gate state is kept.
+    pub fn with_provider(mut self, provider: super::provider_failure::ProviderConfig) -> Self {
+        self.provider_gate
+            .set_ladder(provider.cooldown_ladder_secs.clone());
+        self.provider = provider;
+        self
+    }
+
+    /// This akh's provider gate.
+    pub fn provider_gate(&self) -> &super::provider_failure::ProviderGate {
+        &self.provider_gate
     }
 
     /// Set the per-akh `[memory]` settings (hygiene batch bound).
@@ -2347,6 +2377,9 @@ impl AgentDaemon {
             // through the same path as lock contention: the claim survives
             // and no retry is consumed.
             let occurrence_scope = UsageScope::open();
+            // Phase 53g PR 4: the last provider result of this occurrence's
+            // model calls, for the provider gate.
+            let provider_scope = super::provider_failure::ProviderObservationScope::open();
             let mut ticket: Option<BudgetTicket> = None;
             // Whether this attempt got a response from the model. Only then
             // is it charged as a turn and fed to the ADR 105 trip-wire;
@@ -2413,7 +2446,7 @@ impl AgentDaemon {
                         {
                             return Ok((cached, true));
                         }
-                        ticket = Some(admit_model_turn(&self.governor)?);
+                        ticket = Some(self.admit_model_turn()?);
                         let reply =
                             super::board_reactor::run_tool_free_turn(&guard, agent_id, prompt)
                                 .map_err(|failure| {
@@ -2432,7 +2465,7 @@ impl AgentDaemon {
                         ReactorStore::new(&engine).cache_llm_result(&claim.run_id, &summary)?;
                         return Ok((summary, true));
                     }
-                    ticket = Some(admit_model_turn(&self.governor)?);
+                    ticket = Some(self.admit_model_turn()?);
                     let turn = guard.run_agentic_turn_with_conversation_state(
                         &engine,
                         agent_id,
@@ -2510,7 +2543,7 @@ impl AgentDaemon {
                                       DJEHUTY_BOARD_TOKEN"
                                 .into(),
                         })?;
-                    ticket = Some(admit_model_turn(&self.governor)?);
+                    ticket = Some(self.admit_model_turn()?);
                     match post_board_reply(
                         &guard,
                         &super::djehuty::DjehutyClient::new(identity.config),
@@ -2566,6 +2599,7 @@ impl AgentDaemon {
                 }
             };
 
+            let provider_observation = provider_scope.finish();
             let mut usage = occurrence_scope.finish();
             if let Some(ticket) = ticket {
                 // A model turn that got a response is one turn even when its
@@ -2584,7 +2618,25 @@ impl AgentDaemon {
                     self.defer_claim_for_budget(&engine, &predicates, &claim, &exhausted);
                     continue;
                 }
+                // The provider gate is closed: no model call was made, nothing
+                // is charged, no retry is consumed and the trip-wire is not
+                // touched.
+                Err(OccurrenceStop::ProviderGated(closed)) => {
+                    self.defer_claim_for_provider(&engine, &predicates, &claim, closed, None);
+                    continue;
+                }
             };
+
+            // A provider failure that closes the gate defers the occurrence
+            // the same way: it is the provider's outcome, not the model's, so
+            // it neither consumes a retry nor feeds the trip-wire.
+            if let Some((closed, class)) =
+                self.settle_provider_gate(provider_observation, now_secs())
+                && result.is_err()
+            {
+                self.defer_claim_for_provider(&engine, &predicates, &claim, closed, Some(class));
+                continue;
+            }
 
             let lock_contention = matches!(
                 &result,
@@ -2835,6 +2887,172 @@ impl AgentDaemon {
             &["reactor_run", "deferred", "budget", schedule_tag.as_str()],
         ) {
             tracing::warn!(error = %error, run_id = %claim.run_id, "daemon: failed to record reactor budget deferral episode");
+        }
+    }
+
+    /// Admit one reactor model turn: the provider gate first (a closed gate
+    /// makes no model call, so it must not take a budget ticket), then the
+    /// daily budget.
+    fn admit_model_turn(&self) -> Result<BudgetTicket, OccurrenceStop> {
+        let now = super::autonomy::UnixSecs::now();
+        if let Some(closed) = self.provider_gate.closed(now) {
+            return Err(OccurrenceStop::ProviderGated(closed));
+        }
+        self.provider_auth_warned.store(false, Ordering::Relaxed);
+        match self.governor.admit(DaemonTask::Reactor) {
+            Admission::Admitted(ticket) => Ok(ticket),
+            Admission::Exhausted(exhausted) => Err(OccurrenceStop::BudgetExhausted(exhausted)),
+        }
+    }
+
+    /// Feed this occurrence's last provider result to the gate. A response
+    /// reopens it and restarts the ladder; a failure that closes it returns
+    /// the closed gate and the failure's class. Persistence failures are
+    /// logged: the in-memory gate still applies until the daemon restarts.
+    fn settle_provider_gate(
+        &self,
+        observation: Option<super::provider_failure::ProviderObservation>,
+        now: u64,
+    ) -> Option<(
+        super::provider_failure::GateClosed,
+        super::provider_failure::ProviderFailureClass,
+    )> {
+        use super::provider_failure::{ProviderGateState, ProviderObservation, classify};
+        let now = super::autonomy::UnixSecs::from_secs(now);
+        match observation? {
+            ProviderObservation::Responded => {
+                match self.provider_gate.record_success() {
+                    Ok(previous) if previous != ProviderGateState::Open => tracing::info!(
+                        target: "akh::provider",
+                        workspace = %self.workspace,
+                        previous = ?previous,
+                        "provider gate reopened: the model responded"
+                    ),
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(
+                        target: "akh::provider",
+                        workspace = %self.workspace,
+                        error = ?miette::Report::new(error),
+                        "provider gate reopened in memory only"
+                    ),
+                }
+                None
+            }
+            ProviderObservation::Failed(evidence) => {
+                let class = classify(&evidence, &self.provider.lexicon, now);
+                if !class.closes_gate() {
+                    tracing::debug!(
+                        target: "akh::provider",
+                        workspace = %self.workspace,
+                        class = class.label(),
+                        "provider failure does not close the gate; the reactor's retry policy applies"
+                    );
+                    return None;
+                }
+                if let Err(error) = self.provider_gate.record_failure(class, now) {
+                    tracing::warn!(
+                        target: "akh::provider",
+                        workspace = %self.workspace,
+                        error = ?miette::Report::new(error),
+                        "provider gate closed in memory only; a restart forgets it"
+                    );
+                }
+                self.provider_gate.closed(now).map(|closed| (closed, class))
+            }
+        }
+    }
+
+    /// Defer a model-turn occurrence while the provider gate is closed,
+    /// through the reactor's contention-deferral path: the occurrence
+    /// survives, keeps its retry budget and becomes due when the gate
+    /// reopens (a cooling gate) or at the next recheck (an
+    /// authentication-blocked gate). `failure` is the class that just closed
+    /// the gate, `None` when the gate was already closed.
+    fn defer_claim_for_provider(
+        &self,
+        engine: &Engine,
+        predicates: &super::agent::AgentPredicates,
+        claim: &super::reactor::ReactorClaim,
+        closed: super::provider_failure::GateClosed,
+        failure: Option<super::provider_failure::ProviderFailureClass>,
+    ) {
+        use super::memory::index_system_episode;
+        use super::provider_failure::{AuthBlockedNotice, GateClosed};
+        use super::reactor::ReactorStore;
+
+        let now = now_secs();
+        let delay = closed
+            .recheck_after(super::autonomy::UnixSecs::from_secs(now))
+            .as_secs();
+        if let Err(error) = ReactorStore::new(engine).defer_claim(claim, now, delay) {
+            tracing::warn!(
+                target: "akh::provider",
+                workspace = %self.workspace,
+                run_id = %claim.run_id,
+                error = %error,
+                "reactor occurrence held by the provider gate but could not be deferred; its lease expiry retries it"
+            );
+            return;
+        }
+        let failure_label = failure.map(|class| class.label());
+        match closed {
+            GateClosed::AuthBlocked { since } => {
+                if self.provider_auth_warned.swap(true, Ordering::Relaxed) {
+                    tracing::debug!(
+                        target: "akh::provider",
+                        workspace = %self.workspace,
+                        schedule = %claim.schedule.name,
+                        run_id = %claim.run_id,
+                        retry_at = now.saturating_add(delay),
+                        "reactor model turn deferred: provider gate still authentication-blocked"
+                    );
+                } else {
+                    tracing::error!(
+                        target: "akh::provider",
+                        workspace = %self.workspace,
+                        schedule = %claim.schedule.name,
+                        run_id = %claim.run_id,
+                        since = since.as_secs(),
+                        failure = failure_label,
+                        diagnostic = ?miette::Report::new(AuthBlockedNotice { since }),
+                        "reactor model turns paused: the provider rejected this akh's credential \
+                         (logged once per blocked episode)"
+                    );
+                }
+            }
+            GateClosed::Cooling { until, step, .. } => tracing::info!(
+                target: "akh::provider",
+                workspace = %self.workspace,
+                task = DaemonTask::Reactor.as_str(),
+                schedule = %claim.schedule.name,
+                run_id = %claim.run_id,
+                failure = failure_label,
+                ladder_step = step + 1,
+                retry_at = until.as_secs(),
+                "reactor model turn deferred: {closed}"
+            ),
+        }
+        let schedule_tag = format!("reactor_schedule_{}", claim.schedule.id);
+        let reopens = match closed {
+            GateClosed::Cooling { until, .. } => format!("until-{}", until.as_secs()),
+            GateClosed::AuthBlocked { since } => format!("auth-since-{}", since.as_secs()),
+        };
+        let key = format!(
+            "reactor:{}:attempt:{}:provider-deferred:{reopens}",
+            claim.run_id, claim.attempt
+        );
+        let summary = format!(
+            "reactor schedule {} run {} deferred by the {closed}",
+            claim.schedule.name, claim.run_id
+        );
+        if let Err(error) = index_system_episode(
+            engine,
+            predicates,
+            &key,
+            &summary,
+            &["reactor_run", "deferred", "provider", schedule_tag.as_str()],
+        ) {
+            tracing::warn!(error = %error, run_id = %claim.run_id, "daemon: failed to record reactor provider deferral episode");
         }
     }
 
@@ -3581,19 +3799,14 @@ enum OccurrenceStop {
     /// The daily budget refused the model turn; the occurrence is deferred
     /// to the reset.
     BudgetExhausted(BudgetExhausted),
+    /// The provider gate is closed; the occurrence is deferred until it
+    /// reopens (Phase 53g PR 4).
+    ProviderGated(super::provider_failure::GateClosed),
 }
 
 impl From<super::error::AgentError> for OccurrenceStop {
     fn from(error: super::error::AgentError) -> Self {
         OccurrenceStop::Failed(error)
-    }
-}
-
-/// Admit one reactor model turn against the daily budget.
-fn admit_model_turn(governor: &AutonomyGovernor) -> Result<BudgetTicket, OccurrenceStop> {
-    match governor.admit(DaemonTask::Reactor) {
-        Admission::Admitted(ticket) => Ok(ticket),
-        Admission::Exhausted(exhausted) => Err(OccurrenceStop::BudgetExhausted(exhausted)),
     }
 }
 
@@ -4184,6 +4397,280 @@ mod tests {
                 .no_progress_streak,
             1
         );
+    }
+
+    // ── Phase 53g PR 4: provider-failure gate ──
+
+    /// A backend whose provider answers every request with `status` (and an
+    /// optional `Retry-After`), or succeeds once `healthy` is set.
+    struct ProviderFailingBackend {
+        status: u16,
+        retry_after: Option<&'static str>,
+        body: &'static str,
+        healthy: AtomicBool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ProviderFailingBackend {
+        fn new(status: u16, retry_after: Option<&'static str>) -> Self {
+            Self {
+                status,
+                retry_after,
+                // English prose that must not influence the class.
+                body: r#"{"error":{"message":"usage limit reached, invalid api key"}}"#,
+                healthy: AtomicBool::new(false),
+                calls: Default::default(),
+            }
+        }
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for ProviderFailingBackend {
+        fn label(&self) -> &str {
+            "provider-failing"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            _conversation: &[serde_json::Value],
+            _tools: &[serde_json::Value],
+            request_seq: usize,
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            use crate::agent::llm_metrics::{LlmRequestMetrics, RequestOutcome};
+            use crate::agent::provider_failure::{ProviderErrorDetail, ProviderFailureEvidence};
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.healthy.load(Ordering::SeqCst) {
+                let mut metrics = LlmRequestMetrics::new(request_seq);
+                metrics.set_tokens(10, 5);
+                metrics.log("provider-failing", RequestOutcome::Completed);
+                return Ok(crate::agent::ollama::AssistantTurn {
+                    content: "done".into(),
+                    ..Default::default()
+                });
+            }
+            // What a real backend does on an HTTP error: no response metered.
+            LlmRequestMetrics::new(request_seq).log("provider-failing", RequestOutcome::NoResponse);
+            Err(
+                crate::agent::chat_backend::ChatBackendError::ProviderFailed {
+                    backend: "provider-failing".into(),
+                    reason: format!("HTTP {}", self.status),
+                    evidence: ProviderFailureEvidence::Http {
+                        status: self.status,
+                        detail: ProviderErrorDetail::from_parts(self.retry_after, self.body),
+                    },
+                },
+            )
+        }
+    }
+
+    fn tool_turn_schedule(id: &str) -> crate::agent::reactor::ReactorSchedule {
+        use crate::agent::reactor::{ReactorAction, ReactorSchedule, ScheduleRule};
+        ReactorSchedule::new(
+            id,
+            id,
+            ScheduleRule::Once { at: 0 },
+            ReactorAction::LlmTurn {
+                prompt: "Check the queue.".into(),
+                agent_id: Some("test-akh".into()),
+                allow_tools: true,
+                require_mutation: false,
+                // ADR 105: a tool-enabled schedule needs an exit condition.
+                exit_condition: "the queue was checked once".into(),
+                report_thread: None,
+            },
+            0,
+        )
+        .unwrap()
+    }
+
+    fn schedule_state(
+        shared: &Arc<RwLock<Agent>>,
+        id: &str,
+    ) -> crate::agent::reactor::ReactorState {
+        let agent = shared.read().unwrap();
+        crate::agent::reactor::ReactorStore::new(&agent.engine)
+            .get(id)
+            .unwrap()
+            .state
+    }
+
+    /// Let a deferred occurrence become due again without waiting.
+    fn make_due(shared: &Arc<RwLock<Agent>>, id: &str) {
+        let agent = shared.read().unwrap();
+        let store = crate::agent::reactor::ReactorStore::new(&agent.engine);
+        let mut schedule = store.get(id).unwrap();
+        schedule.state.retry_at = Some(0);
+        store.put(&schedule).unwrap();
+    }
+
+    /// A 429 with `Retry-After` closes the gate for the longer of the header
+    /// and the first ladder step. The occurrence is deferred (not failed, no
+    /// retry consumed), nothing is charged and the trip-wire is untouched.
+    /// While the gate is closed the next due occurrence makes no model call.
+    #[test]
+    fn rate_limited_provider_defers_the_turn_without_charge_or_trip_wire() {
+        use crate::agent::provider_failure::{CoolingCause, GateClosed};
+        let shared = test_shared_agent();
+        let backend = Arc::new(ProviderFailingBackend::new(429, Some("7200")));
+        {
+            let mut agent = shared.write().unwrap();
+            agent.set_chat_backend(backend.clone());
+            crate::agent::reactor::ReactorStore::new(&agent.engine)
+                .put(&tool_turn_schedule("rate-limited"))
+                .unwrap();
+        }
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        let before = now_secs();
+        let report = daemon.run_task(DaemonTask::Reactor, |d| d.run_reactor_evaluation());
+        assert_eq!(report.outcome, TaskOutcome::Ran);
+        assert!(
+            backend.calls.load(Ordering::SeqCst) >= 1,
+            "the model was called"
+        );
+
+        let closed = daemon
+            .provider_gate()
+            .closed(super::super::autonomy::UnixSecs::from_secs(before))
+            .expect("the gate closed");
+        let GateClosed::Cooling { until, cause, step } = closed else {
+            panic!("expected a cooling gate, got {closed:?}");
+        };
+        assert_eq!((cause, step), (CoolingCause::RateLimited, 0));
+        assert!(
+            until.as_secs() >= before + 7_200,
+            "Retry-After 7200 beats the 1800 s ladder step"
+        );
+
+        let state = schedule_state(&shared, "rate-limited");
+        assert!(!state.completed, "the occurrence survives");
+        assert_eq!(state.attempt, 0, "no retry budget consumed");
+        assert!(
+            state.retry_at.is_some_and(|at| at >= before + 7_200),
+            "deferred until the gate reopens"
+        );
+        assert_eq!(state.no_progress_streak, 0, "not a model outcome");
+        assert!(state.last_no_progress.is_none());
+        let ledger = daemon.governor().ledger();
+        assert_eq!((ledger.turns_used, ledger.tokens_used), (0, 0));
+
+        // Due again while the gate is still closed: no model call at all.
+        let calls = backend.calls.load(Ordering::SeqCst);
+        make_due(&shared, "rate-limited");
+        let _ = daemon.run_task(DaemonTask::Reactor, |d| d.run_reactor_evaluation());
+        assert_eq!(backend.calls.load(Ordering::SeqCst), calls, "gated");
+        let state = schedule_state(&shared, "rate-limited");
+        assert_eq!(state.attempt, 0);
+        assert_eq!(state.no_progress_streak, 0);
+        assert!(state.retry_at.is_some_and(|at| at >= before + 7_200));
+        assert_eq!(daemon.governor().ledger().turns_used, 0);
+    }
+
+    /// A 401 blocks the gate until a turn succeeds; time alone never reopens
+    /// it. An operator reset (as `_akh/provider/gate/reset` does) lets the
+    /// next occurrence run, and its success leaves the gate open.
+    #[test]
+    fn authentication_failure_blocks_until_a_reset_and_success_reopens() {
+        use crate::agent::provider_failure::{
+            AUTH_BLOCKED_RECHECK, GateClosed, ProviderGateState, reset_persisted,
+        };
+        let shared = test_shared_agent();
+        let backend = Arc::new(ProviderFailingBackend::new(401, None));
+        shared.write().unwrap().set_chat_backend(backend.clone());
+        woken_event_turn(&shared, "auth-turn");
+
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default())
+            .with_workspace("auth-test");
+        let before = now_secs();
+        let _ = daemon.run_task(DaemonTask::Reactor, |d| d.run_reactor_evaluation());
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        let far_future = super::super::autonomy::UnixSecs::from_secs(before + 86_400 * 30);
+        assert!(
+            matches!(
+                daemon.provider_gate().closed(far_future),
+                Some(GateClosed::AuthBlocked { .. })
+            ),
+            "authentication failures wait for repair, not for time"
+        );
+        assert!(
+            daemon.provider_auth_warned.load(Ordering::Relaxed),
+            "logged once"
+        );
+        let state = schedule_state(&shared, "auth-turn");
+        assert_eq!(state.attempt, 0);
+        assert_eq!(state.no_progress_streak, 0);
+        let retry_at = state.retry_at.expect("deferred");
+        assert!(retry_at >= before + AUTH_BLOCKED_RECHECK.as_secs());
+
+        // The credential is repaired and the operator resets the gate.
+        backend.healthy.store(true, Ordering::SeqCst);
+        {
+            let agent = shared.read().unwrap();
+            assert!(matches!(
+                reset_persisted(&agent.engine).unwrap(),
+                ProviderGateState::AuthBlocked { .. }
+            ));
+        }
+        make_due(&shared, "auth-turn");
+        let _ = daemon.run_task(DaemonTask::Reactor, |d| d.run_reactor_evaluation());
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2, "the turn ran");
+        assert_eq!(daemon.provider_gate().state(), ProviderGateState::Open);
+        assert!(!daemon.provider_auth_warned.load(Ordering::Relaxed));
+        assert_eq!(daemon.governor().ledger().turns_used, 1);
+    }
+
+    /// A model response restarts the ladder: an expired cooling gate at a
+    /// high step goes back to open, so the next failure cools for step 0.
+    #[test]
+    fn a_successful_turn_resets_the_provider_ladder() {
+        use crate::agent::provider_failure::{ProviderFailureClass, ProviderGateState};
+        let shared = test_shared_agent();
+        let backend = Arc::new(ProviderFailingBackend::new(429, None));
+        backend.healthy.store(true, Ordering::SeqCst);
+        shared.write().unwrap().set_chat_backend(backend.clone());
+        woken_event_turn(&shared, "reset-turn");
+
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        // Three earlier failures, all expired by now.
+        let long_ago = super::super::autonomy::UnixSecs::from_secs(1_000);
+        for _ in 0..3 {
+            daemon
+                .provider_gate()
+                .record_failure(ProviderFailureClass::Quota, long_ago)
+                .unwrap();
+        }
+        assert!(matches!(
+            daemon.provider_gate().state(),
+            ProviderGateState::Cooling { step: 2, .. }
+        ));
+        let _ = daemon.run_task(DaemonTask::Reactor, |d| d.run_reactor_evaluation());
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(daemon.provider_gate().state(), ProviderGateState::Open);
+        assert!(
+            schedule_state(&shared, "reset-turn")
+                .last_success_at
+                .is_some(),
+            "the occurrence completed"
+        );
+    }
+
+    /// Transient failures (5xx) do not close the gate: the reactor's bounded
+    /// retry applies as before.
+    #[test]
+    fn transient_provider_failures_leave_the_gate_open() {
+        use crate::agent::provider_failure::ProviderGateState;
+        let shared = test_shared_agent();
+        let backend = Arc::new(ProviderFailingBackend::new(503, Some("60")));
+        shared.write().unwrap().set_chat_backend(backend.clone());
+        woken_event_turn(&shared, "transient-turn");
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        let _ = daemon.run_task(DaemonTask::Reactor, |d| d.run_reactor_evaluation());
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(daemon.provider_gate().state(), ProviderGateState::Open);
+        let state = schedule_state(&shared, "transient-turn");
+        assert_eq!(state.no_progress_streak, 0, "still not a model outcome");
     }
 
     /// A board reply whose message type the schedule filters out makes no

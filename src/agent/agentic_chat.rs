@@ -649,6 +649,40 @@ impl Agent {
         is_autonomous_dispatch: bool,
         conversation_state: &std::sync::Mutex<ConversationState>,
     ) -> Option<AgenticTurnOutcome> {
+        // Phase 53g PR 4: a turn whose last provider call got an answer
+        // proves the provider works again (e.g. the operator's ACP turn after
+        // repairing a credential), so it reopens a closed provider gate.
+        let observed = super::provider_failure::ProviderObservationScope::open();
+        let outcome = self.run_agentic_turn_observed(
+            engine,
+            agent_id,
+            user_prompt,
+            prompt_images,
+            sink,
+            cancel,
+            is_autonomous_dispatch,
+            conversation_state,
+        );
+        if observed.finish() == Some(super::provider_failure::ProviderObservation::Responded) {
+            super::provider_failure::note_model_success(engine);
+        }
+        outcome
+    }
+
+    /// [`Self::run_agentic_turn_with_conversation_state_and_images`] without
+    /// the provider-gate bookkeeping.
+    #[allow(clippy::too_many_arguments)]
+    fn run_agentic_turn_observed(
+        &self,
+        engine: &Engine,
+        agent_id: &str,
+        user_prompt: &str,
+        prompt_images: &[super::chat_backend::ChatPromptImage],
+        sink: &dyn MessageSink,
+        cancel: &std::sync::atomic::AtomicBool,
+        is_autonomous_dispatch: bool,
+        conversation_state: &std::sync::Mutex<ConversationState>,
+    ) -> Option<AgenticTurnOutcome> {
         if let Some(runtime) = &self.agent_runtime {
             return Some(self.run_runtime_turn(
                 runtime,
@@ -1066,14 +1100,16 @@ impl Agent {
                         }
                     }
                 };
-                match backend.chat_with_tools_streaming_prepared(
+                let streamed = backend.chat_with_tools_streaming_prepared(
                     &prepared_chat,
                     agent_id,
                     &conversation,
                     &tools,
                     request_seq,
                     &mut on_event,
-                ) {
+                );
+                super::provider_failure::observe_chat_result(&streamed);
+                match streamed {
                     Ok(t) => t,
                     Err(stream_err) => {
                         tracing::warn!(
@@ -1089,13 +1125,15 @@ impl Agent {
                             backend_label = backend.label()
                         )));
                         used_fallback = true;
-                        match backend.chat_with_tools_prepared(
+                        let fallback = backend.chat_with_tools_prepared(
                             &prepared_chat,
                             agent_id,
                             &conversation,
                             &tools,
                             request_seq,
-                        ) {
+                        );
+                        super::provider_failure::observe_chat_result(&fallback);
+                        match fallback {
                             Ok(t) => t,
                             Err(e) => {
                                 sink.emit(&AkhMessage::error("llm", e.to_string()));
@@ -1669,14 +1707,16 @@ impl Agent {
                     }
                 }
             };
-            match backend.chat_with_tools_streaming_prepared(
+            let streamed = backend.chat_with_tools_streaming_prepared(
                 prepared_chat,
                 agent_id,
                 conversation,
                 &no_tools,
                 request_seq,
                 &mut on_event,
-            ) {
+            );
+            super::provider_failure::observe_chat_result(&streamed);
+            match streamed {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!(
@@ -1689,13 +1729,15 @@ impl Agent {
                         backend_label = backend.label()
                     )));
                     used_fallback = true;
-                    match backend.chat_with_tools_prepared(
+                    let fallback = backend.chat_with_tools_prepared(
                         prepared_chat,
                         agent_id,
                         conversation,
                         &no_tools,
                         request_seq,
-                    ) {
+                    );
+                    super::provider_failure::observe_chat_result(&fallback);
+                    match fallback {
                         Ok(t) => t,
                         Err(e) => {
                             sink.emit(&AkhMessage::error("llm", e.to_string()));

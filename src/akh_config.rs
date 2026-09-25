@@ -941,6 +941,24 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
     pub memory: MemoryConfig,
 
+    /// Provider-failure handling for the akh's own model turns (Phase 53g
+    /// PR 4): the cooldown ladder and the exact structured error codes that
+    /// name authentication, quota and rate-limit failures. Defaults: ladder
+    /// 30 min / 1 h / 2 h / 4 h, empty code lists (classify by HTTP status).
+    ///
+    /// ```toml
+    /// [provider]
+    /// cooldown_ladder_secs = [1800, 3600, 7200, 14400]
+    /// quota_error_codes = ["insufficient_quota"]
+    /// auth_error_codes = ["invalid_api_key"]
+    /// rate_limit_error_codes = ["rate_limit_exceeded"]
+    /// ```
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::provider_failure::ProviderConfig::is_default"
+    )]
+    pub provider: crate::agent::provider_failure::ProviderConfig,
+
     /// Delegation / external scheduling (Phase 36). Parsed now; the
     /// `DelegationManager` is wired behind the `delegation` feature in its phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -986,6 +1004,7 @@ impl Default for AkhConfig {
             mcp: McpConfig::default(),
             board: None,
             memory: MemoryConfig::default(),
+            provider: crate::agent::provider_failure::ProviderConfig::default(),
             delegation: None,
             exec: None,
         }
@@ -1164,6 +1183,15 @@ impl AkhConfig {
                 &["enabled", "tasks", "budget", "idle_cycle_tools"],
             ),
             ("memory", &["contradiction_policy", "hygiene_batch"]),
+            (
+                "provider",
+                &[
+                    "cooldown_ladder_secs",
+                    "auth_error_codes",
+                    "quota_error_codes",
+                    "rate_limit_error_codes",
+                ],
+            ),
             (
                 "delegation",
                 &[
@@ -2296,6 +2324,57 @@ mod tests {
         "#;
         let raw: toml::Value = toml::from_str(toml_src).unwrap();
         assert!(AkhConfig::unknown_keys(&raw).is_empty());
+    }
+
+    /// `[provider]` (Phase 53g PR 4): parses into the typed ladder and
+    /// lexicon, is a known table (a typo inside it is reported), defaults
+    /// when absent, round-trips through `save`, and rejects an empty ladder.
+    #[test]
+    fn provider_table_parses_is_known_and_round_trips() {
+        let toml_src = r#"
+            name = "janus"
+
+            [provider]
+            cooldown_ladder_secs = [60, 600]
+            quota_error_codes = ["insufficient_quota"]
+            auth_error_codes = ["invalid_api_key"]
+            rate_limit_error_codes = ["rate_limit_exceeded"]
+        "#;
+        let raw: toml::Value = toml::from_str(toml_src).unwrap();
+        assert!(AkhConfig::unknown_keys(&raw).is_empty());
+        let cfg: AkhConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            cfg.provider.cooldown_ladder_secs.cooldown(1),
+            std::time::Duration::from_secs(600)
+        );
+        assert!(
+            cfg.provider
+                .lexicon
+                .auth_error_codes
+                .contains("invalid_api_key")
+        );
+
+        let typo: toml::Value =
+            toml::from_str("name = \"a\"\n[provider]\nquota_codes = [\"x\"]\n").unwrap();
+        let unknown = AkhConfig::unknown_keys(&typo);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].path, "provider.quota_codes");
+
+        let absent: AkhConfig = toml::from_str("name = \"a\"\n").unwrap();
+        assert!(absent.provider.is_default());
+        assert!(
+            !toml::to_string(&absent).unwrap().contains("[provider]"),
+            "a default table is not written"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        cfg.save(&path).expect("save");
+        let (loaded, unknown) = AkhConfig::load_checked(&path).expect("load");
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(loaded.provider, cfg.provider);
+
+        assert!(toml::from_str::<AkhConfig>("[provider]\ncooldown_ladder_secs = []\n").is_err());
     }
 
     /// Every key `save()` writes must be a known key: a saved config loads

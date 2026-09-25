@@ -529,6 +529,7 @@ pub(crate) fn run_tool_free_turn(
     let conversation = [serde_json::json!({"role": "user", "content": prompt})];
     let scope = UsageScope::open();
     let turn = backend.chat_with_tools_prepared(&prepared, agent_id, &conversation, &[], 0);
+    super::provider_failure::observe_chat_result(&turn);
     let metered = scope.finish();
     let turn = turn.map_err(|error| ModelTurnFailure {
         contact: if metered.reached_model() {
