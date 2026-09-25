@@ -1009,4 +1009,23 @@ mod deployment_tests {
             .validate_deployment(DeploymentMode::Deployed)
             .unwrap();
     }
+
+    #[test]
+    fn deployed_services_hold_opencode_profiles_to_the_same_rule() {
+        for (mode, refused) in [("colocated", true), ("brokered", false)] {
+            let mut config = config("deployed", Some(mode));
+            let mut profile = config.runtimes.remove("codex-worker").unwrap();
+            profile.kind = RuntimeKind::OpenCode;
+            config.runtimes.insert("opencode-worker".into(), profile);
+            let result = config.validate_deployment(DeploymentMode::Deployed);
+            assert_eq!(result.is_err(), refused, "{mode}");
+            if let Err(fault) = result {
+                assert_eq!(fault.code, "colocated_forbidden");
+                assert!(
+                    fault.message.contains("runtimes.opencode-worker"),
+                    "{fault}"
+                );
+            }
+        }
+    }
 }

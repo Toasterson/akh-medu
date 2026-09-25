@@ -1,6 +1,7 @@
 //! Provider processes with host-owned tools and continuation. No cognitive engine dependency.
 mod claude;
 mod codex;
+pub mod opencode;
 mod process;
 pub mod profile;
 mod questions;
@@ -113,6 +114,7 @@ pub fn run(
     match config.kind {
         RuntimeKind::Codex => codex::run(&mut turn),
         RuntimeKind::Claude => claude::run(&mut turn),
+        RuntimeKind::OpenCode => opencode::run(&mut turn),
         RuntimeKind::Internal => {
             Err("internal runtime is served by the configured Akh cognitive endpoint".into())
         }

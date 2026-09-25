@@ -65,6 +65,10 @@ pub fn validate_conformance(profile: &RuntimeProfile) -> Result<()> {
             "native aliases are implemented only by the Claude bridge",
         ));
     }
+    if profile.kind == RuntimeKind::OpenCode {
+        akh_runtime::opencode::validate_profile(profile)
+            .map_err(|e| crate::runtime_profile::opencode_fault(&e))?;
+    }
     if profile.execution_mode() != ExecutionMode::Brokered || profile.kind == RuntimeKind::Internal
     {
         return Ok(());
@@ -91,6 +95,13 @@ pub fn validate_conformance(profile: &RuntimeProfile) -> Result<()> {
         "cancel_teardown",
         "workspace_semantics",
     ];
+    // OpenCode has no structural "native tools off" switch; its denial is a
+    // permission policy, so evidence must also show the model's tool catalog
+    // held only the Akh MCP tools (docs/ai/research/2026-09-25-opencode-runtime-integration.md).
+    let kind_required: &[&str] = match profile.kind {
+        RuntimeKind::OpenCode => &["native_tools_hidden"],
+        RuntimeKind::Internal | RuntimeKind::Codex | RuntimeKind::Claude => &[],
+    };
     let mut artifacts = std::collections::BTreeMap::new();
     if let Some(scope) = &profile.isolation {
         for path in &scope.validation_artifacts {
@@ -129,7 +140,10 @@ pub fn validate_conformance(profile: &RuntimeProfile) -> Result<()> {
                 .transpose()?
         || evidence.provider_version.is_empty()
         || evidence.evidence.is_empty()
-        || required.iter().any(|name| !evidence.checks.contains(*name))
+        || required
+            .iter()
+            .chain(kind_required)
+            .any(|name| !evidence.checks.contains(*name))
     {
         return Err(Fault::new(
             "conformance_required",
@@ -886,6 +900,69 @@ impl akh_runtime::Host for RemoteHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brokered_opencode_conformance_also_requires_hidden_native_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("opencode");
+        std::fs::write(&binary, "#!/bin/sh\n").unwrap();
+        let evidence_file = dir.path().join("conformance.json");
+        let profile = |kind: &str| -> RuntimeProfile {
+            serde_json::from_value(json!({"revision":"1","kind":kind,"working_dir":dir.path(),
+                "binary":binary,"execution_mode":"brokered","conformance_file":evidence_file,
+                "isolation":{"directory":dir.path().join("profile")}}))
+            .unwrap()
+        };
+        let write = |profile: &RuntimeProfile, extra: &[&str]| {
+            let checks: BTreeSet<String> = [
+                "native_write_denied_before_effect",
+                "native_exec_denied_before_effect",
+                "hooks_disabled",
+                "supplied_tool_succeeds",
+                "exact_resume",
+                "cancel_teardown",
+                "workspace_semantics",
+            ]
+            .iter()
+            .chain(extra)
+            .map(|c| (*c).to_owned())
+            .collect();
+            let evidence = Conformance {
+                profile_revision: "1".into(),
+                profile_sha256: profile_digest(profile).unwrap(),
+                provider_sha256: file_digest(&binary).unwrap(),
+                bridge_sha256: None,
+                platform: std::env::consts::OS.into(),
+                provider_version: "opencode 1.18.32".into(),
+                sdk_version: None,
+                checks,
+                evidence: vec!["fixture".into()],
+                artifact_sha256: Default::default(),
+            };
+            std::fs::write(&evidence_file, serde_json::to_vec(&evidence).unwrap()).unwrap();
+        };
+        let opencode = profile("opencode");
+        write(&opencode, &[]);
+        assert_eq!(
+            validate_conformance(&opencode).unwrap_err().code,
+            "conformance_required"
+        );
+        write(&opencode, &["native_tools_hidden"]);
+        validate_conformance(&opencode).unwrap();
+        // The additional check is OpenCode's alone.
+        let codex = profile("codex");
+        write(&codex, &[]);
+        validate_conformance(&codex).unwrap();
+        // Profile diagnostics surface through `akh-runtime-profile verify` too.
+        let mut ambient = profile("opencode");
+        ambient
+            .environment
+            .insert("OPENCODE_CONFIG_DIR".into(), "/etc/opencode".into());
+        assert_eq!(
+            validate_conformance(&ambient).unwrap_err().code,
+            "akh::runtime::opencode::brokered_environment"
+        );
+    }
 
     #[test]
     fn cancelled_unsubmitted_dispatch_cannot_run_later() {
