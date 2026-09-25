@@ -80,8 +80,16 @@ def main():
             env[var] = capture([op, 'read', reference])
         binary = 'akhrtd'
     elif role == 'sessions':
-        env['ROMAN_ARCHIVE_TOKEN'] = capture([op, 'read', 'op://Homelab/sia-runtime/SIA_SESHAT__TOKEN'])
-        env['ROMAN_ANIMA_TOKEN'] = json.loads(capture(['/Users/toasty/.local/bin/anima-pat', 'get-auth-header']))['Authorization'].removeprefix('Bearer ')
+        # Same file-first lookup as the core: a KeepAlive restart must not read
+        # 1Password every time (rate limit, 2026-09-25).
+        archive = core_secret(root, 'archive-token', 'op://Homelab/sia-runtime/SIA_SESHAT__TOKEN')
+        if not archive:
+            raise RuntimeError('credential source unavailable: archive-token')
+        env['ROMAN_ARCHIVE_TOKEN'] = archive
+        token = anima_token(root)
+        if not token:
+            raise RuntimeError('credential source unavailable: anima-token')
+        env['ROMAN_ANIMA_TOKEN'] = token
         for akh in ('janus', 'minerva', 'vesta'):
             env['ROMAN_BOARD_' + akh.upper()] = json.loads((root / 'secrets' / f'board-{akh}.json').read_text())['bearer_token']
         binary = 'akhsessd'

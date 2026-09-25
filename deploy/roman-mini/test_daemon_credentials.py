@@ -67,5 +67,28 @@ class CoreSecretTests(unittest.TestCase):
             self.assertIsNone(dc.core_secret(self.root, 'archive-token', 'op://x/y/z'))
 
 
+class SessionsRoleTests(unittest.TestCase):
+    def test_sessions_role_reads_files_without_1password(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'secrets').mkdir()
+            (root / 'secrets' / 'archive-token').write_text('arch\n')
+            (root / 'secrets' / 'anima-token').write_text('anima\n')
+            for akh in ('janus', 'minerva', 'vesta'):
+                (root / 'secrets' / f'board-{akh}.json').write_text('{"bearer_token": "b"}')
+            captured = {}
+            def fake_execve(path, argv, env):
+                captured.update(env=env, path=str(path))
+                raise SystemExit(0)
+            with unittest.mock.patch.object(dc, 'capture', side_effect=AssertionError('1Password called')), \
+                 unittest.mock.patch.object(dc.os, 'execve', side_effect=fake_execve), \
+                 unittest.mock.patch.object(dc.sys, 'argv', ['x', 'sessions', str(root)]):
+                with self.assertRaises(SystemExit):
+                    dc.main()
+            self.assertEqual(captured['env']['ROMAN_ARCHIVE_TOKEN'], 'arch')
+            self.assertEqual(captured['env']['ROMAN_ANIMA_TOKEN'], 'anima')
+            self.assertTrue(captured['path'].endswith('akhsessd'))
+
+
 if __name__ == '__main__':
     unittest.main()
