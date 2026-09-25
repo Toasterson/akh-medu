@@ -463,8 +463,10 @@ The `memory_hygiene` daemon task can be switched off per akh with
   no longer routes to them), then restart `dev.roman-akhs.sessions`. akhsessd
   keeps brokering native-runtime delegation sessions.
 - `t3-activity` and `anima-activity` read akhsessd sessions and do not see
-  reactor turns. Boot them out, or leave them for historical views
-  (INVENTORY.md follow-up 5).
+  reactor turns. **Retired 2026-09-25** (ADR 113 / 53g plan PR 1 — see
+  INVENTORY.md follow-up 5 and its "Mac-side steps for PR 1"): boot both out
+  and remove the `t3-activity` plist and `bin/roman-activity-*` rather than
+  leaving them for historical views.
 - Keep `bin/akhomed-d563ba34a247` and `$BK` until the next successful full
   deploy.
 
