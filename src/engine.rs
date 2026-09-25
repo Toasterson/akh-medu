@@ -1495,7 +1495,7 @@ impl Engine {
     /// cascades through the stale object only when no other live edge still
     /// asserts it. Superseding `(wi-1, status, resolved)` must not retract
     /// `resolved` (or anything derived from it) while `(wi-2, status,
-    /// resolved)` holds. `kg_delete` keeps the unconditional symbol cascade.
+    /// resolved)` holds. `remove_triple` and `kg_delete` use the same scope.
     ///
     /// Returns `Ok(false)` when `stale` is no longer live (nothing to do),
     /// so re-running a hygiene pass is idempotent.
@@ -3298,13 +3298,27 @@ impl Engine {
     // Truth Maintenance System (Phase 9c)
     // -----------------------------------------------------------------------
 
-    /// Remove a triple from the knowledge graph with TMS cascade.
+    /// Remove one fact from the knowledge graph.
     ///
-    /// If TMS is enabled, finds all derived symbols that depend on the removed
-    /// triple's symbols, retracts unsupported conclusions, and re-evaluates
-    /// those with alternative justifications.
+    /// Uses [`RetractionScope::CascadeIfOrphaned`]: the edge is removed, and
+    /// the TMS cascade through the object symbol runs only when no other live
+    /// edge still asserts that object. Deleting `(wi-1, status, resolved)`
+    /// therefore leaves `resolved` — and every conclusion it supports — alone
+    /// while `(wi-2, status, resolved)` holds; deleting the last assertion of
+    /// a value still retracts it and cascades.
     ///
-    /// Returns a `RetractionResult` describing what was retracted and re-evaluated.
+    /// The returned `RetractionResult` is empty when no cascade ran (the edge
+    /// was absent, or its object is still asserted elsewhere). Callers that
+    /// must tell "removed" from "not live" use [`Self::remove_triple_scoped`]
+    /// and [`crate::tms::TripleRetraction::removed`]. To retract the object
+    /// symbol itself regardless of other assertions, use
+    /// [`Self::retract_object_symbol`].
+    ///
+    /// [`RetractionScope::CascadeIfOrphaned`]: crate::tms::RetractionScope::CascadeIfOrphaned
+    ///
+    /// # Errors
+    ///
+    /// Fails when the engine is quiesced or the transition cannot commit.
     pub fn remove_triple(
         &self,
         subject: SymbolId,
@@ -3318,14 +3332,45 @@ impl Engine {
         self.remove_triple_locked(subject, predicate, object)
     }
 
+    /// Remove `(subject, predicate, object)` **and** retract its object
+    /// symbol unconditionally ([`RetractionScope::Symbol`]), cascading
+    /// through every conclusion the object supports even while other
+    /// subjects still assert it.
+    ///
+    /// This is the pre-53j `remove_triple` behaviour. Use it only when the
+    /// object symbol itself is being invalidated, not one subject's value:
+    /// replaying a legacy `retract` WAL record (whose writer had these
+    /// semantics and logged only the primary edge) is the one production
+    /// caller. Everything else wants [`Self::remove_triple`].
+    ///
+    /// [`RetractionScope::Symbol`]: crate::tms::RetractionScope::Symbol
+    ///
+    /// # Errors
+    ///
+    /// Fails when the engine is quiesced or the transition cannot commit.
+    pub fn retract_object_symbol(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+    ) -> AkhResult<crate::tms::RetractionResult> {
+        self.remove_triple_scoped(
+            subject,
+            predicate,
+            object,
+            crate::tms::RetractionScope::Symbol,
+        )
+        .map(crate::tms::TripleRetraction::into_retraction_result)
+    }
+
     /// Remove one triple with an explicit TMS reach (Phase 53j).
     ///
-    /// [`Self::remove_triple`] is `RetractionScope::Symbol`: it retracts the
-    /// object *symbol* and cascades through every conclusion supported by
-    /// it, even when other subjects still assert that value. Removing one
-    /// superseded or contradicted value wants
-    /// [`RetractionScope::CascadeIfOrphaned`]; moving a fact to another
-    /// spelling wants [`RetractionScope::ExactTriple`]. All scopes commit
+    /// [`Self::remove_triple`] (and every bulk removal API) is
+    /// `RetractionScope::CascadeIfOrphaned`: the object symbol is retracted
+    /// only once no other live edge asserts it. Moving a fact to another
+    /// spelling wants [`RetractionScope::ExactTriple`]; retracting the object
+    /// symbol unconditionally wants [`RetractionScope::Symbol`]
+    /// ([`Self::retract_object_symbol`]). All scopes commit
     /// through the same exact-edge transition (KG, SPARQL, identity state,
     /// replay-complete `RetractBatch` WAL record), and the planned TMS state
     /// is published only after that transition succeeded.
@@ -3352,6 +3397,11 @@ impl Engine {
     /// `remove_triple` with the encompassing mutation checkpoint already held.
     /// Every bulk/cleanup API delegates here so TMS, SPARQL, identity state,
     /// and the replay-complete WAL transition cannot diverge.
+    ///
+    /// Scope is `CascadeIfOrphaned`: a bulk removal that takes out every
+    /// assertion of a value still cascades on the last one, while one that
+    /// removes only some subjects' copies (a compartment, a pattern, a noise
+    /// subject) never retracts a value the rest of the graph still holds.
     fn remove_triple_locked(
         &self,
         subject: SymbolId,
@@ -3362,7 +3412,7 @@ impl Engine {
             subject,
             predicate,
             object,
-            crate::tms::RetractionScope::Symbol,
+            crate::tms::RetractionScope::CascadeIfOrphaned,
         )
         .map(crate::tms::TripleRetraction::into_retraction_result)
     }
@@ -5551,13 +5601,54 @@ mod tests {
         assert!(engine.tms().was_retracted(resolved));
         assert!(engine.tms().was_retracted(closed));
 
-        // Symbol keeps the historical kg_delete semantics even while wi-2
-        // still asserts the value.
+        // Symbol (`retract_object_symbol`) retracts the value even while
+        // wi-2 still asserts it.
         let (engine, _dir, [wi1, wi2, status, resolved, implies, closed]) = shared_value_engine();
         let symbol = engine
             .remove_triple_scoped(wi1, status, resolved, RetractionScope::Symbol)
             .unwrap();
         assert!(symbol.cascaded());
+        assert!(!engine.has_triple(resolved, implies, closed));
+        assert!(engine.has_triple(wi2, status, resolved));
+        assert!(engine.tms().was_retracted(resolved));
+    }
+
+    #[test]
+    fn remove_triple_defaults_to_cascade_if_orphaned() {
+        // A shared value survives deleting one subject's copy, with its
+        // derived conclusion.
+        let (engine, _dir, [wi1, wi2, status, resolved, implies, closed]) = shared_value_engine();
+        let kept = engine.remove_triple(wi1, status, resolved).unwrap();
+        assert!(kept.retracted.is_empty());
+        assert!(!engine.has_triple(wi1, status, resolved));
+        assert!(engine.has_triple(wi2, status, resolved));
+        assert!(engine.has_triple(resolved, implies, closed));
+        assert!(!engine.tms().was_retracted(resolved));
+
+        // Deleting the last assertion still cascades.
+        let orphaned = engine.remove_triple(wi2, status, resolved).unwrap();
+        assert!(orphaned.retracted.contains(&resolved));
+        assert!(orphaned.retracted.contains(&closed));
+        assert!(!engine.has_triple(resolved, implies, closed));
+        assert!(engine.tms().was_retracted(resolved));
+
+        // Bulk APIs share the default: removing one subject's copy by batch
+        // leaves the shared value and its conclusion live.
+        let (engine, _dir, [_wi1, wi2, status, resolved, implies, closed]) = shared_value_engine();
+        assert_eq!(
+            engine
+                .remove_triples_batch(&[("wi-1", "status", "resolved")])
+                .unwrap(),
+            1
+        );
+        assert!(engine.has_triple(wi2, status, resolved));
+        assert!(engine.has_triple(resolved, implies, closed));
+        assert!(!engine.tms().was_retracted(resolved));
+
+        // The explicit symbol intent keeps the unconditional cascade.
+        let (engine, _dir, [wi1, wi2, status, resolved, implies, closed]) = shared_value_engine();
+        let symbol = engine.retract_object_symbol(wi1, status, resolved).unwrap();
+        assert!(symbol.retracted.contains(&resolved));
         assert!(!engine.has_triple(resolved, implies, closed));
         assert!(engine.has_triple(wi2, status, resolved));
         assert!(engine.tms().was_retracted(resolved));

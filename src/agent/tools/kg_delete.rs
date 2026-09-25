@@ -10,9 +10,12 @@
 //!   like `kg_mutate`. Unlike `kg_mutate`, symbols are *looked up*, not created
 //!   — deleting a triple whose symbols do not exist is a no-op, not an
 //!   auto-creation.
-//! - Delegates to [`Engine::remove_triple`], which retracts the triple from
-//!   the KG, syncs the SPARQL store, and (when TMS is enabled) cascades the
-//!   retraction through dependent support sets.
+//! - Removes exactly the named edge with
+//!   [`RetractionScope::CascadeIfOrphaned`]: the KG, SPARQL store and WAL
+//!   drop the edge, and the TMS cascade through the object runs only when no
+//!   other live edge still asserts that object. Deleting `(wi-1, status,
+//!   resolved)` never retracts `resolved` (or anything derived from it) for
+//!   `wi-2`; deleting the last assertion of a value still cascades.
 //! - Returns the count of triples removed (0 if the triple was not present
 //!   or its symbols were unknown).
 //! - The tool registry already audit-logs every tool invocation
@@ -24,6 +27,7 @@ use crate::agent::tool_manifest::{
     Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
+use crate::tms::{CascadeOutcome, RetractionScope};
 use std::collections::HashSet;
 
 /// Remove a triple from the knowledge graph.
@@ -90,39 +94,34 @@ impl Tool for KgDeleteTool {
             }
         };
 
-        let had_triple = engine.has_triple(s, p, o);
-        let result = engine.remove_triple(s, p, o)?;
-
-        let removed = if had_triple { 1 } else { 0 };
-
-        // Count cascaded retractions (TMS support-set dependents) beyond the
-        // directly removed triple's object.
-        let cascaded = if result.retracted.len() > 1 {
-            result.retracted.len() - 1
-        } else {
-            0
-        };
+        let retraction =
+            engine.remove_triple_scoped(s, p, o, RetractionScope::CascadeIfOrphaned)?;
 
         let label_s = engine.resolve_label(s);
         let label_p = engine.resolve_label(p);
         let label_o = engine.resolve_label(o);
 
-        let summary = if removed == 0 {
-            format!(
-                "Deleted 0 triple(s) — \"{}\" -> {} -> \"{}\" was not present.",
-                label_s, label_p, label_o,
-            )
-        } else if cascaded > 0 {
-            format!(
-                "Deleted 1 triple(s) — \"{}\" -> {} -> \"{}\" — plus {cascaded} \
+        let summary = match &retraction.cascade {
+            CascadeOutcome::NotLive => format!(
+                "Deleted 0 triple(s) — \"{label_s}\" -> {label_p} -> \"{label_o}\" was not present.",
+            ),
+            CascadeOutcome::ObjectStillAsserted {
+                remaining_assertions,
+            } => format!(
+                "Deleted 1 triple(s) — \"{label_s}\" -> {label_p} -> \"{label_o}\". \
+                 \"{label_o}\" is still asserted by {remaining_assertions} other \
+                 triple(s), so it and its dependents stay live.",
+            ),
+            // Cascaded: the object itself plus every dependent conclusion.
+            CascadeOutcome::Cascaded(result) if result.retracted.len() > 1 => format!(
+                "Deleted 1 triple(s) — \"{label_s}\" -> {label_p} -> \"{label_o}\" — plus {} \
                  cascaded retraction(s) from TMS support sets (depth {}).",
-                label_s, label_p, label_o, result.cascade_depth,
-            )
-        } else {
-            format!(
-                "Deleted 1 triple(s) — \"{}\" -> {} -> \"{}\".",
-                label_s, label_p, label_o,
-            )
+                result.retracted.len() - 1,
+                result.cascade_depth,
+            ),
+            CascadeOutcome::Cascaded(_) | CascadeOutcome::NotRequested => {
+                format!("Deleted 1 triple(s) — \"{label_s}\" -> {label_p} -> \"{label_o}\".",)
+            }
         };
 
         Ok(ToolOutput::ok_with_symbols(summary, vec![s, p, o]))
@@ -144,7 +143,8 @@ impl Tool for KgDeleteTool {
                 level: DangerLevel::Dangerous,
                 capabilities: HashSet::from([Capability::WriteKg]),
                 description: "Destructively retracts a triple from the knowledge graph. When TMS \
-                     is enabled, retraction cascades through dependent support sets."
+                     is enabled and no other triple still asserts the object, retraction \
+                     cascades through dependent support sets."
                     .into(),
                 shadow_triggers: vec!["delete triple".into(), "retract".into(), "remove".into()],
             },
@@ -366,6 +366,75 @@ mod tests {
             "TMS cascade should remove the base fact and the dependent, \
              leaving only the unrelated triple"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 4b. Shared values: deleting one subject's copy never cascades
+    // -----------------------------------------------------------------------
+
+    /// `(wi-1, status, resolved)` + `(wi-2, status, resolved)` plus a
+    /// conclusion `(resolved, implies, closed)` supported only by `resolved`.
+    fn shared_value(e: &Engine) -> [SymbolId; 6] {
+        let (wi1, status, resolved) = add_triple(e, "wi-1", "status", "resolved");
+        let (wi2, _, _) = add_triple(e, "wi-2", "status", "resolved");
+        let implies = e.resolve_or_create_relation("implies").unwrap();
+        let closed = e.resolve_or_create_entity("closed").unwrap();
+        e.add_triple_with_support(
+            &Triple::new(resolved, implies, closed),
+            SupportSet::new(vec![resolved], DerivationKind::Reasoned, 1.0),
+        )
+        .unwrap();
+        [wi1, wi2, status, resolved, implies, closed]
+    }
+
+    fn delete(e: &Engine, s: &str, p: &str, o: &str) -> ToolOutput {
+        KgDeleteTool
+            .execute(
+                e,
+                ToolInput::new()
+                    .with_param("subject", s)
+                    .with_param("predicate", p)
+                    .with_param("object", o),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn delete_keeps_shared_value_and_its_derived_facts_live() {
+        let (e, _t) = engine();
+        let [wi1, wi2, status, resolved, implies, closed] = shared_value(&e);
+
+        let out = delete(&e, "wi-1", "status", "resolved");
+
+        assert!(out.success, "{}", out.result);
+        assert!(out.result.contains("Deleted 1 triple(s)"), "{}", out.result);
+        assert!(out.result.contains("still asserted by 1"), "{}", out.result);
+        assert!(!e.has_triple(wi1, status, resolved));
+        assert!(
+            e.has_triple(wi2, status, resolved),
+            "other subject keeps the value"
+        );
+        assert!(
+            e.has_triple(resolved, implies, closed),
+            "derived fact supported by the shared value survives"
+        );
+        assert!(!e.tms().was_retracted(resolved));
+        assert!(!e.tms().was_retracted(closed));
+    }
+
+    #[test]
+    fn delete_of_last_assertion_still_cascades() {
+        let (e, _t) = engine();
+        let [_wi1, wi2, status, resolved, implies, closed] = shared_value(&e);
+
+        let _ = delete(&e, "wi-1", "status", "resolved");
+        let out = delete(&e, "wi-2", "status", "resolved");
+
+        assert!(out.result.contains("cascaded retraction"), "{}", out.result);
+        assert!(!e.has_triple(wi2, status, resolved));
+        assert!(!e.has_triple(resolved, implies, closed));
+        assert!(e.tms().was_retracted(resolved));
+        assert!(e.tms().was_retracted(closed));
     }
 
     // -----------------------------------------------------------------------

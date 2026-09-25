@@ -203,9 +203,10 @@ pub struct ProjectionDiff {
     /// churn.
     pub retained: usize,
     /// Triples retracted this pass (present in the prior manifest, absent
-    /// from the new set) — removed via [`Engine::remove_triple`]'s TMS
-    /// cascade, so `TruthMaintenanceSystem::was_retracted` sees them and
-    /// Phase 44g recall hygiene filters them out, while the retraction
+    /// from the new set) — removed via [`Engine::remove_triple`]
+    /// (`CascadeIfOrphaned`: a value no other edge asserts is marked
+    /// `TruthMaintenanceSystem::was_retracted`, so Phase 44g recall hygiene
+    /// filters it out; a value other facts still hold stays live), while the retraction
     /// itself is preserved as a [`DerivationKind::NoteReprojection`]
     /// provenance record (history is never deleted, only marked superseded).
     pub retracted: usize,
@@ -563,8 +564,9 @@ fn write_manifest(
 ///    **added** (already asserted by step 2); identities only in the prior
 ///    manifest are **retracted**.
 /// 4. Retract each dropped identity via [`Engine::remove_triple`] — the
-///    existing Phase 9c TMS cascade marks the triple's object
-///    `was_retracted` (Phase 44g recall hygiene already filters on that),
+///    Phase 9c TMS cascade marks the triple's object `was_retracted` once no
+///    other live edge asserts it (Phase 44g recall hygiene already filters
+///    on that; a value shared with other notes stays live),
 ///    while a [`DerivationKind::NoteReprojection`] provenance record is
 ///    stored *before* the retraction so the "who/what superseded this" audit
 ///    trail survives even though the TMS's own support-set bookkeeping does
@@ -606,9 +608,10 @@ pub fn reproject_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRe
         .with_confidence(0.0);
         let _ = engine.store_provenance(&mut prov);
 
-        // TMS-cascaded removal: marks `was_retracted` for Phase 44g recall
-        // hygiene, logs to the WAL, and syncs the SPARQL store — the same
-        // path any other fact retraction takes.
+        // Removal with `CascadeIfOrphaned`: marks `was_retracted` for Phase
+        // 44g recall hygiene when no other edge still asserts the value, logs
+        // to the WAL, and syncs the SPARQL store — the same path any other
+        // fact retraction takes.
         let _ = engine.remove_triple(stale.subject, stale.predicate, stale.object);
         retracted += 1;
     }

@@ -2510,23 +2510,31 @@ fn dispatch_akh(
                     "note": "one or more labels not present; nothing to remove",
                 }));
             };
-            // Pre-check existence: RetractionResult only reflects TMS cascade, so
-            // a plain removal with no cascade would otherwise look like a no-op.
-            let existed = engine
-                .triples_from(s)
-                .iter()
-                .any(|t| t.predicate == p && t.object == o);
-            let result = engine
-                .remove_triple(s, p, o)
+            // CascadeIfOrphaned: removing one subject's value never retracts
+            // that value (or what it supports) while another edge still
+            // asserts it; removing its last assertion still cascades.
+            let retraction = engine
+                .remove_triple_scoped(s, p, o, crate::tms::RetractionScope::CascadeIfOrphaned)
                 .map_err(|e| diag_err(e, "remove failed"))?;
             engine
                 .persist()
                 .map_err(|e| diag_err(e, "persist failed"))?;
+            let removed = retraction.removed();
+            let object_still_asserted = match retraction.cascade {
+                crate::tms::CascadeOutcome::ObjectStillAsserted {
+                    remaining_assertions,
+                } => remaining_assertions,
+                _ => 0,
+            };
+            let scope = retraction.scope.as_str();
+            let result = retraction.into_retraction_result();
             Ok(serde_json::json!({
                 "subject": subject,
                 "predicate": predicate,
                 "object": object,
-                "removed": existed,
+                "removed": removed,
+                "scope": scope,
+                "object_still_asserted": object_still_asserted,
                 "cascade_retracted": result.retracted.len(),
                 "cascade_depth": result.cascade_depth,
             }))
@@ -7166,6 +7174,69 @@ mod tests {
             .with_provenance(provenance_id.get());
         triple.timestamp = timestamp;
         engine.add_triple(&triple).unwrap();
+    }
+
+    /// `_akh/triples/remove` removes one subject's value without retracting
+    /// the value while another subject still asserts it, and still cascades
+    /// once the last assertion goes.
+    #[test]
+    fn triples_remove_never_cascades_through_a_shared_value() {
+        let (_dir, engine) = persistent_engine();
+        let wi1 = engine.resolve_or_create_entity("wi-1").unwrap();
+        let wi2 = engine.resolve_or_create_entity("wi-2").unwrap();
+        let status = engine.resolve_or_create_relation("status").unwrap();
+        let resolved = engine.resolve_or_create_entity("resolved").unwrap();
+        let implies = engine.resolve_or_create_relation("implies").unwrap();
+        let closed = engine.resolve_or_create_entity("closed").unwrap();
+        for subject in [wi1, wi2] {
+            engine
+                .add_triple(&crate::graph::Triple::new(subject, status, resolved))
+                .unwrap();
+        }
+        engine
+            .add_triple_with_support(
+                &crate::graph::Triple::new(resolved, implies, closed),
+                crate::tms::SupportSet::new(
+                    vec![resolved],
+                    crate::provenance::DerivationKind::Reasoned,
+                    1.0,
+                ),
+            )
+            .unwrap();
+        let remove = |subject: &str| {
+            dispatch_akh(
+                &engine,
+                "default",
+                false,
+                "_akh/triples/remove",
+                &serde_json::json!({
+                    "subject": subject,
+                    "predicate": "status",
+                    "object": "resolved",
+                }),
+            )
+            .unwrap()
+        };
+
+        let first = remove("wi-1");
+        assert_eq!(first["removed"], true, "{first}");
+        assert_eq!(first["scope"], "cascade_if_orphaned", "{first}");
+        assert_eq!(first["object_still_asserted"], 1, "{first}");
+        assert_eq!(first["cascade_retracted"], 0, "{first}");
+        assert!(!engine.has_triple(wi1, status, resolved));
+        assert!(engine.has_triple(wi2, status, resolved));
+        assert!(engine.has_triple(resolved, implies, closed));
+        assert!(!engine.tms().was_retracted(resolved));
+
+        let last = remove("wi-2");
+        assert_eq!(last["removed"], true, "{last}");
+        assert_eq!(last["object_still_asserted"], 0, "{last}");
+        assert!(last["cascade_retracted"].as_u64().unwrap() >= 2, "{last}");
+        assert!(!engine.has_triple(resolved, implies, closed));
+        assert!(engine.tms().was_retracted(resolved));
+
+        let again = remove("wi-2");
+        assert_eq!(again["removed"], false, "{again}");
     }
 
     #[test]

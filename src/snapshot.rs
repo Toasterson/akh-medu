@@ -3544,8 +3544,13 @@ fn apply_mutation_with_future(
         "retract" => {
             let triple = payload_triple_ids(&m.payload)?;
             validate_replay_symbols_registered(engine, triple, "retract")?;
+            // Legacy single-edge record: its writer (pre-`retract_batch`
+            // `remove_triple`) logged only the primary edge and relied on
+            // replay re-deriving the unconditional object-symbol cascade.
+            // Replay must reproduce that writer's semantics, so this is the
+            // one place that keeps `RetractionScope::Symbol`.
             engine
-                .remove_triple(triple.0, triple.1, triple.2)
+                .retract_object_symbol(triple.0, triple.1, triple.2)
                 .map_err(|error| SnapshotError::Engine(error.to_string()))?;
             Ok(true)
         }

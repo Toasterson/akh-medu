@@ -107,10 +107,12 @@ pub enum RetractionScope {
     /// Remove the edge, then run the symbol cascade for the object **only**
     /// if no other live edge still asserts it as an object. Otherwise
     /// behaves like [`RetractionScope::ExactTriple`]. The scope for removing
-    /// one superseded or contradicted value.
+    /// one superseded, contradicted or deleted value — the default of
+    /// `Engine::remove_triple` and every user-facing delete.
     CascadeIfOrphaned,
     /// Retract the object symbol unconditionally and cascade through every
-    /// dependent conclusion (the historical `kg_delete` semantics).
+    /// dependent conclusion (the pre-53j `remove_triple` / `kg_delete`
+    /// semantics, now only `Engine::retract_object_symbol`).
     Symbol,
 }
 
