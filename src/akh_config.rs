@@ -661,6 +661,7 @@ impl AutonomyConfig {
                 }),
             },
             (None, TaskGating::IgnoresMasterSwitch) => TaskGate::Enabled,
+            (None, TaskGating::OptIn) => TaskGate::Disabled(DisabledReason::OptIn),
             (None, _) if !self.enabled => TaskGate::Disabled(DisabledReason::MasterSwitchOff),
             (None, _) if task == DaemonTask::IdleCycle && exec == ExecPlacement::InProcess => {
                 TaskGate::Disabled(DisabledReason::InProcessExecutor)
@@ -1552,6 +1553,35 @@ mod tests {
         assert!(!cfg.autonomy.enabled);
         assert!(cfg.autonomy.task_enabled("goal_generation"));
         assert!(!cfg.autonomy.task_enabled("reflection"));
+    }
+
+    /// kg_compaction deletes every `episode:*` triple, so it never runs by
+    /// default, not even with autonomy on; only an explicit opt-in enables it.
+    #[test]
+    fn kg_compaction_is_opt_in() {
+        use crate::agent::autonomy::{DaemonTask, DisabledReason, ExecPlacement, TaskGate};
+        let mut a = AutonomyConfig::default();
+        assert!(a.enabled);
+        for exec in [
+            ExecPlacement::InProcess,
+            ExecPlacement::Contained,
+            ExecPlacement::Disabled,
+        ] {
+            assert_eq!(
+                a.gate(DaemonTask::KgCompaction, exec),
+                TaskGate::Disabled(DisabledReason::OptIn)
+            );
+        }
+        a.tasks.insert("kg_compaction".into(), true);
+        assert_eq!(
+            a.gate(DaemonTask::KgCompaction, ExecPlacement::Disabled),
+            TaskGate::Enabled
+        );
+        a.tasks.insert("kg_compaction".into(), false);
+        assert_eq!(
+            a.gate(DaemonTask::KgCompaction, ExecPlacement::Disabled),
+            TaskGate::Disabled(DisabledReason::ExplicitlyDisabled)
+        );
     }
 
     #[test]

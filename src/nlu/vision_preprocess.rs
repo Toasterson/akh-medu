@@ -222,11 +222,18 @@ mod prepare_tests {
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         let img = image::RgbImage::from_fn(width, height, |x, _| {
-            if x < width / 2 { image::Rgb([255, 0, 0]) } else { image::Rgb([255, 255, 255]) }
+            if x < width / 2 {
+                image::Rgb([255, 0, 0])
+            } else {
+                image::Rgb([255, 255, 255])
+            }
         });
         let mut bytes = Vec::new();
         image::DynamicImage::ImageRgb8(img)
-            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
             .unwrap();
         bytes
     }
@@ -241,14 +248,20 @@ mod prepare_tests {
         assert!(prepared.pixels.iter().all(|v| (-1.0..=1.0).contains(v)));
         assert_eq!(prepared.grid.rows, prepared.height / 32);
         assert_eq!(prepared.grid.cols, prepared.width / 32);
-        assert!(prepared.grid.tokens() >= 256, "minimum pixel bound implies >= 256 tokens");
+        assert!(
+            prepared.grid.tokens() >= 256,
+            "minimum pixel bound implies >= 256 tokens"
+        );
 
         // Channel-major: the left half is red, so at a left-half pixel the red
         // channel is +1 and green is -1.
         let (w, h) = (prepared.width, prepared.height);
         let left = h / 2 * w + w / 8;
         assert!((prepared.pixels[left] - 1.0).abs() < 1e-6, "red channel");
-        assert!((prepared.pixels[w * h + left] + 1.0).abs() < 1e-6, "green channel");
+        assert!(
+            (prepared.pixels[w * h + left] + 1.0).abs() < 1e-6,
+            "green channel"
+        );
     }
 
     #[test]

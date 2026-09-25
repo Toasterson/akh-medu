@@ -512,14 +512,21 @@ pub fn capture_snapshot_at_fence(
         })
         .collect();
 
-    // Sleep metrics (time series).
-    let sleep_rows: Vec<sleep_metric::Model> = agent
+    // Sleep metrics (time series). The table is keyed by (akh, cycle), but
+    // several sleeps can land in one OODA cycle when the daemon sleeps and no
+    // OODA cycle has run in between, so keep one row per cycle (the latest):
+    // duplicate keys failed the whole snapshot (UNIQUE constraint, 2026-09-25).
+    let latest_per_cycle: std::collections::BTreeMap<u64, _> = agent
         .sleep_cycle
         .metrics_history
         .iter()
+        .map(|(cycle, m)| (*cycle, m))
+        .collect();
+    let sleep_rows: Vec<sleep_metric::Model> = latest_per_cycle
+        .into_iter()
         .map(|(cycle, m)| sleep_metric::Model {
             akh_id,
-            cycle: *cycle as i64,
+            cycle: cycle as i64,
             episodes_replayed: m.episodes_replayed as i32,
             duplicates_merged: m.duplicates_merged as i32,
             orphans_pruned: m.orphans_pruned as i32,

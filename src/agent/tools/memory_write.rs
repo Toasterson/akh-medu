@@ -532,9 +532,11 @@ mod tests {
             )
             .unwrap();
         assert!(out.success, "expected success, got: {}", out.result);
-        assert!(engine
-            .resolve_symbol(&format!("summary:{}", "a".repeat(79)))
-            .is_ok());
+        assert!(
+            engine
+                .resolve_symbol(&format!("summary:{}", "a".repeat(79)))
+                .is_ok()
+        );
     }
 
     #[test]
