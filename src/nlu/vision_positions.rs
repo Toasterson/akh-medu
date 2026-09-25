@@ -102,8 +102,12 @@ mod tests {
         assert_eq!(
             &triples[2..],
             &[
-                [2, 2, 2], [2, 2, 3], [2, 2, 4],
-                [2, 3, 2], [2, 3, 3], [2, 3, 4],
+                [2, 2, 2],
+                [2, 2, 3],
+                [2, 2, 4],
+                [2, 3, 2],
+                [2, 3, 3],
+                [2, 3, 4],
             ]
         );
     }
@@ -111,10 +115,7 @@ mod tests {
     #[test]
     fn an_image_costs_its_longer_side_in_positions_not_its_token_count() {
         let grid = ImageGrid { rows: 2, cols: 3 };
-        let triples = position_triples(&[
-            PromptPiece::Image(grid),
-            PromptPiece::Text(2),
-        ]);
+        let triples = position_triples(&[PromptPiece::Image(grid), PromptPiece::Text(2)]);
         assert_eq!(triples.len(), grid.tokens() + 2);
         // Six image tokens, but the text resumes at 3, not at 6. Advancing by
         // the token count instead would place every later token too far away.
@@ -144,6 +145,10 @@ mod tests {
         assert_eq!(triples.len(), expected);
         // Nothing may exceed the cursor's final value.
         let end = 3 + 4 + 2 + 5;
-        assert!(triples.iter().all(|[t, h, w]| *t < end && *h < end && *w < end));
+        assert!(
+            triples
+                .iter()
+                .all(|[t, h, w]| *t < end && *h < end && *w < end)
+        );
     }
 }

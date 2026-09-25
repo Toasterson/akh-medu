@@ -211,7 +211,10 @@ mod tests {
         let messages = history();
         // Budget below what the pinned rules plus the current turn need.
         let error = SelectingManager::select(&messages, 1, &PerMessage).unwrap_err();
-        assert!(matches!(error, ContextError::BudgetExceeded { .. }), "{error:?}");
+        assert!(
+            matches!(error, ContextError::BudgetExceeded { .. }),
+            "{error:?}"
+        );
     }
 
     #[test]

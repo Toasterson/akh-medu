@@ -327,6 +327,11 @@ impl DaemonTask {
             }
             DaemonTask::Harvest => TaskGating::FollowsTask(DaemonTask::SleepCycle),
             DaemonTask::Librarian | DaemonTask::OpenclawSync => TaskGating::IgnoresMasterSwitch,
+            // Deletes every `episode:*` triple by design: for an akh that keeps
+            // episodic memory (memory_write, harvest) that is data loss. On
+            // 2026-09-25 it removed ~7,500 Roman episode facts within hours of
+            // being enabled by default.
+            DaemonTask::KgCompaction => TaskGating::OptIn,
             _ => TaskGating::Autonomy,
         }
     }
@@ -446,6 +451,8 @@ pub enum TaskGating {
     /// Its own `tasks` override wins; the master switch does not turn it
     /// off. Its environment gate still applies (librarian, OpenClaw sync).
     IgnoresMasterSwitch,
+    /// Destructive. It runs only with an explicit `tasks.<name> = true`.
+    OptIn,
 }
 
 /// How the daily budget meters a task.
@@ -540,6 +547,9 @@ pub enum DisabledReason {
         /// The variable that must be set.
         var: &'static str,
     },
+    /// A destructive task that runs only with an explicit
+    /// `[autonomy] tasks.<name> = true`.
+    OptIn,
     /// A prerequisite is not configured for this akh.
     NotConfigured {
         /// What is missing.
@@ -563,6 +573,10 @@ impl fmt::Display for DisabledReason {
             DisabledReason::InProcessExecutor => f.write_str(
                 "executor tools run in-process; idle OODA tool use stays off until exec is contained \
                  (set [autonomy] tasks.idle_cycle = true to override)",
+            ),
+            DisabledReason::OptIn => f.write_str(
+                "destructive task, off unless [autonomy] tasks.<name> = true (kg_compaction deletes \
+                 every episode:* triple, i.e. episodic memory)",
             ),
             DisabledReason::EnvGate { var } => write!(f, "environment gate {var} is not set"),
             DisabledReason::NotConfigured { what } => write!(f, "{what} is not configured"),
@@ -850,9 +864,17 @@ impl fmt::Debug for AutonomyGovernor {
 impl AutonomyGovernor {
     /// A governor whose ledger lives only in memory.
     pub fn in_memory(budget: AutonomyBudget) -> Self {
+        Self::in_memory_on(budget, UtcDay::today())
+    }
+
+    /// [`AutonomyGovernor::in_memory`] with an explicit starting day, so a
+    /// caller (or test) that pins its own day does not depend on the clock:
+    /// the ledger only rolls forward, so a ledger seeded "today" treats any
+    /// earlier pinned day as the past.
+    pub fn in_memory_on(budget: AutonomyBudget, day: UtcDay) -> Self {
         Self {
             budget,
-            ledger: Mutex::new(BudgetLedger::empty(UtcDay::today())),
+            ledger: Mutex::new(BudgetLedger::empty(day)),
             store: LedgerStore::Memory,
         }
     }
@@ -1423,8 +1445,8 @@ mod tests {
             max_tokens_per_day: 1_000_000,
             max_turns_per_day: 2,
         };
-        let governor = AutonomyGovernor::in_memory(budget);
         let day = UtcDay::from_unix_secs(1_790_251_200);
+        let governor = AutonomyGovernor::in_memory_on(budget, day);
 
         for _ in 0..2 {
             let ticket = admitted(governor.admit_on(DaemonTask::Librarian, day));
@@ -1458,8 +1480,8 @@ mod tests {
             max_tokens_per_day: 100,
             max_turns_per_day: 40,
         };
-        let governor = AutonomyGovernor::in_memory(budget);
         let day = UtcDay::from_unix_secs(0);
+        let governor = AutonomyGovernor::in_memory_on(budget, day);
         let ticket = admitted(governor.admit_on(DaemonTask::KnowledgeElicitation, day));
         // One run may overshoot; admission is checked before the work.
         governor.settle_on(ticket, usage(250), day).unwrap();
@@ -1470,11 +1492,14 @@ mod tests {
 
     #[test]
     fn work_that_never_reached_a_model_is_free() {
-        let governor = AutonomyGovernor::in_memory(AutonomyBudget {
-            max_tokens_per_day: 10,
-            max_turns_per_day: 1,
-        });
         let day = UtcDay::from_unix_secs(0);
+        let governor = AutonomyGovernor::in_memory_on(
+            AutonomyBudget {
+                max_tokens_per_day: 10,
+                max_turns_per_day: 1,
+            },
+            day,
+        );
         for _ in 0..5 {
             let ticket = admitted(governor.admit_on(DaemonTask::KnowledgeElicitation, day));
             governor
