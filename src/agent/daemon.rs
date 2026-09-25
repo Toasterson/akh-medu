@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use super::Agent;
 use super::autonomy::{
     Admission, AutonomyBudget, AutonomyGovernor, BudgetExhausted, BudgetLedger, BudgetMetering,
-    BudgetTicket, DaemonTask, DaemonTaskReport, DisabledReason, ExecPlacement, FactDelta, TaskGate,
-    TaskOutcome, TaskRun,
+    BudgetTicket, Cadence, DaemonTask, DaemonTaskReport, DisabledReason, ExecPlacement, FactDelta,
+    LastRun, LastRunCause, LastRunStore, TaskGate, TaskOutcome, TaskRun, UnixSecs,
 };
 use super::error::AgentResult;
 use super::llm_metrics::{LlmUsage, ModelContact, UsageScope};
@@ -28,15 +28,17 @@ use crate::config::UpstreamEndpointConfig;
 use crate::engine::Engine;
 use crate::message::AkhMessage;
 
-/// A ticker for `task` every `period` (Phase 53 review).
+/// A ticker every `period` whose first tick is `first` from now (Phase 53
+/// review).
 ///
-/// The first tick follows [`DaemonTask::first_tick`]: cheap infrastructure
-/// fires at once, the sleep tick after a short startup delay, everything
-/// else after one period, so a start or wake does not run every task at
+/// The daemon picks `first` per task ([`AgentDaemon::first_tick_delay`]):
+/// cheap infrastructure fires at once, the sleep tick after a short startup
+/// delay, long-period tasks resume from their persisted last run, everything
+/// else waits one period, so a start or wake does not run every task at
 /// once. Missed ticks (a long task, a suspended host) are delayed rather
 /// than replayed in a burst.
-fn task_interval(task: DaemonTask, period: Duration) -> tokio::time::Interval {
-    let start = tokio::time::Instant::now() + task.first_tick().delay(period);
+fn interval_after(first: Duration, period: Duration) -> tokio::time::Interval {
+    let start = tokio::time::Instant::now() + first;
     let mut ticker = tokio::time::interval_at(start, period);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker
@@ -291,6 +293,46 @@ impl Default for DaemonConfig {
     }
 }
 
+impl DaemonConfig {
+    /// How often the daemon ticks `task`. Harvest and memory hygiene run on
+    /// the sleep tick.
+    pub fn period(&self, task: DaemonTask) -> Duration {
+        match task {
+            DaemonTask::Equivalence => self.equivalence_interval,
+            DaemonTask::Reflection => self.reflection_interval,
+            DaemonTask::Consolidation => self.consolidation_interval,
+            DaemonTask::SchemaDiscovery => self.schema_discovery_interval,
+            DaemonTask::RuleInference => self.rule_inference_interval,
+            DaemonTask::GapAnalysis => self.gap_analysis_interval,
+            DaemonTask::IdleCycle => self.idle_cycle_interval,
+            DaemonTask::ContinuousLearning => self.continuous_learning_interval,
+            DaemonTask::GoalGeneration => self.goal_generation_interval,
+            DaemonTask::SleepCycle | DaemonTask::Harvest | DaemonTask::MemoryHygiene => {
+                self.sleep_cycle_interval
+            }
+            DaemonTask::KnowledgeExtraction => self.knowledge_extraction_interval,
+            DaemonTask::BridgeTraining => self.bridge_training_interval,
+            DaemonTask::OpenclawSync => self.openclaw_sync_interval,
+            DaemonTask::KnowledgeElicitation => self.knowledge_elicitation_interval,
+            DaemonTask::KgCompaction => self.kg_compaction_interval,
+            DaemonTask::Delegation => self.delegation_interval,
+            DaemonTask::RelationEnrichment => self.relation_enrichment_interval,
+            DaemonTask::Librarian => self.librarian_interval,
+            DaemonTask::SeshatCuration => self.seshat_curation_interval,
+            DaemonTask::HekaCuration => self.heka_curation_interval,
+            DaemonTask::Persist => self.persist_interval,
+            DaemonTask::TriggerEvaluation => self.trigger_evaluation_interval,
+            DaemonTask::Reactor => self.reactor_evaluation_interval,
+        }
+    }
+
+    /// How `task`'s first tick after a start is chosen at its configured
+    /// period (see [`DaemonTask::cadence`]).
+    pub fn cadence(&self, task: DaemonTask) -> Cadence {
+        task.cadence(self.period(task))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Daemon
 // ---------------------------------------------------------------------------
@@ -338,6 +380,9 @@ pub struct AgentDaemon {
     exec: ExecPlacement,
     /// Daily LLM budget for this akh (Phase 53b).
     governor: AutonomyGovernor,
+    /// Last-run marks of the long-period tasks, so their cadence survives
+    /// restarts (see [`DaemonTask::cadence`]).
+    last_runs: LastRunStore,
     /// The agent's engine, cached at construction (an Agent never swaps its
     /// engine). Used for fact-delta telemetry without taking the agent lock.
     engine: Arc<Engine>,
@@ -400,11 +445,13 @@ impl AgentDaemon {
     pub fn new(agent: Arc<RwLock<Agent>>, config: DaemonConfig) -> Self {
         let engine = Arc::clone(&agent.read().unwrap_or_else(|e| e.into_inner()).engine);
         let governor = AutonomyGovernor::open_or_reset(&engine, AutonomyBudget::default());
+        let last_runs = LastRunStore::open_or_reset(&engine);
         Self {
             agent,
             config,
             exec: ExecPlacement::InProcess,
             governor,
+            last_runs,
             engine,
             workspace: "unnamed".to_owned(),
             total_cycles: 0,
@@ -646,7 +693,87 @@ impl AgentDaemon {
             ledger,
         };
         report.emit(&self.workspace);
+        self.record_last_run(report.task, &report.outcome, UnixSecs::now());
         report
+    }
+
+    /// Record `task`'s last-run mark after a tick that did work (ran or
+    /// failed), if its cadence resumes across restarts. Skips leave the
+    /// previous mark. A failed write is logged; the in-memory mark still
+    /// drives this daemon's schedule.
+    fn record_last_run(&self, task: DaemonTask, outcome: &TaskOutcome, at: UnixSecs) {
+        if self.config.cadence(task) != Cadence::Resumable {
+            return;
+        }
+        let Some(cause) = LastRunCause::from_outcome(outcome) else {
+            return;
+        };
+        if let Err(error) = self.last_runs.record(task, LastRun { at, cause }) {
+            tracing::warn!(
+                target: "akh::autonomy",
+                workspace = %self.workspace,
+                task = task.as_str(),
+                error = %error,
+                "daemon last-run mark not persisted; the next start may run the task early"
+            );
+        }
+    }
+
+    /// Anchor every enabled resumable task that has no mark yet at `now`
+    /// ([`LastRunCause::FirstSeen`]).
+    ///
+    /// A task that has never run on this akh waits one full period after the
+    /// daemon's *first* start, as before this mark existed, but a restart
+    /// inside that period no longer pushes it out again. Gated-off tasks get
+    /// no anchor, so enabling one later also waits a period from that start.
+    fn seed_last_runs(&self, now: UnixSecs) {
+        for task in DaemonTask::ALL {
+            if self.config.cadence(task) != Cadence::Resumable
+                || self.last_runs.get(task).is_some()
+                || self.task_gate(task) != TaskGate::Enabled
+            {
+                continue;
+            }
+            let anchor = LastRun {
+                at: now,
+                cause: LastRunCause::FirstSeen,
+            };
+            if let Err(error) = self.last_runs.record(task, anchor) {
+                tracing::warn!(
+                    target: "akh::autonomy",
+                    workspace = %self.workspace,
+                    task = task.as_str(),
+                    error = %error,
+                    "daemon first-run anchor not persisted; a restart waits one more period"
+                );
+            }
+        }
+    }
+
+    /// The delay before `task`'s first tick after a start at `now`
+    /// ([`Cadence::first_tick_delay`] over the persisted mark).
+    fn first_tick_delay(&self, task: DaemonTask, now: UnixSecs) -> Duration {
+        self.config.cadence(task).first_tick_delay(
+            self.config.period(task),
+            self.last_runs.get(task),
+            now,
+        )
+    }
+
+    /// The ticker for `task`, first firing after [`Self::first_tick_delay`].
+    fn task_interval(&self, task: DaemonTask, now: UnixSecs) -> tokio::time::Interval {
+        let first = self.first_tick_delay(task, now);
+        if self.config.cadence(task) == Cadence::Resumable {
+            tracing::debug!(
+                target: "akh::autonomy",
+                workspace = %self.workspace,
+                task = task.as_str(),
+                first_tick_secs = first.as_secs(),
+                last_run = ?self.last_runs.get(task),
+                "daemon task resumes its cadence"
+            );
+        }
+        interval_after(first, self.config.period(task))
     }
 
     /// Charge a ticket. A ledger write failure is logged; the in-process
@@ -958,52 +1085,35 @@ impl AgentDaemon {
     /// `tokio::task::block_in_place`, which signals Tokio to migrate waiting
     /// async tasks to other threads before this thread blocks.
     pub async fn run(&mut self) -> AgentResult<()> {
-        let c = &self.config;
-        let mut equivalence_tick = task_interval(DaemonTask::Equivalence, c.equivalence_interval);
-        let mut reflection_tick = task_interval(DaemonTask::Reflection, c.reflection_interval);
-        let mut consolidation_tick =
-            task_interval(DaemonTask::Consolidation, c.consolidation_interval);
-        let mut schema_tick =
-            task_interval(DaemonTask::SchemaDiscovery, c.schema_discovery_interval);
-        let mut rules_tick = task_interval(DaemonTask::RuleInference, c.rule_inference_interval);
-        let mut gaps_tick = task_interval(DaemonTask::GapAnalysis, c.gap_analysis_interval);
-        let mut persist_tick = task_interval(DaemonTask::Persist, c.persist_interval);
-        let mut idle_cycle_tick = task_interval(DaemonTask::IdleCycle, c.idle_cycle_interval);
-        let mut continuous_learning_tick = task_interval(
-            DaemonTask::ContinuousLearning,
-            c.continuous_learning_interval,
-        );
-        let mut goal_gen_tick =
-            task_interval(DaemonTask::GoalGeneration, c.goal_generation_interval);
+        // Long-period tasks resume from their persisted last run (anchoring
+        // tasks never seen before at this start), so a daemon restarted more
+        // often than a task's period still runs it.
+        let now = UnixSecs::now();
+        tokio::task::block_in_place(|| self.seed_last_runs(now));
+        let mut equivalence_tick = self.task_interval(DaemonTask::Equivalence, now);
+        let mut reflection_tick = self.task_interval(DaemonTask::Reflection, now);
+        let mut consolidation_tick = self.task_interval(DaemonTask::Consolidation, now);
+        let mut schema_tick = self.task_interval(DaemonTask::SchemaDiscovery, now);
+        let mut rules_tick = self.task_interval(DaemonTask::RuleInference, now);
+        let mut gaps_tick = self.task_interval(DaemonTask::GapAnalysis, now);
+        let mut persist_tick = self.task_interval(DaemonTask::Persist, now);
+        let mut idle_cycle_tick = self.task_interval(DaemonTask::IdleCycle, now);
+        let mut continuous_learning_tick = self.task_interval(DaemonTask::ContinuousLearning, now);
+        let mut goal_gen_tick = self.task_interval(DaemonTask::GoalGeneration, now);
         // The sleep tick runs harvest, then the sleep cycle.
-        let mut sleep_tick = task_interval(DaemonTask::SleepCycle, c.sleep_cycle_interval);
-        let mut trigger_tick =
-            task_interval(DaemonTask::TriggerEvaluation, c.trigger_evaluation_interval);
-        let mut reactor_tick = task_interval(DaemonTask::Reactor, c.reactor_evaluation_interval);
-        let mut extraction_tick = task_interval(
-            DaemonTask::KnowledgeExtraction,
-            c.knowledge_extraction_interval,
-        );
-        let mut bridge_training_tick =
-            task_interval(DaemonTask::BridgeTraining, c.bridge_training_interval);
-        let mut openclaw_sync_tick =
-            task_interval(DaemonTask::OpenclawSync, c.openclaw_sync_interval);
-        let mut elicitation_tick = task_interval(
-            DaemonTask::KnowledgeElicitation,
-            c.knowledge_elicitation_interval,
-        );
-        let mut kg_compaction_tick =
-            task_interval(DaemonTask::KgCompaction, c.kg_compaction_interval);
-        let mut delegation_tick = task_interval(DaemonTask::Delegation, c.delegation_interval);
-        let mut relation_enrichment_tick = task_interval(
-            DaemonTask::RelationEnrichment,
-            c.relation_enrichment_interval,
-        );
-        let mut librarian_tick = task_interval(DaemonTask::Librarian, c.librarian_interval);
-        let mut seshat_curation_tick =
-            task_interval(DaemonTask::SeshatCuration, c.seshat_curation_interval);
-        let mut heka_curation_tick =
-            task_interval(DaemonTask::HekaCuration, c.heka_curation_interval);
+        let mut sleep_tick = self.task_interval(DaemonTask::SleepCycle, now);
+        let mut trigger_tick = self.task_interval(DaemonTask::TriggerEvaluation, now);
+        let mut reactor_tick = self.task_interval(DaemonTask::Reactor, now);
+        let mut extraction_tick = self.task_interval(DaemonTask::KnowledgeExtraction, now);
+        let mut bridge_training_tick = self.task_interval(DaemonTask::BridgeTraining, now);
+        let mut openclaw_sync_tick = self.task_interval(DaemonTask::OpenclawSync, now);
+        let mut elicitation_tick = self.task_interval(DaemonTask::KnowledgeElicitation, now);
+        let mut kg_compaction_tick = self.task_interval(DaemonTask::KgCompaction, now);
+        let mut delegation_tick = self.task_interval(DaemonTask::Delegation, now);
+        let mut relation_enrichment_tick = self.task_interval(DaemonTask::RelationEnrichment, now);
+        let mut librarian_tick = self.task_interval(DaemonTask::Librarian, now);
+        let mut seshat_curation_tick = self.task_interval(DaemonTask::SeshatCuration, now);
+        let mut heka_curation_tick = self.task_interval(DaemonTask::HekaCuration, now);
 
         tokio::task::block_in_place(|| {
             self.lock_agent().sink().emit(&AkhMessage::system(
@@ -4162,7 +4272,11 @@ mod tests {
         ] {
             assert_eq!(task.first_tick(), FirstTick::Immediate, "{task}");
         }
-        for task in [DaemonTask::Harvest, DaemonTask::SleepCycle] {
+        for task in [
+            DaemonTask::Harvest,
+            DaemonTask::MemoryHygiene,
+            DaemonTask::SleepCycle,
+        ] {
             assert_eq!(task.first_tick(), FirstTick::AfterStartupDelay, "{task}");
         }
         for task in [
@@ -4188,14 +4302,16 @@ mod tests {
             .enable_time()
             .build()
             .unwrap();
+        let daemon = AgentDaemon::new(test_shared_agent(), DaemonConfig::default());
+        let now = UnixSecs::now();
         runtime.block_on(async {
             let short = Duration::from_millis(100);
-            let mut reactor = task_interval(DaemonTask::Reactor, hour);
+            let mut reactor = daemon.task_interval(DaemonTask::Reactor, now);
             assert!(
                 tokio::time::timeout(short, reactor.tick()).await.is_ok(),
                 "infrastructure fires at once"
             );
-            let mut learning = task_interval(DaemonTask::ContinuousLearning, hour);
+            let mut learning = daemon.task_interval(DaemonTask::ContinuousLearning, now);
             assert!(
                 tokio::time::timeout(short, learning.tick()).await.is_err(),
                 "heavy tasks wait a period"
@@ -4204,6 +4320,198 @@ mod tests {
                 learning.missed_tick_behavior(),
                 tokio::time::MissedTickBehavior::Delay
             );
+        });
+    }
+
+    // ── Long-period cadence survives restarts (WI 01a0d569-1cf1 item 1) ──
+
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    fn shared_agent_at(dir: &std::path::Path) -> Arc<RwLock<Agent>> {
+        use crate::engine::{Engine, EngineConfig};
+        use crate::vsa::Dimension;
+
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        })
+        .expect("engine");
+        let agent =
+            Agent::new(Arc::new(engine), crate::agent::AgentConfig::default()).expect("agent");
+        Arc::new(RwLock::new(agent))
+    }
+
+    /// Start a daemon over `dir`, let `f` inspect it, then persist and drop
+    /// everything so the next "start" reopens the same store.
+    fn with_daemon_at<T>(dir: &std::path::Path, f: impl FnOnce(&mut AgentDaemon) -> T) -> T {
+        let shared = shared_agent_at(dir);
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        let out = f(&mut daemon);
+        daemon.engine.persist().expect("persist");
+        out
+    }
+
+    #[test]
+    fn daemon_config_periods_cover_every_task_and_pick_the_resumable_set() {
+        let config = DaemonConfig::default();
+        let resumable: Vec<_> = DaemonTask::ALL
+            .into_iter()
+            .filter(|task| config.cadence(*task) == Cadence::Resumable)
+            .collect();
+        assert_eq!(
+            resumable,
+            vec![
+                DaemonTask::SchemaDiscovery,
+                DaemonTask::GapAnalysis,
+                DaemonTask::ContinuousLearning,
+                DaemonTask::KnowledgeExtraction,
+                DaemonTask::BridgeTraining,
+                DaemonTask::OpenclawSync,
+                DaemonTask::KnowledgeElicitation,
+                DaemonTask::KgCompaction,
+                DaemonTask::RelationEnrichment,
+                DaemonTask::Librarian,
+                DaemonTask::SeshatCuration,
+                DaemonTask::HekaCuration,
+            ]
+        );
+        assert_eq!(
+            config.period(DaemonTask::Harvest),
+            config.sleep_cycle_interval
+        );
+        assert_eq!(config.period(DaemonTask::Librarian), 24 * HOUR);
+    }
+
+    #[test]
+    fn restart_resumes_a_daily_task_from_its_persisted_last_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = UnixSecs::now();
+        let ran = |ago: Duration| LastRun {
+            at: now.saturating_sub(ago),
+            cause: LastRunCause::Ran,
+        };
+
+        // Ran 23 h ago: the restarted daemon fires it in ~1 h, not 24 h.
+        with_daemon_at(dir.path(), |daemon| {
+            daemon
+                .last_runs
+                .record(DaemonTask::Librarian, ran(23 * HOUR))
+                .unwrap();
+        });
+        let delay = with_daemon_at(dir.path(), |d| {
+            d.first_tick_delay(DaemonTask::Librarian, now)
+        });
+        assert_eq!(delay, HOUR);
+
+        // Ran 30 h ago: overdue, fires after the minimum delay.
+        with_daemon_at(dir.path(), |daemon| {
+            daemon
+                .last_runs
+                .record(DaemonTask::Librarian, ran(30 * HOUR))
+                .unwrap();
+        });
+        let delay = with_daemon_at(dir.path(), |d| {
+            d.first_tick_delay(DaemonTask::Librarian, now)
+        });
+        assert_eq!(delay, super::super::autonomy::RESUME_MIN_DELAY);
+
+        // Short-period tasks are unchanged: one period after every start.
+        let delay = with_daemon_at(dir.path(), |d| {
+            d.first_tick_delay(DaemonTask::RuleInference, now)
+        });
+        assert_eq!(delay, DaemonConfig::default().rule_inference_interval);
+    }
+
+    #[test]
+    fn a_never_run_task_waits_one_period_from_its_first_start_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let task = DaemonTask::ContinuousLearning;
+        let period = DaemonConfig::default().continuous_learning_interval;
+        let first_start = UnixSecs::now();
+
+        // First start: anchored, one full period.
+        let (gate, delay) = with_daemon_at(dir.path(), |daemon| {
+            daemon.seed_last_runs(first_start);
+            (
+                daemon.task_gate(task),
+                daemon.first_tick_delay(task, first_start),
+            )
+        });
+        assert_eq!(gate, TaskGate::Enabled);
+        assert_eq!(delay, period);
+
+        // Restarted 90 min later: the anchor holds, 30 min left.
+        let restart = first_start.saturating_add(Duration::from_secs(90 * 60));
+        let (mark, delay) = with_daemon_at(dir.path(), |daemon| {
+            daemon.seed_last_runs(restart);
+            (
+                daemon.last_runs.get(task),
+                daemon.first_tick_delay(task, restart),
+            )
+        });
+        assert_eq!(
+            mark,
+            Some(LastRun {
+                at: first_start,
+                cause: LastRunCause::FirstSeen
+            }),
+            "a restart does not move the anchor"
+        );
+        assert_eq!(delay, Duration::from_secs(30 * 60));
+
+        // A gated-off task (kg_compaction is opt-in) gets no anchor.
+        let compaction = with_daemon_at(dir.path(), |daemon| {
+            daemon.seed_last_runs(first_start);
+            daemon.last_runs.get(DaemonTask::KgCompaction)
+        });
+        assert_eq!(compaction, None);
+    }
+
+    #[test]
+    fn runs_and_failures_are_marked_but_skips_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = UnixSecs::now();
+        with_daemon_at(dir.path(), |daemon| {
+            let report = daemon.run_task(DaemonTask::ContinuousLearning, |_| TaskRun::Ran);
+            assert_eq!(report.outcome, TaskOutcome::Ran);
+            let report = daemon.run_task(DaemonTask::GapAnalysis, |_| {
+                TaskRun::Failed("backend down".into())
+            });
+            assert_eq!(report.outcome.label(), "failed");
+            let report = daemon.run_task(DaemonTask::SchemaDiscovery, |_| TaskRun::Contended);
+            assert_eq!(report.outcome, TaskOutcome::SkippedContended);
+            // Opt-in and off by default: skipped without running.
+            let report = daemon.run_task(DaemonTask::KgCompaction, |_| {
+                panic!("an opt-in task must not run by default")
+            });
+            assert_eq!(report.outcome.label(), "skipped_disabled");
+            // Short period: never marked.
+            let _ = daemon.run_task(DaemonTask::RuleInference, |_| TaskRun::Ran);
+        });
+
+        // After a restart, the marks are there and drive the schedule.
+        with_daemon_at(dir.path(), |daemon| {
+            let ran = daemon
+                .last_runs
+                .get(DaemonTask::ContinuousLearning)
+                .unwrap();
+            assert_eq!(ran.cause, LastRunCause::Ran);
+            assert!(ran.at >= before);
+            let failed = daemon.last_runs.get(DaemonTask::GapAnalysis).unwrap();
+            assert_eq!(failed.cause, LastRunCause::Failed);
+            // A failed heavy task is retried a period later, not on restart.
+            assert_eq!(
+                daemon.first_tick_delay(DaemonTask::GapAnalysis, failed.at),
+                daemon.config.gap_analysis_interval
+            );
+            for task in [
+                DaemonTask::SchemaDiscovery,
+                DaemonTask::KgCompaction,
+                DaemonTask::RuleInference,
+            ] {
+                assert_eq!(daemon.last_runs.get(task), None, "{task}");
+            }
         });
     }
 

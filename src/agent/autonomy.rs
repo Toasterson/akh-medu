@@ -13,6 +13,10 @@
 //!   persisted in the engine's durable metadata under [`BUDGET_LEDGER_KEY`].
 //!   An engine without a durable store (in-memory, tests) keeps the ledger in
 //!   memory only.
+//! - [`Cadence`], [`LastRunLog`] and [`LastRunStore`]: long-period tasks
+//!   resume their schedule from a per-task last-run mark persisted under
+//!   [`LAST_RUN_LOG_KEY`], so a daemon that restarts more often than a task's
+//!   period (the 24 h librarian) still runs it once per period.
 //! - [`DaemonTaskReport`]: the per-run telemetry record that every daemon
 //!   task produces, logged under target `akh::autonomy` and exported as the
 //!   `akh_daemon_task_*` metrics.
@@ -134,6 +138,73 @@ pub enum AutonomyError {
         help("This is a bug: BudgetLedger is plain data. Report it with the daemon log.")
     )]
     LedgerEncode {
+        /// The encode error.
+        #[source]
+        source: serde_json::Error,
+    },
+
+    /// The persisted daemon last-run log could not be decoded.
+    #[error("the daemon last-run log at `{key}` is corrupt: {source}")]
+    #[diagnostic(
+        code(akh::autonomy::corrupt_last_run),
+        help(
+            "The daemon starts with an empty log and overwrites it on the next run, so each \
+             long-period task (librarian, continuous learning, ...) waits one full period from \
+             this start. To inspect the log first, stop the akh and read the durable meta key \
+             `{key}`."
+        )
+    )]
+    CorruptLastRunLog {
+        /// The metadata key that failed to decode.
+        key: String,
+        /// The decode error.
+        #[source]
+        source: serde_json::Error,
+    },
+
+    /// Reading the daemon last-run log from the durable store failed.
+    #[error("failed to read the daemon last-run log at `{key}`")]
+    #[diagnostic(
+        code(akh::autonomy::last_run_read),
+        help(
+            "The engine's durable store did not answer. Check the akh's data directory \
+             (disk full, permissions, or a redb lock held by another process). The daemon \
+             starts with an empty log, so long-period tasks wait one full period."
+        )
+    )]
+    LastRunRead {
+        /// The metadata key.
+        key: String,
+        /// The store error.
+        #[source]
+        source: crate::error::StoreError,
+    },
+
+    /// Writing the daemon last-run log to the durable store failed.
+    #[error("failed to persist the daemon last-run log at `{key}`")]
+    #[diagnostic(
+        code(akh::autonomy::last_run_write),
+        help(
+            "The in-process log still drives this daemon's schedule. A restart before the \
+             write succeeds resumes from the previous mark: the task may run once more than \
+             its period allows. Check disk space and permissions on the akh's data directory."
+        )
+    )]
+    LastRunWrite {
+        /// The metadata key.
+        key: String,
+        /// The store error.
+        #[source]
+        source: crate::error::StoreError,
+    },
+
+    /// Encoding the last-run log failed (should not happen for plain data).
+    #[error("failed to encode the daemon last-run log: {source}")]
+    #[diagnostic(
+        code(akh::autonomy::last_run_encode),
+        help("This is a bug: LastRunLog is plain data. Report it with the daemon log.")
+    )]
+    LastRunEncode {
         /// The encode error.
         #[source]
         source: serde_json::Error,
@@ -339,7 +410,7 @@ impl DaemonTask {
     /// When the daemon first runs this task after a start or wake.
     ///
     /// Cheap infrastructure (reactor, triggers, persistence) runs at once.
-    /// The sleep tick (harvest, then the sleep cycle) runs after a short
+    /// The sleep tick (harvest, memory hygiene, then the sleep cycle) runs after a short
     /// [`STARTUP_DELAY`] so a freshly started akh (the Roman cutover) harvests
     /// soon without competing with its own wake. Everything else, including
     /// the heavy tasks (continuous learning holds the agent write lock for
@@ -350,7 +421,10 @@ impl DaemonTask {
             DaemonTask::Reactor | DaemonTask::TriggerEvaluation | DaemonTask::Persist => {
                 FirstTick::Immediate
             }
-            DaemonTask::Harvest | DaemonTask::SleepCycle => FirstTick::AfterStartupDelay,
+            // All three run on the sleep tick.
+            DaemonTask::Harvest | DaemonTask::MemoryHygiene | DaemonTask::SleepCycle => {
+                FirstTick::AfterStartupDelay
+            }
             _ => FirstTick::AfterOnePeriod,
         }
     }
@@ -425,6 +499,371 @@ impl FirstTick {
             FirstTick::AfterOnePeriod => period,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cadence across restarts
+// ---------------------------------------------------------------------------
+
+/// Durable-metadata key of the per-akh [`LastRunLog`]. The `v1` suffix
+/// versions its JSON shape.
+pub const LAST_RUN_LOG_KEY: &[u8] = b"daemon:last_run:v1";
+
+/// Shortest period whose cadence survives a daemon restart (see
+/// [`DaemonTask::cadence`]).
+///
+/// 15 minutes covers every heavy task at its default period (gap analysis
+/// 15 min, schema discovery, knowledge elicitation and KG compaction 30 min,
+/// knowledge extraction 45 min, then the hourly-to-daily tasks) and leaves
+/// the cheap sub-15-minute tasks (reflection, equivalence, rule inference,
+/// goal generation, delegation, the idle cycle) on the plain per-start
+/// schedule, so they never write metadata on every run.
+pub const RESUMABLE_MIN_PERIOD: Duration = Duration::from_secs(15 * 60);
+
+/// The earliest a resumed task fires after a daemon start, even when it is
+/// long overdue. A restart storm therefore cannot burst the heavy tasks, and
+/// an overdue task does not compete with the akh's own wake.
+pub const RESUME_MIN_DELAY: Duration = STARTUP_DELAY;
+
+/// A UTC wall-clock instant, as whole seconds since the Unix epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UnixSecs(u64);
+
+impl UnixSecs {
+    /// The instant `secs` seconds after the epoch.
+    pub const fn from_secs(secs: u64) -> Self {
+        Self(secs)
+    }
+
+    /// Now, by the system clock (the epoch if the clock is before it).
+    pub fn now() -> Self {
+        Self(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )
+    }
+
+    /// Seconds since the epoch.
+    pub const fn as_secs(self) -> u64 {
+        self.0
+    }
+
+    /// This instant moved `by` later (saturating).
+    pub const fn saturating_add(self, by: Duration) -> Self {
+        Self(self.0.saturating_add(by.as_secs()))
+    }
+
+    /// This instant moved `by` earlier (saturating at the epoch).
+    pub const fn saturating_sub(self, by: Duration) -> Self {
+        Self(self.0.saturating_sub(by.as_secs()))
+    }
+}
+
+impl fmt::Display for UnixSecs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unix {}", self.0)
+    }
+}
+
+/// How a task's first tick after a daemon start is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cadence {
+    /// Every start begins the schedule afresh, per [`FirstTick`]. Right for
+    /// infrastructure, the sleep tick and cheap short-period tasks.
+    PerStart(FirstTick),
+    /// The schedule resumes from the task's persisted [`LastRun`], so a
+    /// daemon that restarts more often than the period still runs the task
+    /// once per period.
+    Resumable,
+}
+
+impl Cadence {
+    /// The delay before the first tick after a start at `now`, for a task
+    /// that repeats every `period` and whose persisted mark is `last`.
+    ///
+    /// For [`Cadence::Resumable`]:
+    ///
+    /// - no mark: one full period (the daemon records a
+    ///   [`LastRunCause::FirstSeen`] mark at the first start, so this applies
+    ///   once per akh, not once per restart);
+    /// - otherwise `last.at + period - now`, clamped to
+    ///   `[RESUME_MIN_DELAY, period]`: an overdue task runs after the
+    ///   minimum delay, and a clock that stepped back never postpones a task
+    ///   by more than one period.
+    pub fn first_tick_delay(
+        self,
+        period: Duration,
+        last: Option<LastRun>,
+        now: UnixSecs,
+    ) -> Duration {
+        match self {
+            Cadence::PerStart(first) => first.delay(period),
+            Cadence::Resumable => match last {
+                None => period,
+                Some(last) => {
+                    let due = last.at.saturating_add(period);
+                    let remaining =
+                        Duration::from_secs(due.as_secs().saturating_sub(now.as_secs()));
+                    remaining.clamp(RESUME_MIN_DELAY.min(period), period)
+                }
+            },
+        }
+    }
+}
+
+impl DaemonTask {
+    /// How this task's first tick is chosen when it repeats every `period`.
+    ///
+    /// A task that waits a full period after each start
+    /// ([`FirstTick::AfterOnePeriod`]) with a period of at least
+    /// [`RESUMABLE_MIN_PERIOD`] is [`Cadence::Resumable`]: without that, a
+    /// daemon restarted more often than the period (the 24 h librarian on an
+    /// akh redeployed daily) would push the first tick out on every start and
+    /// never run the task. Everything else keeps [`Cadence::PerStart`].
+    pub fn cadence(self, period: Duration) -> Cadence {
+        match self.first_tick() {
+            FirstTick::AfterOnePeriod if period >= RESUMABLE_MIN_PERIOD => Cadence::Resumable,
+            first => Cadence::PerStart(first),
+        }
+    }
+}
+
+/// Why a [`LastRun`] mark was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LastRunCause {
+    /// The first daemon start that scheduled the task on this akh. It
+    /// anchors the first run one period after that start, however often the
+    /// daemon restarts in between.
+    FirstSeen,
+    /// The task ran to completion.
+    Ran,
+    /// The task was attempted and failed. Recorded like a run so a failing
+    /// heavy task is retried once per period, not after every restart.
+    Failed,
+}
+
+impl LastRunCause {
+    /// The mark a finished tick leaves, if any. Skips (gated, over budget,
+    /// contended) did no work and leave the previous mark in place.
+    pub const fn from_outcome(outcome: &TaskOutcome) -> Option<Self> {
+        match outcome {
+            TaskOutcome::Ran => Some(LastRunCause::Ran),
+            TaskOutcome::Failed(_) => Some(LastRunCause::Failed),
+            TaskOutcome::SkippedDisabled(_)
+            | TaskOutcome::SkippedBudget(_)
+            | TaskOutcome::SkippedContended => None,
+        }
+    }
+}
+
+/// When a resumable task was last run (or first scheduled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastRun {
+    /// When the run finished (or the task was first scheduled).
+    pub at: UnixSecs,
+    /// What the mark records.
+    pub cause: LastRunCause,
+}
+
+/// Per-task [`LastRun`] marks of one akh, persisted under
+/// [`LAST_RUN_LOG_KEY`] as `{"librarian": {"at": 1790251200, "cause": "ran"}}`.
+///
+/// Unknown task names (a snapshot from a newer binary) are dropped on load
+/// rather than failing the whole log.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawLastRunLog", into = "RawLastRunLog")]
+pub struct LastRunLog {
+    marks: std::collections::BTreeMap<DaemonTask, LastRun>,
+}
+
+type RawLastRunLog = std::collections::BTreeMap<String, LastRun>;
+
+impl From<RawLastRunLog> for LastRunLog {
+    fn from(raw: RawLastRunLog) -> Self {
+        let marks = raw
+            .into_iter()
+            .filter_map(|(name, mark)| match name.parse::<DaemonTask>() {
+                Ok(task) => Some((task, mark)),
+                Err(error) => {
+                    tracing::debug!(
+                        target: "akh::autonomy",
+                        error = %error,
+                        "daemon last-run log: dropping a mark for an unknown task"
+                    );
+                    None
+                }
+            })
+            .collect();
+        Self { marks }
+    }
+}
+
+impl From<LastRunLog> for RawLastRunLog {
+    fn from(log: LastRunLog) -> Self {
+        log.marks
+            .into_iter()
+            .map(|(task, mark)| (task.as_str().to_owned(), mark))
+            .collect()
+    }
+}
+
+impl LastRunLog {
+    /// The mark of `task`, if any.
+    pub fn get(&self, task: DaemonTask) -> Option<LastRun> {
+        self.marks.get(&task).copied()
+    }
+
+    /// Set the mark of `task`.
+    pub fn set(&mut self, task: DaemonTask, mark: LastRun) {
+        self.marks.insert(task, mark);
+    }
+
+    /// Whether no task has a mark.
+    pub fn is_empty(&self) -> bool {
+        self.marks.is_empty()
+    }
+
+    /// Every mark, in task order.
+    pub fn iter(&self) -> impl Iterator<Item = (DaemonTask, LastRun)> + '_ {
+        self.marks.iter().map(|(task, mark)| (*task, *mark))
+    }
+}
+
+/// One akh's [`LastRunLog`], kept in the engine's durable metadata when it
+/// has a durable tier and in memory otherwise (same fallback as the
+/// [`AutonomyGovernor`] ledger).
+pub struct LastRunStore {
+    log: Mutex<LastRunLog>,
+    store: LedgerStore,
+}
+
+impl fmt::Debug for LastRunStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LastRunStore")
+            .field("log", &self.log())
+            .field("durable", &self.is_durable())
+            .finish()
+    }
+}
+
+impl LastRunStore {
+    /// A store that lives only in memory.
+    pub fn in_memory() -> Self {
+        Self {
+            log: Mutex::new(LastRunLog::default()),
+            store: LedgerStore::Memory,
+        }
+    }
+
+    /// Open the store for `engine`, loading the persisted log when the
+    /// engine has a durable tier.
+    ///
+    /// Callers choose how to handle a bad log: propagate it, or use
+    /// [`LastRunStore::open_or_reset`] to start empty.
+    pub fn open(engine: &Arc<Engine>) -> AutonomyResult<Self> {
+        if engine.store().durable.is_none() {
+            return Ok(Self::in_memory());
+        }
+        Ok(Self {
+            log: Mutex::new(load_last_run_log(engine)?.unwrap_or_default()),
+            store: LedgerStore::Durable(Arc::clone(engine)),
+        })
+    }
+
+    /// Like [`LastRunStore::open`], but an unreadable or corrupt log is
+    /// logged and replaced by an empty one. That costs one period of delay
+    /// per resumable task (each waits a full period from this start), never
+    /// an extra run.
+    pub fn open_or_reset(engine: &Arc<Engine>) -> Self {
+        match Self::open(engine) {
+            Ok(store) => store,
+            Err(error) => {
+                tracing::warn!(
+                    target: "akh::autonomy",
+                    error = %error,
+                    "daemon last-run log unreadable; long-period tasks wait one full period"
+                );
+                Self {
+                    log: Mutex::new(LastRunLog::default()),
+                    store: if engine.store().durable.is_some() {
+                        LedgerStore::Durable(Arc::clone(engine))
+                    } else {
+                        LedgerStore::Memory
+                    },
+                }
+            }
+        }
+    }
+
+    /// Whether the log survives a restart.
+    pub fn is_durable(&self) -> bool {
+        matches!(self.store, LedgerStore::Durable(_))
+    }
+
+    /// A copy of the whole log.
+    pub fn log(&self) -> LastRunLog {
+        self.log.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The mark of `task`, if any.
+    pub fn get(&self, task: DaemonTask) -> Option<LastRun> {
+        self.log.lock().unwrap_or_else(|e| e.into_inner()).get(task)
+    }
+
+    /// Record `mark` for `task` and persist the log.
+    ///
+    /// The in-memory log is updated before the write, so a failed write still
+    /// schedules correctly until the daemon restarts; the caller decides
+    /// whether to log or propagate the error.
+    pub fn record(&self, task: DaemonTask, mark: LastRun) -> AutonomyResult<()> {
+        let log = {
+            let mut guard = self.log.lock().unwrap_or_else(|e| e.into_inner());
+            guard.set(task, mark);
+            guard.clone()
+        };
+        self.persist(&log)
+    }
+
+    fn persist(&self, log: &LastRunLog) -> AutonomyResult<()> {
+        let LedgerStore::Durable(engine) = &self.store else {
+            return Ok(());
+        };
+        let bytes =
+            serde_json::to_vec(log).map_err(|source| AutonomyError::LastRunEncode { source })?;
+        engine
+            .store()
+            .put_meta(LAST_RUN_LOG_KEY, &bytes)
+            .map_err(|source| AutonomyError::LastRunWrite {
+                key: last_run_key_display(),
+                source,
+            })
+    }
+}
+
+fn last_run_key_display() -> String {
+    String::from_utf8_lossy(LAST_RUN_LOG_KEY).into_owned()
+}
+
+fn load_last_run_log(engine: &Engine) -> AutonomyResult<Option<LastRunLog>> {
+    let bytes = engine
+        .store()
+        .get_meta(LAST_RUN_LOG_KEY)
+        .map_err(|source| AutonomyError::LastRunRead {
+            key: last_run_key_display(),
+            source,
+        })?;
+    bytes
+        .map(|bytes| {
+            serde_json::from_slice(&bytes).map_err(|source| AutonomyError::CorruptLastRunLog {
+                key: last_run_key_display(),
+                source,
+            })
+        })
+        .transpose()
 }
 
 /// What running a task can cost.
@@ -1581,6 +2020,177 @@ mod tests {
         let ticket = admitted(governor.admit(DaemonTask::Librarian));
         let ledger = governor.settle(ticket, usage(7)).unwrap();
         assert_eq!(ledger.tokens_used, 7);
+    }
+
+    const HOUR: Duration = Duration::from_secs(3600);
+    const DAY: Duration = Duration::from_secs(86_400);
+
+    fn mark(at: UnixSecs, cause: LastRunCause) -> LastRun {
+        LastRun { at, cause }
+    }
+
+    #[test]
+    fn only_long_period_after_one_period_tasks_resume() {
+        for (task, period) in [
+            (DaemonTask::Librarian, DAY),
+            (DaemonTask::ContinuousLearning, 2 * HOUR),
+            (DaemonTask::KnowledgeExtraction, Duration::from_secs(2700)),
+            (DaemonTask::GapAnalysis, RESUMABLE_MIN_PERIOD),
+        ] {
+            assert_eq!(task.cadence(period), Cadence::Resumable, "{task}");
+        }
+        // Short periods and non-period first ticks keep the per-start schedule.
+        assert_eq!(
+            DaemonTask::RuleInference.cadence(Duration::from_secs(600)),
+            Cadence::PerStart(FirstTick::AfterOnePeriod)
+        );
+        assert_eq!(
+            DaemonTask::SleepCycle.cadence(DAY),
+            Cadence::PerStart(FirstTick::AfterStartupDelay)
+        );
+        assert_eq!(
+            DaemonTask::Reactor.cadence(DAY),
+            Cadence::PerStart(FirstTick::Immediate)
+        );
+    }
+
+    #[test]
+    fn resumed_first_tick_follows_the_last_run() {
+        let now = UnixSecs::from_secs(1_790_251_200);
+        let delay = |last| Cadence::Resumable.first_tick_delay(DAY, last, now);
+
+        // Ran 23 h ago: due in 1 h, not 24 h.
+        assert_eq!(
+            delay(Some(mark(now.saturating_sub(23 * HOUR), LastRunCause::Ran))),
+            HOUR
+        );
+        // Ran 30 h ago: overdue, fires after the minimum delay.
+        assert_eq!(
+            delay(Some(mark(now.saturating_sub(30 * HOUR), LastRunCause::Ran))),
+            RESUME_MIN_DELAY
+        );
+        // Just ran: one full period.
+        assert_eq!(delay(Some(mark(now, LastRunCause::Failed))), DAY);
+        // Never scheduled before: one full period.
+        assert_eq!(delay(None), DAY);
+        // A clock that stepped back never postpones past one period.
+        assert_eq!(
+            delay(Some(mark(now.saturating_add(10 * HOUR), LastRunCause::Ran))),
+            DAY
+        );
+        // The per-start cadence ignores the mark.
+        assert_eq!(
+            Cadence::PerStart(FirstTick::AfterOnePeriod).first_tick_delay(
+                DAY,
+                Some(mark(now.saturating_sub(30 * HOUR), LastRunCause::Ran)),
+                now
+            ),
+            DAY
+        );
+    }
+
+    #[test]
+    fn last_run_cause_marks_runs_and_failures_only() {
+        assert_eq!(
+            LastRunCause::from_outcome(&TaskOutcome::Ran),
+            Some(LastRunCause::Ran)
+        );
+        assert_eq!(
+            LastRunCause::from_outcome(&TaskOutcome::Failed("x".into())),
+            Some(LastRunCause::Failed)
+        );
+        assert_eq!(
+            LastRunCause::from_outcome(&TaskOutcome::SkippedContended),
+            None
+        );
+        assert_eq!(
+            LastRunCause::from_outcome(&TaskOutcome::SkippedDisabled(DisabledReason::OptIn)),
+            None
+        );
+    }
+
+    #[test]
+    fn last_run_log_persists_across_engine_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = UnixSecs::from_secs(1_790_251_200);
+        {
+            let engine = durable_engine(dir.path());
+            let store = LastRunStore::open(&engine).unwrap();
+            assert!(store.is_durable());
+            assert!(store.log().is_empty());
+            store
+                .record(DaemonTask::Librarian, mark(at, LastRunCause::Ran))
+                .unwrap();
+            store
+                .record(
+                    DaemonTask::ContinuousLearning,
+                    mark(at, LastRunCause::FirstSeen),
+                )
+                .unwrap();
+            engine.persist().unwrap();
+        }
+        let engine = durable_engine(dir.path());
+        let store = LastRunStore::open(&engine).unwrap();
+        assert_eq!(
+            store.get(DaemonTask::Librarian),
+            Some(mark(at, LastRunCause::Ran))
+        );
+        assert_eq!(
+            store.get(DaemonTask::ContinuousLearning),
+            Some(mark(at, LastRunCause::FirstSeen))
+        );
+        assert_eq!(store.get(DaemonTask::GapAnalysis), None);
+    }
+
+    #[test]
+    fn last_run_log_wire_shape_and_unknown_tasks() {
+        let mut log = LastRunLog::default();
+        log.set(
+            DaemonTask::Librarian,
+            mark(UnixSecs::from_secs(7), LastRunCause::Failed),
+        );
+        let json = serde_json::to_value(&log).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "librarian": { "at": 7, "cause": "failed" } })
+        );
+        let with_future_task: LastRunLog = serde_json::from_value(serde_json::json!({
+            "librarian": { "at": 7, "cause": "failed" },
+            "task_from_the_future": { "at": 9, "cause": "ran" },
+        }))
+        .unwrap();
+        assert_eq!(with_future_task, log);
+    }
+
+    #[test]
+    fn corrupt_last_run_log_is_a_diagnostic_and_open_or_reset_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = durable_engine(dir.path());
+        engine
+            .store()
+            .put_meta(LAST_RUN_LOG_KEY, b"not json")
+            .unwrap();
+        let error = LastRunStore::open(&engine).unwrap_err();
+        assert!(matches!(error, AutonomyError::CorruptLastRunLog { .. }));
+        let store = LastRunStore::open_or_reset(&engine);
+        assert!(store.is_durable());
+        assert!(store.log().is_empty());
+    }
+
+    #[test]
+    fn in_memory_engine_keeps_the_last_run_log_in_memory() {
+        let engine = Arc::new(
+            Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let store = LastRunStore::open(&engine).unwrap();
+        assert!(!store.is_durable());
+        let ran = mark(UnixSecs::from_secs(1), LastRunCause::Ran);
+        store.record(DaemonTask::Librarian, ran).unwrap();
+        assert_eq!(store.get(DaemonTask::Librarian), Some(ran));
     }
 
     #[test]
