@@ -1,9 +1,9 @@
 {
   "pack": {
     "name": "roman-memory",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "scope": "own",
-    "description": "Phase 53j memory hygiene for janus, minerva and vesta: the state-like predicates the Romans write through memory_write are single-valued and temporal (the newest value supersedes, older values are history), and the spellings the models produced are declared aliases. Chosen from the 2026-09-24 store: each predicate here had subjects holding several live values that were successive updates of one state (e.g. next_check: 478 live triples on 230 subjects, 53 subjects with 2-46 values, three spellings plus has_next_check)."
+    "description": "Phase 53j memory hygiene for janus, minerva and vesta: the state-like predicates the Romans write through memory_write are single-valued and temporal (the newest value supersedes, older values are history), and the spellings the models produced are declared aliases. Chosen from the 2026-09-24 store: each predicate here had subjects holding several live values that were successive updates of one state (e.g. next_check: 478 live triples on 230 subjects, 53 subjects with 2-46 values, three spellings plus has_next_check). 1.1.0 (Phase 53g PR 6) adds intervention_outcome and intervention_next_event: the laya-intervention skillpack's typed outcome of a scoped intervention, written with memory_write on the event's entity (formerly laya_controller's record_fixer_result)."
   },
   "relations": [
     {
@@ -79,6 +79,20 @@
       "cardinality": "single_valued",
       "temporal": true,
       "description": "Alert / session status (e.g. active -> resolved). 44 live, 40 subjects, 4 multi-valued (max 2)."
+    },
+    {
+      "name": "intervention_outcome",
+      "cardinality": "single_valued",
+      "temporal": true,
+      "aliases": ["intervention-outcome", "intervention outcome"],
+      "description": "Typed outcome of the latest laya-intervention on an Anima entity (subject = work_item:<id> or plan:<id>): fix_applied, human_required, waiting or blocked. The newest supersedes; history keeps the trail. Replaces record_fixer_result's outcome (Phase 53g PR 6)."
+    },
+    {
+      "name": "intervention_next_event",
+      "cardinality": "single_valued",
+      "temporal": true,
+      "aliases": ["intervention-next-event", "intervention next event"],
+      "description": "The event that re-opens the entity after the latest intervention: human_reply, dependency_changed, lane_recovered, ci_completed, review_completed, work_item_changed or none. Replaces record_fixer_result's next_event and laya_controller's wait guard (Phase 53g PR 6)."
     }
   ]
 }

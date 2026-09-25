@@ -101,6 +101,31 @@ Restart privileges: akheventd and core are system LaunchDaemons. The core can al
   - `record_fixer_result` becomes a memory write (`roman-memory` v1.1.0 adds `intervention_outcome` and `intervention_next_event`);
   - a `laya-intervention` skillpack.
 - **Rollout:** 48 h in shadow mode, compared against `laya-decisions.sqlite3`, then the cutover.
+- **Implemented** (branch `feat/53g-pr6-anima-source`, on top of PR 5):
+  - **akheventd:** `crates/akh-session-services/src/anima_source.rs` (source,
+    shadow records, emission cap with durable state and attention list),
+    `route_filter.rs` (`EventRoute.when`), `watchdog.rs`; wire types in
+    `crates/akh-session-types/src/anima.rs`; `GET /v1/anima/{source}` and
+    `GET /v1/anima/{source}/shadow`. The MCP client module is now built with
+    the `events` feature too.
+  - **Routing as data:** `full_akh.py` renders `host_action` as filters
+    (`anima_route_filters`, mapping table in the comments and in INVENTORY).
+    Parity is tested on fixtures (`test_anima_routing.py`, shared Rust/Python
+    fixture `deploy/roman-mini/fixtures/route_filter_cases.json`), and a
+    read-only replay over the live `laya-decisions.sqlite3` matched 201/201
+    decisions on 2026-09-26.
+  - **Akh side:** seeds `roman-<role>-anima.work_item.changed` (and Minerva's
+    `anima.plan.changed`) take their prompt and exit condition from
+    `deploy/roman-mini/skills/laya-intervention/prompts.json`; the skillpack
+    (`skill.json`, `procedures.md`, `actions.json`, `triples.json`) is copied
+    into each Roman's engine skills dir; `roman-memory` 1.1.0 adds
+    `intervention_outcome` and `intervention_next_event`.
+  - **Rollout support:** `configure_core.py` renders shadow by default and
+    `--live` for the cutover (drops the legacy routes, their seeds as `remove`
+    operations, the `laya` MCP server and the observer status export);
+    `compare_anima_shadow.py` compares both databases read-only. The Mac-side
+    steps are in `deploy/roman-mini/INVENTORY.md` ("PR 6"). `observer.py` and
+    `laya_controller.py` are deleted only after the verified cutover.
 
 ### PR 7: `janus_escalation` plus `mergiraf_worker` become Janus delegation and a skill (risk: high; D3, D4)
 

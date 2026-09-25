@@ -1,4 +1,5 @@
 //! Shared wire contracts. This crate deliberately has no engine, transport or provider dependency.
+pub mod anima;
 pub mod bootstrap;
 pub mod credentials;
 pub mod monitor;

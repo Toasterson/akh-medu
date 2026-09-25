@@ -20,9 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import full_akh as fa  # noqa: E402
 
 
-def requests_for(seeds: dict, enable: bool) -> list[dict]:
-    """CognitiveToolCall bodies for `seeds` (add, or enable)."""
-    calls = seeds["enable"] if enable else seeds["apply"]
+def requests_for(seeds: dict, enable: bool, remove: bool = False) -> list[dict]:
+    """CognitiveToolCall bodies for `seeds` (add, enable, or remove the
+    schedules of routes the PR 6 cutover retired)."""
+    calls = seeds.get("remove", []) if remove else seeds["enable"] if enable else seeds["apply"]
     # A fresh request id per run: the core caches results by id, so a reused id
     # would replay an earlier failure instead of retrying.
     return [{"request_id": str(uuid.uuid4()),
@@ -43,6 +44,8 @@ def main():
     parser.add_argument("root", type=Path)
     parser.add_argument("roles", nargs="*", default=list(fa.ROLES))
     parser.add_argument("--enable", action="store_true", help="enable the staged schedules")
+    parser.add_argument("--remove-retired", action="store_true",
+                        help="remove the schedules of routes the PR 6 cutover retired (laya.*, anima.<role>.changed)")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--url", default=f"http://{fa.CORE_LISTEN}/v1/tools/call")
     args = parser.parse_args()
@@ -51,7 +54,7 @@ def main():
     failures = 0
     for role in args.roles:
         seeds = json.loads((root / f"config/reactor-seeds/{role}.json").read_text())
-        for body in requests_for(seeds, args.enable):
+        for body in requests_for(seeds, args.enable, args.remove_retired):
             label = f"{role} {body['arguments']['operation']} {body['arguments'].get('id') or body['arguments']['schedule']['id']}"
             if args.dry_run:
                 print(json.dumps(body, indent=2))

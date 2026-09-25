@@ -361,7 +361,8 @@ def _is_loopback(url: str) -> bool:
     return (urlparse(url).hostname or "") in LOOPBACK_HOSTS
 
 
-def mcp_servers(session: dict, role: str, root: Path) -> tuple[list[dict], list[str]]:
+def mcp_servers(session: dict, role: str, root: Path,
+                retired: tuple[str, ...] = ()) -> tuple[list[dict], list[str]]:
     """`[[mcp.servers]]` entries mirroring the role's current broker grants.
 
     Returns the entries and warnings for servers that were skipped. Each
@@ -372,6 +373,9 @@ def mcp_servers(session: dict, role: str, root: Path) -> tuple[list[dict], list[
     """
     servers, warnings = [], []
     for name in ROLE_SERVERS[role]:
+        if name in retired:
+            # PR 6 cutover: `laya` (record_fixer_result) became a memory write.
+            continue
         alias = SERVER_ENDPOINTS[name].format(role=role)
         granted = [t for t in session["akhs"][role]["tools"]
                    if t["destination"]["kind"] == "mcp" and t["destination"]["service"] == alias]
@@ -430,7 +434,8 @@ def grafana_server(root: Path) -> dict:
     return {"name": GRAFANA_SERVER_NAME, "url": GRAFANA_URL, "tools": names}
 
 
-def monitoring_config(session: dict, role: str, root: Path) -> dict | None:
+def monitoring_config(session: dict, role: str, root: Path,
+                      observer_retired: bool = False) -> dict | None:
     """`[monitoring]` for a role that held the observer's monitoring_snapshot (PR 5).
 
     The native tool reads akheventd's `roman-alerts` monitor as the
@@ -439,9 +444,12 @@ def monitoring_config(session: dict, role: str, root: Path) -> dict | None:
     """
     if not any(native_tool(t) == "monitoring_snapshot" for t in session["akhs"][role]["tools"]):
         return None
-    return {"endpoint": EVENTS_URL, "source": MONITOR_SOURCE,
-            "token_file": str(root / f"secrets/{MONITOR_READER}.key"),
-            "observer_status_file": str(root / OBSERVER_STATUS_FILE)}
+    config = {"endpoint": EVENTS_URL, "source": MONITOR_SOURCE,
+              "token_file": str(root / f"secrets/{MONITOR_READER}.key")}
+    if not observer_retired:
+        # PR 6 cutover retires the observer and its status export.
+        config["observer_status_file"] = str(root / OBSERVER_STATUS_FILE)
+    return config
 
 
 def board_identity(events: dict, role: str) -> dict:
@@ -454,11 +462,20 @@ def board_identity(events: dict, role: str) -> dict:
     return {"url": endpoint["url"], "auth": auth}
 
 
-def system_prompt(roles_dir: Path, role: str) -> str:
+MCP_SERVERS_PLACEHOLDER = "{mcp_servers}"
+
+
+def system_prompt(roles_dir: Path, role: str, servers: list[dict] | None = None) -> str:
+    """The role's system prompt; `{mcp_servers}` in the addenda becomes the
+    names of the MCP servers actually rendered for the role."""
     parts = [roles_dir / "common.md", roles_dir / f"{role}.md", roles_dir / "addenda/common.md"]
     if (roles_dir / f"addenda/{role}.md").exists():
         parts.append(roles_dir / f"addenda/{role}.md")
-    return "\n".join(p.read_text() for p in parts)
+    text = "\n".join(p.read_text() for p in parts)
+    if MCP_SERVERS_PLACEHOLDER in text:
+        names = [s["name"] for s in servers] if servers is not None else list(ROLE_SERVERS[role])
+        text = text.replace(MCP_SERVERS_PLACEHOLDER, ", ".join(names))
+    return text
 
 
 def worker_profile(project: str) -> str:
@@ -687,6 +704,176 @@ def missing_monitor_files(events: dict) -> list[str]:
     return [p for p in paths if not Path(p).is_file()]
 
 
+# ── PR 6: akheventd Anima source + data-driven Laya routing ─────────────────
+#
+# akheventd's `roman-anima` source replaces the observer's Anima scan and
+# laya_controller.py's queue (Phase 53g PR 6). It emits one event per entity
+# projection change; which Roman wakes is decided by the route filters below,
+# rendered into events.json. Nothing about routing is in Rust, and every rule
+# compares Anima machine fields (phase, reason codes, session counts), never
+# prose.
+
+ANIMA_SOURCE = "roman-anima"
+ANIMA_ENDPOINT = "anima"
+ANIMA_MCP_URL = "https://anima.wegmueller.it/mcp"
+ANIMA_TOKEN_ENV = "ROMAN_ANIMA_TOKEN"
+WORK_ITEM_EVENT = "anima.work_item.changed"
+PLAN_EVENT = "anima.plan.changed"
+# observer.py's stable_item keys: a change in any of them is an event.
+ANIMA_FIELDS = ["id", "code", "title", "status", "current_phase", "priority", "project_id", "plan_id",
+                "parked", "parked_reason", "hold_reason"]
+# observer.py's plan fingerprint keys (content_sha256).
+PLAN_FIELDS = ["id", "title", "name", "status", "description", "content", "version", "document_id",
+               "workflow_id"]
+ANIMA_HYDRATION = {
+    # Listing rows omit parked_reason, so parked items read their detail.
+    "when": {"eq": {"pointer": "/current_phase", "value": "parked"}},
+    # Anima forensics record parks as `type: park` (older events as a
+    # phase transition to `parked`); the newest anchors the park episode.
+    "park_event": {"any": [{"eq": {"pointer": "/type", "value": "park"}},
+                           {"eq": {"pointer": "/to_phase", "value": "parked"}}]},
+    "park_event_order": "/occurred_at",
+    "episode_fields": ["parked_reason", "phase_entered_at"],
+    # laya_controller.hydrate: provisioning/running/blocked sessions are live owners.
+    "live_session": {"in": {"pointer": "/status", "values": ["provisioning", "running", "blocked"]}},
+    # laya_controller's wait guard: only a human reply re-opens a parked item.
+    "thread_message": {"eq": {"pointer": "/sender_type", "value": "human"}},
+    "thread_message_order": "/created_at",
+    "rehydrate_secs": 300,
+    "max_per_tick": 16,
+    "max_forensic_events": 500,
+}
+# laya_controller's intervention budget: 2 per park episode.
+MAX_EMISSIONS_PER_EPISODE = 2
+
+# laya_controller.host_action, row by row, as data (the order is irrelevant
+# because the reason predicates are mutually exclusive):
+#
+# | host_action rule                                        | action               | role    | filter here                     |
+# |---------------------------------------------------------|----------------------|---------|---------------------------------|
+# | kind == plan                                            | product              | minerva | route on PLAN_EVENT, no `when`  |
+# | phase in done/cancelled/draft                           | no_intervention      | -       | every route requires parked     |
+# | reason in HOLD_REASONS                                  | preserve_hold        | -       | excluded from janus             |
+# | reason starts with HUMAN_GATE_PREFIXES                  | human_required       | -       | excluded from janus             |
+# | parked, reason in INFRA_REASONS or INFRA_PREFIXES*      | infrastructure       | vesta   | vesta (live sessions ignored)   |
+# | live sessions                                           | wait_for_owner       | -       | minerva/janus need no live owner|
+# | blocked_by and not parked / not parked                  | wait / scheduler     | -       | every route requires parked     |
+# | reason == too-big                                       | product              | minerva | minerva                         |
+# | missing evidence / anything else parked                 | investigate          | janus   | janus                           |
+#
+# The retired classifier's `human`/`wait` choices always became
+# `investigate` (janus), so the model never changed a route (plan D1).
+PARK_REASON = "/current/parked_reason"
+HOLD_REASONS = ["operator-hold", "human-parked"]
+HUMAN_GATE_PREFIXES = ["gate-needs-human"]
+INFRA_REASONS = ["ci-infra-failing", "ci-toolchain-broken"]
+INFRA_PREFIXES = ["lane-circuit-breaker"]
+PRODUCT_REASONS = ["too-big"]
+
+
+def _parked() -> dict:
+    return {"eq": {"pointer": "/current/current_phase", "value": "parked"}}
+
+
+def _no_live_owner() -> dict:
+    # A missing count (hydration off) counts as no owner, as it did for laya.
+    return {"any": [{"eq": {"pointer": "/current/live_sessions", "value": 0}},
+                    {"not": {"exists": {"pointer": "/current/live_sessions"}}}]}
+
+
+def _reason(codes: list[str], prefixes: list[str]) -> dict:
+    members = ([{"in": {"pointer": PARK_REASON, "values": list(codes)}}] if codes else [])
+    members += [{"prefix": {"pointer": PARK_REASON, "value": p}} for p in prefixes]
+    return members[0] if len(members) == 1 else {"any": members}
+
+
+def anima_route_filters() -> dict[str, dict]:
+    """Role -> `when` filter for `anima.work_item.changed` (host_action as data)."""
+    return {
+        "vesta": {"all": [_parked(), _reason(INFRA_REASONS, INFRA_PREFIXES)]},
+        "minerva": {"all": [_parked(), _reason(PRODUCT_REASONS, []), _no_live_owner()]},
+        "janus": {"all": [_parked(), _no_live_owner(),
+                          {"not": _reason(HOLD_REASONS + INFRA_REASONS + PRODUCT_REASONS,
+                                          HUMAN_GATE_PREFIXES + INFRA_PREFIXES)}]},
+    }
+
+
+def anima_routes() -> list[dict]:
+    """The PR 6 routes: work-item changes per role (filtered), plans to Minerva."""
+    routes = [{"id": f"{role}-{WORK_ITEM_EVENT}", "source": ANIMA_SOURCE, "event_type": WORK_ITEM_EVENT,
+               "coalesce_pending": False, "target": {"kind": "akh", "endpoint": "core", "akh": role},
+               "when": when}
+              for role, when in anima_route_filters().items()]
+    routes.append({"id": f"minerva-{PLAN_EVENT}", "source": ANIMA_SOURCE, "event_type": PLAN_EVENT,
+                   "coalesce_pending": False, "target": {"kind": "akh", "endpoint": "core", "akh": "minerva"}})
+    return routes
+
+
+def legacy_route(route: dict) -> bool:
+    """Routes whose producer (observer.py / laya_controller.py) PR 6 retires."""
+    typ = route.get("event_type", "")
+    return typ.startswith("laya.") or (typ.startswith("anima.") and typ not in (WORK_ITEM_EVENT, PLAN_EVENT))
+
+
+def anima_source(live: bool) -> dict:
+    return {"endpoint": ANIMA_ENDPOINT, "source": ANIMA_SOURCE, "work_item_event_type": WORK_ITEM_EVENT,
+            "plan_event_type": PLAN_EVENT, "projects_per_tick": 8, "interval_secs": 60,
+            "projects_refresh_secs": 900, "page_size": 100, "max_pages": 32,
+            "project_filter": {"eq": {"pointer": "/status", "value": "active"}},
+            "fields": list(ANIMA_FIELDS), "plan_fields": list(PLAN_FIELDS),
+            "hydrate_parked": json.loads(json.dumps(ANIMA_HYDRATION)),
+            "max_emissions_per_episode": MAX_EMISSIONS_PER_EPISODE, "shadow": not live}
+
+
+WATCHDOG_ENDPOINT = "board-watchdog"
+WATCHDOG_TOKEN_ENV = "ROMAN_BOARD_WATCHDOG"
+BOARD_URL = "http://127.0.0.1:18089"
+WATCHDOG = {"endpoint": WATCHDOG_ENDPOINT, "thread": STATUS_THREAD,
+            "summary": "Roman workflow and monitoring availability changed",
+            "detail_prefix": "Deterministic Roman watchdog evidence (does not imply model task completion): ",
+            "interval_secs": 60, "stale_secs": 300, "max_attention": 40}
+
+
+def render_anima_events(events: dict, live: bool = False) -> dict:
+    """Add the `roman-anima` source, its endpoint and routes to an akheventd
+    config (after `retarget_events`). Idempotent.
+
+    Shadow (default): the source records would-be events for comparison
+    (`GET /v1/anima/roman-anima/shadow`) and the legacy observer/laya routes
+    stay. `live=True` (the cutover) ingests, adds the Board watchdog (the
+    observer's is retired with it) and drops the legacy routes.
+    """
+    rendered = json.loads(json.dumps(events))
+    endpoints = rendered.setdefault("endpoints", {})
+    endpoints[ANIMA_ENDPOINT] = {"url": ANIMA_MCP_URL, "token_env": ANIMA_TOKEN_ENV}
+    rendered["anima"] = [a for a in rendered.get("anima", []) if a.get("source") != ANIMA_SOURCE]
+    rendered["anima"].append(anima_source(live))
+    ids = {r["id"] for r in anima_routes()}
+    routes = [r for r in rendered.get("routes", []) if r["id"] not in ids]
+    if live:
+        routes = [r for r in routes if not legacy_route(r)]
+        endpoints[WATCHDOG_ENDPOINT] = {"url": BOARD_URL, "token_env": WATCHDOG_TOKEN_ENV}
+        rendered["watchdog"] = dict(WATCHDOG)
+    else:
+        rendered.pop("watchdog", None)
+        endpoints.pop(WATCHDOG_ENDPOINT, None)
+    rendered["routes"] = routes + anima_routes()
+    return rendered
+
+
+LAYA_SKILL = "laya-intervention"
+LAYA_SERVER = "laya"
+
+
+def laya_skill_prompts(source: Path) -> dict:
+    """The skillpack's wake-prompt texts (`skills/laya-intervention/prompts.json`)."""
+    path = source / "skills" / LAYA_SKILL / "prompts.json"
+    prompts = json.loads(path.read_text())
+    if set(prompts.get("scope", {})) != set(ROLES) or not prompts.get("exit_condition"):
+        raise RenderError(f"{path} must give a scope for {', '.join(ROLES)} and an exit_condition")
+    return prompts
+
+
 # ── Reactor schedule seeds (53d + ADR 105) ───────────────────────────────────
 
 # (focus sentence, exit condition, report to the status thread?)
@@ -733,6 +920,8 @@ ROUTE_KINDS = {
 
 
 def route_kind(event_type: str) -> str:
+    if event_type in (WORK_ITEM_EVENT, PLAN_EVENT):
+        return "intervention"
     if event_type == "djehuty.inbox":
         return "inbox"
     if event_type == "monitoring.changed":
@@ -789,14 +978,28 @@ def wake_prompt(session: dict, role: str) -> str:
 
 
 def reactor_seeds(events: dict, session: dict, role: str,
-                  report_thread: str | None = STATUS_THREAD) -> dict:
-    """reactor_manage `add` payloads for every event route that targets `role`."""
+                  report_thread: str | None = STATUS_THREAD, source: Path | None = None,
+                  retired: list[dict] | None = None) -> dict:
+    """reactor_manage `add` payloads for every event route that targets `role`.
+
+    Routes of the PR 6 Anima source (`intervention`) take their focus and
+    exit condition from the laya-intervention skillpack under `source`
+    (`skills/laya-intervention/prompts.json`). `retired` routes (the legacy
+    observer/laya routes dropped at the PR 6 cutover) become `remove`
+    operations for the schedules seeded from them.
+    """
     prompt = wake_prompt(session, role)
+    skill = laya_skill_prompts(source or Path(__file__).resolve().parent)
     schedules = []
     for route in events.get("routes", []):
         if route_akh(route) != role:
             continue
-        focus, exit_condition, reports = ROUTE_KINDS[route_kind(route["event_type"])]
+        kind = route_kind(route["event_type"])
+        if kind == "intervention":
+            focus = "\n\n".join((skill["focus"], skill["scope"][role], skill["instruction"]))
+            exit_condition, reports = skill["exit_condition"], True
+        else:
+            focus, exit_condition, reports = ROUTE_KINDS[kind]
         source = f"{route['source']}/{route['event_type']}"
         action = {"kind": "llm_turn", "prompt": prompt + "\n\n" + focus, "allow_tools": True,
                   "exit_condition": exit_condition}
@@ -807,6 +1010,9 @@ def reactor_seeds(events: dict, session: dict, role: str,
                           "coalesce": bool(route.get("coalesce_pending"))})
     if not schedules:
         raise RenderError(f"events.json routes nothing to {role}; no reactor seeds rendered")
+    remove = [{"operation": "remove", "id": "roman-" + r["id"]} for r in (retired or [])
+              if route_akh(r) == role]
     return {"akh": role, "tool": "reactor_manage", "enable_gate": "AKH_REACTOR_ENABLE=1",
             "apply": [{"operation": "add", "schedule": s} for s in schedules],
-            "enable": [{"operation": "enable", "id": s["id"]} for s in schedules]}
+            "enable": [{"operation": "enable", "id": s["id"]} for s in schedules],
+            "remove": remove}

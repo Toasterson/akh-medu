@@ -2,6 +2,8 @@
 pub use akh_session_types as types;
 #[cfg(feature = "session")]
 pub mod a2a;
+#[cfg(feature = "events")]
+pub mod anima_source;
 #[cfg(feature = "session")]
 pub mod acp;
 #[cfg(feature = "session")]
@@ -26,13 +28,14 @@ pub mod helper;
 pub mod http;
 #[cfg(feature = "events")]
 pub mod ingress;
-#[cfg(feature = "session")]
+#[cfg(any(feature = "session", feature = "events"))]
 pub mod mcp;
 #[cfg(feature = "events")]
 pub mod monitor;
 #[cfg(feature = "profiling")]
 pub mod profiling;
 pub mod recovery;
+pub mod route_filter;
 #[cfg(feature = "sandbox")]
 pub mod repository_bootstrap;
 #[cfg(feature = "runtime")]
@@ -85,3 +88,5 @@ mod native_recall;
 #[cfg(any(feature = "candle-runtime", test))]
 mod native_window;
 pub mod telemetry;
+#[cfg(feature = "events")]
+pub mod watchdog;

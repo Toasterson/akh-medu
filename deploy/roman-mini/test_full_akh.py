@@ -373,7 +373,8 @@ class RenderTests(unittest.TestCase):
         vesta = json.loads((self.root / "config/reactor-seeds/vesta.json").read_text())
         schedules = {a["schedule"]["rule"]["source"]: a["schedule"] for a in vesta["apply"]}
         self.assertEqual(set(schedules), {"roman-inbox-vesta/djehuty.inbox", "roman-alerts/monitoring.changed",
-                                          "roman-alerts/laya.vesta.intervention"})
+                                          "roman-alerts/laya.vesta.intervention",
+                                          "roman-anima/anima.work_item.changed"})
         for schedule in schedules.values():
             action = schedule["action"]
             self.assertEqual(action["kind"], "llm_turn")
@@ -387,6 +388,122 @@ class RenderTests(unittest.TestCase):
         self.assertEqual([e["id"] for e in vesta["enable"]], [s["id"] for s in (a["schedule"] for a in vesta["apply"])])
         body = apply_reactor_seeds.requests_for(vesta, enable=False)[0]
         self.assertEqual((body["akh"], body["tool"], body["arguments"]["operation"]), ("vesta", "reactor_manage", "add"))
+
+    # ── PR 6: Anima source, data-driven Laya routing, skill, schema ──────────
+
+    def render_live(self):
+        return configure_core.render(self.root, self.prov, self.binary, "0" * 64, source=SOURCE, live=True)
+
+    def test_staged_anima_source_is_shadow_next_to_the_legacy_routes(self):
+        staged = json.loads((self.root / "config/events.akh-target.json").read_text())
+        [source] = staged["anima"]
+        self.assertTrue(source["shadow"])
+        self.assertEqual((source["source"], source["endpoint"], source["max_emissions_per_episode"]),
+                         ("roman-anima", "anima", 2))
+        self.assertEqual(source["fields"], fa.ANIMA_FIELDS)
+        self.assertEqual(staged["endpoints"]["anima"], {"url": fa.ANIMA_MCP_URL, "token_env": "ROMAN_ANIMA_TOKEN"})
+        self.assertNotIn("watchdog", staged, "the observer still owns the watchdog in shadow mode")
+        routes = {r["id"]: r for r in staged["routes"]}
+        for role in ROLES:
+            route = routes[f"{role}-anima.work_item.changed"]
+            self.assertEqual(route["when"], fa.anima_route_filters()[role])
+            self.assertEqual(route["target"], {"kind": "akh", "endpoint": "core", "akh": role})
+            self.assertIn(f"laya-{role}", routes, "legacy routes stay until the cutover")
+        self.assertNotIn("when", routes["minerva-anima.plan.changed"])
+        self.assertEqual(fa.render_anima_events(staged), staged, "idempotent")
+
+    def test_live_render_is_the_cutover(self):
+        self.render_live()
+        staged = json.loads((self.root / "config/events.akh-target.json").read_text())
+        self.assertFalse(staged["anima"][0]["shadow"])
+        ids = {r["id"] for r in staged["routes"]}
+        self.assertFalse({i for i in ids if i.startswith("laya-") or i.endswith((".janus.changed", ".minerva.changed"))})
+        self.assertIn("vesta-monitoring.changed", ids)
+        self.assertEqual(staged["watchdog"]["thread"], fa.STATUS_THREAD)
+        self.assertEqual(staged["endpoints"]["board-watchdog"],
+                         {"url": "http://127.0.0.1:18089", "token_env": "ROMAN_BOARD_WATCHDOG"})
+        for role in ROLES:
+            ws = self.toml(f"core-config/akh-medu/workspaces/{role}.toml")
+            names = [s["name"] for s in ws["mcp"]["servers"]]
+            self.assertNotIn("laya", names)
+            self.assertNotIn("observer_status_file", ws["monitoring"])
+            self.assertIn("(your servers: " + ", ".join(names) + ")", ws["system_prompt"])
+            seeds = json.loads((self.root / f"config/reactor-seeds/{role}.json").read_text())
+            removed = {r["id"] for r in seeds["remove"]}
+            self.assertIn(f"roman-laya-{role}", removed)
+            self.assertNotIn(f"roman-laya-{role}", {a["schedule"]["id"] for a in seeds["apply"]})
+            body = apply_reactor_seeds.requests_for(seeds, enable=False, remove=True)[0]
+            self.assertEqual(body["arguments"]["operation"], "remove")
+        janus = json.loads((self.root / "config/reactor-seeds/janus.json").read_text())
+        self.assertIn("roman-janus-anima.janus.changed", {r["id"] for r in janus["remove"]})
+        # Rendering live again removes nothing more (the legacy routes are gone).
+        live_events = self.root / "config/events.json"
+        live_events.write_text((self.root / "config/events.akh-target.json").read_text())
+        self.render_live()
+        self.assertEqual(json.loads((self.root / "config/reactor-seeds/janus.json").read_text())["remove"], [])
+
+    def test_shadow_workspaces_keep_laya_and_name_their_servers(self):
+        for role in ROLES:
+            ws = self.toml(f"core-config/akh-medu/workspaces/{role}.toml")
+            names = [s["name"] for s in ws["mcp"]["servers"]]
+            self.assertIn("laya", names)
+            self.assertNotIn("{mcp_servers}", ws["system_prompt"])
+            self.assertIn("(your servers: " + ", ".join(names) + ")", ws["system_prompt"])
+            seeds = json.loads((self.root / f"config/reactor-seeds/{role}.json").read_text())
+            self.assertEqual(seeds["remove"], [])
+
+    def test_anima_seeds_carry_the_skill_scope_exit_condition_and_report_thread(self):
+        prompts = json.loads((SOURCE / "skills/laya-intervention/prompts.json").read_text())
+        for role in ROLES:
+            seeds = json.loads((self.root / f"config/reactor-seeds/{role}.json").read_text())
+            schedules = {a["schedule"]["rule"]["source"]: a["schedule"] for a in seeds["apply"]}
+            schedule = schedules["roman-anima/anima.work_item.changed"]
+            self.assertEqual(schedule["id"], f"roman-{role}-anima.work_item.changed")
+            action = schedule["action"]
+            self.assertIn(prompts["scope"][role], action["prompt"])
+            self.assertIn("intervention_outcome", action["prompt"])
+            self.assertNotIn("record_fixer_result", action["prompt"])
+            self.assertEqual(action["exit_condition"], prompts["exit_condition"])
+            self.assertEqual(action["report_thread"], fa.STATUS_THREAD)
+            self.assertFalse(schedule["coalesce"])
+            for other in set(ROLES) - {role}:
+                self.assertNotIn(prompts["scope"][other], action["prompt"])
+        minerva = json.loads((self.root / "config/reactor-seeds/minerva.json").read_text())
+        self.assertIn("roman-anima/anima.plan.changed", {a["schedule"]["rule"]["source"] for a in minerva["apply"]})
+
+    def test_skillpack_is_installed_into_each_engine_skills_dir(self):
+        manifest = json.loads((SOURCE / "skills/laya-intervention/skill.json").read_text())
+        self.assertEqual(manifest["id"], fa.LAYA_SKILL)
+        for name in ("triples_file", "actions_file", "procedures_file"):
+            self.assertTrue((SOURCE / "skills/laya-intervention" / manifest[name]).is_file(), name)
+        for role in ROLES:
+            dest = self.root / f"core-data/akh-medu/workspaces/{role}/kg/skills/laya-intervention"
+            self.assertEqual((dest / "skill.json").read_bytes(), (SOURCE / "skills/laya-intervention/skill.json").read_bytes())
+            self.assertEqual((dest / "prompts.json").stat().st_mode & 0o777, 0o600)
+        actions = json.loads((SOURCE / "skills/laya-intervention/actions.json").read_text())
+        self.assertTrue(all(set(a["effects"]) == {"initiates", "terminates"} for a in actions))
+
+    def test_roman_memory_1_1_declares_the_intervention_predicates(self):
+        pack = json.loads((SOURCE / "schemas/roman-memory.json").read_text())
+        self.assertEqual(pack["pack"]["version"], "1.1.0")
+        relations = {r["name"]: r for r in pack["relations"]}
+        for name in ("intervention_outcome", "intervention_next_event"):
+            self.assertEqual((relations[name]["cardinality"], relations[name]["temporal"]), ("single_valued", True))
+        # The 1.0.0 relations are unchanged.
+        self.assertTrue({"next_check", "status", "state"} <= set(relations))
+        # The skill's vocabulary is exactly the one the prompt tells the akh to write.
+        prompt = json.loads((SOURCE / "skills/laya-intervention/prompts.json").read_text())["instruction"]
+        triples = json.loads((SOURCE / "skills/laya-intervention/triples.json").read_text())
+        for kind in ("intervention_outcome_value", "intervention_next_event_value"):
+            for value in [t["subject"] for t in triples if t["object"] == kind]:
+                self.assertIn(value, prompt)
+
+    def test_events_credentials_cover_the_anima_source_and_watchdog(self):
+        text = (SOURCE / "daemon_credentials.py").read_text()
+        section = text[text.index("elif role == 'events':"):text.index("binary = 'akheventd'")]
+        self.assertIn("ROMAN_ANIMA_TOKEN", section)
+        self.assertIn("ROMAN_BOARD_WATCHDOG", section)
+        self.assertIn("board-watchdog.json", section)
 
     def test_events_are_staged_then_retargeted_with_backup(self):
         live = json.loads((self.root / "config/events.json").read_text())

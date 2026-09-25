@@ -14,6 +14,8 @@ pub fn event_router(service: Events) -> Router {
             .route("/v1/deliveries/{id}", get(delivery))
             .route("/v1/inboxes", get(inboxes))
             .route("/v1/monitors/{source}", get(monitor))
+            .route("/v1/anima/{source}", get(anima_status))
+            .route("/v1/anima/{source}/shadow", get(anima_shadow))
             .with_state(service),
         config,
     )
@@ -92,6 +94,63 @@ async fn monitor(
         })?;
     Ok(Json(reading))
 }
+/// `GET /v1/anima/{source}` (Phase 53g PR 6): the Anima source's latest poll
+/// outcome, coverage, counters and emission-cap attention list. Same access
+/// rule as the monitor read.
+async fn anima_status(
+    State(service): State<Events>,
+    Extension(p): Extension<Principal>,
+    Path(source): Path<String>,
+) -> Api<akh_session_types::anima::AnimaSourceStatus> {
+    validate_key(&source)?;
+    authorize_monitor_read(&p, &source)?;
+    if !service.config.anima.iter().any(|a| a.source == source) {
+        return Err(Fault::missing(format!("no anima source {source} is configured")).into());
+    }
+    let status = crate::anima_source::status(&service, &source)?.ok_or_else(|| {
+        Fault::missing(format!(
+            "anima source {source} has not polled yet; retry after one interval"
+        ))
+    })?;
+    Ok(Json(status))
+}
+#[derive(serde::Deserialize)]
+struct ShadowQuery {
+    /// Only records after this time (ms since the epoch).
+    #[serde(default)]
+    since_ms: Option<u64>,
+    #[serde(default = "shadow_page")]
+    limit: usize,
+}
+fn shadow_page() -> usize {
+    1000
+}
+/// `GET /v1/anima/{source}/shadow?since_ms=&limit=` (Phase 53g PR 6): the
+/// would-be events a shadow-mode source recorded instead of ingesting, with
+/// the routes that would have delivered them, oldest first (the newest
+/// `limit`, at most 10000). Compared against the system being replaced
+/// before the cutover.
+async fn anima_shadow(
+    State(service): State<Events>,
+    Extension(p): Extension<Principal>,
+    Path(source): Path<String>,
+    Query(query): Query<ShadowQuery>,
+) -> Api<Vec<akh_session_types::anima::ShadowRecord>> {
+    validate_key(&source)?;
+    authorize_monitor_read(&p, &source)?;
+    if !service.config.anima.iter().any(|a| a.source == source) {
+        return Err(Fault::missing(format!("no anima source {source} is configured")).into());
+    }
+    if !(1..=10_000).contains(&query.limit) {
+        return Err(Fault::invalid("limit must be within 1..=10000").into());
+    }
+    Ok(Json(crate::anima_source::shadow_records(
+        &service,
+        &source,
+        query.since_ms,
+        query.limit,
+    )?))
+}
 fn authorize_monitor_read(principal: &Principal, source: &str) -> crate::types::Result<()> {
     if principal.has_role("operator")
         || (principal.has_role("event") && principal.sources.iter().any(|s| s == source))
@@ -100,7 +159,7 @@ fn authorize_monitor_read(principal: &Principal, source: &str) -> crate::types::
     } else {
         Err(Fault::new(
             "forbidden",
-            "reading a monitor requires the operator role, or the event role granted this source",
+            "reading a monitor or Anima source requires the operator role, or the event role granted this source",
         ))
     }
 }

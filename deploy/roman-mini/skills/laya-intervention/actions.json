@@ -1,0 +1,51 @@
+[
+  {
+    "action": "read_current_evidence",
+    "description": "Read the work item's current detail, forensics, thread and referenced artifacts (or the plan) named by the event's entity before acting.",
+    "preconditions": ["intervention_admitted"],
+    "effects": {"initiates": ["evidence_current"], "terminates": []},
+    "estimated_duration": "medium"
+  },
+  {
+    "action": "check_prior_outcome",
+    "description": "Recall intervention_outcome and intervention_next_event for the entity; if the awaited next event has not happened, record a quiet check instead of acting again.",
+    "preconditions": ["evidence_current"],
+    "effects": {"initiates": ["prior_outcome_known"], "terminates": []},
+    "estimated_duration": "fast"
+  },
+  {
+    "action": "apply_scoped_fix",
+    "description": "Take one justified, reversible action within the role's granted tools; never release explicit holds, reset budgets, bypass gates or infer success from occupancy.",
+    "preconditions": ["evidence_current", "prior_outcome_known"],
+    "effects": {"initiates": ["fix_attempted"], "terminates": []},
+    "estimated_duration": "slow"
+  },
+  {
+    "action": "record_fix_applied",
+    "description": "memory_write intervention_outcome = fix_applied and intervention_next_event (usually work_item_changed); a later event verifies it.",
+    "preconditions": ["fix_attempted"],
+    "effects": {"initiates": ["outcome_recorded"], "terminates": ["intervention_admitted"]},
+    "estimated_duration": "fast"
+  },
+  {
+    "action": "record_human_required",
+    "description": "Preserve the park, post the exact question and its owner in the WI thread, then memory_write intervention_outcome = human_required and intervention_next_event = human_reply.",
+    "preconditions": ["evidence_current"],
+    "effects": {"initiates": ["outcome_recorded", "awaiting_human_reply"], "terminates": ["intervention_admitted"]},
+    "estimated_duration": "fast"
+  },
+  {
+    "action": "record_waiting",
+    "description": "A live owner or a named dependency is making progress: memory_write intervention_outcome = waiting and a named intervention_next_event (never none).",
+    "preconditions": ["evidence_current"],
+    "effects": {"initiates": ["outcome_recorded", "awaiting_next_event"], "terminates": ["intervention_admitted"]},
+    "estimated_duration": "fast"
+  },
+  {
+    "action": "record_blocked",
+    "description": "The fault is outside the granted tools: post coordination/status@v1 blocked with the reason, then memory_write intervention_outcome = blocked and the event that would unblock it.",
+    "preconditions": ["evidence_current"],
+    "effects": {"initiates": ["outcome_recorded"], "terminates": ["intervention_admitted"]},
+    "estimated_duration": "fast"
+  }
+]

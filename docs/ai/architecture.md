@@ -1,6 +1,10 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-09-26 (**53g PR 5** — akheventd monitor sources +
+> Last updated: 2026-09-26 (**53g PR 6** — akheventd Anima source,
+> data-driven route filters and Board watchdog, see "akheventd Anima source"
+> below).
+>
+> 2026-09-26 (**53g PR 5** — akheventd monitor sources +
 > native `monitoring_snapshot` tool, see "akheventd monitor sources" below).
 >
 > 2026-09-26 (**53g PR 7** — Janus escalation and merge repair
@@ -511,6 +515,27 @@ native tool through a bridge-owned permission policy and requires the extra
   serves the reading (`operator` role, or `event` granted the source). Endpoints
   may be `anonymous = true` (no bearer). akhomed's native read-only
   `monitoring_snapshot` tool reads it for akhs with a `[monitoring]` table.
+- **akheventd Anima source, route filters, watchdog (53g PR 6,
+  `crates/akh-session-services/src/{anima_source,route_filter,watchdog}.rs`,
+  `crates/akh-session-types/src/anima.rs`)**: `Config.anima` scans Anima over
+  MCP (round-robin projects, bounded cursor pagination, plans), keeps one
+  projection per entity, hydrates items matching a configured filter (park
+  episode from forensics, live-session count, latest matching thread message)
+  and, after a silent per-project baseline, ingests one
+  `anima.work_item.changed`/`anima.plan.changed` event per projection change
+  (`<entity>@blake3(projection, revision)`), capped per (entity, park episode)
+  with the cap committed in the event's transaction. `shadow = true` records
+  would-be events plus their matching routes instead (`GET
+  /v1/anima/{source}/shadow`); `GET /v1/anima/{source}` serves status, coverage
+  and the capped-episode attention list. `EventRoute.when` is a data-driven
+  JSON-pointer predicate (`eq`/`in`/`prefix`/`exists`/`not`/`all`/`any`) over
+  the event data; routing policy lives in config, never in Rust or on prose.
+  `Config.watchdog` posts a `coordination/status@v1` notice to a Board thread
+  whenever the structural signal (monitor and Anima availability, failing and
+  retrying delivery routes, capped episodes) changes. The Roman deployment
+  renders `laya_controller.host_action` as route filters and wakes the akhs'
+  reactors with the `laya-intervention` skillpack; outcomes are
+  `roman-memory` 1.1.0 memory writes.
 - **Per-akh static MCP servers (53i, `src/agent/tools/mcp_config.rs`,
   `src/agent/tools/mcp_static.rs`)**: `[[mcp.servers]]` in the workspace TOML
   (`name, url, auth, tools`) wires an `McpClient` into the akh's `ToolRegistry`
