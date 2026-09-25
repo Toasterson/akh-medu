@@ -645,8 +645,14 @@ warning, and one predicate accumulated under several spellings (`next_check`,
     still has the object as its object. Superseding `(wi-569, status,
     resolved)` therefore leaves `resolved`, `was_retracted(resolved)` and
     anything derived from it alone while another subject is `resolved`.
-    `kg_delete` and the other bulk APIs keep `Symbol`. All scopes commit
-    through the same exact-edge `RetractBatch` transition.
+    All scopes commit through the same exact-edge `RetractBatch` transition.
+    *Follow-up (Anima WI 01a0d569-1cf1 item 6):* `Engine::remove_triple`, every
+    bulk API (`remove_triples_batch`, compartment removal, pattern/SPARQL
+    delete, purges), `kg_delete` and ACP `_akh/triples/remove` (hence
+    `akh` CLI deletes) now default to `CascadeIfOrphaned` too. `Symbol` is
+    only reachable through the explicit `Engine::retract_object_symbol`,
+    whose one production caller is replay of a legacy single-edge `retract`
+    WAL record (that writer relied on replay re-deriving the symbol cascade).
 - **Structural keys** (`src/schema/canonical.rs`): `PredicateKey` = NFKC +
   Unicode lowercasing + separator runs (whitespace, `_`, dash punctuation)
   collapsed to `_`. There are no word lists, and namespaces stay distinct.

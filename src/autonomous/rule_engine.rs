@@ -832,9 +832,16 @@ impl RuleEngine {
 
         let mut removed = 0usize;
         for triple in to_remove {
+            // CascadeIfOrphaned: a whole still `part-of` other entities keeps
+            // its conclusions; count removed edges, not cascades.
             if engine
-                .remove_triple(triple.subject, triple.predicate, triple.object)
-                .map(|r| !r.retracted.is_empty())
+                .remove_triple_scoped(
+                    triple.subject,
+                    triple.predicate,
+                    triple.object,
+                    crate::tms::RetractionScope::CascadeIfOrphaned,
+                )
+                .map(|r| r.removed())
                 .unwrap_or(false)
             {
                 removed += 1;
