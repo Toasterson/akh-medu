@@ -632,6 +632,25 @@ impl Sessions {
         self.store.get(&archived_key(id))
     }
 
+    /// The session a `POST /v1/sessions` with `request_id` created for
+    /// `principal` (53g PR 7). A delegating akh that restarted has lost the
+    /// grant secret its create carried, so it cannot replay the create (the
+    /// replay's grant fingerprint differs and is refused); it recovers the
+    /// session id here instead. `not_found` means no create with this id ever
+    /// landed, so a fresh create with the same id is safe.
+    pub fn created_by_request(
+        &self,
+        principal: &Principal,
+        request_id: &str,
+    ) -> Result<SessionRecord> {
+        validate_key(request_id)?;
+        let created = self
+            .store
+            .get::<CommandRecord>(&key("create", &[&principal.id, request_id]))?
+            .ok_or_else(|| Fault::missing("no session was created with this request_id"))?;
+        self.get(principal, &created.result)
+    }
+
     pub fn get(&self, principal: &Principal, id: &str) -> Result<SessionRecord> {
         let session = self
             .get_record(id)?

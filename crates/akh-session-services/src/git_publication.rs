@@ -105,8 +105,17 @@ impl Executor {
             {
                 return Err(Fault::conflict("verified repository contents changed"));
             }
+            let existing_only = profile.require_existing_branch;
             view.enable_publication(profile);
             let previous = remote_head(&view, &request).await?;
+            if existing_only && previous.is_none() {
+                // D4 (53g PR 7): a merge-repair worker updates an existing PR
+                // source branch; it never creates one.
+                return Err(Fault::new(
+                    "forbidden",
+                    "this publication profile only fast-forwards an existing branch; no push was attempted",
+                ));
+            }
             let head = &snapshot.request.head_revision;
             let already_present = previous.as_ref() == Some(head);
             if let Some(old) = previous.as_ref().filter(|_| !already_present) {
@@ -131,20 +140,14 @@ impl Executor {
                 let refspec = format!("{head}:{}", request.branch_ref);
                 // Preserve the assigned base and every commit on the observed
                 // work branch. Explicit lease refuses a race after this read.
-                let pushed = view
-                    .run(
-                        &[
-                            "push",
-                            "--porcelain",
-                            "--no-verify",
-                            "--atomic",
-                            &lease,
-                            &request.repository,
-                            &refspec,
-                        ],
-                        64 * 1024,
-                    )
-                    .await;
+                // An existing-branch-only profile pushes without any force
+                // flag: the remote then accepts nothing but a fast-forward.
+                let mut arguments = vec!["push", "--porcelain", "--no-verify", "--atomic"];
+                if !existing_only {
+                    arguments.push(&lease);
+                }
+                arguments.extend([request.repository.as_str(), refspec.as_str()]);
+                let pushed = view.run(&arguments, 64 * 1024).await;
                 let observed = remote_head(&view, &request).await;
                 if observed.as_ref().ok().and_then(Option::as_ref) != Some(head) {
                     return Err(Fault::new(

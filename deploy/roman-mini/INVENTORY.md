@@ -22,10 +22,10 @@ Legend for **Status**:
 | Script | Purpose | Inputs / outputs | Launchd label | Status | ADR 113 target |
 |---|---|---|---|---|---|
 | `daemon_credentials.py` | Resolves 1Password / file-based credentials into the environment for the daemon it `execve`s into (`runtime*`, `sessions`, `events`, now `core`); never writes secrets to disk. | in: `sys.argv[ROLE, ROOT]`, `op-service-account`, `anima-pat`, `secrets/board-*.json`; out: `execve`s `akhrtd`/`akhsessd`/`akheventd`/(soon) `akhomed` with an augmented env. | `dev.roman-akhs.events`, `.sessions`, `.runtime`, `.runtime-minerva`, `.runtime-vesta` (all exec through it) | drifted → synced (see below) | deploy tooling kept — this is exactly the credential-injection seam ADR 113 decision 10 asks the `core` plist to route through at cutover (53f) |
-| `janus_escalation.py` | Durable outbox broker: turns a `escalate_to_astra` / `dispatch_mergiraf` MCP tool call into a T3/Astra thread; the delivery survives T3 being offline. | in: MCP `tools/call` over loopback HTTP, `config/janus-escalation.json` (registered T3 project IDs), `secrets/janus-escalation.key`; out: T3 `/api/orchestration` thread/turn commands, `state/*.sqlite3` incident ledger. | `dev.roman-akhs.janus-escalation` | drifted → synced (see below) | Janus delegation (53e grants) + skill, per the plan's step-2 list |
+| `janus_escalation.py` | Durable outbox broker: turns a `escalate_to_astra` / `dispatch_mergiraf` MCP tool call into a T3/Astra thread; the delivery survives T3 being offline. | in: MCP `tools/call` over loopback HTTP, `config/janus-escalation.json` (registered T3 project IDs), `secrets/janus-escalation.key`; out: T3 `/api/orchestration` thread/turn commands, `state/*.sqlite3` incident ledger. | `dev.roman-akhs.janus-escalation` | drifted → synced (see below); **converted (53g PR 7)** — replaced by the native `escalate` / `escalation_status` tools, the incident ledger and the `skills/astra-escalation` skillpack; kept until the verified Mac cutover ("PR 7 Mac-side steps" below), then deleted | Janus delegation (53e grants) + skill — **done** |
 | `laya_controller.py` | Durable event→classification→scoped-fixer controller: reads an observation queue (`state/laya-decisions.sqlite3`), classifies a blocker (product/execution/infrastructure/human/wait/investigate) and routes an intervention to the right role (`ROLE` map) or opens a mergiraf/Astra dispatch. Serves a small results API on `127.0.0.1:18447`. **`classify()` no longer calls the Laya model** (see "`laya_service.py` retired" below) — it returns `{'choice': 'investigate', 'classifier': 'retired', ...}` synchronously, and `CHOICES`/`digest`/`encoded` (formerly imported from `laya_service`) are now defined in this module. `config/laya.json`'s `model_revision` is still read unchanged (it participates in the decision id). Now installed with `configure_laya.py` on the system `python3` instead of the `experiments/` venv. | in: observations from `observer.py` (when `config/laya.json.event_only` is true), `secrets/laya-<role>.key`; out: `laya.<role>.intervention` outbox events, HTTP decisions API. | `dev.roman-akhs.laya-controller` (LaunchAgent) | in repo | Janus reactor + skill (plan's explicit step-2 item; PR 2 of that step retired the classifier first) |
 | `laya_service.py` | **Retired 2026-09-25** (Phase 53g step-2 plan, PR 2, operator decision D1). Was a resident, loopback-only classifier (`127.0.0.1:18446`) that scored blocker text against the 6 `CHOICES` with a local model and validated the returned probability simplex. **Rationale:** live decision-log evidence showed every one of the 52 complete-input classifications ended in `investigate` with near-uniform per-choice scores (0.10–0.24 against a uniform 1/6); every real route to `product` or `infrastructure` came from `laya_controller.py`'s `host_action` structural rules (which match Anima's phase/parked_reason/session fields), never from the model's score. Deleted from the repo; its `dev.roman-akhs.laya` LaunchAgent is booted out on the Mac side (see Mac-side steps below), not replaced. | — | `dev.roman-akhs.laya` (LaunchAgent, booted out) | retired | n/a — folded into `laya_controller.py`'s structural router, no successor process |
-| `mergiraf_worker.py` | **Not in repo before this pass.** Library (no server, no launchd entry) imported by `janus_escalation.py`; defines the `POLICY` prompt, JSON-schema `TOOLS` (`dispatch_mergiraf`, `mergiraf_status`) and `escalation()` builder for a bounded, typed merge-conflict-resolution job dispatched to an Astra/T3 worker via the same broker. | in: called in-process from `janus_escalation.Broker.submit_merge`; out: a T3 thread prompt + schema-validated job fields (work item, PR, head/base SHAs). | none (imported, not a service) | added | Janus delegation (53e grants) + skill, alongside `janus_escalation.py` |
+| `mergiraf_worker.py` | **Not in repo before this pass.** Library (no server, no launchd entry) imported by `janus_escalation.py`; defines the `POLICY` prompt, JSON-schema `TOOLS` (`dispatch_mergiraf`, `mergiraf_status`) and `escalation()` builder for a bounded, typed merge-conflict-resolution job dispatched to an Astra/T3 worker via the same broker. | in: called in-process from `janus_escalation.Broker.submit_merge`; out: a T3 thread prompt + schema-validated job fields (work item, PR, head/base SHAs). | none (imported, not a service) | added; **converted (53g PR 7)** — replaced by the native `dispatch_merge_repair` tool and the `skills/mergiraf` skillpack (D4 in its procedures and in the `require_existing_branch` publication profile); kept until the verified Mac cutover, then deleted | Janus delegation (53e grants) + skill — **done** |
 | `observer.py` | Polls Anima (rotating 8 projects/min), Grafana and VictoriaMetrics; maintains a deterministic watchdog signal, a durable outbox of `schedule.*`/`anima.*.changed`/`monitoring.changed` events, and (new) `laya.<role>.intervention` events when `event_only` mode is on; serves a read-only `monitoring_snapshot` MCP tool on `127.0.0.1:18436`. | in: Anima MCP, Grafana HTTPS, VictoriaMetrics via `127.0.0.1:18440` tunnel, `config/laya.json`; out: `state/observer.sqlite3` outbox/state, POSTs to akhsessd `127.0.0.1:18431`, board watchdog notices. | `dev.roman-akhs.observer` (LaunchAgent) | drifted → synced (see below) | event production → Rust `akheventd` source; monitoring snapshot → a Vesta tool (both named explicitly in the plan's step-2 list) |
 | `provider_failure.py` | Classifies a provider HTTP/error response into `authentication`/`quota`/`rate_limit`/`unknown` so `observer.py` and `janus_escalation.py` apply the right cooldown (30m/1h/2h/4h, or operator-repair-only for auth). | in: response text/status from a provider call; out: a classification tag consumed by callers. | none (imported library) | in repo | folds into akhomed's provider error taxonomy (explicit step-2 item) |
 | `t3_activity.py` | T3 ACP driver used as the transport for the "autonomous activity" provider instances (`roman-activity-<role>`); also runs as a background `--service` LaunchAgent. | in: T3 CLI invocation or `--service` mode; out: ACP session against akhsessd `127.0.0.1:18431`, reads `secrets/operator.key`. | `dev.roman-akhs.t3-activity` (LaunchAgent) | **retired 2026-09-25** (ADR 113 / 53g plan PR 1 — see below) | done — once T3 speaks ACP directly to akhomed there is no separate "activity" transport to shim |
@@ -174,7 +174,7 @@ folded into the akheventd-source conversion — see the retirement note above.
 |---|---|---|---|
 | `anima-activity` | `python3 anima-activity.py --config activity.json` (outside `roman-akhs`) | `PATH` | not part of `deploy/roman-mini` — **retired 2026-09-25**, see Anima runner glue above |
 | `grafana-tunnel` | `kubectl -n observability port-forward … mcp-grafana 18441:80` | `KUBECONFIG`, `HOME`, `PATH` | `configure_vesta_actions.py` (in repo) |
-| `janus-escalation` | `python3 janus_escalation.py <root>` | `PATH`, `HOME` | `configure_janus_escalation.py` (in repo) |
+| `janus-escalation` | `python3 janus_escalation.py <root>` | `PATH`, `HOME` | `configure_janus_escalation.py` (in repo). **Converted (53g PR 7):** booted out by the "PR 7 Mac-side steps" below; plist, script and renderer are deleted in the follow-up after verification |
 | `laya-controller` | `/usr/bin/python3 laya_controller.py <root>` | `TOKENIZERS_PARALLELISM`, `USE_TF`, `HF_HUB_OFFLINE` | `configure_laya.py` (in repo, this pass). Was `<repo>/experiments/typed-decisions/.venv-comparison/bin/python laya_controller.py <root>` — the venv interpreter loaded the retired classifier's torch/transformers dependency, which the controller no longer imports, so this pass moves it to the system Python like every other roman-akhs LaunchAgent. |
 | `laya` | *(retired 2026-09-25, see `laya_service.py` above)* | `TOKENIZERS_PARALLELISM`, `USE_TF`, `HF_HUB_OFFLINE` | n/a — no successor plist; the Mac-side steps below boot it out and don't replace it |
 | `observer` | `python3 observer.py <root>` | `KUBECONFIG`, `HOME`, `PATH` | `activate.py` (in repo) |
@@ -200,11 +200,16 @@ Each of these needs its own work item before it lands (not done in this pass):
    inside akhomed's reactor, not a standalone controller process. The
    `experiments/.venv-comparison` dependency noted below is resolved by this
    pass's `configure_laya.py` (system `python3`).
-3. **`janus_escalation.py` + `mergiraf_worker.py` → Janus delegation (53e
-   grants) + skills.** The escalation-outbox pattern (durable, dedup on
-   `incident_key`, cooldown-aware) is a good template for how delegated grants
-   should behave; `mergiraf_worker.py`'s typed job schema is a natural skill
-   input schema.
+3. ~~**`janus_escalation.py` + `mergiraf_worker.py` → Janus delegation (53e
+   grants) + skills.**~~ **Converted in 53g PR 7** (repository side): native
+   `escalate` / `dispatch_merge_repair` / `escalation_status` tools
+   (`src/agent/tools/escalation.rs`), the durable incident ledger
+   (`src/agent/delegation/ledger.rs`), per-project akhsessd worker profiles,
+   and the worker policy as skillpacks (`deploy/roman-mini/skills/`). The
+   scripts stay in the repo until the Mac cutover below is verified, then a
+   follow-up deletes `janus_escalation.py`, `mergiraf_worker.py`,
+   `test_janus_escalation.py`, `configure_janus_escalation.py` and (with PR 5
+   and PR 6, which drop the observer's use of it) `provider_failure.py`.
 4. **`provider_failure.py` → akhomed's provider error taxonomy.** Its
    classification rules (429 vs. explicit quota exhaustion, auth failures need
    operator repair and don't expire on a timer, cooldown ladder 30m/1h/2h/4h)
@@ -380,3 +385,297 @@ Naming before/after: `mcp__vesta-ops__grafana__query_prometheus` (proxied) →
    "no Grafana tools" during either direction of the switch, never to a
    half-registered state — the workspace TOML and `vesta_ops.py` change
    together in the same restart.
+
+
+## PR 7 Mac-side steps (`janus_escalation` + `mergiraf_worker` → delegation, D3/D4)
+
+Not done by the repository PR. The architect runs these against the live
+deployment at `~/Library/Application Support/roman-akhs` (`$ROOT` below) after
+PR 7 is merged to `origin/main`. deploy-from-main applies to every binary:
+build only from a clean checkout of `origin/main` and quote the
+`merge-base --is-ancestor` line in the deploy report. `$UID_` is `501`.
+
+**What changes.** Janus loses `[[mcp.servers]] janus-escalation` and gains the
+native `escalate`, `dispatch_merge_repair` and `escalation_status` tools. Each
+admitted incident runs as an akhsessd session in the project's worker profile
+(`janus-worker-<project>`) on the `codex-astra` runtime, carrying a
+per-incident delegation grant (read-only cognitive tools plus `memory_write`),
+briefed with `skills/astra-escalation` or `skills/mergiraf`, and reporting to
+the Roman status thread. T3/Astra stays the rollback. The new ledger starts
+empty: open incidents of the old broker are **not** migrated.
+
+### 0. Preconditions
+
+1. No escalation or mergiraf job of the old broker is still needed: list them
+   with `sqlite3 "$ROOT/state/janus-escalation.sqlite3" 'select key, thread,
+   created, delivered, last_error from incidents order by created'`, finish or
+   record each (the T3 threads stay readable in T3), and note the keys so
+   Janus does not treat a re-escalation under the same key as a duplicate of
+   the old one.
+2. A Codex CLI is installed for the `toasty` user and logged in (the
+   `codex-astra` runtime profile below manages its own isolated state).
+
+### 1. Build from main (services and core together)
+
+Use CUTOVER.md step 1 unchanged (it builds `akhomed` and `akhsessd`,
+`akhrtd`, `akhsbxd`, `akhexecd`, `akheventd`, `akh-acp`, `akh-trigger` from
+one `origin/main` checkout and records `SHA`). PR 7 changes akhsessd (the
+`GET /v1/session-requests/{id}` lookup, the `session_grants` runtime and
+instructions override), akhsbxd/akhexecd (the `require_existing_branch`
+publication profile) and akhomed (the tools). They must move together.
+
+### 2. `config/runtime.json` (akhrtd): the Codex worker runtime
+
+Add `runtimes.codex-astra` (kind `codex`, `execution_mode: "brokered"`,
+`binary` = absolute path of the `codex` CLI, `working_dir` =
+`$ROOT/workspaces`, an `isolation.directory` of its own such as
+`$ROOT/runtime-isolation/codex-astra` with a `codex/config.toml` managed file
+pinning `model = "gpt-6-astra"` and `model_reasoning_effort = "high"`,
+`effort: "high"`, `timeout_secs: 14400`, and a `conformance_file`).
+`scripts/session-platform/codex-native-wire-smoke.py` shows a working brokered
+Codex profile shape. Install the conformance evidence like any other brokered
+profile, then check it:
+
+```sh
+"$ROOT/bin/akh-runtime-profile" --config "$ROOT/config/runtime.json" --profile codex-astra verify
+```
+
+It must print `codex-astra: installed runtime conformance verified`; akhrtd
+refuses a brokered profile without it (`conformance_required`).
+
+### 3. `config/sessions.json` (akhsessd)
+
+Do all of this in one edit after `cp -p "$ROOT/config/sessions.json"
+"$ROOT/config/sessions.json.pre-pr7"` (and the same for runtime.json,
+sandbox.json and executor.json). akhsessd validates the whole file on start
+and refuses an invalid one, so a mistake shows up in step 5 as a failed start
+with the reason in `logs/sessions.err.log`; restore the `.pre-pr7` copy then.
+
+1. **Principal** for the core's delegation client (the key file is created
+   0600 by `configure_core.py`, step 4):
+
+   ```json
+   {"id": "janus-delegation", "token_file": "<ROOT>/secrets/sessions-janus-delegation.key",
+    "roles": ["client"], "akhs": ["janus"]}
+   ```
+
+2. **One worker workspace per registered project.** The registered projects
+   are the keys of `config/janus-escalation.json` (today `akh-medu`,
+   `eu-tender`, `anima`, `reddwarf`, `board`, `secrets-share`, `papercrab`,
+   `Droneworld`, `chat`, `illumos`, `colonysim`). The profile name is
+   `janus-worker-<slug>`, the slug being the project lower-cased with every
+   run of other characters replaced by `-` (`Droneworld` →
+   `janus-worker-droneworld`). For each, add the same entry under
+   `workspaces` in **sessions.json, runtime.json, sandbox.json and
+   executor.json**, and create the directory (`mkdir -m 700 -p
+   "$ROOT/workspaces/janus-worker-<slug>"`):
+
+   ```json
+   "janus-worker-<slug>": {"revision": "roman-mini-v1", "site": "armini",
+     "provisioner": {"kind": "existing", "executor": "executor",
+                     "root": "<ROOT>/workspaces/janus-worker-<slug>"},
+     "retain_on_release": true}
+   ```
+
+   Only projects that have this workspace **and** appear in
+   `akhs.janus.workspace_profiles` are registered by `configure_core.py`; the
+   others are listed as warnings.
+
+3. **`akhs.janus.workspace_profiles`**: append every `janus-worker-<slug>`.
+
+4. **Workspace tools for the workers.** Append workspace `ToolSpec`s to
+   `akhs.janus.tools` for the operations `read`, `write`, `edit`, `mkdir`,
+   `list`, `stat`, `search`, `exec_start`, `exec_poll`, `exec_stdin`,
+   `exec_cancel` (destination `{"kind": "workspace", "operation": "<op>"}`,
+   object input schemas; see the smoke script above for the shape). Then add
+   `akhs.janus.session_grants.janus` = `{"tools": [<every tool name Janus had
+   before this step>]}` so Janus's own profile does not widen.
+
+5. **`akhs.janus.session_grants.janus-worker-<slug>`** for each project:
+
+   ```json
+   {"tools": [<the workspace tools>, "kg_query", "memory_recall", "memory_write",
+              "reason", "similarity_search", "entity_schema", "entity_types",
+              "entity_type_filter",
+              "anima__list_projects", "anima__resolve_project_by_git_remote",
+              "anima__list_project_remotes", "anima__get_project_ci_status",
+              "anima__list_work_items", "anima__get_work_item_by_id",
+              "anima__get_work_item_detail", "anima__get_work_item", "anima__get_thread",
+              "anima__post_message", "anima__list_sessions",
+              "anima__get_session_transcript", "anima__get_session_retirement",
+              "anima__get_session_publications", "anima__list_changes",
+              "anima__get_change", "anima__get_wi_loop_state", "anima__list_artifacts"],
+    "runtime": {"runtime": "runtime", "profile": "codex-astra", "revision": "roman-mini-v1",
+                "kind": "codex", "model": "gpt-6-astra", "execution_mode": "brokered"},
+    "instructions": "You are a delegated worker session. Your task, its procedure and its limits arrive as your first input; follow them and nothing else."}
+   ```
+
+   Deliberately **absent** (D4, and "Janus merges only through Anima's gated
+   path"): `anima__approve_and_merge`, `anima__force_clear_ai_gate`,
+   `anima__force_unclear_ai_gate`, `anima__set_work_item_phase`,
+   `anima__promote_work_item`, `anima__unpark_work_item`,
+   `anima__cancel_session`, `anima__hold_work_item`, `anima__release_hold`,
+   `anima__repin_executor`, `anima__run_scheduler_tick`,
+   `anima__reset_in_flight_time`, `anima__rearm_exhausted_ci`,
+   `anima__rearm_exhausted_ai_review`, `anima__resync_pr_state`,
+   `anima__create_work_item`, `anima__update_work_item` and `kg_mutate`. For
+   the workers to post their report to the Roman status thread themselves
+   (D3), also grant the `board__*` tool Janus uses to post to a thread;
+   without it the worker's `memory_write` report and its final answer (read
+   through `escalation_status`) are the report.
+
+6. Leave `endpoints.janus-escalation` in place until step 7 (rollback needs
+   it), and do not touch `automations`.
+
+### 4. Render the core
+
+```sh
+cp -p "$ROOT/core-config/akh-medu/workspaces/janus.toml" \
+      "$ROOT/core-config/akh-medu/workspaces/janus.toml.pre-pr7"
+cd "$REPO"   # the clean origin/main checkout from step 1
+/opt/homebrew/bin/python3 deploy/roman-mini/configure_core.py --root "$ROOT" \
+  --binaries "$REPO/target/release" --repo "$REPO"
+```
+
+This installs `bin/akhomed-main-$SHA`, copies `skills/astra-escalation` and
+`skills/mergiraf` to `$ROOT/skills/`, creates
+`secrets/sessions-janus-delegation.key` (0600) and renders Janus's workspace
+TOML **without** `[[mcp.servers]] janus-escalation` and **with**:
+
+```toml
+[delegation]
+enabled = false            # the generic `delegate` tool stays off
+
+[delegation.native]
+enabled = true
+service = "akhsessd"
+url = "http://127.0.0.1:18431"
+token_file = "<ROOT>/secrets/sessions-janus-delegation.key"
+workspace_profile = "janus"
+core_principal = "sessions"
+max_new_per_day = 4
+
+[delegation.native.profiles]
+akh-medu = { workspace_profile = "janus-worker-akh-medu", runtime_profile = "codex-astra" }
+# ... one line per registered project with a worker profile
+
+[delegation.native.escalation]
+enabled = true
+report_thread = "01a0ab49-9cc4-7012-8785-1eada26fbd46"
+escalation_skill = "<ROOT>/skills/astra-escalation"
+merge_repair_skill = "<ROOT>/skills/mergiraf"
+```
+
+Read every `warning:` line: a project listed there has no worker profile and
+cannot be escalated for. Janus's prompt now names `escalate`,
+`dispatch_merge_repair` and `escalation_status` (roles/addenda/janus.md).
+
+### 5. Restart, readers before writers (CUTOVER "Wire compatibility")
+
+```sh
+sudo launchctl bootout system/dev.roman-akhs.core
+launchctl kickstart -k gui/$UID_/dev.roman-akhs.sessions       # akhsessd (reader)
+sudo launchctl kickstart -k system/dev.roman-akhs.runtime        # akhrtd: codex-astra
+sudo launchctl kickstart -k system/dev.roman-akhs.sandbox        # akhsbxd (reader)
+sudo cp "$ROOT/launchd/dev.roman-akhs.core.plist" /Library/LaunchDaemons/
+sudo launchctl bootstrap system /Library/LaunchDaemons/dev.roman-akhs.core.plist
+sudo launchctl kickstart -k system/dev.roman-akhs.executor       # akhexecd last (writer)
+```
+
+Each service must run the `-main-$SHA` binary from step 1 (check `ps` and the
+`*.err.log` start lines). `logs/core.err.log` must show `escalation tools
+registered` for janus with the expected `projects`; an `escalation tools not
+registered` line carries the diagnostic to fix.
+
+### 6. Boot out the broker
+
+```sh
+launchctl bootout gui/$UID_/dev.roman-akhs.janus-escalation
+curl -sf http://127.0.0.1:18438/healthz && echo "broker still listening"   # must print nothing
+```
+
+Keep `~/Library/LaunchAgents/dev.roman-akhs.janus-escalation.plist`,
+`bin/janus_escalation.py`, `bin/mergiraf_worker.py`,
+`config/janus-escalation.json` and `state/janus-escalation.sqlite3` until the
+verification below has held for 48 h (rollback).
+
+### 7. Verify
+
+For the dry runs, temporarily add `"escalate"` and `"escalation_status"` to
+the `operator` principal's `tools.tools` in `config/core.json` and restart the
+core; remove them (and restart) afterwards. Call
+`POST http://127.0.0.1:18430/v1/tools/call` with the operator key and
+`{"request_id": "<uuid>", "session_id": "pr7-verify", "akh": "janus", "tool":
+"escalate", "arguments": {...}}`.
+
+1. **One incident, one session.** Escalate a harmless dry incident
+   (`incident_key` `pr7-dry-1`, project `akh-medu`, `requested_action`
+   "reply with an akh-result and change nothing"). The receipt is `running`
+   with a `session_id`; `GET /v1/sessions?compact=true` on akhsessd shows
+   exactly one new session, on runtime profile `codex-astra` (`GET
+   /v1/sessions/<id>` → `runtime.profile`).
+2. **Repeat → duplicate.** The same call again returns `duplicate: true`, the
+   same `delegation_id` and `session_id`, and akhsessd shows no new session.
+3. **Fifth new incident in a UTC day refused.** Escalate `pr7-dry-2`,
+   `pr7-dry-3`, `pr7-dry-4` (with `pr7-dry-1` that is four), then `pr7-dry-5`:
+   refused with `akh::delegation::daily_limit`. (The limit is per UTC day, so
+   run all five between 00:00 and 23:59 UTC.)
+4. **Status.** `escalation_status` for `pr7-dry-1` shows `running` then,
+   after the worker finishes, `succeeded` with the worker's `akh-result`, and
+   the session is archived.
+5. **Delegated provenance.** The worker's `memory_write` records hang off the
+   entity `delegate:native:akhsessd/janus-worker-akh-medu`; its provenance is
+   `delegated_call` naming the incident's `session_id` (operator `kg_query`
+   for that entity, then `_akh/explain` on one of the symbols).
+6. **Restart reconciliation.** Escalate `pr7-dry-6` on the next UTC day,
+   restart the core while it runs, and check `logs/core.err.log` for
+   `incident ledger reconciled` with no second akhsessd session for it.
+
+### Rollback
+
+1. Restore `core-config/akh-medu/workspaces/janus.toml` from
+   `janus.toml.pre-pr7` (step 4), which brings back `[[mcp.servers]]
+   janus-escalation` and drops `[delegation]`. The PR 7 core reads the old
+   TOML fine; roll the binary back too only if the core itself misbehaves
+   (CUTOVER "Rollback", readers after writers).
+2. `launchctl bootstrap gui/$UID_ ~/Library/LaunchAgents/dev.roman-akhs.janus-escalation.plist`.
+3. Restart the core (`sudo launchctl kickstart -k system/dev.roman-akhs.core`).
+4. The sessions.json additions are inert without the core's tools and can
+   stay; remove them only together with the akhsessd binary rollback. Worker
+   sessions already created stay visible in akhsessd and are archived by its
+   sweeps; revoke any still-open grant with `_akh/delegation/grant/revoke`.
+
+### D4 enforcement status
+
+- **Enforced:** workers never hold `anima__approve_and_merge` or any gate or
+  lifecycle override (step 3.5), so they cannot merge through Anima; the
+  controller-owned publication path refuses to create a branch and pushes
+  without any force flag when its `git_publication` profile sets
+  `require_existing_branch: true` (akhsessd/akhexecd, tested), and every
+  profile already refuses a non-fast-forward result. The merge-repair
+  profile, in the executor config next to a pinned `git_snapshot`, per
+  repository (the prefixes are the repository's PR source-branch namespaces;
+  `refs/heads/` alone is refused):
+
+  ```json
+  "git_publication": [{"repository": "https://code.aopc.cloud/<owner>/<repo>.git",
+                       "branch_prefixes": ["refs/heads/anima/", "refs/heads/feat/", "refs/heads/fix/"],
+                       "config_file": "<absolute private git config with the push credential>",
+                       "require_existing_branch": true}]
+  ```
+- **Gap (Mac):** the Mac executor has no `git_snapshot`/`git_publication`
+  configured, and the worker workspaces use the `existing` provisioner on the
+  host executor, whose `exec_start` commands run as `toasty` with that user's
+  Git credentials. A worker could therefore run `git push --force` or push to
+  another branch itself; only the `mergiraf` procedures forbid it. Close it by
+  (a) enabling server-side branch protection that disables force pushes on
+  the repositories' PR branches, and (b) moving merge-repair publication to
+  the controller-owned path with a `require_existing_branch` profile once the
+  worker workspaces run in a credential-free sandbox (PR 8's Kubernetes
+  sandbox work). Until then D4 on the Mac is policy plus tool narrowing, not
+  a hard boundary.
+- **Gap (provider taxonomy):** akhrtd reports a failed Codex turn as fault
+  `unknown_outcome` with prose, which is never parsed, so a worker's quota or
+  credential failure classifies as `unknown` unless its fault code is listed
+  in Janus's `[provider]` lexicon. A follow-up should surface Codex's
+  structured error code as the fault code in `akh-runtime`.

@@ -42,19 +42,42 @@ SERVER_ENDPOINTS = {
     "board": "board-{role}",
     "observer": "observer",
     "laya": "laya-{role}",
-    "janus-escalation": "janus-escalation",
     "vesta-ops": "vesta-ops",
 }
 COMMON_SERVERS = ("anima", "seshat", "sokar", "board", "observer", "laya")
 ROLE_SERVERS = {
-    "janus": COMMON_SERVERS + ("janus-escalation",),
+    "janus": COMMON_SERVERS,
     "minerva": COMMON_SERVERS,
     "vesta": COMMON_SERVERS + ("vesta-ops",),
 }
-# Brokers that run bounded commands or T3 dispatch answer slower than the
-# 30 s default; vesta_ops bounds its own commands well below this.
-SERVER_TIMEOUTS = {"observer": 60, "janus-escalation": 60, "vesta-ops": 300}
+# Brokers that run bounded commands answer slower than the 30 s default;
+# vesta_ops bounds its own commands well below this.
+SERVER_TIMEOUTS = {"observer": 60, "vesta-ops": 300}
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+# 53g PR 7 (decisions D3, D4): the janus_escalation.py broker's MCP tools are
+# native akh tools now, backed by akhsessd delegation with per-incident grants.
+# The broker's sessions.json destination service, and its tool names -> the
+# native tool that replaces each.
+ESCALATION_SERVICE = "janus-escalation"
+NATIVE_ESCALATION_TOOLS = {
+    "escalate_to_astra": "escalate",
+    "astra_escalation_status": "escalation_status",
+    "dispatch_mergiraf": "dispatch_merge_repair",
+    "mergiraf_status": "escalation_status",
+}
+DELEGATING_ROLES = ("janus",)
+# akhsessd client principal the core uses to create Janus's worker sessions.
+DELEGATION_PRINCIPAL = "janus-delegation"
+DELEGATION_TOKEN = "secrets/sessions-janus-delegation.key"
+SESSIONS_URL = "http://127.0.0.1:18431"
+# akhsessd workspace profile per registered project, and the Codex runtime
+# profile its `session_grants` override must bind (the akh fails closed on any
+# other runtime).
+WORKER_PROFILE_PREFIX = "janus-worker-"
+WORKER_RUNTIME_PROFILE = "codex-astra"
+MAX_NEW_PER_DAY = 4
+SKILLS = {"escalation_skill": "astra-escalation", "merge_repair_skill": "mergiraf"}
 
 # Vesta-only direct Grafana MCP server (PR 3 of the step-2 plan): no broker,
 # no auth, loopback-only via the grafana-tunnel LaunchAgent
@@ -255,11 +278,24 @@ def server_for(service: str) -> str:
 
 
 def tool_renames(session: dict, role: str) -> dict[str, str]:
-    """Old broker tool names (and bare remote names) -> `mcp__<server>__<tool>`."""
+    """Old broker tool names (and bare remote names) -> `mcp__<server>__<tool>`.
+
+    The retired escalation broker's tools map to their native replacements
+    (53g PR 7), including the `mcp__janus-escalation__*` spelling.
+    """
     renames: dict[str, str] = {}
     for tool in session["akhs"][role]["tools"]:
         dest = tool["destination"]
         if dest["kind"] != "mcp":
+            continue
+        if dest["service"] == ESCALATION_SERVICE:
+            native = NATIVE_ESCALATION_TOOLS.get(dest["tool"])
+            if native is None:
+                raise RenderError(f"no native replacement for escalation broker tool {dest['tool']!r}; "
+                                  "add it to NATIVE_ESCALATION_TOOLS in full_akh.py")
+            renames[tool["name"]] = native
+            renames[dest["tool"]] = native
+            renames[f"mcp__{ESCALATION_SERVICE}__{dest['tool']}"] = native
             continue
         qualified = f"mcp__{server_for(dest['service'])}__{dest['tool']}"
         renames[tool["name"]] = qualified
@@ -370,8 +406,57 @@ def system_prompt(roles_dir: Path, role: str) -> str:
     return "\n".join(p.read_text() for p in parts)
 
 
+def worker_profile(project: str) -> str:
+    """The akhsessd workspace profile a registered project's workers run in."""
+    slug = re.sub(r"[^a-z0-9]+", "-", project.lower()).strip("-")
+    if not slug:
+        raise RenderError(f"project {project!r} has no usable profile name")
+    return WORKER_PROFILE_PREFIX + slug
+
+
+def sessions_url(session: dict) -> str:
+    listen = session.get("listen")
+    return f"http://{listen}" if listen else SESSIONS_URL
+
+
+def render_delegation(session: dict, root: Path, projects, role: str = "janus") -> tuple[dict, list[str]]:
+    """`[delegation]` for a delegating role (53g PR 7): the native escalation tools.
+
+    `projects` are the registered project names (the keys of
+    config/janus-escalation.json). A project is registered for delegation only
+    when akhsessd already has its worker profile (`workspaces.<profile>` and
+    `akhs.<role>.workspace_profiles`); the others are reported as warnings so
+    the tools never point at a profile akhsessd would refuse. Without any
+    registered project the escalation tools stay disabled.
+    """
+    warnings = []
+    granted = set(session.get("akhs", {}).get(role, {}).get("workspace_profiles", []))
+    workspaces = session.get("workspaces", {})
+    profiles = {}
+    for project in sorted(projects):
+        name = worker_profile(project)
+        if name not in workspaces or name not in granted:
+            warnings.append(f"{role}: akhsessd has no worker profile `{name}` for project {project!r} "
+                            f"(sessions.json workspaces and akhs.{role}.workspace_profiles); "
+                            "not registered for delegation")
+            continue
+        profiles[project] = Inline(workspace_profile=name, runtime_profile=WORKER_RUNTIME_PROFILE)
+    enabled = bool(profiles)
+    if not enabled:
+        warnings.append(f"{role}: no project has an akhsessd worker profile; the escalation tools stay disabled")
+    escalation = {"enabled": enabled, "report_thread": STATUS_THREAD}
+    escalation.update({key: str(root / "skills" / name) for key, name in SKILLS.items()})
+    native = {"enabled": enabled, "service": "akhsessd", "url": sessions_url(session),
+              "token_file": str(root / DELEGATION_TOKEN), "workspace_profile": role,
+              "core_principal": "sessions", "max_new_per_day": MAX_NEW_PER_DAY,
+              "profiles": profiles, "escalation": escalation}
+    # `enabled = false` keeps the generic `delegate` tool off; the escalation
+    # tools are gated by [delegation.native.escalation] alone.
+    return {"enabled": False, "native": native}, warnings
+
+
 def render_workspace(existing: dict | None, role: str, prompt: str, servers: list[dict],
-                     board: dict) -> dict:
+                     board: dict, delegation: dict | None = None) -> dict:
     """The full-akh workspace document, preserving unrelated existing keys."""
     doc = dict(existing or {})
     doc["name"] = role
@@ -391,8 +476,12 @@ def render_workspace(existing: dict | None, role: str, prompt: str, servers: lis
     mcp.setdefault("require_pushed_mcp", False)
     mcp["servers"] = servers
     doc["mcp"] = mcp
+    managed = ["ollama_endpoint", "autonomy", "exec", "board", "mcp"]
+    if delegation is not None:
+        doc["delegation"] = delegation
+        managed.append("delegation")
     # Stable table order: the managed tables last, in a fixed sequence.
-    for key in ("ollama_endpoint", "autonomy", "exec", "board", "mcp"):
+    for key in managed:
         doc[key] = doc.pop(key)
     return doc
 
@@ -403,6 +492,10 @@ WORKSPACE_COMMENTS = {
              "board replies). The token is resolved from the environment by daemon_credentials.py.",
     "mcp.servers": "Phase 53i: tools register as mcp__<server>__<tool>. Allowlists mirror the\n"
                    "role's akhsessd grants at cutover time; secrets are env names or token files.",
+    "delegation": "53g PR 7 (D3, D4): escalate / dispatch_merge_repair / escalation_status run\n"
+                  "contained Codex workers as akhsessd sessions with per-incident grants. `enabled`\n"
+                  "keeps the generic `delegate` tool off; [delegation.native.escalation] gates the\n"
+                  "escalation tools. Worker instructions are the skillpacks under skills/.",
 }
 
 

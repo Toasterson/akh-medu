@@ -188,6 +188,19 @@ pub struct SessionGrants {
     pub tools: Vec<String>,
     #[serde(default)]
     pub bootstrap_repositories: Vec<String>,
+    /// Runtime binding for sessions of this workspace profile, replacing the
+    /// Akh's own (53g PR 7). This is how an akh delegates to a contained
+    /// native worker (Codex, Claude) under its own identity and grant: the
+    /// akh's own turn keeps its runtime, while its worker profiles name a
+    /// native runtime. Absent = the Akh's runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeBinding>,
+    /// Trusted instructions for sessions of this workspace profile, replacing
+    /// the Akh's own. A delegated worker must not run under the delegating
+    /// akh's persona; the per-task procedure arrives as the first input.
+    /// Absent = the Akh's instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 pub use akh_session_types::ProviderConfig as RuntimeProfile;
@@ -251,6 +264,16 @@ pub struct GitPublicationProfile {
     /// Full prefixes ending in '/', e.g. refs/heads/anima/. No blanket heads/.
     pub branch_prefixes: Vec<String>,
     pub config_file: Option<PathBuf>,
+    /// Only fast-forward an existing branch (53g PR 7, decision D4): a branch
+    /// that does not exist on the remote is refused instead of created, and
+    /// the push is a plain (non-forced) update, so the remote itself refuses
+    /// anything but a fast-forward. Used for merge-repair workers, which may
+    /// only update an existing PR source branch. Every profile already
+    /// refuses a non-fast-forward result; this also removes branch creation
+    /// and the lease-based forced update. Omitted from the serialized policy
+    /// when false, so existing profiles keep their policy digest.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_existing_branch: bool,
 }
 impl GitPublicationProfile {
     pub fn validate(&self) -> Result<()> {
@@ -676,6 +699,19 @@ impl Config {
                     .filter(|(_, akh)| akh.runtime.execution_mode == ExecutionMode::Colocated)
                     .map(|(id, _)| format!("akhs.{id}.runtime")),
             )
+            .chain(self.akhs.iter().flat_map(|(id, akh)| {
+                akh.session_grants
+                    .iter()
+                    .filter(|(_, grants)| {
+                        grants
+                            .runtime
+                            .as_ref()
+                            .is_some_and(|r| r.execution_mode == ExecutionMode::Colocated)
+                    })
+                    .map(move |(workspace, _)| {
+                        format!("akhs.{id}.session_grants.{workspace}.runtime")
+                    })
+            }))
             .collect::<Vec<_>>();
         if colocated.is_empty() {
             return Ok(());
@@ -906,8 +942,25 @@ impl Config {
                     "workspace session grants must narrow existing Akh tools and repositories",
                 ));
             }
+            if grants.runtime.as_ref().is_some_and(|runtime| {
+                validate_key(&runtime.runtime).is_err() || validate_key(&runtime.profile).is_err()
+            }) || grants
+                .instructions
+                .as_ref()
+                .is_some_and(|text| text.trim().is_empty())
+            {
+                return Err(Fault::invalid(
+                    "a workspace runtime override needs a runtime and profile, and instructions must not be empty",
+                ));
+            }
             profile.tools.retain(|t| names.contains(&t.name));
             profile.bootstrap_repositories = grants.bootstrap_repositories.clone();
+            if let Some(runtime) = &grants.runtime {
+                profile.runtime = runtime.clone();
+            }
+            if let Some(instructions) = &grants.instructions {
+                profile.instructions = instructions.clone();
+            }
         }
         Ok(profile)
     }

@@ -263,6 +263,67 @@ struct SnapshotTicker {
     handle: tokio::task::JoinHandle<()>,
 }
 
+/// Register the escalation tools (`escalate`, `dispatch_merge_repair`,
+/// `escalation_status`; Phase 53g PR 7) for an akh whose
+/// `[delegation.native.escalation]` enables them, and reconcile the incident
+/// ledger in the background (adopting sessions a create made before a
+/// restart, settling turns that ended while the akh was down).
+///
+/// A misconfiguration is logged with its diagnostic and leaves the tools
+/// unregistered: the akh still starts, and a call to a missing tool fails
+/// visibly instead of delegating uncontained.
+#[cfg(all(feature = "delegation", feature = "core-api"))]
+fn register_escalation_tools(
+    agent: &akh_medu::agent::Agent,
+    name: &str,
+    engine: &Arc<akh_medu::engine::Engine>,
+    native: &akh_medu::agent::delegation::NativeDelegationConfig,
+    lexicon: &akh_medu::agent::provider_failure::ProviderErrorLexicon,
+    issuer: Arc<dyn akh_medu::agent::delegation::DelegationGrantIssuer>,
+) {
+    use akh_medu::agent::delegation::escalation::EscalationService;
+    use akh_medu::agent::delegation::ledger::IncidentLedger;
+    let service = IncidentLedger::open(engine)
+        .map_err(akh_medu::agent::delegation::escalation::EscalationError::from)
+        .and_then(|ledger| {
+            EscalationService::from_config(name, native, lexicon.clone(), issuer, ledger)
+        });
+    let service = match service {
+        Ok(service) => Arc::new(service),
+        Err(error) => {
+            tracing::error!(
+                target: "akh::delegation",
+                workspace = %name,
+                error = ?miette::Report::new(error),
+                "escalation tools not registered"
+            );
+            return;
+        }
+    };
+    for tool in akh_medu::agent::tools::escalation_tools(&service) {
+        agent.register_tool(tool);
+    }
+    tracing::info!(
+        target: "akh::delegation",
+        workspace = %name,
+        projects = ?service.projects(),
+        durable = service.ledger().is_durable(),
+        "escalation tools registered"
+    );
+    let workspace = name.to_string();
+    drop(tokio::task::spawn_blocking(move || {
+        let report = service.reconcile();
+        if report.examined > 0 {
+            tracing::info!(
+                target: "akh::delegation",
+                workspace = %workspace,
+                ?report,
+                "incident ledger reconciled"
+            );
+        }
+    }));
+}
+
 /// Capture + persist one snapshot of `name`'s agent (Phase 38c).
 /// Build the privilege-dropping executor for a workspace whose `[exec]` selects
 /// `kind = "local-drop"` (Phase 48b / ADR 082).
@@ -3302,6 +3363,17 @@ impl ServerState {
                 name,
                 agent.tool_registry_handle(),
             ));
+            // 53g PR 7: the escalation tools, only for an akh that enables them.
+            if delegation.native.escalation.enabled {
+                register_escalation_tools(
+                    &agent,
+                    name,
+                    &engine,
+                    &delegation.native,
+                    &akh_config.provider.lexicon,
+                    issuer.clone(),
+                );
+            }
             agent.set_delegation_manager(
                 akh_medu::agent::delegation::DelegationManager::new(delegation)
                     .with_grant_issuer(issuer),

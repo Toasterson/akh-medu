@@ -567,6 +567,7 @@ pub fn capture_snapshot_at_fence(
     let budget_ledger = capture_budget_ledger(engine);
     let last_run = capture_last_run_log(engine);
     let provider_gate = capture_provider_gate(engine);
+    let incidents = capture_incident_ledger(engine);
     let extra = serde_json::json!({
         "provenance_snapshot_version": PROVENANCE_SNAPSHOT_VERSION,
         "audience": agent.audience,
@@ -584,6 +585,9 @@ pub fn capture_snapshot_at_fence(
         },
         "provider": {
             "gate": provider_gate,
+        },
+        "delegation": {
+            "incidents": incidents,
         },
     });
 
@@ -986,6 +990,7 @@ pub async fn wake(
         restore_budget_ledger(&store, state.extra.as_ref());
         restore_last_run_log(&store, state.extra.as_ref());
         restore_provider_gate(&store, state.extra.as_ref());
+        restore_incident_ledger(&store, state.extra.as_ref());
     }
 
     // 4. Open the engine over the reconstructed redb (registry + allocator come
@@ -2097,6 +2102,59 @@ fn restore_provider_gate(store: &TieredStore, extra: Option<&serde_json::Value>)
     };
     if let Err(error) = store.put_meta(PROVIDER_GATE_KEY, &bytes) {
         tracing::warn!(error = %error, "wake: provider gate not restored");
+    }
+}
+
+/// Capture the delegation incident ledger (`delegation:incidents:v1`, Phase
+/// 53g PR 7) so a relocated or re-woken akh keeps deduplicating escalations,
+/// its daily limit and its link to the worker sessions it started. `None`
+/// when the akh has no ledger; an unreadable one is logged and left out.
+fn capture_incident_ledger(
+    engine: &Engine,
+) -> Option<crate::agent::delegation::ledger::LedgerState> {
+    match crate::agent::delegation::ledger::load_persisted(engine) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "snapshot: incident ledger unreadable or corrupt; not captured"
+            );
+            None
+        }
+    }
+}
+
+/// Restore the incident ledger captured by [`capture_incident_ledger`]. An
+/// older snapshot without one leaves the store untouched; a malformed one is
+/// logged and skipped rather than failing the wake.
+fn restore_incident_ledger(store: &TieredStore, extra: Option<&serde_json::Value>) {
+    use crate::agent::delegation::ledger::{INCIDENT_LEDGER_KEY, LedgerState};
+    let Some(value) = extra
+        .and_then(|extra| extra.get("delegation"))
+        .and_then(|delegation| delegation.get("incidents"))
+        .filter(|value| !value.is_null())
+    else {
+        return;
+    };
+    let state = match serde_json::from_value::<LedgerState>(value.clone()) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "wake: incident ledger in the snapshot is malformed; not restored"
+            );
+            return;
+        }
+    };
+    let bytes = match serde_json::to_vec(&state) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(error = %error, "wake: incident ledger could not be encoded");
+            return;
+        }
+    };
+    if let Err(error) = store.put_meta(INCIDENT_LEDGER_KEY, &bytes) {
+        tracing::warn!(error = %error, "wake: incident ledger not restored");
     }
 }
 
@@ -4558,6 +4616,72 @@ mod tests {
         let bytes = store.get_meta(PROVIDER_GATE_KEY).unwrap().expect("kept");
         assert_eq!(
             serde_json::from_slice::<ProviderGateState>(&bytes).unwrap(),
+            captured
+        );
+    }
+
+    #[test]
+    fn incident_ledger_roundtrips_through_snapshot_extra() {
+        use crate::agent::autonomy::UnixSecs;
+        use crate::agent::delegation::ledger::{
+            INCIDENT_LEDGER_KEY, IncidentKey, IncidentKind, IncidentLedger, LedgerState,
+            NewIncident, request_id_for,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(
+            Engine::new(EngineConfig {
+                data_dir: Some(dir.path().to_path_buf()),
+                ..EngineConfig::default()
+            })
+            .unwrap(),
+        );
+        assert_eq!(capture_incident_ledger(&engine), None, "no ledger yet");
+        let ledger = IncidentLedger::open(&engine).unwrap();
+        let key = IncidentKey::parse("WI-403-owner").unwrap();
+        ledger
+            .admit(
+                NewIncident {
+                    request_id: request_id_for("janus", IncidentKind::Escalation, &key),
+                    key: key.clone(),
+                    kind: IncidentKind::Escalation,
+                    project: "akh-medu".into(),
+                    workspace_profile: "janus-worker-akh-medu".into(),
+                    job: serde_json::json!({"summary": "x"}),
+                },
+                4,
+                UnixSecs::from_secs(1_790_251_200),
+            )
+            .unwrap();
+        let captured = capture_incident_ledger(&engine).expect("captured");
+        assert!(captured.records.contains_key("WI-403-owner"));
+
+        let extra = serde_json::json!({ "delegation": { "incidents": captured } });
+        let restored_dir = tempfile::tempdir().unwrap();
+        let store =
+            TieredStore::with_persistence(restored_dir.path(), "snapshot-incident-ledger").unwrap();
+        restore_incident_ledger(&store, Some(&extra));
+        let bytes = store
+            .get_meta(INCIDENT_LEDGER_KEY)
+            .unwrap()
+            .expect("restored");
+        assert_eq!(
+            serde_json::from_slice::<LedgerState>(&bytes).unwrap(),
+            captured
+        );
+
+        // Older snapshots leave the store alone; a malformed ledger is skipped.
+        restore_incident_ledger(&store, Some(&serde_json::json!({})));
+        restore_incident_ledger(
+            &store,
+            Some(&serde_json::json!({ "delegation": { "incidents": null } })),
+        );
+        restore_incident_ledger(
+            &store,
+            Some(&serde_json::json!({ "delegation": { "incidents": { "records": 3 } } })),
+        );
+        let bytes = store.get_meta(INCIDENT_LEDGER_KEY).unwrap().expect("kept");
+        assert_eq!(
+            serde_json::from_slice::<LedgerState>(&bytes).unwrap(),
             captured
         );
     }

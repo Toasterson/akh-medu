@@ -1,5 +1,6 @@
 //! Core delegation types: IDs, configuration, targets, tasks, and results.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -85,6 +86,24 @@ pub enum GrantTools {
 /// session (Phase 53e). The akh mints a grant per delegation and creates the
 /// session with it; the runtime's cognitive tool calls then run under the
 /// grant and are recorded as the delegate's provenance.
+///
+/// ```toml
+/// [delegation.native]
+/// enabled = true
+/// url = "http://127.0.0.1:18431"
+/// token_file = "/path/to/secrets/sessions-janus-delegation.key"
+/// workspace_profile = "janus"            # the default (generic `delegate`)
+/// max_new_per_day = 4                    # new escalation incidents per UTC day
+///
+/// [delegation.native.profiles]           # 53g PR 7: per registered project
+/// akh-medu = "janus-worker-akh-medu"     # shorthand: the workspace profile
+/// anima = { workspace_profile = "janus-worker-anima", runtime_profile = "codex-astra" }
+///
+/// [delegation.native.escalation]         # the Janus-only escalation tools
+/// enabled = true
+/// escalation_skill = "/path/to/skills/astra-escalation"
+/// merge_repair_skill = "/path/to/skills/mergiraf"
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NativeDelegationConfig {
@@ -96,8 +115,14 @@ pub struct NativeDelegationConfig {
     pub url: String,
     /// File holding akhsessd's bearer token for this akh (role `client`).
     pub token_file: Option<PathBuf>,
-    /// akhsessd workspace profile the delegated session runs in.
+    /// akhsessd workspace profile the delegated session runs in when no
+    /// project profile applies (the generic `delegate` tool).
     pub workspace_profile: String,
+    /// Per registered Anima project: the akhsessd workspace profile its
+    /// delegated workers run in (53g PR 7). Empty = only
+    /// [`Self::workspace_profile`].
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, NativeProjectProfile>,
     /// The `/v1` core principal akhsessd presents the grant as.
     pub core_principal: String,
     /// Tools the grant names.
@@ -106,6 +131,11 @@ pub struct NativeDelegationConfig {
     pub timeout_seconds: u64,
     /// Interval between session polls while the turn runs.
     pub poll_interval_ms: u64,
+    /// New escalation incidents admitted per UTC day (53g PR 7). A repeated
+    /// incident key never counts; `0` admits none.
+    pub max_new_per_day: u32,
+    /// The escalation and merge-repair tools (53g PR 7).
+    pub escalation: NativeEscalationConfig,
 }
 
 impl Default for NativeDelegationConfig {
@@ -116,10 +146,120 @@ impl Default for NativeDelegationConfig {
             url: "http://127.0.0.1:18431".into(),
             token_file: None,
             workspace_profile: "default".into(),
+            profiles: BTreeMap::new(),
             core_principal: "sessions".into(),
             grant_tools: GrantTools::default(),
             timeout_seconds: 600,
             poll_interval_ms: 2_000,
+            max_new_per_day: DEFAULT_MAX_NEW_PER_DAY,
+            escalation: NativeEscalationConfig::default(),
+        }
+    }
+}
+
+impl NativeDelegationConfig {
+    /// The profile a project's workers run in, if the project is registered.
+    pub fn project_profile(&self, project: &str) -> Option<&NativeProjectProfile> {
+        self.profiles.get(project)
+    }
+}
+
+/// The default of [`NativeDelegationConfig::max_new_per_day`] (the limit the
+/// retired `janus_escalation.py` broker enforced).
+pub const DEFAULT_MAX_NEW_PER_DAY: u32 = 4;
+
+/// Where one registered project's delegated workers run (53g PR 7).
+///
+/// Written either as the workspace profile name alone or as a table:
+///
+/// ```toml
+/// akh-medu = "janus-worker-akh-medu"
+/// anima = { workspace_profile = "janus-worker-anima", runtime_profile = "codex-astra" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ProjectProfileRepr", into = "ProjectProfileRepr")]
+pub struct NativeProjectProfile {
+    /// The akhsessd workspace profile.
+    pub workspace_profile: String,
+    /// The akhsessd runtime profile the workspace profile must bind (its
+    /// `session_grants` runtime override). When set, a session created on any
+    /// other runtime (for example the delegating akh's own) is retired and
+    /// the delegation fails closed instead of running uncontained.
+    pub runtime_profile: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ProjectProfileRepr {
+    Name(String),
+    Table {
+        workspace_profile: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_profile: Option<String>,
+    },
+}
+
+impl From<ProjectProfileRepr> for NativeProjectProfile {
+    fn from(repr: ProjectProfileRepr) -> Self {
+        match repr {
+            ProjectProfileRepr::Name(workspace_profile) => Self {
+                workspace_profile,
+                runtime_profile: None,
+            },
+            ProjectProfileRepr::Table {
+                workspace_profile,
+                runtime_profile,
+            } => Self {
+                workspace_profile,
+                runtime_profile,
+            },
+        }
+    }
+}
+
+impl From<NativeProjectProfile> for ProjectProfileRepr {
+    fn from(profile: NativeProjectProfile) -> Self {
+        match profile.runtime_profile {
+            None => Self::Name(profile.workspace_profile),
+            runtime_profile => Self::Table {
+                workspace_profile: profile.workspace_profile,
+                runtime_profile,
+            },
+        }
+    }
+}
+
+/// The escalation (`escalate`) and merge-repair (`dispatch_merge_repair`)
+/// tools plus `escalation_status` (53g PR 7). They are registered only for an
+/// akh whose config enables them; the worker instructions come from the two
+/// skillpacks, loaded by path on every dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NativeEscalationConfig {
+    /// Register the three tools.
+    pub enabled: bool,
+    /// Skillpack directory whose procedures brief an escalation worker.
+    pub escalation_skill: Option<PathBuf>,
+    /// Skillpack directory whose procedures brief a merge-repair worker.
+    pub merge_repair_skill: Option<PathBuf>,
+    /// Agent Board thread (UUID) the workers report to (decision D3).
+    pub report_thread: Option<String>,
+    /// How long a worker may run; its grant lives this long plus a margin
+    /// (at most 24 h).
+    pub worker_timeout_seconds: u64,
+    /// Tools the workers' grants name.
+    pub grant_tools: GrantTools,
+}
+
+impl Default for NativeEscalationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            escalation_skill: None,
+            merge_repair_skill: None,
+            report_thread: None,
+            worker_timeout_seconds: 4 * 60 * 60,
+            grant_tools: GrantTools::default(),
         }
     }
 }

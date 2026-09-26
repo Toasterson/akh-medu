@@ -995,6 +995,7 @@ pub fn session_router(app: SessionApp) -> Router {
             )
             .route("/v1/sessions", get(list_sessions).post(create_session))
             .route("/v1/sessions/{id}", get(get_session))
+            .route("/v1/session-requests/{request_id}", get(session_by_request))
             .route("/v1/sessions/{id}/access", get(session_access))
             .route("/v1/sessions/{id}/lifecycle", get(session_lifecycle))
             .route(
@@ -1196,6 +1197,14 @@ async fn create_session(
 ) -> Api<SessionRecord> {
     http::role(&p, "client")?;
     Ok(Json(app.sessions.create(&p, &request)?))
+}
+async fn session_by_request(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(request_id): Path<String>,
+) -> Api<SessionRecord> {
+    http::role(&p, "client")?;
+    Ok(Json(app.sessions.created_by_request(&p, &request_id)?))
 }
 async fn get_session(
     State(app): State<SessionApp>,
