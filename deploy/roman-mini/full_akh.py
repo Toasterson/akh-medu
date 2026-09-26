@@ -52,7 +52,12 @@ ROLE_SERVERS = {
 }
 # Brokers that run bounded commands answer slower than the 30 s default;
 # vesta_ops bounds its own commands well below this.
-SERVER_TIMEOUTS = {"observer": 60, "vesta-ops": 300}
+SERVER_TIMEOUTS = {"vesta-ops": 300}
+# Remote MCP tools that became native akhomed tools: (server, remote tool) ->
+# native tool name. A server whose granted tools are all native is no longer
+# rendered; prose naming the old tool is rewritten to the native name.
+# PR 5: the observer's monitoring_snapshot reads akheventd's monitor source.
+NATIVE_TOOLS = {("observer", "monitoring_snapshot"): "monitoring_snapshot"}
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 # 53g PR 7 (decisions D3, D4): the janus_escalation.py broker's MCP tools are
@@ -85,6 +90,24 @@ SKILLS = {"escalation_skill": "astra-escalation", "merge_repair_skill": "mergira
 GRAFANA_SERVER_NAME = "grafana"
 GRAFANA_URL = "http://127.0.0.1:18441/mcp"
 GRAFANA_TOOLS_FILE = "config/vesta-grafana-tools.json"
+
+# PR 5 (D2): akheventd's `roman-alerts` monitor source replaces observer.py's
+# monitoring(). Same probes and feeds as the observer used; Grafana now
+# authenticates with a Viewer service-account token plus the exported lab CA
+# instead of reading the admin secret with kubectl on every start.
+EVENTS_URL = "http://127.0.0.1:18435"
+MONITOR_SOURCE = "roman-alerts"
+MONITOR_EVENT_TYPE = "monitoring.changed"
+MONITOR_READER = "monitoring-reader"
+MONITOR_HEALTH = (("core", 18430), ("sessions", 18431), ("runtime", 18432),
+                  ("runtime-minerva", 18442), ("runtime-vesta", 18443), ("events", 18435))
+GRAFANA_ALERTS_URL = "https://grafana.lab.home"
+GRAFANA_ALERTS_PATH = "/api/alertmanager/grafana/api/v2/alerts"
+GRAFANA_TOKEN_FILE = "secrets/grafana-sa.token"
+LAB_CA_FILE = "secrets/lab-ca.pem"
+METRICS_URL = "http://127.0.0.1:18440"
+METRICS_QUERY = 'ALERTS{alertstate="firing"}'
+OBSERVER_STATUS_FILE = "state/observer-status.json"
 
 
 class RenderError(RuntimeError):
@@ -277,8 +300,17 @@ def server_for(service: str) -> str:
     raise RenderError(f"no MCP server mapping for sessions.json service {service!r}")
 
 
+def native_tool(tool: dict) -> str | None:
+    """The native akhomed tool that replaced this remote MCP grant, if any."""
+    dest = tool["destination"]
+    if dest["kind"] != "mcp":
+        return None
+    return NATIVE_TOOLS.get((server_for(dest["service"]), dest["tool"]))
+
+
 def tool_renames(session: dict, role: str) -> dict[str, str]:
-    """Old broker tool names (and bare remote names) -> `mcp__<server>__<tool>`.
+    """Old broker tool names (and bare remote names) -> `mcp__<server>__<tool>`,
+    or -> the native tool name for grants that moved into akhomed.
 
     The retired escalation broker's tools map to their native replacements
     (53g PR 7), including the `mcp__janus-escalation__*` spelling.
@@ -297,7 +329,7 @@ def tool_renames(session: dict, role: str) -> dict[str, str]:
             renames[dest["tool"]] = native
             renames[f"mcp__{ESCALATION_SERVICE}__{dest['tool']}"] = native
             continue
-        qualified = f"mcp__{server_for(dest['service'])}__{dest['tool']}"
+        qualified = native_tool(tool) or f"mcp__{server_for(dest['service'])}__{dest['tool']}"
         renames[tool["name"]] = qualified
         # Prose also names tools by their bare remote name (`board_send_inbox`,
         # `approve_and_merge`); only identifier-like names are rewritten.
@@ -315,7 +347,11 @@ def rename_tools(text: str, renames: dict[str, str]) -> str:
     # Grafana moved from a `vesta-ops` passthrough to its own direct MCP server
     # (PR 3): the prose describes a prefix, not an exact tool name, so it isn't
     # covered by the per-tool `renames` map above and must always be checked.
-    return text.replace("prefixed grafana__", "prefixed mcp__grafana__")
+    text = text.replace("prefixed grafana__", "prefixed mcp__grafana__")
+    # Prose already written against the 53i name of a tool that is now native.
+    for (server, remote), native in NATIVE_TOOLS.items():
+        text = text.replace(f"mcp__{server}__{remote}", native)
+    return text
 
 
 # ── Workspace TOML ───────────────────────────────────────────────────────────
@@ -337,12 +373,17 @@ def mcp_servers(session: dict, role: str, root: Path) -> tuple[list[dict], list[
     servers, warnings = [], []
     for name in ROLE_SERVERS[role]:
         alias = SERVER_ENDPOINTS[name].format(role=role)
+        granted = [t for t in session["akhs"][role]["tools"]
+                   if t["destination"]["kind"] == "mcp" and t["destination"]["service"] == alias]
+        tools = sorted({t["destination"]["tool"] for t in granted if native_tool(t) is None})
+        if granted and not tools:
+            # Every grant on this server became a native akhomed tool (PR 5:
+            # observer -> monitoring_snapshot), so the server is not rendered.
+            continue
         endpoint = session.get("endpoints", {}).get(alias)
         if endpoint is None:
             warnings.append(f"{role}: sessions.json has no `{alias}` endpoint; MCP server `{name}` skipped")
             continue
-        tools = sorted({t["destination"]["tool"] for t in session["akhs"][role]["tools"]
-                        if t["destination"]["kind"] == "mcp" and t["destination"]["service"] == alias})
         if not tools:
             warnings.append(f"{role}: no granted tools on `{alias}`; MCP server `{name}` skipped")
             continue
@@ -387,6 +428,20 @@ def grafana_server(root: Path) -> dict:
     if not names:
         raise RenderError(f"{path} lists no Grafana tools; rerun configure_vesta_actions.py <root>")
     return {"name": GRAFANA_SERVER_NAME, "url": GRAFANA_URL, "tools": names}
+
+
+def monitoring_config(session: dict, role: str, root: Path) -> dict | None:
+    """`[monitoring]` for a role that held the observer's monitoring_snapshot (PR 5).
+
+    The native tool reads akheventd's `roman-alerts` monitor as the
+    `monitoring-reader` principal (operator role: monitor reads only) and
+    merges the observer's exported status keys until PR 6 retires it.
+    """
+    if not any(native_tool(t) == "monitoring_snapshot" for t in session["akhs"][role]["tools"]):
+        return None
+    return {"endpoint": EVENTS_URL, "source": MONITOR_SOURCE,
+            "token_file": str(root / f"secrets/{MONITOR_READER}.key"),
+            "observer_status_file": str(root / OBSERVER_STATUS_FILE)}
 
 
 def board_identity(events: dict, role: str) -> dict:
@@ -456,7 +511,8 @@ def render_delegation(session: dict, root: Path, projects, role: str = "janus") 
 
 
 def render_workspace(existing: dict | None, role: str, prompt: str, servers: list[dict],
-                     board: dict, delegation: dict | None = None) -> dict:
+                     board: dict, delegation: dict | None = None,
+                     monitoring: dict | None = None) -> dict:
     """The full-akh workspace document, preserving unrelated existing keys."""
     doc = dict(existing or {})
     doc["name"] = role
@@ -472,17 +528,21 @@ def render_workspace(existing: dict | None, role: str, prompt: str, servers: lis
     doc["autonomy"] = autonomy
     doc["exec"] = {"kind": "none"}
     doc["board"] = board
+    doc.pop("monitoring", None)
+    if monitoring is not None:
+        doc["monitoring"] = dict(monitoring)
     mcp = {k: v for k, v in (doc.get("mcp") or {}).items() if k != "servers"}
     mcp.setdefault("require_pushed_mcp", False)
     mcp["servers"] = servers
     doc["mcp"] = mcp
-    managed = ["ollama_endpoint", "autonomy", "exec", "board", "mcp"]
+    managed = ["ollama_endpoint", "autonomy", "exec", "board", "monitoring", "mcp"]
     if delegation is not None:
         doc["delegation"] = delegation
         managed.append("delegation")
     # Stable table order: the managed tables last, in a fixed sequence.
     for key in managed:
-        doc[key] = doc.pop(key)
+        if key in doc:
+            doc[key] = doc.pop(key)
     return doc
 
 
@@ -490,6 +550,8 @@ WORKSPACE_COMMENTS = {
     "exec": "Side effects stay disabled until an execd sandbox profile exists (ADR 113 53c).",
     "board": "Per-akh Agent Board identity, per phase53/fixups (reactor report_thread posts,\n"
              "board replies). The token is resolved from the environment by daemon_credentials.py.",
+    "monitoring": "Phase 53g PR 5: the native read-only monitoring_snapshot tool reads akheventd's\n"
+                  "roman-alerts monitor (GET /v1/monitors/roman-alerts) plus the observer's status export.",
     "mcp.servers": "Phase 53i: tools register as mcp__<server>__<tool>. Allowlists mirror the\n"
                    "role's akhsessd grants at cutover time; secrets are env names or token files.",
     "delegation": "53g PR 7 (D3, D4): escalate / dispatch_merge_repair / escalation_status run\n"
@@ -534,7 +596,9 @@ def acp_principals(session: dict, root: Path) -> list[dict]:
 
 # Seeds go through reactor_manage; kg_query supports hygiene reads. Retraction
 # uses ACP `_akh/triples/remove` (kg_delete is not in the live registry).
-OPERATOR_CORE_TOOLS = ["kg_query", "reactor_manage"]
+# monitoring_snapshot (read-only, PR 5) lets the operator verify the native
+# tool's output shape through `/v1/tools/call`.
+OPERATOR_CORE_TOOLS = ["kg_query", "reactor_manage", "monitoring_snapshot"]
 
 
 def render_core_config(core: dict, root: Path) -> dict:
@@ -573,6 +637,54 @@ def retarget_events(events: dict, root: Path, core_url: str = "http://" + CORE_L
         elif route.get("target", {}).get("kind") != "akh":
             raise RenderError(f"route {route.get('id')!r} has neither an automation nor an akh target")
     return rendered
+
+
+def monitor_source(root: Path) -> tuple[dict, dict]:
+    """akheventd `endpoints` and the `monitors` entry for `roman-alerts` (PR 5)."""
+    endpoints = {f"health-{name}": {"url": f"http://127.0.0.1:{port}", "anonymous": True}
+                 for name, port in MONITOR_HEALTH}
+    endpoints["grafana-alerts"] = {"url": GRAFANA_ALERTS_URL, "token_file": str(root / GRAFANA_TOKEN_FILE),
+                                   "ca_file": str(root / LAB_CA_FILE)}
+    endpoints["victoriametrics"] = {"url": METRICS_URL, "anonymous": True}
+    monitor = {"source": MONITOR_SOURCE, "event_type": MONITOR_EVENT_TYPE, "interval_secs": 60,
+               "timeout_secs": 5,
+               "health": [{"name": name, "endpoint": f"health-{name}"} for name, _ in MONITOR_HEALTH],
+               "alertmanager": {"endpoint": "grafana-alerts", "path": GRAFANA_ALERTS_PATH},
+               "prometheus": {"endpoint": "victoriametrics", "query": METRICS_QUERY}}
+    return endpoints, monitor
+
+
+def render_monitoring_events(events: dict, root: Path) -> dict:
+    """Add the `roman-alerts` monitor source, its endpoints and the
+    `monitoring-reader` principal to an akheventd config. Idempotent."""
+    rendered = json.loads(json.dumps(events))
+    endpoints, monitor = monitor_source(root)
+    rendered.setdefault("endpoints", {}).update(endpoints)
+    rendered["principals"] = [p for p in rendered.get("principals", []) if p.get("id") != MONITOR_READER]
+    rendered["principals"].append({"id": MONITOR_READER, "token_file": str(root / f"secrets/{MONITOR_READER}.key"),
+                                   "roles": ["operator"]})
+    rendered["monitors"] = [m for m in rendered.get("monitors", []) if m.get("source") != MONITOR_SOURCE]
+    rendered["monitors"].append(monitor)
+    return rendered
+
+
+def missing_monitor_files(events: dict) -> list[str]:
+    """Credential/CA files the monitors (and principals) need but that don't exist.
+
+    akheventd builds every endpoint's HTTP client at start, so a missing CA
+    file stops the whole daemon; a missing principal token file does too.
+    """
+    endpoints = events.get("endpoints", {})
+    names = set()
+    for monitor in events.get("monitors", []):
+        names.update(check["endpoint"] for check in monitor.get("health", []))
+        for feed in ("alertmanager", "prometheus"):
+            if monitor.get(feed):
+                names.add(monitor[feed]["endpoint"])
+    paths = [endpoints[n][k] for n in sorted(names) if n in endpoints for k in ("token_file", "ca_file")
+             if endpoints[n].get(k)]
+    paths += [p["token_file"] for p in events.get("principals", []) if p.get("token_file")]
+    return [p for p in paths if not Path(p).is_file()]
 
 
 # ── Reactor schedule seeds (53d + ADR 105) ───────────────────────────────────

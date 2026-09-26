@@ -412,6 +412,7 @@ mod tests {
             ca_file: None,
             allow_insecure_http: false,
             request_timeout_secs: None,
+            anonymous: false,
         };
         let config = super::super::Config {
             listen: "127.0.0.1:0".parse().unwrap(),

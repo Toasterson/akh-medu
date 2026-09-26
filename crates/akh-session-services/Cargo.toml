@@ -19,7 +19,7 @@ vulkan = ["candle-runtime", "akh-medu/vulkan"]
 metal = ["candle-runtime", "akh-medu/metal"]
 executor = ["helpers", "dep:regex", "dep:globset", "dep:base64", "dep:tempfile"]
 sandbox = []
-events = ["dep:lapin", "dep:tokio-executor-trait", "dep:tokio-reactor-trait", "dep:chrono"]
+events = ["dep:lapin", "dep:tokio-executor-trait", "dep:tokio-reactor-trait", "dep:chrono", "dep:blake3"]
 helpers = []
 client = ["helpers", "dep:tokio-tungstenite", "dep:rustls", "dep:rustls-pemfile"]
 admin = []
@@ -39,6 +39,9 @@ akh-runtime = { path = "../akh-runtime", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+thiserror = "2"
+# Monitor snapshot signatures (Phase 53g PR 5).
+blake3 = { version = "1", optional = true }
 akh-service-store = { path = "../akh-service-store" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", default-features = true }

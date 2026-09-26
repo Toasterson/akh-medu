@@ -75,6 +75,22 @@ Restart privileges: akheventd and core are system LaunchDaemons. The core can al
 - **Source:** akheventd gains `Config.monitors` (health endpoints, alertmanager, prometheus) and a structural `monitoring_signature`. It emits coalesced `monitoring.changed` events. An unavailable feed is reported as unknown, never as zero alerts. It serves `GET /v1/monitors/{source}`.
 - **Tool:** a native read-only `monitoring_snapshot` akh tool replaces `mcp__observer__monitoring_snapshot`.
 - **Observer:** keeps only the watchdog, for now.
+- **Implemented** (branch `feat/53g-pr5-monitor-source`):
+  - **akheventd:** the source lives in `crates/akh-session-services/src/monitor.rs`
+    and the shared wire types in `crates/akh-session-types/src/monitor.rs`.
+    - The signature is the blake3 digest of a canonical structural
+      projection. The event ID is blake3 of the signature plus the
+      transition number, so a recurring state is not refused as a reused ID.
+    - The snapshot and the event commit in one transaction. The first poll
+      is a silent baseline.
+    - `Endpoint.anonymous` endpoints send no token (used for the health
+      probes).
+  - **akhomed:** the tool is `src/agent/tools/monitoring_snapshot.rs`,
+    configured by the workspace `[monitoring]` table. It keeps the old
+    top-level keys, and the observer-owned status keys come from
+    `state/observer-status.json` until PR 6.
+  - **Deploy:** the D2 operator action and the Mac-side steps are in
+    `deploy/roman-mini/INVENTORY.md` ("PR 5").
 
 ### PR 6: Anima source plus `laya_controller` become an akheventd Anima source, reactors and a skill; retire `observer.py` (risk: medium–high)
 

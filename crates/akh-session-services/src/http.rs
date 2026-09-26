@@ -194,14 +194,25 @@ impl Client {
         .await
         .map(|(value, _)| value)
     }
-    async fn send<T: DeserializeOwned>(
+    /// A request to a configured endpoint carrying the endpoint's own
+    /// credential (none for an `anonymous` endpoint). The caller sends it and
+    /// interprets the raw response, e.g. a health probe that needs the status
+    /// code and timing rather than a decoded body.
+    pub fn request(
         &self,
         service: &str,
         method: reqwest::Method,
         path: &str,
-        body: Option<Value>,
+    ) -> Result<reqwest::RequestBuilder> {
+        self.builder(service, method, path, None)
+    }
+    fn builder(
+        &self,
+        service: &str,
+        method: reqwest::Method,
+        path: &str,
         bearer: Option<String>,
-    ) -> Result<(T, HeaderMap)> {
+    ) -> Result<reqwest::RequestBuilder> {
         let endpoint = self.config.endpoint(service)?;
         let route = endpoint.route(path);
         let route = if route.contains("{sandbox}") {
@@ -214,15 +225,29 @@ impl Client {
         } else {
             route
         };
-        let mut request = self
+        let request = self
             .clients
             .get(service)
             .ok_or_else(|| Fault::invalid("service has no configured HTTP client"))?
-            .request(method, route)
-            .bearer_auth(match bearer {
-                Some(token) => token,
-                None => endpoint.token()?,
-            });
+            .request(method, route);
+        let bearer = match bearer {
+            Some(token) => Some(token),
+            None => endpoint.bearer()?,
+        };
+        Ok(match bearer {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        })
+    }
+    async fn send<T: DeserializeOwned>(
+        &self,
+        service: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        bearer: Option<String>,
+    ) -> Result<(T, HeaderMap)> {
+        let mut request = self.builder(service, method, path, bearer)?;
         if let Some(body) = body {
             request = request.json(&body);
         }

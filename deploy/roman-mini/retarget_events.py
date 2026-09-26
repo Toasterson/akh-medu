@@ -27,6 +27,14 @@ def retarget(root: Path) -> list[str]:
     for route in staged.get("routes", []):
         if route.get("automation") is not None or route.get("target", {}).get("kind") != "akh":
             raise fa.RenderError(f"staged route {route.get('id')!r} is not an akh target; rerun configure_core.py")
+    missing = fa.missing_monitor_files(staged)
+    if missing:
+        # akheventd reads every endpoint CA and principal token at start; a
+        # missing file would take all event routing down, not just monitoring.
+        raise fa.RenderError(
+            "the staged akheventd config needs files that do not exist: " + ", ".join(missing)
+            + ". Create the Grafana service-account token and export the lab CA (PR 5 / D2 in "
+            "deploy/roman-mini/INVENTORY.md), rerun configure_core.py, then retarget again")
     fa.write_atomic(config / "events.json", json.dumps(staged, indent=2) + "\n")
     return [f"{r['id']}: {r['source']}/{r['event_type']} -> akh {r['target']['akh']}" for r in staged["routes"]]
 

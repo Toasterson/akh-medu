@@ -23,6 +23,12 @@ pub struct Endpoint {
     /// Total request deadline; slow cognitive cold starts may need more than 30s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
+    /// Send no credential at all (Phase 53g PR 5). For unauthenticated
+    /// read-only probes such as `/healthz` or a loopback metrics tunnel, so a
+    /// daemon token is never handed to a service that does not need it.
+    /// Mutually exclusive with `token_file` and `token_env`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub anonymous: bool,
 }
 
 impl Endpoint {
@@ -52,7 +58,13 @@ impl Endpoint {
                 "service URL requires HTTPS or explicitly authorized private HTTP, with no embedded credentials/query",
             ));
         }
-        if let Some(name) = &self.token_env {
+        if self.anonymous {
+            if !self.token_file.as_os_str().is_empty() || self.token_env.is_some() {
+                return Err(Fault::invalid(
+                    "an anonymous endpoint must not also name token_file or token_env",
+                ));
+            }
+        } else if let Some(name) = &self.token_env {
             if !self.token_file.as_os_str().is_empty()
                 || name.is_empty()
                 || !name
@@ -105,6 +117,14 @@ impl Endpoint {
             return Ok(token);
         }
         read_token(&self.token_file)
+    }
+    /// The bearer credential to send, or `None` for an anonymous endpoint.
+    pub fn bearer(&self) -> Result<Option<String>> {
+        if self.anonymous {
+            Ok(None)
+        } else {
+            self.token().map(Some)
+        }
     }
     pub fn route(&self, path: &str) -> String {
         format!("{}{}", self.url.trim_end_matches('/'), path)
@@ -481,6 +501,288 @@ fn djehuty_page_size() -> u16 {
     50
 }
 
+/// One akheventd monitor source (Phase 53g PR 5, ADR 113 decision 10).
+///
+/// Every `interval_secs` the source probes its health endpoints and reads its
+/// alert feeds, records a structural snapshot under
+/// `monitor_snapshot/<source>` and, when the snapshot's signature changes,
+/// ingests one `{previous, current}` event as `<source>/<event_type>`. The
+/// first observation is a silent baseline. Endpoints are names in
+/// [`Config::endpoints`]; their `token_file`, `ca_file` and `anonymous`
+/// settings decide how each request authenticates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MonitorSource {
+    /// Event source identity, e.g. `roman-alerts`.
+    pub source: String,
+    /// Event type emitted on a signature change, e.g. `monitoring.changed`.
+    pub event_type: String,
+    #[serde(default = "monitor_interval")]
+    pub interval_secs: u64,
+    /// Per-request deadline for every probe and feed of this source.
+    #[serde(default = "monitor_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub health: Vec<HealthCheck>,
+    #[serde(default)]
+    pub alertmanager: Option<AlertmanagerFeed>,
+    #[serde(default)]
+    pub prometheus: Option<PrometheusFeed>,
+}
+fn monitor_interval() -> u64 {
+    60
+}
+fn monitor_timeout() -> u64 {
+    5
+}
+
+/// A health endpoint: up on 2xx, down on refusal or non-2xx, unknown otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthCheck {
+    pub name: String,
+    pub endpoint: String,
+    #[serde(default = "health_path")]
+    pub path: String,
+}
+fn health_path() -> String {
+    "/healthz".into()
+}
+
+/// An Alertmanager API v2 `GET …/alerts` feed (Grafana's is
+/// `/api/alertmanager/grafana/api/v2/alerts`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlertmanagerFeed {
+    pub endpoint: String,
+    pub path: String,
+}
+
+/// A Prometheus-compatible instant query whose result series are alerts,
+/// typically `ALERTS{alertstate="firing"}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrometheusFeed {
+    pub endpoint: String,
+    pub query: String,
+    #[serde(default = "prometheus_path")]
+    pub path: String,
+}
+fn prometheus_path() -> String {
+    "/api/v1/query".into()
+}
+
+/// Bounds for [`MonitorSource::interval_secs`].
+pub const MONITOR_INTERVAL_SECS: std::ops::RangeInclusive<u64> = 10..=86_400;
+/// Bounds for [`MonitorSource::timeout_secs`].
+pub const MONITOR_TIMEOUT_SECS: std::ops::RangeInclusive<u64> = 1..=60;
+
+/// A monitor source that cannot run as configured.
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+pub enum MonitorConfigError {
+    #[error("monitor `{source_id}`: {field} `{value}` is not a valid identifier")]
+    #[diagnostic(
+        code(akh::events::monitor::identifier),
+        help(
+            "Use 1..256 characters without control characters, e.g. `roman-alerts` or `monitoring.changed`."
+        )
+    )]
+    Identifier {
+        source_id: String,
+        field: &'static str,
+        value: String,
+    },
+    #[error("monitor source `{source_id}` is configured twice")]
+    #[diagnostic(
+        code(akh::events::monitor::duplicate_source),
+        help("Give each entry in `monitors` its own `source`; one poller owns one snapshot key.")
+    )]
+    DuplicateSource { source_id: String },
+    #[error("monitor `{source_id}` observes nothing")]
+    #[diagnostic(
+        code(akh::events::monitor::empty),
+        help(
+            "Add at least one `health` entry, an `alertmanager` feed or a `prometheus` feed, or remove the monitor."
+        )
+    )]
+    Empty { source_id: String },
+    #[error("monitor `{source_id}`: interval_secs {interval_secs} is outside 10..=86400")]
+    #[diagnostic(
+        code(akh::events::monitor::interval),
+        help("Poll at most every 10 s; 60 matches the former Roman observer.")
+    )]
+    Interval {
+        source_id: String,
+        interval_secs: u64,
+    },
+    #[error(
+        "monitor `{source_id}`: timeout_secs {timeout_secs} must be within 1..=60 and below interval_secs {interval_secs}"
+    )]
+    #[diagnostic(
+        code(akh::events::monitor::timeout),
+        help("A probe must finish before the next poll starts; 5 s is the default.")
+    )]
+    Timeout {
+        source_id: String,
+        timeout_secs: u64,
+        interval_secs: u64,
+    },
+    #[error("monitor `{source_id}` names health check `{name}` twice")]
+    #[diagnostic(
+        code(akh::events::monitor::duplicate_health),
+        help("Health check names key the snapshot's `health` map; make them unique.")
+    )]
+    DuplicateHealth { source_id: String, name: String },
+    #[error("monitor `{source_id}` {feed} uses endpoint `{endpoint}`, which is not configured")]
+    #[diagnostic(
+        code(akh::events::monitor::endpoint),
+        help(
+            "Add `endpoints.{endpoint}` (url plus token_file/ca_file, or `anonymous = true` for an unauthenticated probe), or fix the name."
+        )
+    )]
+    UnknownEndpoint {
+        source_id: String,
+        feed: String,
+        endpoint: String,
+    },
+    #[error("monitor `{source_id}` {feed} path `{path}` is not an absolute request path")]
+    #[diagnostic(
+        code(akh::events::monitor::path),
+        help(
+            "Start the path with `/`, without a fragment, whitespace or control characters; it is appended to the endpoint URL."
+        )
+    )]
+    Path {
+        source_id: String,
+        feed: String,
+        path: String,
+    },
+    #[error("monitor `{source_id}` prometheus path `{path}` must not carry a query string")]
+    #[diagnostic(
+        code(akh::events::monitor::prometheus_path),
+        help("Put the PromQL expression in `query`; the monitor URL-encodes it as `?query=`.")
+    )]
+    PrometheusPath { source_id: String, path: String },
+    #[error("monitor `{source_id}` prometheus query is empty or longer than 4096 bytes")]
+    #[diagnostic(
+        code(akh::events::monitor::query),
+        help(
+            "Set `query` to an instant-vector expression such as `ALERTS{{alertstate=\"firing\"}}`."
+        )
+    )]
+    Query { source_id: String },
+}
+
+impl From<MonitorConfigError> for Fault {
+    fn from(error: MonitorConfigError) -> Self {
+        use miette::Diagnostic;
+        let code = error.code().map(|c| c.to_string()).unwrap_or_default();
+        let help = error.help().map(|h| h.to_string()).unwrap_or_default();
+        Fault::invalid(format!("{error} [{code}] help: {help}"))
+    }
+}
+
+fn valid_request_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.starts_with("//")
+        && path.len() <= 2048
+        && !path.contains('#')
+        && !path.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
+impl MonitorSource {
+    /// Static checks (no file or network access).
+    pub fn validate(
+        &self,
+        endpoints: &BTreeMap<String, Endpoint>,
+    ) -> std::result::Result<(), MonitorConfigError> {
+        let source_id = || self.source.clone();
+        let identifier = |field: &'static str, value: &str| {
+            validate_key(value).map_err(|_| MonitorConfigError::Identifier {
+                source_id: source_id(),
+                field,
+                value: value.into(),
+            })
+        };
+        identifier("source", &self.source)?;
+        identifier("event_type", &self.event_type)?;
+        if !MONITOR_INTERVAL_SECS.contains(&self.interval_secs) {
+            return Err(MonitorConfigError::Interval {
+                source_id: source_id(),
+                interval_secs: self.interval_secs,
+            });
+        }
+        if !MONITOR_TIMEOUT_SECS.contains(&self.timeout_secs)
+            || self.timeout_secs >= self.interval_secs
+        {
+            return Err(MonitorConfigError::Timeout {
+                source_id: source_id(),
+                timeout_secs: self.timeout_secs,
+                interval_secs: self.interval_secs,
+            });
+        }
+        if self.health.is_empty() && self.alertmanager.is_none() && self.prometheus.is_none() {
+            return Err(MonitorConfigError::Empty {
+                source_id: source_id(),
+            });
+        }
+        let endpoint = |feed: String, name: &str| {
+            if endpoints.contains_key(name) {
+                Ok(())
+            } else {
+                Err(MonitorConfigError::UnknownEndpoint {
+                    source_id: source_id(),
+                    feed,
+                    endpoint: name.into(),
+                })
+            }
+        };
+        let path = |feed: String, path: &str| {
+            if valid_request_path(path) {
+                Ok(())
+            } else {
+                Err(MonitorConfigError::Path {
+                    source_id: source_id(),
+                    feed,
+                    path: path.into(),
+                })
+            }
+        };
+        let mut names = std::collections::HashSet::new();
+        for check in &self.health {
+            identifier("health name", &check.name)?;
+            if !names.insert(&check.name) {
+                return Err(MonitorConfigError::DuplicateHealth {
+                    source_id: source_id(),
+                    name: check.name.clone(),
+                });
+            }
+            endpoint(format!("health `{}`", check.name), &check.endpoint)?;
+            path(format!("health `{}`", check.name), &check.path)?;
+        }
+        if let Some(feed) = &self.alertmanager {
+            endpoint("alertmanager".into(), &feed.endpoint)?;
+            path("alertmanager".into(), &feed.path)?;
+        }
+        if let Some(feed) = &self.prometheus {
+            endpoint("prometheus".into(), &feed.endpoint)?;
+            path("prometheus".into(), &feed.path)?;
+            if feed.path.contains('?') {
+                return Err(MonitorConfigError::PrometheusPath {
+                    source_id: source_id(),
+                    path: feed.path.clone(),
+                });
+            }
+            if feed.query.trim().is_empty() || feed.query.len() > 4096 {
+                return Err(MonitorConfigError::Query {
+                    source_id: source_id(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Selects the durable store's backend. Absent (the default) keeps every
 /// daemon on the original per-kind redb file under `data_dir`; this is what
 /// every test and every deployment predating the Postgres backend still
@@ -553,6 +855,10 @@ pub struct Config {
     pub djehuty: Vec<DjehutySource>,
     #[serde(default)]
     pub djehuty_inboxes: Vec<DjehutyInbox>,
+    /// akheventd monitor sources (Phase 53g PR 5): poll health endpoints and
+    /// alert feeds, emit an event when the structural signature changes.
+    #[serde(default)]
+    pub monitors: Vec<MonitorSource>,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     pub workspace_root: Option<PathBuf>,
@@ -815,6 +1121,16 @@ impl Config {
                 return Err(Fault::invalid(
                     "Djehuty inboxes require unique sources, protocols and positive bounded polling",
                 ));
+            }
+        }
+        let mut monitors = std::collections::HashSet::new();
+        for monitor in &self.monitors {
+            monitor.validate(&self.endpoints)?;
+            if !monitors.insert(&monitor.source) {
+                return Err(MonitorConfigError::DuplicateSource {
+                    source_id: monitor.source.clone(),
+                }
+                .into());
             }
         }
         let mut route_ids = std::collections::HashSet::new();

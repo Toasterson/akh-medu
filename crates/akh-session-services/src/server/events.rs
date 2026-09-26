@@ -13,6 +13,7 @@ pub fn event_router(service: Events) -> Router {
             .route("/v1/deliveries", get(deliveries))
             .route("/v1/deliveries/{id}", get(delivery))
             .route("/v1/inboxes", get(inboxes))
+            .route("/v1/monitors/{source}", get(monitor))
             .with_state(service),
         config,
     )
@@ -66,4 +67,40 @@ async fn deliveries(
             .filter(|d| !query.pending || !d.terminal)
             .collect(),
     ))
+}
+/// `GET /v1/monitors/{source}` (Phase 53g PR 5): the monitor source's latest
+/// structural snapshot, its signature, transition count and feed
+/// availability. Readable by the `operator` role (any source) and by an
+/// `event` principal granted that source.
+async fn monitor(
+    State(service): State<Events>,
+    Extension(p): Extension<Principal>,
+    Path(source): Path<String>,
+) -> Api<akh_session_types::monitor::MonitorReading> {
+    validate_key(&source)?;
+    authorize_monitor_read(&p, &source)?;
+    if !service.config.monitors.iter().any(|m| m.source == source) {
+        return Err(Fault::missing(format!("no monitor source {source} is configured")).into());
+    }
+    let reading = service
+        .store
+        .get(&crate::monitor::snapshot_key(&source))?
+        .ok_or_else(|| {
+            Fault::missing(format!(
+                "monitor source {source} has not completed its first observation yet; retry after one interval"
+            ))
+        })?;
+    Ok(Json(reading))
+}
+fn authorize_monitor_read(principal: &Principal, source: &str) -> crate::types::Result<()> {
+    if principal.has_role("operator")
+        || (principal.has_role("event") && principal.sources.iter().any(|s| s == source))
+    {
+        Ok(())
+    } else {
+        Err(Fault::new(
+            "forbidden",
+            "reading a monitor requires the operator role, or the event role granted this source",
+        ))
+    }
 }

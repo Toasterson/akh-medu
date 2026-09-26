@@ -16,7 +16,7 @@ Renders (existing unrelated keys and secrets are preserved; rerunning is safe):
 - core-config/akh-medu/workspaces/<r>.toml  full-akh workspace per Roman
 - config/core.json                          sessions / events / operator principals
 - config/reactor-seeds/<r>.json             reactor_manage payloads (apply_reactor_seeds.py)
-- config/events.akh-target.json             staged akheventd routes (retarget_events.py)
+- config/events.akh-target.json             staged akheventd routes + roman-alerts monitor (retarget_events.py)
 - config/t3-acp.json                        T3 transport -> akhomed ACP (t3_entrypoint.py)
 - launchd/dev.roman-akhs.core.plist         execs through daemon_credentials.py core
 - skills/{astra-escalation,mergiraf}/       Janus's worker skillpacks (53g PR 7)
@@ -125,14 +125,21 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
             delegation, delegation_warnings = fa.render_delegation(session, root, projects, role)
             warnings.extend(delegation_warnings)
         doc = fa.render_workspace(existing, role, fa.system_prompt(source / "roles", role), servers,
-                                  fa.board_identity(events, role), delegation)
+                                  fa.board_identity(events, role), delegation=delegation,
+                                  monitoring=fa.monitoring_config(session, role, root))
         _save_text(path, fa.dump_toml(doc, fa.WORKSPACE_COMMENTS,
                                       header=f"{role}: full akh (ADR 113). Rendered by configure_core.py."))
         _save_json(config / f"reactor-seeds/{role}.json", fa.reactor_seeds(events, session, role))
 
     _ensure_key(root / "secrets/core-events.key")
+    _ensure_key(root / f"secrets/{fa.MONITOR_READER}.key")
     _save_json(config / "core.json", fa.render_core_config(core, root))
-    _save_json(config / "events.akh-target.json", fa.retarget_events(events, root))
+    _save_json(config / "events.akh-target.json",
+               fa.render_monitoring_events(fa.retarget_events(events, root), root))
+    missing = fa.missing_monitor_files(json.loads((config / "events.akh-target.json").read_text()))
+    if missing:
+        warnings.append("akheventd would not start with the staged events config until these exist "
+                        "(PR 5 / D2, see INVENTORY.md): " + ", ".join(missing))
 
     # ACP shared secret: one accepted token per line (akhomed reads
     # AKHOMED_SHARED_SECRET_FILE). Until per-principal ACP scoping lands

@@ -383,6 +383,7 @@ mod tests {
                 ca_file: None,
                 allow_insecure_http: false,
                 request_timeout_secs: None,
+                anonymous: false,
             },
             akh: "test".into(),
             public_url: "http://akh-byo.kagent:8080/".into(),

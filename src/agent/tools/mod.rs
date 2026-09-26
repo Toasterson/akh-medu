@@ -36,6 +36,7 @@ pub mod mcp_config;
 pub mod mcp_static;
 pub mod memory_recall;
 pub mod memory_write;
+pub mod monitoring_snapshot;
 pub mod openclaw_discover;
 pub mod pattern_mine;
 pub mod reason;
@@ -100,6 +101,7 @@ pub use mcp_static::{
 };
 pub use memory_recall::MemoryRecallTool;
 pub use memory_write::MemoryWriteTool;
+pub use monitoring_snapshot::{MonitoringConfig, MonitoringSnapshotTool};
 pub use openclaw_discover::OpenClawDiscoverTool;
 pub use pattern_mine::PatternMineTool;
 #[cfg(feature = "daemon")]

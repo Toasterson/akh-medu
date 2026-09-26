@@ -58,6 +58,7 @@ pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result
                 .unwrap_or_else(|| "/unused".into()),
             allow_insecure_http: endpoint.allow_insecure_http,
             request_timeout_secs: None,
+            anonymous: false,
         }
         .validate()?;
         if endpoint
