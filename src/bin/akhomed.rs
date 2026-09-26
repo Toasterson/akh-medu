@@ -425,6 +425,42 @@ fn build_execd_backend(
     Ok(Arc::new(backend) as Arc<dyn akh_medu::backend::Backend>)
 }
 
+/// Build the `sandbox_exec` tool for a workspace whose `[exec]` configures
+/// `[[exec.sandboxes]]` (Phase 53g PR 8). `Ok(None)` when there are none.
+///
+/// Validation failures fail the workspace load, like `build_execd_backend`.
+/// Nothing is allocated here: each sandbox allocates on its first
+/// `sandbox_exec` call.
+#[cfg(feature = "execd-executor")]
+fn build_sandbox_exec_tool(
+    exec: &akh_medu::akh_config::ExecBackendConfig,
+    workspace: &str,
+) -> Result<Option<akh_medu::agent::tools::SandboxExecTool>, String> {
+    use akh_medu::agent::tools::SandboxExecTool;
+    use miette::Diagnostic as _;
+
+    let tool = SandboxExecTool::from_execd_config(exec, workspace).map_err(|e| {
+        let code = e.code().map(|c| format!(" [{c}]")).unwrap_or_default();
+        let help = e.help().map(|h| format!(" help: {h}")).unwrap_or_default();
+        format!("workspace {workspace}: invalid [[exec.sandboxes]]: {e}{code}{help}")
+    })?;
+    if let Some(tool) = &tool {
+        let sandboxes = tool
+            .sandboxes()
+            .iter()
+            .map(|entry| format!("{}={}", entry.name(), entry.profile()))
+            .collect::<Vec<_>>()
+            .join(",");
+        tracing::info!(
+            target: "akh::backend::execd",
+            workspace = %workspace,
+            sandboxes = %sandboxes,
+            "sandbox_exec registered for additional execd sandboxes (allocated on first use)"
+        );
+    }
+    Ok(tool)
+}
+
 /// Built without `execd-executor`: refuse rather than execute locally.
 #[cfg(not(feature = "execd-executor"))]
 fn build_execd_backend(
@@ -3203,6 +3239,14 @@ impl ServerState {
             ));
         }
 
+        // Phase 53g PR 8: additional named execd sandboxes behind
+        // `sandbox_exec`. Validated here, before the primary allocation, so a
+        // bad `[[exec.sandboxes]]` table fails the load without allocating
+        // anything. The sandboxes themselves allocate lazily on first use, so
+        // a down secondary sandbox never blocks the akh from loading.
+        #[cfg(feature = "execd-executor")]
+        let sandbox_exec_tool = build_sandbox_exec_tool(&exec_kind, name)?;
+
         let mut agent = tokio::task::spawn_blocking({
             let engine = Arc::clone(&engine);
             let akh_config = akh_config.clone();
@@ -3330,6 +3374,11 @@ impl ServerState {
         .map_err(|e| format!("failed to create agent: {e}"))?;
 
         tracing::info!(workspace = %name, ?exec_kind, "shared agent created");
+
+        #[cfg(feature = "execd-executor")]
+        if let Some(tool) = sandbox_exec_tool {
+            agent.register_tool(Box::new(tool));
+        }
 
         // Wire the per-akh model manager: pinned model + Ollama endpoint +
         // authoritative system prompt (P1 / ADR-053). Construction is cheap

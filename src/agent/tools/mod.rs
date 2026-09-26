@@ -40,6 +40,10 @@ pub mod monitoring_snapshot;
 pub mod openclaw_discover;
 pub mod pattern_mine;
 pub mod reason;
+// Additional named execd sandboxes (Phase 53g PR 8) allocate through
+// `crate::backend::execd::ExecdBackend`, which is `execd-executor`-gated.
+#[cfg(feature = "execd-executor")]
+pub mod sandbox_exec;
 pub mod shell_exec;
 pub mod similarity_search;
 pub mod skill_author;
@@ -107,6 +111,8 @@ pub use pattern_mine::PatternMineTool;
 #[cfg(feature = "daemon")]
 pub use reactor_manage::ReactorManageTool;
 pub use reason::ReasonTool;
+#[cfg(feature = "execd-executor")]
+pub use sandbox_exec::{SandboxConnector, SandboxEntry, SandboxExecError, SandboxExecTool};
 pub use shell_exec::ShellExecTool;
 pub use similarity_search::SimilaritySearchTool;
 pub use skill_author::SkillAuthorTool;

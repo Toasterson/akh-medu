@@ -1,6 +1,9 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-09-26 (**53g PR 6** — akheventd Anima source,
+> Last updated: 2026-09-26 (**53g PR 8** — Vesta's side effects move into
+> execd sandboxes; see "Core Service, Autonomy and Delegation" below).
+>
+> 2026-09-26 (**53g PR 6** — akheventd Anima source,
 > data-driven route filters and Board watchdog, see "akheventd Anima source"
 > below).
 >
@@ -492,6 +495,15 @@ native tool through a bridge-owned permission policy and requires the extra
   with `allow_legacy_exec = true` plus a warning. `Development` (the default)
   admits everything, so tests are unaffected. Native runtimes default to
   `Brokered` placement; `Colocated` is refused in deployed mode.
+  **Named sandboxes (53g PR 8, `src/agent/tools/sandbox_exec.rs`)**: an execd
+  `[exec]` may add `[[exec.sandboxes]]` (`name` = `SandboxName`, `profile`,
+  `description`), further akhsbxd profiles on the same akhsbxd that only the
+  native `sandbox_exec` tool reaches (`sandbox`, `command`, `timeout`,
+  `stdin`). The primary profile keeps serving the file and shell tools; each
+  named sandbox allocates lazily on first use and reallocates when its lease
+  lapses. Vesta uses it for a credential-free GitOps workspace plus an `ops`
+  sandbox running as an RBAC-scoped Kubernetes ServiceAccount (research note
+  [2026-09-26-vesta-sandbox-execution](research/2026-09-26-vesta-sandbox-execution.md)).
 - **Reactor event admission (53d, `src/agent/reactor.rs`,
   `src/core_service/events.rs`)**: `akheventd` is a thin ingress adapter that
   forwards typed events into the akh's own reactor via

@@ -109,6 +109,30 @@ METRICS_URL = "http://127.0.0.1:18440"
 METRICS_QUERY = 'ALERTS{alertstate="firing"}'
 OBSERVER_STATUS_FILE = "state/observer-status.json"
 
+# 53g PR 8 (ADR 113 D3, plan decision D5): Vesta's side effects move from the
+# vesta-ops broker into akhsbxd/akhexecd sandboxes on the home cluster (talos
+# repo clusters/talos.wegmueller.it/vesta-sandbox). Rendering switches only
+# once the operator writes VESTA_SANDBOX_FILE at cutover; until then Vesta
+# keeps `[exec] kind = "none"` and the full broker grant.
+VESTA_SANDBOX_FILE = "config/vesta-sandbox.json"
+VESTA_SANDBOX_KEYS = {"sandbox_url", "token_file", "allow_insecure_http"}
+VESTA_SANDBOX_URL = "http://vesta-sandbox.lab.home"
+# akhsbxd workspace profiles (talos vesta-sandbox/config/sandbox-service.json).
+VESTA_GITOPS_PROFILE = "vesta-gitops"
+VESTA_OPS_SANDBOX = {
+    "name": "ops",
+    "profile": "vesta-ops",
+    "description": "Homelab cluster access as ServiceAccount vesta (kubectl in-cluster) "
+                   "and the vesta/*-only GitOps push key",
+}
+# Broker tools whose effects the sandboxes now carry: gitops_exec -> the
+# vesta-gitops [exec] tools; homelab_write and gitops_publish -> sandbox_exec
+# in `ops`. homelab_inspect is read-only and stays on the broker until the
+# broker is retired after cutover verification.
+VESTA_SANDBOXED_TOOLS = ("gitops_exec", "homelab_write", "gitops_publish")
+VESTA_SKILL = "vesta-remediation"
+MAX_PROCEDURES_BYTES = 64 * 1024
+
 
 class RenderError(RuntimeError):
     """A rendering precondition failed; the message says what to fix."""
@@ -370,8 +394,13 @@ def mcp_servers(session: dict, role: str, root: Path,
     today, so the cutover neither widens nor narrows a grant. Vesta also gets
     a direct Grafana server (`grafana_server`), which isn't a session broker
     grant and so isn't covered by the loop below.
+
+    Once Vesta's sandboxes are configured (`vesta_sandbox(root)`, 53g PR 8),
+    the broker's side-effecting tools (`VESTA_SANDBOXED_TOOLS`) leave the
+    `vesta-ops` allowlist: the sandboxes carry those effects now.
     """
     servers, warnings = [], []
+    sandboxed = role == "vesta" and vesta_sandbox(root) is not None
     for name in ROLE_SERVERS[role]:
         if name in retired:
             # PR 6 cutover: `laya` (record_fixer_result) became a memory write.
@@ -388,6 +417,8 @@ def mcp_servers(session: dict, role: str, root: Path,
         if endpoint is None:
             warnings.append(f"{role}: sessions.json has no `{alias}` endpoint; MCP server `{name}` skipped")
             continue
+        if name == "vesta-ops" and sandboxed:
+            tools = [tool for tool in tools if tool not in VESTA_SANDBOXED_TOOLS]
         if not tools:
             warnings.append(f"{role}: no granted tools on `{alias}`; MCP server `{name}` skipped")
             continue
@@ -452,6 +483,95 @@ def monitoring_config(session: dict, role: str, root: Path,
     return config
 
 
+def vesta_sandbox(root: Path) -> dict | None:
+    """The cutover switch for Vesta's sandboxes (53g PR 8), or None before it.
+
+    `config/vesta-sandbox.json` is written by the operator at cutover (see
+    INVENTORY "PR 8"). It names non-secret settings only: `token_file` (an
+    absolute path to Vesta's akhsbxd bearer token, which must exist; it is
+    never read here), and optionally `sandbox_url` and
+    `allow_insecure_http`. Absent file: None, and Vesta renders exactly as
+    before. A malformed file fails closed with a RenderError rather than
+    half-switching Vesta between the broker and the sandboxes.
+    """
+    path = root / VESTA_SANDBOX_FILE
+    if not path.exists():
+        return None
+    try:
+        settings = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise RenderError(f"{path} is not valid JSON ({error}); fix or remove it") from error
+    if not isinstance(settings, dict):
+        raise RenderError(f"{path} must be a JSON object")
+    unknown = sorted(set(settings) - VESTA_SANDBOX_KEYS)
+    if unknown:
+        raise RenderError(f"{path} has unknown keys {unknown}; allowed: {sorted(VESTA_SANDBOX_KEYS)}")
+    token = settings.get("token_file")
+    if not isinstance(token, str) or not Path(token).is_absolute():
+        raise RenderError(f"{path} needs `token_file`: the absolute path of Vesta's akhsbxd token")
+    if not Path(token).exists():
+        raise RenderError(
+            f"Vesta's akhsbxd token {token} does not exist; create it (mode 0600) with the token "
+            "whose SHA-256 is in 1Password item vesta-sandbox, or remove "
+            f"{VESTA_SANDBOX_FILE} to keep Vesta on the broker")
+    url = settings.get("sandbox_url", VESTA_SANDBOX_URL)
+    if not isinstance(url, str) or urlparse(url).scheme not in ("http", "https") or not urlparse(url).hostname:
+        raise RenderError(f"{path}: `sandbox_url` must be an http(s) URL")
+    # Plain http to a non-loopback host sends the bearer token in clear text;
+    # the default URL is the LAN-only internal Gateway, the same trust
+    # decision as the seshat/sokar lab.home endpoints.
+    insecure = settings.get("allow_insecure_http", url.startswith("http://") and not _is_loopback(url))
+    if not isinstance(insecure, bool):
+        raise RenderError(f"{path}: `allow_insecure_http` must be a boolean")
+    return {"sandbox_url": url, "token_file": token, "allow_insecure_http": insecure}
+
+
+def render_exec(role: str, sandbox: dict | None) -> dict:
+    """The workspace `[exec]` table.
+
+    `none` for every role until its sandboxes exist. For Vesta with a
+    configured sandbox (53g PR 8): `execd` against the credential-free
+    `vesta-gitops` profile (shell_exec and the file tools), plus the `ops`
+    sandbox that the `sandbox_exec` tool reaches (ServiceAccount `vesta`,
+    `vesta/*` deploy key). The cluster, not this file, decides what `ops` may do.
+    """
+    if role != "vesta" or sandbox is None:
+        return {"kind": "none"}
+    table = {"kind": "execd", "sandbox_url": sandbox["sandbox_url"],
+             "sandbox_token_file": sandbox["token_file"], "profile": VESTA_GITOPS_PROFILE,
+             "principal": role}
+    if sandbox["allow_insecure_http"]:
+        table["allow_insecure_http"] = True
+    table["sandboxes"] = [dict(VESTA_OPS_SANDBOX)]
+    return table
+
+
+def skill_procedures(skill_dir: Path) -> str:
+    """A skillpack's procedures text, located through its `skill.json`.
+
+    Mirrors the akh's skillpack layout: `procedures_file` (default
+    `procedures.md`) must stay inside the skill directory, be non-empty and
+    at most MAX_PROCEDURES_BYTES.
+    """
+    manifest_path = skill_dir / "skill.json"
+    if not manifest_path.exists():
+        raise RenderError(f"skillpack {skill_dir} has no skill.json")
+    manifest = json.loads(manifest_path.read_text())
+    relative = manifest.get("procedures_file") or "procedures.md"
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise RenderError(f"{manifest_path}: procedures_file {relative!r} must stay inside the skill directory")
+    path = skill_dir / candidate
+    if not path.exists():
+        raise RenderError(f"{manifest_path}: procedures_file {relative!r} does not exist")
+    if path.stat().st_size > MAX_PROCEDURES_BYTES:
+        raise RenderError(f"{path} exceeds {MAX_PROCEDURES_BYTES} bytes")
+    text = path.read_text()
+    if not text.strip():
+        raise RenderError(f"{path} is empty")
+    return text
+
+
 def board_identity(events: dict, role: str) -> dict:
     """Per-akh Agent Board identity (per phase53/fixups)."""
     endpoint = events.get("endpoints", {}).get("board-" + role)
@@ -465,13 +585,24 @@ def board_identity(events: dict, role: str) -> dict:
 MCP_SERVERS_PLACEHOLDER = "{mcp_servers}"
 
 
-def system_prompt(roles_dir: Path, role: str, servers: list[dict] | None = None) -> str:
-    """The role's system prompt; `{mcp_servers}` in the addenda becomes the
-    names of the MCP servers actually rendered for the role."""
+def system_prompt(roles_dir: Path, role: str, servers: list[dict] | None = None,
+                  skill_dir: Path | None = None) -> str:
+    """The workspace system prompt: role files, then the role's policy, then
+    `{mcp_servers}` substitution.
+
+    The policy is `roles/addenda/<role>.md`, or, when `skill_dir` is given,
+    that skillpack's procedures instead (Vesta after the sandbox cutover,
+    53g PR 8: the addendum describes the broker tools the cutover removes).
+    `{mcp_servers}` in the addenda becomes the names of the MCP servers
+    actually rendered for the role.
+    """
     parts = [roles_dir / "common.md", roles_dir / f"{role}.md", roles_dir / "addenda/common.md"]
-    if (roles_dir / f"addenda/{role}.md").exists():
-        parts.append(roles_dir / f"addenda/{role}.md")
-    text = "\n".join(p.read_text() for p in parts)
+    texts = [p.read_text() for p in parts]
+    if skill_dir is not None:
+        texts.append(skill_procedures(skill_dir))
+    elif (roles_dir / f"addenda/{role}.md").exists():
+        texts.append((roles_dir / f"addenda/{role}.md").read_text())
+    text = "\n".join(texts)
     if MCP_SERVERS_PLACEHOLDER in text:
         names = [s["name"] for s in servers] if servers is not None else list(ROLE_SERVERS[role])
         text = text.replace(MCP_SERVERS_PLACEHOLDER, ", ".join(names))
@@ -527,9 +658,16 @@ def render_delegation(session: dict, root: Path, projects, role: str = "janus") 
     return {"enabled": False, "native": native}, warnings
 
 
+def role_skill(source: Path, role: str, root: Path) -> Path | None:
+    """The skillpack that replaces a role's addendum, if any (53g PR 8)."""
+    if role == "vesta" and vesta_sandbox(root) is not None:
+        return source / "skills" / VESTA_SKILL
+    return None
+
+
 def render_workspace(existing: dict | None, role: str, prompt: str, servers: list[dict],
                      board: dict, delegation: dict | None = None,
-                     monitoring: dict | None = None) -> dict:
+                     monitoring: dict | None = None, exec_table: dict | None = None) -> dict:
     """The full-akh workspace document, preserving unrelated existing keys."""
     doc = dict(existing or {})
     doc["name"] = role
@@ -543,7 +681,7 @@ def render_workspace(existing: dict | None, role: str, prompt: str, servers: lis
     autonomy["budget"] = dict(BUDGET)
     autonomy["tasks"] = autonomy.pop("tasks", {})
     doc["autonomy"] = autonomy
-    doc["exec"] = {"kind": "none"}
+    doc["exec"] = exec_table if exec_table is not None else {"kind": "none"}
     doc["board"] = board
     doc.pop("monitoring", None)
     if monitoring is not None:
@@ -564,7 +702,10 @@ def render_workspace(existing: dict | None, role: str, prompt: str, servers: lis
 
 
 WORKSPACE_COMMENTS = {
-    "exec": "Side effects stay disabled until an execd sandbox profile exists (ADR 113 53c).",
+    "exec": "Side effects stay disabled until an execd sandbox profile exists (ADR 113 53c).\n"
+            "Vesta after the 53g PR 8 cutover: `execd` on the credential-free vesta-gitops\n"
+            "profile; [[exec.sandboxes]] `ops` (ServiceAccount vesta, vesta/* deploy key) is\n"
+            "reached through the sandbox_exec tool. The cluster enforces what `ops` may do.",
     "board": "Per-akh Agent Board identity, per phase53/fixups (reactor report_thread posts,\n"
              "board replies). The token is resolved from the environment by daemon_credentials.py.",
     "monitoring": "Phase 53g PR 5: the native read-only monitoring_snapshot tool reads akheventd's\n"

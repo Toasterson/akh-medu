@@ -88,7 +88,7 @@ impl ToolExecutionTracker {
     /// Determine the ToolKind for a given tool name based on capability.
     fn classify_tool(tool_name: &str) -> ToolKind {
         match tool_name {
-            "shell_exec" | "file_io" | "mcp__" | "send_mail" => ToolKind::Execute,
+            "shell_exec" | "sandbox_exec" | "file_io" | "mcp__" | "send_mail" => ToolKind::Execute,
             "edit" => ToolKind::Edit,
             "web_fetch" | "mcp_call" => ToolKind::Fetch,
             "seshat_search" | "seshat_wish" | "search_library" | "kg_query" | "query_symbols" => {

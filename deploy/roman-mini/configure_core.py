@@ -23,6 +23,7 @@ Renders (existing unrelated keys and secrets are preserved; rerunning is safe):
 - launchd/dev.roman-akhs.core.plist         execs through daemon_credentials.py core
 - skills/{astra-escalation,mergiraf}/       Janus's worker skillpacks (53g PR 7)
 - secrets/sessions-janus-delegation.key     akhsessd client token for Janus's delegation
+- skills/vesta-remediation/                  Vesta's sandbox procedures (53g PR 8)
 Never reads a provider key; token files are only concatenated into the ACP
 shared-secret file, never printed.
 """
@@ -124,9 +125,12 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
         header="Rendered by deploy/roman-mini/configure_core.py (Phase 53f, ADR 113).\n"
                f"akhomed-main-{provenance.short} = {provenance.commit}"))
 
-    # 53g PR 7: Janus's escalation and merge-repair workers. The skillpacks are
-    # read by path on every dispatch; the registered projects are the keys of
-    # the retired broker's config/janus-escalation.json.
+    # Skillpacks ship next to the rendered config so the operator can read
+    # exactly the procedures a role runs with: Janus's escalation and
+    # merge-repair workers (53g PR 7, read by path on every dispatch; the
+    # registered projects are the keys of the retired broker's
+    # config/janus-escalation.json) and Vesta's remediation procedures
+    # (53g PR 8).
     if (source / "skills").is_dir():
         shutil.copytree(source / "skills", root / "skills", dirs_exist_ok=True)
     registry = config / "janus-escalation.json"
@@ -150,9 +154,14 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
         if role in fa.DELEGATING_ROLES:
             delegation, delegation_warnings = fa.render_delegation(session, root, projects, role)
             warnings.extend(delegation_warnings)
-        doc = fa.render_workspace(existing, role, fa.system_prompt(source / "roles", role, servers), servers,
+        # 53g PR 8: after the operator writes config/vesta-sandbox.json, Vesta's
+        # [exec] targets her akhsbxd sandboxes and her policy prompt is the
+        # vesta-remediation skillpack instead of roles/addenda/vesta.md.
+        prompt = fa.system_prompt(source / "roles", role, servers, fa.role_skill(source, role, root))
+        doc = fa.render_workspace(existing, role, prompt, servers,
                                   fa.board_identity(events, role), delegation=delegation,
-                                  monitoring=fa.monitoring_config(session, role, root, observer_retired=live))
+                                  monitoring=fa.monitoring_config(session, role, root, observer_retired=live),
+                                  exec_table=fa.render_exec(role, fa.vesta_sandbox(root)))
         _save_text(path, fa.dump_toml(doc, fa.WORKSPACE_COMMENTS,
                                       header=f"{role}: full akh (ADR 113). Rendered by configure_core.py."))
         _save_json(config / f"reactor-seeds/{role}.json",

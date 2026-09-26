@@ -462,6 +462,13 @@ pub enum ExecBackendConfig {
     /// # executor_token_file = "/run/akh/credentials/akhexecd-token"
     /// # poll_wait_ms = 5000
     /// # allow_insecure_http = false  # plain http only to loopback unless true
+    ///
+    /// # Optional: more profiles on the same akhsbxd, reached only through the
+    /// # `sandbox_exec` tool (Phase 53g PR 8). The primary stays credential-free.
+    /// # [[exec.sandboxes]]
+    /// # name = "ops"
+    /// # profile = "vesta-ops"
+    /// # description = "Live cluster access under the vesta ServiceAccount"
     /// ```
     Execd {
         /// akhsbxd base URL.
@@ -490,7 +497,206 @@ pub enum ExecBackendConfig {
         /// never needs it.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         allow_insecure_http: bool,
+        /// Additional named sandbox profiles on the same akhsbxd, reached through the
+        /// `sandbox_exec` tool (Phase 53g PR 8). The primary `profile` keeps serving
+        /// shell_exec/file_io/edit/glob/grep.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sandboxes: Vec<ExecdSandbox>,
     },
+}
+
+/// Longest accepted [`SandboxName`], in characters.
+pub const SANDBOX_NAME_MAX_LEN: usize = 32;
+
+/// Name of an additional execd sandbox (`[[exec.sandboxes]] name = "…"`), the
+/// value the model passes as `sandbox` to the `sandbox_exec` tool.
+///
+/// 1..=32 characters of ASCII lowercase letters, digits and `-`, starting with
+/// a letter and not ending with `-`. The name also becomes part of the
+/// allocation session id (`akhomed-<workspace>-<name>-<uuid>`), which is why it
+/// is restricted to this conservative, path- and log-safe alphabet.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SandboxName(String);
+
+impl SandboxName {
+    /// Validate `raw` as a sandbox name.
+    pub fn parse(raw: impl Into<String>) -> Result<Self, SandboxNameError> {
+        let name = raw.into();
+        let problem = if name.is_empty() {
+            Some(SandboxNameProblem::Empty)
+        } else if name.chars().count() > SANDBOX_NAME_MAX_LEN {
+            Some(SandboxNameProblem::TooLong {
+                len: name.chars().count(),
+            })
+        } else if let Some(ch) = name
+            .chars()
+            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
+        {
+            Some(SandboxNameProblem::InvalidChar(ch))
+        } else if !name.starts_with(|c: char| c.is_ascii_lowercase()) {
+            Some(SandboxNameProblem::MustStartWithLetter)
+        } else if name.ends_with('-') {
+            Some(SandboxNameProblem::TrailingHyphen)
+        } else {
+            None
+        };
+        match problem {
+            Some(problem) => Err(SandboxNameError { name, problem }),
+            None => Ok(Self(name)),
+        }
+    }
+
+    /// The name as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SandboxName {
+    type Error = SandboxNameError;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        Self::parse(raw)
+    }
+}
+
+impl std::str::FromStr for SandboxName {
+    type Err = SandboxNameError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
+impl From<SandboxName> for String {
+    fn from(name: SandboxName) -> Self {
+        name.0
+    }
+}
+
+impl AsRef<str> for SandboxName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SandboxName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Which [`SandboxName`] rule a candidate broke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxNameProblem {
+    /// The name is empty.
+    Empty,
+    /// The name exceeds [`SANDBOX_NAME_MAX_LEN`] characters.
+    TooLong { len: usize },
+    /// A character outside `a-z`, `0-9` and `-`.
+    InvalidChar(char),
+    /// The first character is not a lowercase ASCII letter.
+    MustStartWithLetter,
+    /// The name ends with `-`.
+    TrailingHyphen,
+}
+
+impl std::fmt::Display for SandboxNameProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("it is empty"),
+            Self::TooLong { len } => write!(
+                f,
+                "it is {len} characters long (at most {SANDBOX_NAME_MAX_LEN})"
+            ),
+            Self::InvalidChar(ch) => write!(f, "it contains {ch:?}"),
+            Self::MustStartWithLetter => f.write_str("it does not start with a letter a-z"),
+            Self::TrailingHyphen => f.write_str("it ends with '-'"),
+        }
+    }
+}
+
+/// A `[[exec.sandboxes]] name` that is not a valid [`SandboxName`].
+#[derive(Debug, Clone, PartialEq, Eq, Error, Diagnostic)]
+#[error("invalid execd sandbox name {name:?}: {problem}")]
+#[diagnostic(
+    code(akh::config::sandbox_name),
+    help(
+        "Sandbox names are 1 to 32 characters of lowercase ASCII letters, digits and '-', \
+         start with a letter and do not end with '-' (for example `ops` or `gitops-2`). \
+         Rename the `[[exec.sandboxes]]` entry; the name is what the model passes as \
+         `sandbox` to the `sandbox_exec` tool and becomes part of the allocation session id."
+    )
+)]
+pub struct SandboxNameError {
+    /// The rejected candidate.
+    pub name: String,
+    /// The rule it broke.
+    pub problem: SandboxNameProblem,
+}
+
+/// One additional sandbox profile on the workspace's akhsbxd
+/// (`[[exec.sandboxes]]`, Phase 53g PR 8).
+///
+/// It shares the primary's akhsbxd URL, tokens, executor route, poll wait and
+/// insecure-http setting, and differs only in the workspace `profile` it
+/// allocates from, which is how a differently privileged sandbox (for example
+/// one running under an RBAC-scoped ServiceAccount) is reached without giving
+/// the primary sandbox any of its credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecdSandbox {
+    /// Name the model selects the sandbox by.
+    pub name: SandboxName,
+    /// akhsbxd workspace profile to allocate from. Must differ from the
+    /// primary `profile`.
+    pub profile: String,
+    /// Operator-facing description shown in the `sandbox_exec` signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// `[[exec.sandboxes]]` entries that cannot be served as configured.
+#[derive(Debug, Clone, PartialEq, Eq, Error, Diagnostic)]
+pub enum ExecdSandboxConfigError {
+    /// Two entries share one name, so `sandbox_exec` could not tell them apart.
+    #[error("execd sandbox name `{name}` is configured more than once")]
+    #[diagnostic(
+        code(akh::config::exec_sandboxes::duplicate_name),
+        help(
+            "Each `[[exec.sandboxes]]` entry needs a unique `name`. Options: rename one \
+             of the entries, or delete the duplicate if both point at the same profile."
+        )
+    )]
+    DuplicateName { name: SandboxName },
+
+    /// An entry reuses the primary sandbox's profile.
+    #[error(
+        "execd sandbox `{name}` uses profile `{profile}`, which is already the primary \
+         `[exec] profile`"
+    )]
+    #[diagnostic(
+        code(akh::config::exec_sandboxes::primary_profile),
+        help(
+            "Additional sandboxes exist to reach a differently privileged profile; the \
+             primary profile is already served by shell_exec/file_io/edit/glob/grep. \
+             Options: point `[[exec.sandboxes]] profile` at the other akhsbxd profile, or \
+             remove the entry."
+        )
+    )]
+    ProfileIsPrimary { name: SandboxName, profile: String },
+
+    /// An entry has an empty or whitespace-only profile.
+    #[error("execd sandbox `{name}` has an empty `profile`")]
+    #[diagnostic(
+        code(akh::config::exec_sandboxes::empty_profile),
+        help(
+            "Set `profile` on the `[[exec.sandboxes]]` entry to an akhsbxd workspace \
+             profile name (the same kind of value as the primary `[exec] profile`)."
+        )
+    )]
+    EmptyProfile { name: SandboxName },
 }
 
 impl ExecBackendConfig {
@@ -573,16 +779,49 @@ impl ExecBackendConfig {
     /// allocation session for `workspace`. `None` for other kinds.
     #[cfg(feature = "execd-executor")]
     pub fn to_execd_config(&self, workspace: &str) -> Option<crate::backend::execd::ExecdConfig> {
+        let Self::Execd { profile, .. } = self else {
+            return None;
+        };
+        self.execd_config_for(workspace, profile)
+    }
+
+    /// Translate one `[[exec.sandboxes]]` entry into the config
+    /// [`crate::backend::execd::ExecdBackend::connect`] takes: the primary's
+    /// akhsbxd URL, tokens, executor route, poll wait and insecure-http
+    /// setting, with the sandbox's own `profile`.
+    ///
+    /// Every call mints a fresh allocation session
+    /// `akhomed-<workspace>-<name>-<uuid v7>`, because akhsbxd never
+    /// reallocates a released session. `None` for kinds other than `execd`.
+    #[cfg(feature = "execd-executor")]
+    pub fn to_execd_sandbox_config(
+        &self,
+        workspace: &str,
+        sandbox: &ExecdSandbox,
+    ) -> Option<crate::backend::execd::ExecdConfig> {
+        self.execd_config_for(&format!("{workspace}-{}", sandbox.name), &sandbox.profile)
+    }
+
+    /// Shared translation behind [`Self::to_execd_config`] and
+    /// [`Self::to_execd_sandbox_config`]: `session_label` becomes the
+    /// `<workspace>` part of the minted session id.
+    #[cfg(feature = "execd-executor")]
+    fn execd_config_for(
+        &self,
+        session_label: &str,
+        profile: &str,
+    ) -> Option<crate::backend::execd::ExecdConfig> {
         use crate::backend::execd::{ExecdConfig, ExecutorRoute};
         let Self::Execd {
             sandbox_url,
             sandbox_token_file,
             executor_url,
             executor_token_file,
-            profile,
+            profile: _,
             principal,
             poll_wait_ms,
             allow_insecure_http,
+            sandboxes: _,
         } = self
         else {
             return None;
@@ -601,14 +840,62 @@ impl ExecBackendConfig {
             ExecdConfig::new(
                 sandbox_url.clone(),
                 sandbox_token_file.clone(),
-                profile.clone(),
+                profile,
                 principal.clone(),
-                workspace,
+                session_label,
             )
             .with_executor(route)
             .with_poll_wait(std::time::Duration::from_millis(*poll_wait_ms))
             .with_insecure_http(*allow_insecure_http),
         )
+    }
+
+    /// The `[[exec.sandboxes]]` entries of a `kind = "execd"` executor; empty
+    /// for every other kind.
+    pub fn execd_sandboxes(&self) -> &[ExecdSandbox] {
+        match self {
+            Self::Execd { sandboxes, .. } => sandboxes,
+            _ => &[],
+        }
+    }
+
+    /// Check the `[[exec.sandboxes]]` entries: names are unique, every profile
+    /// is non-empty, and none reuses the primary `profile`. Always `Ok` for
+    /// kinds other than `execd`.
+    ///
+    /// # Errors
+    ///
+    /// The first offending entry, as an [`ExecdSandboxConfigError`].
+    pub fn validate_execd_sandboxes(&self) -> Result<(), ExecdSandboxConfigError> {
+        let Self::Execd {
+            profile: primary,
+            sandboxes,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        let mut seen = std::collections::HashSet::new();
+        for sandbox in sandboxes {
+            if !seen.insert(&sandbox.name) {
+                return Err(ExecdSandboxConfigError::DuplicateName {
+                    name: sandbox.name.clone(),
+                });
+            }
+            let profile = sandbox.profile.trim();
+            if profile.is_empty() {
+                return Err(ExecdSandboxConfigError::EmptyProfile {
+                    name: sandbox.name.clone(),
+                });
+            }
+            if profile == primary.trim() {
+                return Err(ExecdSandboxConfigError::ProfileIsPrimary {
+                    name: sandbox.name.clone(),
+                    profile: sandbox.profile.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Short, stable name of the variant for logs and diagnostics.
@@ -1270,6 +1557,8 @@ impl AkhConfig {
                     "profile",
                     "principal",
                     "poll_wait_ms",
+                    "allow_insecure_http",
+                    "sandboxes",
                 ],
             ),
         ]
@@ -2957,6 +3246,153 @@ auth = { token_file = "/tmp/observer.key" }
     }
 }
 
+#[cfg(test)]
+mod exec_sandboxes_tests {
+    use super::*;
+
+    const VESTA: &str = r#"
+name = "vesta"
+[exec]
+kind = "execd"
+sandbox_url = "http://vesta-sandbox.lab.home"
+sandbox_token_file = "/x/secrets/vesta-sandbox.key"
+profile = "vesta-gitops"
+principal = "vesta"
+allow_insecure_http = true
+
+[[exec.sandboxes]]
+name = "ops"
+profile = "vesta-ops"
+description = "Live homelab cluster access under the vesta ServiceAccount"
+"#;
+
+    #[test]
+    fn sandbox_name_accepts_the_documented_alphabet() {
+        for ok in ["ops", "gitops-2", "a", "a1-b2", &"a".repeat(32)] {
+            let name = SandboxName::parse(ok).unwrap_or_else(|e| panic!("{ok:?}: {e}"));
+            assert_eq!(name.as_str(), ok);
+            assert_eq!(name.to_string(), ok);
+            assert_eq!(AsRef::<str>::as_ref(&name), ok);
+        }
+    }
+
+    #[test]
+    fn sandbox_name_rejects_each_broken_rule() {
+        let cases = [
+            ("", SandboxNameProblem::Empty),
+            ("Ops", SandboxNameProblem::InvalidChar('O')),
+            ("-x", SandboxNameProblem::MustStartWithLetter),
+            ("1x", SandboxNameProblem::MustStartWithLetter),
+            ("x-", SandboxNameProblem::TrailingHyphen),
+            ("a_b", SandboxNameProblem::InvalidChar('_')),
+            ("a b", SandboxNameProblem::InvalidChar(' ')),
+            (&"a".repeat(33), SandboxNameProblem::TooLong { len: 33 }),
+        ];
+        for (raw, problem) in cases {
+            let err = SandboxName::parse(raw).expect_err(raw);
+            assert_eq!(err.problem, problem, "{raw:?}");
+            assert_eq!(
+                err.code().map(|c| c.to_string()).as_deref(),
+                Some("akh::config::sandbox_name")
+            );
+            assert!(err.help().is_some());
+        }
+    }
+
+    #[test]
+    fn exec_sandboxes_parse_with_no_unknown_keys() {
+        let cfg: AkhConfig = toml::from_str(VESTA).unwrap();
+        assert!(
+            AkhConfig::unknown_keys(&toml::from_str(VESTA).unwrap()).is_empty(),
+            "{:?}",
+            AkhConfig::unknown_keys(&toml::from_str(VESTA).unwrap())
+        );
+        let exec = cfg.effective_exec(None);
+        assert_eq!(exec.kind_name(), "execd");
+        let sandboxes = exec.execd_sandboxes();
+        assert_eq!(sandboxes.len(), 1);
+        assert_eq!(sandboxes[0].name.as_str(), "ops");
+        assert_eq!(sandboxes[0].profile, "vesta-ops");
+        assert_eq!(
+            sandboxes[0].description.as_deref(),
+            Some("Live homelab cluster access under the vesta ServiceAccount")
+        );
+        assert!(exec.validate_execd_sandboxes().is_ok());
+        assert!(ExecBackendConfig::InProcess.execd_sandboxes().is_empty());
+    }
+
+    #[test]
+    fn exec_sandboxes_round_trip_and_default_to_empty() {
+        let cfg: AkhConfig = toml::from_str(VESTA).unwrap();
+        let saved = toml::to_string_pretty(&cfg).unwrap();
+        let reloaded: AkhConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(reloaded.exec, cfg.exec);
+
+        let primary_only = VESTA.split("[[exec.sandboxes]]").next().unwrap();
+        let cfg: AkhConfig = toml::from_str(primary_only).unwrap();
+        assert!(cfg.effective_exec(None).execd_sandboxes().is_empty());
+        assert!(
+            !toml::to_string_pretty(&cfg).unwrap().contains("sandboxes"),
+            "an empty sandbox list is not serialized"
+        );
+    }
+
+    #[test]
+    fn exec_sandboxes_reject_bad_names_and_unknown_fields() {
+        let bad_name = VESTA.replace("name = \"ops\"", "name = \"Ops\"");
+        let err = toml::from_str::<AkhConfig>(&bad_name).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid execd sandbox name"),
+            "{err}"
+        );
+
+        let typo = VESTA.replace("profile = \"vesta-ops\"", "profil = \"vesta-ops\"");
+        assert!(toml::from_str::<AkhConfig>(&typo).is_err());
+    }
+
+    fn with_sandboxes(extra: &str) -> ExecBackendConfig {
+        let raw = format!(
+            "{}{extra}",
+            VESTA.split("[[exec.sandboxes]]").next().unwrap()
+        );
+        toml::from_str::<AkhConfig>(&raw)
+            .unwrap()
+            .effective_exec(None)
+    }
+
+    #[test]
+    fn exec_sandboxes_validation_rejects_duplicates_primary_profile_and_empty_profile() {
+        let duplicate = with_sandboxes(
+            "[[exec.sandboxes]]\nname = \"ops\"\nprofile = \"vesta-ops\"\n\
+             [[exec.sandboxes]]\nname = \"ops\"\nprofile = \"vesta-ops-2\"\n",
+        );
+        let err = duplicate.validate_execd_sandboxes().unwrap_err();
+        assert!(matches!(err, ExecdSandboxConfigError::DuplicateName { .. }));
+        assert!(err.help().is_some());
+
+        let primary =
+            with_sandboxes("[[exec.sandboxes]]\nname = \"ops\"\nprofile = \"vesta-gitops\"\n");
+        assert_eq!(
+            primary.validate_execd_sandboxes().unwrap_err(),
+            ExecdSandboxConfigError::ProfileIsPrimary {
+                name: SandboxName::parse("ops").unwrap(),
+                profile: "vesta-gitops".into(),
+            }
+        );
+
+        let empty = with_sandboxes("[[exec.sandboxes]]\nname = \"ops\"\nprofile = \"  \"\n");
+        assert!(matches!(
+            empty.validate_execd_sandboxes().unwrap_err(),
+            ExecdSandboxConfigError::EmptyProfile { .. }
+        ));
+        assert!(
+            ExecBackendConfig::InProcess
+                .validate_execd_sandboxes()
+                .is_ok()
+        );
+    }
+}
+
 #[cfg(all(test, feature = "execd-executor"))]
 mod execd_config_tests {
     use super::*;
@@ -3014,6 +3450,61 @@ principal = "janus"
         assert!(
             ExecBackendConfig::InProcess
                 .to_execd_config("janus")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn execd_sandbox_config_uses_the_sandbox_profile_and_shared_route() {
+        let raw = r#"
+name = "vesta"
+[exec]
+kind = "execd"
+sandbox_url = "http://vesta-sandbox.lab.home"
+sandbox_token_file = "/x/secrets/vesta-sandbox.key"
+executor_token_file = "/x/secrets/vesta-executor.key"
+profile = "vesta-gitops"
+principal = "vesta"
+poll_wait_ms = 750
+allow_insecure_http = true
+
+[[exec.sandboxes]]
+name = "ops"
+profile = "vesta-ops"
+"#;
+        let cfg: AkhConfig = toml::from_str(raw).unwrap();
+        let exec = cfg.effective_exec(None);
+        let sandbox = &exec.execd_sandboxes()[0];
+        let primary = exec.to_execd_config("vesta").unwrap();
+        let ops = exec.to_execd_sandbox_config("vesta", sandbox).unwrap();
+
+        assert_eq!(primary.profile, "vesta-gitops");
+        assert_eq!(ops.profile, "vesta-ops");
+        assert_eq!(ops.sandbox_url, primary.sandbox_url);
+        assert_eq!(ops.sandbox_token_file, primary.sandbox_token_file);
+        assert_eq!(ops.executor, primary.executor);
+        assert_eq!(
+            ops.executor,
+            ExecutorRoute::ViaSandbox {
+                token_file: "/x/secrets/vesta-executor.key".into()
+            }
+        );
+        assert_eq!(ops.principal, "vesta");
+        assert_eq!(ops.poll_wait, std::time::Duration::from_millis(750));
+        assert!(ops.allow_insecure_http);
+        assert!(
+            ops.session_id.starts_with("akhomed-vesta-ops-"),
+            "{}",
+            ops.session_id
+        );
+        // Each translation mints a fresh session (akhsbxd never reallocates a
+        // released one), distinct from the primary's.
+        let again = exec.to_execd_sandbox_config("vesta", sandbox).unwrap();
+        assert_ne!(again.session_id, ops.session_id);
+        assert_ne!(ops.session_id, primary.session_id);
+        assert!(
+            ExecBackendConfig::InProcess
+                .to_execd_sandbox_config("vesta", sandbox)
                 .is_none()
         );
     }

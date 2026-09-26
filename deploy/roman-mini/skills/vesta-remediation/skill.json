@@ -1,0 +1,9 @@
+{
+  "id": "vesta-remediation",
+  "name": "Vesta homelab remediation (sandboxed)",
+  "version": "1.0.0",
+  "description": "How Vesta inspects and repairs the homelab cluster and publishes GitOps fixes from akhsbxd/akhexecd sandboxes: the credential-free vesta-gitops workspace (shell_exec and the file tools) and the vesta-ops sandbox (sandbox_exec, ServiceAccount vesta, vesta/*-only deploy key). Replaces the tool descriptions and policy prose of deploy/roman-mini/vesta_ops.py, vesta_actions.py and configure_vesta.py (53g PR 8, plan decision D5).",
+  "domains": ["homelab", "kubernetes", "gitops", "remediation", "flux"],
+  "weight_size_bytes": 0,
+  "procedures_file": "procedures.md"
+}
