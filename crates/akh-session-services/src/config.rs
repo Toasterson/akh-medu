@@ -1,4 +1,7 @@
-use crate::types::*;
+use crate::types::{
+    streaming::{StreamingConfig, StreamingConfigError},
+    *,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -556,6 +559,12 @@ pub struct Config {
     /// when the runtime is unreachable.
     #[serde(default = "default_retirement_cancel_grace_ms")]
     pub retirement_cancel_grace_ms: u64,
+    /// How akhrtd forwards native-runtime text and reasoning deltas:
+    /// coalesced into paragraphs (default) or token by token. Lives on the
+    /// service, not on a runtime profile, so changing it never invalidates
+    /// profile conformance evidence.
+    #[serde(default)]
+    pub streaming: StreamingConfig,
 }
 fn unconfined() -> String {
     "unconfined".into()
@@ -595,6 +604,21 @@ pub fn execution_mode_required(subject: &str) -> Fault {
              \"development\" and without AKH_DEPLOYMENT=deployed."
         ),
     )
+}
+
+/// The fault for an invalid `[streaming]` section. `Fault` has no separate
+/// help field, so the diagnostic's code becomes the fault code and its help
+/// travels in the message.
+pub fn streaming_fault(error: StreamingConfigError) -> Fault {
+    use miette::Diagnostic;
+    let code = error
+        .code()
+        .map_or_else(|| "invalid_request".to_owned(), |code| code.to_string());
+    let help = error
+        .help()
+        .map(|help| format!(" help: {help}"))
+        .unwrap_or_default();
+    Fault::new(&code, format!("{error}.{help}"))
 }
 
 fn default_reconciliation_interval_ms() -> u64 {
@@ -661,6 +685,7 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         validate_key(&self.service_id)?;
+        self.streaming.validate().map_err(streaming_fault)?;
         self.validate_deployment(self.deployment_mode()?)?;
         if let Some(StoreConfig::Postgres { url_env, schema }) = &self.store
             && (url_env.is_empty() || schema.is_empty())
@@ -996,6 +1021,48 @@ mod deployment_tests {
         development
             .validate_deployment(DeploymentMode::Development)
             .unwrap();
+    }
+
+    #[test]
+    fn streaming_defaults_to_paragraphs_and_rejects_invalid_settings_with_help() {
+        use crate::types::streaming::StreamingMode;
+        let dir = std::env::temp_dir();
+        let base = json!({
+            "service_id":"runtime","listen":"127.0.0.1:0","data_dir":dir,
+            "principals":[{"id":"sessions","roles":["session"],"token_file":"/unused"}]
+        });
+        let config: Config = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(config.streaming, StreamingConfig::default());
+        assert_eq!(config.streaming.mode, StreamingMode::Paragraph);
+        config.validate().unwrap();
+
+        let mut token = base.clone();
+        token["streaming"] = json!({"mode":"token"});
+        let config: Config = serde_json::from_value(token).unwrap();
+        assert_eq!(config.streaming.mode, StreamingMode::Token);
+
+        let mut invalid = base;
+        invalid["streaming"] = json!({"idle_flush_ms":5000,"max_latency_ms":1000});
+        let config: Config = serde_json::from_value(invalid).unwrap();
+        let fault = config.validate().unwrap_err();
+        assert_eq!(
+            fault.code,
+            "akh::runtime::streaming::idle_exceeds_max_latency"
+        );
+        assert!(fault.message.contains("help:"), "{fault}");
+
+        let toml_config: Config = toml::from_str(&format!(
+            "service_id = \"runtime\"\nlisten = \"127.0.0.1:0\"\ndata_dir = {:?}\n\
+             [[principals]]\nid = \"sessions\"\nroles = [\"session\"]\ntoken_file = \"/unused\"\n\
+             [streaming]\nmode = \"paragraph\"\nmax_bytes = 2048\n",
+            dir.to_string_lossy()
+        ))
+        .unwrap();
+        assert_eq!(toml_config.streaming.max_bytes, 2048);
+        assert_eq!(
+            toml_config.streaming.idle_flush_ms,
+            StreamingConfig::DEFAULT_IDLE_FLUSH_MS
+        );
     }
 
     #[test]

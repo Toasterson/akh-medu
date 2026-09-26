@@ -9,4 +9,6 @@ description = "Versioned contracts for Akh sessions, runtimes, workspaces and in
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# Diagnostics for configuration contracts (no "fancy" renderer: callers render).
+miette = "7"
 uuid = { version = "1", features = ["v7", "serde"] }

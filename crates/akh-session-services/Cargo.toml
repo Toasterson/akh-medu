@@ -46,6 +46,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "blo
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"], optional = true }
 sha2 = "0.10"
+# Diagnostic codes/help for configuration errors (rendered into `Fault`).
+miette = "7"
 tempfile = { version = "3", optional = true }
 base64 = { version = "0.22", optional = true }
 libc = "0.2"

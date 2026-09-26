@@ -347,6 +347,7 @@ dependencies = [
  "jsonschema",
  "lapin",
  "libc",
+ "miette 7.6.0",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-proto",
@@ -379,6 +380,7 @@ dependencies = [
 name = "akh-session-types"
 version = "0.1.0"
 dependencies = [
+ "miette 7.6.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

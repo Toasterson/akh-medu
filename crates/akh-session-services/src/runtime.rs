@@ -3,7 +3,11 @@ use crate::{
     config::{Config, Principal, RuntimeProfile},
     http::Client,
     store::{Store, Transaction, key},
-    types::*,
+    streaming::{DeltaStream, EventSink, Outgoing, SystemClock},
+    types::{
+        streaming::{DeltaKind, ParagraphCoalescer},
+        *,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -436,6 +440,10 @@ impl Runtime {
         if profile.kind == RuntimeKind::Internal {
             crate::internal::validate(&profile, &request)?;
         }
+        // Refuse admission, before anything durable, if the stream settings
+        // are unusable (configuration load already validated them).
+        let coalescer = ParagraphCoalescer::new(self.config.streaming)
+            .map_err(crate::config::streaming_fault)?;
         let job = RuntimeJob {
             provider_session: request.provider_session.clone(),
             request: request.clone(),
@@ -465,7 +473,16 @@ impl Runtime {
                 handle,
                 cancel: cancel.clone(),
                 native_tools: HashMap::new(),
+                stream: DeltaStream::new(
+                    coalescer,
+                    JobEventLog {
+                        service: service.clone(),
+                        job_id: request.id.clone(),
+                    },
+                    Arc::new(SystemClock),
+                ),
             };
+            host.stream.start_ticker(span.clone());
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if profile.kind == RuntimeKind::Internal {
                     crate::internal::run_loop(
@@ -486,6 +503,18 @@ impl Runtime {
                     "runtime worker panicked; outcome requires reconciliation",
                 ))
             });
+            // The turn is over: release buffered text before the result is
+            // saved, so the event log is complete when the job turns terminal.
+            // A failed final append is the same durable-log failure a token
+            // stream would have reported from `Host::event`.
+            let result = match (result, host.stream.finish()) {
+                (result, Ok(())) => result,
+                (Ok(_), Err(error)) => Err(Fault::new("unknown_outcome", error)),
+                (Err(error), Err(flush)) => {
+                    tracing::error!(error = %flush, "final stream flush failed after a failed turn");
+                    Err(error)
+                }
+            };
             if result.is_ok() {
                 operation.success();
             } else {
@@ -645,7 +674,72 @@ struct RemoteHost {
     handle: tokio::runtime::Handle,
     cancel: Arc<AtomicBool>,
     native_tools: HashMap<String, (tracing::Span, crate::telemetry::Operation)>,
+    /// Paragraph coalescing in front of telemetry and the job event log.
+    stream: DeltaStream<JobEventLog>,
 }
+
+/// The durable, ordered runtime event log of one job, read by akhsessd.
+struct JobEventLog {
+    service: Runtime,
+    job_id: String,
+}
+impl EventSink for JobEventLog {
+    fn append(&mut self, item: Outgoing) -> std::result::Result<(), String> {
+        if let Outgoing::Chunk(chunk) = &item {
+            crate::telemetry::delta(
+                chunk.kind.as_str(),
+                &chunk.text,
+                chunk.deltas,
+                chunk.reason.as_str(),
+            );
+        }
+        let event = item.into_event();
+        self.service
+            .store
+            .transaction(|tx| {
+                // A job is only ever Running while its own worker can still
+                // call back here, so this always finds it in `job/` — but it
+                // is routed through the same fallback as every other by-id
+                // read so this call site never needs to change if that ever
+                // stops being true.
+                let (mut job, slot) = load_job(tx, &self.job_id)?
+                    .ok_or_else(|| Fault::missing("runtime job not found"))?;
+                if let RuntimeEvent::Bound {
+                    provider_session, ..
+                } = &event
+                {
+                    if job
+                        .provider_session
+                        .as_ref()
+                        .is_some_and(|s| s != provider_session)
+                    {
+                        return Err(Fault::conflict("provider continuation changed"));
+                    }
+                    job.provider_session = Some(provider_session.clone());
+                }
+                if job.events.len() >= 100_000 {
+                    return Err(Fault::new("capacity", "runtime event limit exceeded"));
+                }
+                let bytes_key = key("runtime_event_bytes", &[&self.job_id]);
+                let old_bytes = tx.get::<usize>(&bytes_key)?.unwrap_or_else(|| {
+                    serde_json::to_vec(&job.events)
+                        .map(|b| b.len())
+                        .unwrap_or(4 * 1024 * 1024)
+                });
+                let event_bytes = serde_json::to_vec(&event)
+                    .map_err(|_| Fault::invalid("cannot encode runtime event"))?
+                    .len();
+                if old_bytes + event_bytes > 4 * 1024 * 1024 {
+                    return Err(Fault::new("capacity", "runtime event byte budget exceeded"));
+                }
+                tx.put(&bytes_key, &(old_bytes + event_bytes))?;
+                job.events.push(event);
+                save_job(tx, &job, slot)
+            })
+            .map_err(|e| e.to_string())
+    }
+}
+
 impl RemoteHost {
     fn call(&self, id: &str, name: &str, arguments: Value) -> ToolCall {
         ToolCall {
@@ -709,9 +803,20 @@ impl RemoteHost {
 }
 impl akh_runtime::Host for RemoteHost {
     fn usage(&mut self, usage: &Value) {
+        // Usage is reported after the text it accounts for. A failed flush is
+        // sticky and surfaces at the provider's next host call.
+        if let Err(error) = self.stream.barrier() {
+            tracing::warn!(error, "stream flush before usage failed");
+        }
         crate::telemetry::usage(usage);
     }
     fn event(&mut self, event: RuntimeEvent) -> std::result::Result<(), String> {
+        if DeltaKind::of(&event).is_some() {
+            // Coalesced; telemetry runs per released chunk in `JobEventLog`.
+            return self.stream.event(event);
+        }
+        // Buffered text goes out before this event's own telemetry and record.
+        self.stream.barrier()?;
         match &event {
             RuntimeEvent::Bound {
                 provider_session,
@@ -719,8 +824,6 @@ impl akh_runtime::Host for RemoteHost {
             } => {
                 tracing::info!(event.name="runtime.bound", provider.session_id=%provider_session, model=?model, "provider session bound")
             }
-            RuntimeEvent::Text { text } => crate::telemetry::delta("text", text),
-            RuntimeEvent::Reasoning { text } => crate::telemetry::delta("reasoning", text),
             RuntimeEvent::ToolStarted { id, name } => {
                 let span = tracing::info_span!("runtime.tool", tool.id=%id, tool.name=%name, otel.status_code=tracing::field::Empty);
                 span.in_scope(|| {
@@ -741,50 +844,9 @@ impl akh_runtime::Host for RemoteHost {
                     drop(operation);
                 }
             }
+            RuntimeEvent::Text { .. } | RuntimeEvent::Reasoning { .. } => {}
         }
-        self.service
-            .store
-            .transaction(|tx| {
-                // A job is only ever Running while its own worker can still
-                // call back here, so this always finds it in `job/` — but it
-                // is routed through the same fallback as every other by-id
-                // read so this call site never needs to change if that ever
-                // stops being true.
-                let (mut job, slot) = load_job(tx, &self.request.id)?
-                    .ok_or_else(|| Fault::missing("runtime job not found"))?;
-                if let RuntimeEvent::Bound {
-                    provider_session, ..
-                } = &event
-                {
-                    if job
-                        .provider_session
-                        .as_ref()
-                        .is_some_and(|s| s != provider_session)
-                    {
-                        return Err(Fault::conflict("provider continuation changed"));
-                    }
-                    job.provider_session = Some(provider_session.clone());
-                }
-                if job.events.len() >= 100_000 {
-                    return Err(Fault::new("capacity", "runtime event limit exceeded"));
-                }
-                let bytes_key = key("runtime_event_bytes", &[&self.request.id]);
-                let old_bytes = tx.get::<usize>(&bytes_key)?.unwrap_or_else(|| {
-                    serde_json::to_vec(&job.events)
-                        .map(|b| b.len())
-                        .unwrap_or(4 * 1024 * 1024)
-                });
-                let event_bytes = serde_json::to_vec(&event)
-                    .map_err(|_| Fault::invalid("cannot encode runtime event"))?
-                    .len();
-                if old_bytes + event_bytes > 4 * 1024 * 1024 {
-                    return Err(Fault::new("capacity", "runtime event byte budget exceeded"));
-                }
-                tx.put(&bytes_key, &(old_bytes + event_bytes))?;
-                job.events.push(event);
-                save_job(tx, &job, slot)
-            })
-            .map_err(|e| e.to_string())
+        self.stream.event(event)
     }
     fn tool(
         &mut self,
@@ -813,6 +875,7 @@ impl akh_runtime::Host for RemoteHost {
         name: &str,
         arguments: &Value,
     ) -> std::result::Result<bool, String> {
+        self.stream.barrier()?;
         let span = tracing::info_span!("runtime.approval", tool.id = id, tool.name = name);
         let _entered = span.enter();
         let mut operation = crate::telemetry::Operation::new("approval_wait");
@@ -828,6 +891,7 @@ impl akh_runtime::Host for RemoteHost {
             .is_some_and(|r| r["approved"] == true))
     }
     fn question(&mut self, id: &str, questions: &Value) -> std::result::Result<Value, String> {
+        self.stream.barrier()?;
         let span = tracing::info_span!("runtime.question", question.id = id);
         let _entered = span.enter();
         let mut operation = crate::telemetry::Operation::new("question_wait");
@@ -845,6 +909,7 @@ impl akh_runtime::Host for RemoteHost {
         vector: &[u8],
         limit: usize,
     ) -> std::result::Result<Option<Vec<neural_spans::SpanHit>>, String> {
+        self.stream.barrier()?;
         let request = neural_spans::RecallRequest {
             call: self.call(id, neural_spans::RecallRequest::CALL_NAME, json!({})),
             space: space.clone(),
@@ -861,6 +926,7 @@ impl akh_runtime::Host for RemoteHost {
         id: &str,
         captures: &[neural_spans::SpanCapture],
     ) -> std::result::Result<bool, String> {
+        self.stream.barrier()?;
         let delivery = neural_spans::SpanDelivery {
             call: self.call(id, neural_spans::SpanDelivery::CALL_NAME, json!({})),
             captures: captures.to_vec(),
@@ -875,6 +941,7 @@ impl akh_runtime::Host for RemoteHost {
         window_tokens: usize,
         reserved_output_tokens: usize,
     ) -> std::result::Result<Option<akh_session_types::AssembledContext>, String> {
+        self.stream.barrier()?;
         let request = akh_session_types::RuntimeContextRequest {
             call: self.call(
                 &self.request.turn_id,

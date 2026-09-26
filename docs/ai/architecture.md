@@ -14,6 +14,15 @@
 > Previous update: 2026-09-24 (**Phase 53 — every akh runs fully featured**, [ADR
 > Last updated: 2026-09-25 (akhrtd gains the `opencode` native runtime kind —
 > [research](research/2026-09-25-opencode-runtime-integration.md); previously 2026-09-24: **Phase 53 — every akh runs fully featured**, [ADR
+> Last updated: 2026-09-25 (**Paragraph streaming for native-runtime text**):
+> akhrtd's runtime host (`RemoteHost` in `crates/akh-session-services/src/runtime.rs`)
+> now puts a `DeltaStream` (`crates/akh-session-services/src/streaming.rs`) in front of
+> telemetry and the durable job event log, coalescing provider text/reasoning deltas
+> into paragraphs with `ParagraphCoalescer` (`crates/akh-session-types/src/streaming.rs`).
+> Service config `[streaming]` (`mode = "paragraph" | "token"`, `max_bytes`,
+> `idle_flush_ms`, `max_latency_ms`; default paragraph/4096/1500/3000).
+>
+> Previous update: 2026-09-24 (**Phase 53 — every akh runs fully featured**, [ADR
 > 113](decisions/113-full-akh-always.md), [plan](plans/2026-09-24-phase53-full-akh-always.md),
 > briefs [docs/ai/phases/phase-53/README.md](phases/phase-53/README.md)): the
 > `core-server` build profile is retired — `akhomed` has one `server` feature
@@ -476,6 +485,24 @@ native tool through a bridge-owned permission policy and requires the extra
   convention). An unreachable server at init is a warning, retried lazily, and
   never fatal. This unblocks the Roman cutover, where most of Minerva's tools
   are external MCP servers.
+
+- **Paragraph streaming (`crates/akh-session-services/src/streaming.rs`,
+  `crates/akh-session-types/src/streaming.rs`)**: every native-runtime event
+  (Codex, Claude, internal) enters akhrtd through `Host::event`. A
+  `DeltaStream` there buffers text and reasoning deltas and releases them at
+  structural boundaries only — a blank line (`\n\n`, `\r\n\r\n`), a kind
+  switch, `max_bytes` (UTF-8 safe, last `\n` preferred), `idle_flush_ms` /
+  `max_latency_ms` deadlines, or turn end — so the job event log, akhsessd's
+  session events, ACP `agent_message_chunk`/`agent_thought_chunk` and OTLP
+  delta records all carry paragraphs. Any non-text event or host interaction
+  (tool, approval, question, usage, recall, context) flushes first under the
+  same lock, so ordering is unchanged and nothing non-text is delayed.
+  Deadlines are checked on each event and by a per-turn flush-ticker thread
+  (tick = idle/4, at most 250 ms). The `[streaming]` section lives on the
+  service config, not the runtime profile, so it never touches conformance
+  evidence; `mode = "token"` keeps per-delta forwarding. Metrics:
+  `akh.runtime.delta.bytes` (exact), `akh.runtime.delta.chunks`,
+  `akh.runtime.delta.coalesced`.
 
 **Deployment topology (ADR 113):** every deployed akh — Mac-resident or
 cluster — is a full `akhomed`: daemon loop, in-process turn (psyche,
