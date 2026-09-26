@@ -1,0 +1,10 @@
+{
+  "id": "laya-intervention",
+  "name": "Laya intervention: scoped repair of a parked Anima work item",
+  "version": "1.0.0",
+  "description": "Phase 53g PR 6 (ADR 113 decision 10): the procedure the Romans follow when akheventd's roman-anima source wakes them for a parked work item or a changed plan. Replaces laya_controller.py's scoped-fixer brief and its record_fixer_result MCP tool: the typed outcome is a memory write (roman-memory 1.1.0 intervention_outcome / intervention_next_event). Routing is not here; it is the data-driven route filters in akheventd's events.json.",
+  "domains": ["anima", "intervention", "roman"],
+  "triples_file": "triples.json",
+  "actions_file": "actions.json",
+  "procedures_file": "procedures.md"
+}

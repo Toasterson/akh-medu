@@ -96,6 +96,19 @@ def main():
     elif role == 'events':
         for akh in ('janus', 'minerva', 'vesta'):
             env['ROMAN_BOARD_' + akh.upper()] = json.loads((root / 'secrets' / f'board-{akh}.json').read_text())['bearer_token']
+        # Phase 53g PR 6: the roman-anima source reads Anima over MCP and the
+        # Board watchdog posts as the observer's watchdog identity. Neither
+        # stops akheventd when missing: the source reports itself unavailable
+        # (GET /v1/anima/roman-anima) and the watchdog retries its notice.
+        token = anima_token(root)
+        if token:
+            env['ROMAN_ANIMA_TOKEN'] = token
+        else:
+            print('Roman events: no Anima token (write secrets/anima-token, mode 0600); '
+                  'the roman-anima source stays unavailable', file=sys.stderr)
+        watchdog = root / 'secrets' / 'board-watchdog.json'
+        if watchdog.exists():
+            env['ROMAN_BOARD_WATCHDOG'] = json.loads(watchdog.read_text())['bearer_token']
         binary = 'akheventd'
     elif role == 'core':
         # ADR 113 decision 2: the akh's own turn runs inside akhomed, so the core

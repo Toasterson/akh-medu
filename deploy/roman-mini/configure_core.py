@@ -16,7 +16,9 @@ Renders (existing unrelated keys and secrets are preserved; rerunning is safe):
 - core-config/akh-medu/workspaces/<r>.toml  full-akh workspace per Roman
 - config/core.json                          sessions / events / operator principals
 - config/reactor-seeds/<r>.json             reactor_manage payloads (apply_reactor_seeds.py)
-- config/events.akh-target.json             staged akheventd routes + roman-alerts monitor (retarget_events.py)
+- config/events.akh-target.json             staged akheventd routes + roman-alerts monitor + roman-anima
+                                            source (retarget_events.py); shadow unless --live (PR 6)
+- core-data/…/workspaces/<r>/kg/skills/laya-intervention   the PR 6 skillpack (activate via ACP)
 - config/t3-acp.json                        T3 transport -> akhomed ACP (t3_entrypoint.py)
 - launchd/dev.roman-akhs.core.plist         execs through daemon_credentials.py core
 - skills/{astra-escalation,mergiraf}/       Janus's worker skillpacks (53g PR 7)
@@ -77,9 +79,29 @@ def install_binary(built, target):
     return digest
 
 
+def install_skillpack(source, root, role):
+    """Copy the laya-intervention skillpack into the role's engine skills dir
+    (`core-data/akh-medu/workspaces/<role>/kg/skills/`). Activation stays an
+    operator step (`akh acp skill activate laya-intervention`, INVENTORY PR 6)."""
+    src = source / "skills" / fa.LAYA_SKILL
+    dest = root / f"core-data/akh-medu/workspaces/{role}/kg/skills/{fa.LAYA_SKILL}"
+    dest.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for item in sorted(src.iterdir()):
+        if item.is_file():
+            fa.write_atomic(dest / item.name, item.read_bytes(), mode=0o600)
+    return dest
+
+
 def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None,
-           acp_port=fa.ACP_TCP_PORT):
-    """Render every full-akh file under `root`. Returns warnings."""
+           acp_port=fa.ACP_TCP_PORT, live=False):
+    """Render every full-akh file under `root`. Returns warnings.
+
+    `live=False` (default) stages the PR 6 Anima source in shadow mode next
+    to the observer/laya routes. `live=True` is the PR 6 cutover: the source
+    ingests, the watchdog moves into akheventd, the legacy routes, their
+    reactor seeds (as `remove` operations) and the `laya` MCP server go, and
+    `[monitoring]` stops reading the observer's status export.
+    """
     source = source or Path(__file__).resolve().parent
     warnings = []
     for name in ("core-config/akh-medu/workspaces", "core-data", "core-state", "core-runtime",
@@ -91,6 +113,10 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
     events = json.loads((config / "events.json").read_text())
     core = json.loads((config / "core.json").read_text())
     url = "sqlite://" + str(root / "state/core/akh.sqlite3") + "?mode=rwc"
+    retargeted = fa.retarget_events(events, root)
+    staged = fa.render_anima_events(fa.render_monitoring_events(retargeted, root), live=live)
+    retired_routes = [r for r in retargeted.get("routes", []) if fa.legacy_route(r)] if live else []
+    retired_servers = (fa.LAYA_SERVER,) if live else ()
 
     host = fa.render_host_config(url, fa.acp_principals(session, root), acp_port)
     _save_text(root / "core-config/akh-medu/config.toml", fa.dump_toml(
@@ -118,24 +144,25 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
                 "/opt/homebrew/bin/python3 (cutover.sh selects one automatically)."
             )
         existing = tomllib.loads(path.read_text()) if path.exists() else None
-        servers, server_warnings = fa.mcp_servers(session, role, root)
+        servers, server_warnings = fa.mcp_servers(session, role, root, retired_servers)
         warnings.extend(server_warnings)
         delegation = None
         if role in fa.DELEGATING_ROLES:
             delegation, delegation_warnings = fa.render_delegation(session, root, projects, role)
             warnings.extend(delegation_warnings)
-        doc = fa.render_workspace(existing, role, fa.system_prompt(source / "roles", role), servers,
+        doc = fa.render_workspace(existing, role, fa.system_prompt(source / "roles", role, servers), servers,
                                   fa.board_identity(events, role), delegation=delegation,
-                                  monitoring=fa.monitoring_config(session, role, root))
+                                  monitoring=fa.monitoring_config(session, role, root, observer_retired=live))
         _save_text(path, fa.dump_toml(doc, fa.WORKSPACE_COMMENTS,
                                       header=f"{role}: full akh (ADR 113). Rendered by configure_core.py."))
-        _save_json(config / f"reactor-seeds/{role}.json", fa.reactor_seeds(events, session, role))
+        _save_json(config / f"reactor-seeds/{role}.json",
+                   fa.reactor_seeds(staged, session, role, source=source, retired=retired_routes))
+        install_skillpack(source, root, role)
 
     _ensure_key(root / "secrets/core-events.key")
     _ensure_key(root / f"secrets/{fa.MONITOR_READER}.key")
     _save_json(config / "core.json", fa.render_core_config(core, root))
-    _save_json(config / "events.akh-target.json",
-               fa.render_monitoring_events(fa.retarget_events(events, root), root))
+    _save_json(config / "events.akh-target.json", staged)
     missing = fa.missing_monitor_files(json.loads((config / "events.akh-target.json").read_text()))
     if missing:
         warnings.append("akheventd would not start with the staged events config until these exist "
@@ -195,6 +222,9 @@ def main():
     parser.add_argument("--repo", type=Path, required=True, help="the clean origin/main checkout")
     parser.add_argument("--no-fetch", action="store_true", help="skip `git fetch origin`")
     parser.add_argument("--acp-port", type=int, default=fa.ACP_TCP_PORT)
+    parser.add_argument("--live", action="store_true",
+                        help="PR 6 cutover: the roman-anima source ingests (default: shadow), "
+                             "drops the legacy observer/laya routes, seeds and laya MCP server")
     args = parser.parse_args()
     # Everything rendered here is private unless written with an explicit mode.
     os.umask(0o077)
@@ -211,11 +241,13 @@ def main():
     if (args.binaries.resolve() / "akh-acp").is_file():
         acp_binary = root / "bin" / provenance.acp_binary_name
         install_binary(args.binaries.resolve() / "akh-acp", acp_binary)
-    warnings = render(root, provenance, binary, digest, acp_binary, acp_port=args.acp_port)
+    warnings = render(root, provenance, binary, digest, acp_binary, acp_port=args.acp_port,
+                      live=args.live)
     print(f"Configured full akh core {provenance.binary_name} ({provenance.commit}); "
           f"merge-base --is-ancestor {provenance.short} origin/main ({provenance.origin_main[:12]}): ok")
     for warning in warnings:
         print("warning:", warning)
+    print("roman-anima source: " + ("LIVE (cutover)" if args.live else "shadow"))
     print("Not started. Follow deploy/roman-mini/CUTOVER.md.")
 
 

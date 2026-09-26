@@ -2,6 +2,7 @@ use crate::types::{
     streaming::{StreamingConfig, StreamingConfigError},
     *,
 };
+use crate::route_filter::{JsonPointer, RouteFilter};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -418,9 +419,23 @@ pub struct EventRoute {
     pub automation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<RouteTarget>,
+    /// Deliver only events whose `data` satisfies this filter (Phase 53g
+    /// PR 6). Absent = every event of `source`/`event_type`, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<RouteFilter>,
 }
 
 impl EventRoute {
+    /// Whether this route delivers `event`: same source and type, and the
+    /// `when` filter (if any) holds on its data.
+    pub fn matches(&self, event: &EventEnvelope) -> bool {
+        self.source == event.source
+            && self.event_type == event.event_type
+            && self
+                .when
+                .as_ref()
+                .is_none_or(|when| when.matches(&event.data))
+    }
     /// The resolved delivery target. Errors unless exactly one of
     /// `automation` and `target` is set.
     pub fn resolved_target(&self) -> Result<RouteTarget> {
@@ -783,6 +798,526 @@ impl MonitorSource {
     }
 }
 
+/// akheventd Anima source (Phase 53g PR 6, ADR 113 decision 10).
+///
+/// Replaces the Roman observer's Anima scan and `laya_controller`'s queue.
+/// Every `interval_secs` the source lists up to `projects_per_tick` projects
+/// (round robin) through the Anima MCP endpoint `endpoint`: their work items
+/// (cursor pagination, at most `max_pages` pages) and plans. Each entity keeps
+/// one projection; the first complete pass of a project is a silent baseline,
+/// and afterwards every projection change is one event
+/// (`<source>/<work_item_event_type>` or `<source>/<plan_event_type>`, data
+/// [`AnimaChange`](crate::types::anima::AnimaChange)). Which akh wakes is not
+/// decided here but by the routes' `when` filters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnimaSource {
+    /// `endpoints` entry of the Anima MCP URL and its credential.
+    pub endpoint: String,
+    /// Event source identity, e.g. `roman-anima`.
+    pub source: String,
+    #[serde(default = "anima_work_item_event_type")]
+    pub work_item_event_type: String,
+    #[serde(default = "anima_plan_event_type")]
+    pub plan_event_type: String,
+    #[serde(default = "anima_projects_per_tick")]
+    pub projects_per_tick: u16,
+    #[serde(default = "anima_interval")]
+    pub interval_secs: u64,
+    /// How long the project list is reused before it is listed again.
+    #[serde(default = "anima_projects_refresh")]
+    pub projects_refresh_secs: u64,
+    #[serde(default = "anima_page_size")]
+    pub page_size: u16,
+    /// Pagination bound per project listing; exceeding it fails the pass.
+    #[serde(default = "anima_max_pages")]
+    pub max_pages: u16,
+    /// Projects to scan, over each `list_projects` row (absent = all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_filter: Option<RouteFilter>,
+    /// Work-item fields projected from the listing (and, once hydrated, from
+    /// the detail). A change in any of them is an event.
+    pub fields: Vec<String>,
+    /// Plan fields whose canonical digest is the plan's `content_digest`.
+    #[serde(default)]
+    pub plan_fields: Vec<String>,
+    /// Detail reads for work items matching `when` (typically parked ones).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hydrate_parked: Option<ParkedHydration>,
+    /// Emissions allowed per (entity, park episode); later changes in the
+    /// same episode are suppressed and listed for the watchdog.
+    #[serde(default = "anima_max_emissions")]
+    pub max_emissions_per_episode: u32,
+    /// Record would-be events (`GET /v1/anima/{source}/shadow`) instead of
+    /// ingesting them. Projections and emission caps advance exactly as in
+    /// live mode, so a shadow period is comparable with the system it
+    /// replaces.
+    #[serde(default)]
+    pub shadow: bool,
+    /// Shadow records kept (oldest pruned first).
+    #[serde(default = "anima_shadow_retention")]
+    pub shadow_retention: u32,
+}
+fn anima_work_item_event_type() -> String {
+    "anima.work_item.changed".into()
+}
+fn anima_plan_event_type() -> String {
+    "anima.plan.changed".into()
+}
+fn anima_projects_per_tick() -> u16 {
+    8
+}
+fn anima_interval() -> u64 {
+    60
+}
+fn anima_projects_refresh() -> u64 {
+    900
+}
+fn anima_page_size() -> u16 {
+    100
+}
+fn anima_max_pages() -> u16 {
+    32
+}
+fn anima_max_emissions() -> u32 {
+    2
+}
+fn anima_shadow_retention() -> u32 {
+    10_000
+}
+
+/// Which work items are hydrated and how their hydrated fields are derived.
+/// Every Anima vocabulary lives in these filters (rendered by the
+/// deployment), none in Rust.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParkedHydration {
+    /// Hydrate listed work items matching this filter (over the listing
+    /// projection), e.g. `current_phase == "parked"`.
+    pub when: RouteFilter,
+    /// Forensic events that open a park episode; the newest match anchors
+    /// `park_episode`. Without a match the episode is derived from the
+    /// item's `parked_reason` and `phase_entered_at`.
+    pub park_event: RouteFilter,
+    /// Sessions counted in `live_sessions`.
+    pub live_session: RouteFilter,
+    /// Orders forensic events (e.g. `/occurred_at`); the greatest matching
+    /// `park_event` anchors the episode. Absent = the response order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub park_event_order: Option<JsonPointer>,
+    /// Work-item detail fields whose values identify the episode when no
+    /// forensic event matches `park_event` (e.g. `parked_reason`,
+    /// `phase_entered_at`). Empty = one episode per entity.
+    #[serde(default)]
+    pub episode_fields: Vec<String>,
+    /// Thread messages considered for `latest_thread_message_id` (absent =
+    /// all). Restricting it to human senders re-emits a parked item when a
+    /// human replies, not when an akh posts its own evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_message: Option<RouteFilter>,
+    /// Orders thread messages (e.g. `/created_at`); the greatest match is
+    /// the latest. Absent = the response order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_message_order: Option<JsonPointer>,
+    /// An unchanged listing row is hydrated again after this long.
+    #[serde(default = "hydrate_rehydrate")]
+    pub rehydrate_secs: u64,
+    /// Hydrations per poll; the rest keep their projection until later.
+    #[serde(default = "hydrate_max_per_tick")]
+    pub max_per_tick: u16,
+    #[serde(default = "hydrate_max_forensic_events")]
+    pub max_forensic_events: u16,
+}
+fn hydrate_rehydrate() -> u64 {
+    300
+}
+fn hydrate_max_per_tick() -> u16 {
+    16
+}
+fn hydrate_max_forensic_events() -> u16 {
+    500
+}
+
+/// Bounds for [`AnimaSource`].
+pub const ANIMA_INTERVAL_SECS: std::ops::RangeInclusive<u64> = 10..=86_400;
+pub const ANIMA_PROJECTS_PER_TICK: std::ops::RangeInclusive<u16> = 1..=64;
+pub const ANIMA_PAGE_SIZE: std::ops::RangeInclusive<u16> = 1..=200;
+pub const ANIMA_MAX_PAGES: std::ops::RangeInclusive<u16> = 1..=256;
+pub const ANIMA_MAX_EMISSIONS: std::ops::RangeInclusive<u32> = 1..=100;
+pub const ANIMA_SHADOW_RETENTION: std::ops::RangeInclusive<u32> = 1..=100_000;
+pub const ANIMA_FIELDS: usize = 64;
+
+/// An Anima source or watchdog that cannot run as configured.
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+pub enum AnimaConfigError {
+    #[error("anima source `{source_id}`: {field} `{value}` is not a valid identifier")]
+    #[diagnostic(
+        code(akh::events::anima::identifier),
+        help(
+            "Use 1..256 characters without control characters, e.g. `roman-anima` or `anima.work_item.changed`."
+        )
+    )]
+    Identifier {
+        source_id: String,
+        field: &'static str,
+        value: String,
+    },
+    #[error("anima source `{source_id}` is configured twice")]
+    #[diagnostic(
+        code(akh::events::anima::duplicate_source),
+        help("Give each entry in `anima` its own `source`; one poller owns one projection set.")
+    )]
+    DuplicateSource { source_id: String },
+    #[error("anima source `{source_id}` uses endpoint `{endpoint}`, which is not configured")]
+    #[diagnostic(
+        code(akh::events::anima::endpoint),
+        help(
+            "Add `endpoints.{endpoint}` with the Anima MCP URL (`…/mcp`) and a `token_env` or `token_file`."
+        )
+    )]
+    UnknownEndpoint { source_id: String, endpoint: String },
+    #[error("anima source `{source_id}` endpoint `{endpoint}` is anonymous")]
+    #[diagnostic(
+        code(akh::events::anima::anonymous),
+        help(
+            "Anima requires a bearer credential; set `token_env` or `token_file` on the endpoint."
+        )
+    )]
+    Anonymous { source_id: String, endpoint: String },
+    #[error("anima source `{source_id}`: {field} {value} is outside {range}")]
+    #[diagnostic(
+        code(akh::events::anima::bound),
+        help(
+            "Defaults: interval_secs 60, projects_per_tick 8, page_size 100, max_pages 32, max_emissions_per_episode 2, shadow_retention 10000."
+        )
+    )]
+    Bound {
+        source_id: String,
+        field: &'static str,
+        value: u64,
+        range: &'static str,
+    },
+    #[error(
+        "anima source `{source_id}`: work_item_event_type and plan_event_type are both `{event_type}`"
+    )]
+    #[diagnostic(
+        code(akh::events::anima::event_types),
+        help("Routes tell work items and plans apart by type; use two distinct types.")
+    )]
+    SameEventType {
+        source_id: String,
+        event_type: String,
+    },
+    #[error("anima source `{source_id}`: `fields` must name 1..=64 distinct identifiers")]
+    #[diagnostic(
+        code(akh::events::anima::fields),
+        help(
+            "List the work-item fields whose change is an event, e.g. `id`, `current_phase`, `parked_reason`; `id` is always included."
+        )
+    )]
+    Fields { source_id: String },
+    #[error("anima source `{source_id}`: field `{field}` is reserved for a hydrated value")]
+    #[diagnostic(
+        code(akh::events::anima::reserved_field),
+        help(
+            "`park_episode`, `live_sessions` and `latest_thread_message_id` are written by hydration; remove it from `fields`."
+        )
+    )]
+    ReservedField { source_id: String, field: String },
+    #[error("watchdog: `{field}` is invalid ({reason})")]
+    #[diagnostic(
+        code(akh::events::watchdog::config),
+        help(
+            "Set `endpoint` to a configured Board endpoint, `thread` to the status thread UUID, a non-empty `summary`, interval_secs within 10..=3600 and stale_secs above interval_secs."
+        )
+    )]
+    Watchdog {
+        field: &'static str,
+        reason: &'static str,
+    },
+}
+
+impl From<AnimaConfigError> for Fault {
+    fn from(error: AnimaConfigError) -> Self {
+        use miette::Diagnostic;
+        let code = error.code().map(|c| c.to_string()).unwrap_or_default();
+        let help = error.help().map(|h| h.to_string()).unwrap_or_default();
+        Fault::invalid(format!("{error} [{code}] help: {help}"))
+    }
+}
+
+impl AnimaSource {
+    /// Static checks (no file or network access).
+    pub fn validate(&self, endpoints: &BTreeMap<String, Endpoint>) -> Result<()> {
+        let source_id = || self.source.clone();
+        let identifier = |field: &'static str, value: &str| {
+            validate_key(value).map_err(|_| AnimaConfigError::Identifier {
+                source_id: source_id(),
+                field,
+                value: value.into(),
+            })
+        };
+        identifier("source", &self.source)?;
+        identifier("work_item_event_type", &self.work_item_event_type)?;
+        identifier("plan_event_type", &self.plan_event_type)?;
+        if self.work_item_event_type == self.plan_event_type {
+            return Err(AnimaConfigError::SameEventType {
+                source_id: source_id(),
+                event_type: self.plan_event_type.clone(),
+            }
+            .into());
+        }
+        match endpoints.get(&self.endpoint) {
+            None => {
+                return Err(AnimaConfigError::UnknownEndpoint {
+                    source_id: source_id(),
+                    endpoint: self.endpoint.clone(),
+                }
+                .into());
+            }
+            Some(endpoint) if endpoint.anonymous => {
+                return Err(AnimaConfigError::Anonymous {
+                    source_id: source_id(),
+                    endpoint: self.endpoint.clone(),
+                }
+                .into());
+            }
+            Some(_) => {}
+        }
+        let bound = |field: &'static str, value: u64, ok: bool, range: &'static str| {
+            if ok {
+                Ok(())
+            } else {
+                Err(AnimaConfigError::Bound {
+                    source_id: source_id(),
+                    field,
+                    value,
+                    range,
+                })
+            }
+        };
+        bound(
+            "interval_secs",
+            self.interval_secs,
+            ANIMA_INTERVAL_SECS.contains(&self.interval_secs),
+            "10..=86400",
+        )?;
+        bound(
+            "projects_refresh_secs",
+            self.projects_refresh_secs,
+            ANIMA_INTERVAL_SECS.contains(&self.projects_refresh_secs),
+            "10..=86400",
+        )?;
+        bound(
+            "projects_per_tick",
+            self.projects_per_tick.into(),
+            ANIMA_PROJECTS_PER_TICK.contains(&self.projects_per_tick),
+            "1..=64",
+        )?;
+        bound(
+            "page_size",
+            self.page_size.into(),
+            ANIMA_PAGE_SIZE.contains(&self.page_size),
+            "1..=200",
+        )?;
+        bound(
+            "max_pages",
+            self.max_pages.into(),
+            ANIMA_MAX_PAGES.contains(&self.max_pages),
+            "1..=256",
+        )?;
+        bound(
+            "max_emissions_per_episode",
+            self.max_emissions_per_episode.into(),
+            ANIMA_MAX_EMISSIONS.contains(&self.max_emissions_per_episode),
+            "1..=100",
+        )?;
+        bound(
+            "shadow_retention",
+            self.shadow_retention.into(),
+            ANIMA_SHADOW_RETENTION.contains(&self.shadow_retention),
+            "1..=100000",
+        )?;
+        for fields in [&self.fields, &self.plan_fields] {
+            let distinct: std::collections::HashSet<_> = fields.iter().collect();
+            if distinct.len() != fields.len()
+                || fields.len() > ANIMA_FIELDS
+                || fields.iter().any(|f| validate_key(f).is_err())
+            {
+                return Err(AnimaConfigError::Fields {
+                    source_id: source_id(),
+                }
+                .into());
+            }
+        }
+        if self.fields.is_empty() {
+            return Err(AnimaConfigError::Fields {
+                source_id: source_id(),
+            }
+            .into());
+        }
+        use crate::types::anima::hydrated;
+        if let Some(field) = self.fields.iter().find(|f| {
+            [
+                hydrated::PARK_EPISODE,
+                hydrated::LIVE_SESSIONS,
+                hydrated::LATEST_THREAD_MESSAGE_ID,
+            ]
+            .contains(&f.as_str())
+        }) {
+            return Err(AnimaConfigError::ReservedField {
+                source_id: source_id(),
+                field: field.clone(),
+            }
+            .into());
+        }
+        let context = |part: &str| format!("anima source `{}` {part}", self.source);
+        if let Some(filter) = &self.project_filter {
+            filter
+                .validate("project_filter")
+                .map_err(|e| e.into_fault(&context("project_filter")))?;
+        }
+        if let Some(hydration) = &self.hydrate_parked {
+            for (name, filter) in [
+                ("hydrate_parked.when", Some(&hydration.when)),
+                ("hydrate_parked.park_event", Some(&hydration.park_event)),
+                ("hydrate_parked.live_session", Some(&hydration.live_session)),
+                (
+                    "hydrate_parked.thread_message",
+                    hydration.thread_message.as_ref(),
+                ),
+            ] {
+                if let Some(filter) = filter {
+                    filter
+                        .validate(name)
+                        .map_err(|e| e.into_fault(&context(name)))?;
+                }
+            }
+            for (name, pointer) in [
+                (
+                    "hydrate_parked.park_event_order",
+                    &hydration.park_event_order,
+                ),
+                (
+                    "hydrate_parked.thread_message_order",
+                    &hydration.thread_message_order,
+                ),
+            ] {
+                if let Some(pointer) = pointer
+                    && !pointer.is_well_formed()
+                {
+                    return Err(crate::route_filter::RouteFilterError::Pointer {
+                        at: name.into(),
+                        pointer: pointer.as_str().into(),
+                    }
+                    .into_fault(&context(name)));
+                }
+            }
+            if hydration.episode_fields.len() > ANIMA_FIELDS
+                || hydration
+                    .episode_fields
+                    .iter()
+                    .any(|f| validate_key(f).is_err())
+            {
+                return Err(AnimaConfigError::Fields {
+                    source_id: source_id(),
+                }
+                .into());
+            }
+            bound(
+                "hydrate_parked.rehydrate_secs",
+                hydration.rehydrate_secs,
+                (30..=86_400).contains(&hydration.rehydrate_secs),
+                "30..=86400",
+            )?;
+            bound(
+                "hydrate_parked.max_per_tick",
+                hydration.max_per_tick.into(),
+                (1..=256).contains(&hydration.max_per_tick),
+                "1..=256",
+            )?;
+            bound(
+                "hydrate_parked.max_forensic_events",
+                hydration.max_forensic_events.into(),
+                (1..=2000).contains(&hydration.max_forensic_events),
+                "1..=2000",
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The deterministic Board watchdog (Phase 53g PR 6; formerly the Roman
+/// observer's `notify_watchdog`). Every `interval_secs` it derives a
+/// structural signal (monitor and Anima source availability, failing
+/// delivery routes, emission-cap attention) and, when the signal differs
+/// from the last one posted, posts one `coordination/status@v1` message to
+/// `thread` through the Board endpoint `endpoint`. At most one post per
+/// interval; a failed post is retried with the same idempotency key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WatchdogConfig {
+    /// `endpoints` entry of the Agent Board HTTP API (not its `/mcp`).
+    pub endpoint: String,
+    /// Board thread UUID that receives the notices.
+    pub thread: String,
+    /// Message summary line (deployment-supplied text).
+    pub summary: String,
+    /// Text placed before the JSON signal in `payload.detail`.
+    #[serde(default)]
+    pub detail_prefix: String,
+    #[serde(default = "watchdog_interval")]
+    pub interval_secs: u64,
+    /// A monitor reading or Anima poll older than this is unavailable.
+    #[serde(default = "watchdog_stale")]
+    pub stale_secs: u64,
+    /// Attention entries included per Anima source.
+    #[serde(default = "watchdog_max_attention")]
+    pub max_attention: u16,
+}
+fn watchdog_interval() -> u64 {
+    60
+}
+fn watchdog_stale() -> u64 {
+    300
+}
+fn watchdog_max_attention() -> u16 {
+    40
+}
+
+impl WatchdogConfig {
+    pub fn validate(&self, endpoints: &BTreeMap<String, Endpoint>) -> Result<()> {
+        let error = |field: &'static str, reason: &'static str| -> Fault {
+            AnimaConfigError::Watchdog { field, reason }.into()
+        };
+        if !endpoints.contains_key(&self.endpoint) {
+            return Err(error("endpoint", "not a configured endpoint"));
+        }
+        if uuid::Uuid::parse_str(&self.thread).is_err() {
+            return Err(error("thread", "not a UUID"));
+        }
+        if self.summary.trim().is_empty() || self.summary.len() > 512 {
+            return Err(error("summary", "empty or longer than 512 bytes"));
+        }
+        if self.detail_prefix.len() > 1024 {
+            return Err(error("detail_prefix", "longer than 1024 bytes"));
+        }
+        if !(10..=3600).contains(&self.interval_secs) {
+            return Err(error("interval_secs", "outside 10..=3600"));
+        }
+        if self.stale_secs <= self.interval_secs || self.stale_secs > 86_400 {
+            return Err(error(
+                "stale_secs",
+                "not above interval_secs, or above 86400",
+            ));
+        }
+        if !(1..=200).contains(&self.max_attention) {
+            return Err(error("max_attention", "outside 1..=200"));
+        }
+        Ok(())
+    }
+}
+
 /// Selects the durable store's backend. Absent (the default) keeps every
 /// daemon on the original per-kind redb file under `data_dir`; this is what
 /// every test and every deployment predating the Postgres backend still
@@ -859,6 +1394,13 @@ pub struct Config {
     /// alert feeds, emit an event when the structural signature changes.
     #[serde(default)]
     pub monitors: Vec<MonitorSource>,
+    /// akheventd Anima sources (Phase 53g PR 6): scan Anima through MCP,
+    /// emit one event per entity projection change.
+    #[serde(default)]
+    pub anima: Vec<AnimaSource>,
+    /// akheventd's deterministic Board watchdog (Phase 53g PR 6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog: Option<WatchdogConfig>,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     pub workspace_root: Option<PathBuf>,
@@ -1133,6 +1675,19 @@ impl Config {
                 .into());
             }
         }
+        let mut anima = std::collections::HashSet::new();
+        for source in &self.anima {
+            source.validate(&self.endpoints)?;
+            if !anima.insert(&source.source) {
+                return Err(AnimaConfigError::DuplicateSource {
+                    source_id: source.source.clone(),
+                }
+                .into());
+            }
+        }
+        if let Some(watchdog) = &self.watchdog {
+            watchdog.validate(&self.endpoints)?;
+        }
         let mut route_ids = std::collections::HashSet::new();
         for route in &self.routes {
             validate_key(&route.id)?;
@@ -1140,6 +1695,10 @@ impl Config {
             validate_key(&route.event_type)?;
             if !route_ids.insert(&route.id) {
                 return Err(Fault::invalid("event route IDs must be unique"));
+            }
+            if let Some(when) = &route.when {
+                when.validate("when")
+                    .map_err(|e| e.into_fault(&format!("route `{}`", route.id)))?;
             }
             match route.resolved_target()? {
                 RouteTarget::Automation { automation } => validate_key(&automation)?,

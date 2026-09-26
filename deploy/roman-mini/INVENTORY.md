@@ -23,10 +23,10 @@ Legend for **Status**:
 |---|---|---|---|---|---|
 | `daemon_credentials.py` | Resolves 1Password / file-based credentials into the environment for the daemon it `execve`s into (`runtime*`, `sessions`, `events`, now `core`); never writes secrets to disk. | in: `sys.argv[ROLE, ROOT]`, `op-service-account`, `anima-pat`, `secrets/board-*.json`; out: `execve`s `akhrtd`/`akhsessd`/`akheventd`/(soon) `akhomed` with an augmented env. | `dev.roman-akhs.events`, `.sessions`, `.runtime`, `.runtime-minerva`, `.runtime-vesta` (all exec through it) | drifted → synced (see below) | deploy tooling kept — this is exactly the credential-injection seam ADR 113 decision 10 asks the `core` plist to route through at cutover (53f) |
 | `janus_escalation.py` | Durable outbox broker: turns a `escalate_to_astra` / `dispatch_mergiraf` MCP tool call into a T3/Astra thread; the delivery survives T3 being offline. | in: MCP `tools/call` over loopback HTTP, `config/janus-escalation.json` (registered T3 project IDs), `secrets/janus-escalation.key`; out: T3 `/api/orchestration` thread/turn commands, `state/*.sqlite3` incident ledger. | `dev.roman-akhs.janus-escalation` | drifted → synced (see below); **converted (53g PR 7)** — replaced by the native `escalate` / `escalation_status` tools, the incident ledger and the `skills/astra-escalation` skillpack; kept until the verified Mac cutover ("PR 7 Mac-side steps" below), then deleted | Janus delegation (53e grants) + skill — **done** |
-| `laya_controller.py` | Durable event→classification→scoped-fixer controller: reads an observation queue (`state/laya-decisions.sqlite3`), classifies a blocker (product/execution/infrastructure/human/wait/investigate) and routes an intervention to the right role (`ROLE` map) or opens a mergiraf/Astra dispatch. Serves a small results API on `127.0.0.1:18447`. **`classify()` no longer calls the Laya model** (see "`laya_service.py` retired" below) — it returns `{'choice': 'investigate', 'classifier': 'retired', ...}` synchronously, and `CHOICES`/`digest`/`encoded` (formerly imported from `laya_service`) are now defined in this module. `config/laya.json`'s `model_revision` is still read unchanged (it participates in the decision id). Now installed with `configure_laya.py` on the system `python3` instead of the `experiments/` venv. | in: observations from `observer.py` (when `config/laya.json.event_only` is true), `secrets/laya-<role>.key`; out: `laya.<role>.intervention` outbox events, HTTP decisions API. | `dev.roman-akhs.laya-controller` (LaunchAgent) | in repo | Janus reactor + skill (plan's explicit step-2 item; PR 2 of that step retired the classifier first) |
+| `laya_controller.py` | **PR 6:** routing moved to data-driven `when` filters on akheventd routes (the `host_action` table, rendered by `full_akh.py`), the queue to the `roman-anima` source, the brief to the `laya-intervention` skillpack and `record_fixer_result` to a `roman-memory` 1.1.0 memory write (see "PR 6" below); retired at the PR 6 cutover, deleted after it is verified. Before PR 6: Durable event→classification→scoped-fixer controller: reads an observation queue (`state/laya-decisions.sqlite3`), classifies a blocker (product/execution/infrastructure/human/wait/investigate) and routes an intervention to the right role (`ROLE` map) or opens a mergiraf/Astra dispatch. Serves a small results API on `127.0.0.1:18447`. **`classify()` no longer calls the Laya model** (see "`laya_service.py` retired" below) — it returns `{'choice': 'investigate', 'classifier': 'retired', ...}` synchronously, and `CHOICES`/`digest`/`encoded` (formerly imported from `laya_service`) are now defined in this module. `config/laya.json`'s `model_revision` is still read unchanged (it participates in the decision id). Now installed with `configure_laya.py` on the system `python3` instead of the `experiments/` venv. | in: observations from `observer.py` (when `config/laya.json.event_only` is true), `secrets/laya-<role>.key`; out: `laya.<role>.intervention` outbox events, HTTP decisions API. | `dev.roman-akhs.laya-controller` (LaunchAgent) | in repo | Janus reactor + skill (plan's explicit step-2 item; PR 2 of that step retired the classifier first) |
 | `laya_service.py` | **Retired 2026-09-25** (Phase 53g step-2 plan, PR 2, operator decision D1). Was a resident, loopback-only classifier (`127.0.0.1:18446`) that scored blocker text against the 6 `CHOICES` with a local model and validated the returned probability simplex. **Rationale:** live decision-log evidence showed every one of the 52 complete-input classifications ended in `investigate` with near-uniform per-choice scores (0.10–0.24 against a uniform 1/6); every real route to `product` or `infrastructure` came from `laya_controller.py`'s `host_action` structural rules (which match Anima's phase/parked_reason/session fields), never from the model's score. Deleted from the repo; its `dev.roman-akhs.laya` LaunchAgent is booted out on the Mac side (see Mac-side steps below), not replaced. | — | `dev.roman-akhs.laya` (LaunchAgent, booted out) | retired | n/a — folded into `laya_controller.py`'s structural router, no successor process |
 | `mergiraf_worker.py` | **Not in repo before this pass.** Library (no server, no launchd entry) imported by `janus_escalation.py`; defines the `POLICY` prompt, JSON-schema `TOOLS` (`dispatch_mergiraf`, `mergiraf_status`) and `escalation()` builder for a bounded, typed merge-conflict-resolution job dispatched to an Astra/T3 worker via the same broker. | in: called in-process from `janus_escalation.Broker.submit_merge`; out: a T3 thread prompt + schema-validated job fields (work item, PR, head/base SHAs). | none (imported, not a service) | added; **converted (53g PR 7)** — replaced by the native `dispatch_merge_repair` tool and the `skills/mergiraf` skillpack (D4 in its procedures and in the `require_existing_branch` publication profile); kept until the verified Mac cutover, then deleted | Janus delegation (53e grants) + skill — **done** |
-| `observer.py` | **PR 5:** monitoring (health, Grafana, VictoriaMetrics) and the `monitoring_snapshot` MCP server moved to akheventd's `roman-alerts` monitor source + akhomed's native tool (see "PR 5" below); the watchdog reads `GET /v1/monitors/roman-alerts`. Before PR 5: polls Anima (rotating 8 projects/min), Grafana and VictoriaMetrics; maintains a deterministic watchdog signal, a durable outbox of `schedule.*`/`anima.*.changed`/`monitoring.changed` events, and (new) `laya.<role>.intervention` events when `event_only` mode is on; serves a read-only `monitoring_snapshot` MCP tool on `127.0.0.1:18436`. | in: Anima MCP, Grafana HTTPS, VictoriaMetrics via `127.0.0.1:18440` tunnel, `config/laya.json`; out: `state/observer.sqlite3` outbox/state, POSTs to akhsessd `127.0.0.1:18431`, board watchdog notices. | `dev.roman-akhs.observer` (LaunchAgent) | drifted → synced (see below) | event production → Rust `akheventd` source; monitoring snapshot → a Vesta tool (both named explicitly in the plan's step-2 list) |
+| `observer.py` | **PR 6:** the Anima scan and the watchdog moved into akheventd (`roman-anima` source, `watchdog`); retired at the PR 6 cutover, deleted after it is verified. **PR 5:** monitoring (health, Grafana, VictoriaMetrics) and the `monitoring_snapshot` MCP server moved to akheventd's `roman-alerts` monitor source + akhomed's native tool (see "PR 5" below); the watchdog reads `GET /v1/monitors/roman-alerts`. Before PR 5: polls Anima (rotating 8 projects/min), Grafana and VictoriaMetrics; maintains a deterministic watchdog signal, a durable outbox of `schedule.*`/`anima.*.changed`/`monitoring.changed` events, and (new) `laya.<role>.intervention` events when `event_only` mode is on; serves a read-only `monitoring_snapshot` MCP tool on `127.0.0.1:18436`. | in: Anima MCP, Grafana HTTPS, VictoriaMetrics via `127.0.0.1:18440` tunnel, `config/laya.json`; out: `state/observer.sqlite3` outbox/state, POSTs to akhsessd `127.0.0.1:18431`, board watchdog notices. | `dev.roman-akhs.observer` (LaunchAgent) | drifted → synced (see below) | event production → Rust `akheventd` source; monitoring snapshot → a Vesta tool (both named explicitly in the plan's step-2 list) |
 | `provider_failure.py` | Classifies a provider HTTP/error response into `authentication`/`quota`/`rate_limit`/`unknown` so `observer.py` and `janus_escalation.py` apply the right cooldown (30m/1h/2h/4h, or operator-repair-only for auth). | in: response text/status from a provider call; out: a classification tag consumed by callers. | none (imported library) | in repo | folds into akhomed's provider error taxonomy (explicit step-2 item) |
 | `t3_activity.py` | T3 ACP driver used as the transport for the "autonomous activity" provider instances (`roman-activity-<role>`); also runs as a background `--service` LaunchAgent. | in: T3 CLI invocation or `--service` mode; out: ACP session against akhsessd `127.0.0.1:18431`, reads `secrets/operator.key`. | `dev.roman-akhs.t3-activity` (LaunchAgent) | **retired 2026-09-25** (ADR 113 / 53g plan PR 1 — see below) | done — once T3 speaks ACP directly to akhomed there is no separate "activity" transport to shim |
 | `t3_entrypoint.py` | T3 ACP driver used as the transport for the three named Roman provider instances (`roman-janus`/`roman-minerva`/`roman-vesta`); dispatches on `sys.argv[0]`'s basename. | in: T3 CLI invocation, `secrets/t3-<role>.key`; out: `akh-acp` subprocess against `ws://127.0.0.1:18431/acp` (akhsessd) today. | n/a (invoked by T3, not launchd) | drifted → synced (see below); **also changed in this pass** — see "t3_entrypoint.py ACP endpoint" below | akhomed ACP once 53d/53f land; this pass adds the seam, doesn't flip the default |
@@ -915,3 +915,417 @@ and the core must both come from the PR 5 merge commit or later.
     The observer then probes Grafana with kubectl again. The D2 files can stay;
     nothing else reads them.
 
+## PR 6: the Anima scan and `laya_controller` become an akheventd source, reactors and a skill
+
+Per the [step-2 plan](../../docs/ai/plans/2026-09-25-phase53g-roman-glue-conversion.md)'s
+PR 6 (Anima WI `01a0d569-1cf1` item 5). The rollout has two stages: a
+**shadow** period of at least 48 h, then the **cutover**.
+
+**What moved.**
+
+- **akheventd `roman-anima` source** (`Config.anima`,
+  `crates/akh-session-services/src/anima_source.rs`; wire types in
+  `crates/akh-session-types/src/anima.rs`). It replaces `observer.py`'s
+  `scan_anima` and `laya_controller.py`'s queue and hydration.
+  - Every 60 s it visits 8 of the `status == active` projects (round robin;
+    the project list is refreshed every 900 s). For each project it lists work
+    items with cursor pagination (at most 32 pages; a repeated cursor or a
+    longer listing fails the pass) and lists plans.
+  - Each entity keeps one projection: the observer's `stable_item` fields.
+    Parked items are hydrated from their detail, forensics and sessions, and
+    get three extra fields:
+    - `park_episode`: the newest forensic `park` event, or else the
+      `parked_reason` and `phase_entered_at` values;
+    - `live_sessions`: the number of `provisioning`, `running` or `blocked`
+      sessions;
+    - `latest_thread_message_id`: the newest message with
+      `sender_type == human`.
+
+    Hydration is repeated when the listing row changes, or after 300 s. At
+    most 16 items are hydrated per poll.
+  - The first complete pass of a project is a silent baseline. After that,
+    each projection change is one `anima.work_item.changed` or
+    `anima.plan.changed` event. Its ID is
+    `<entity>@blake3(projection, revision)`, and its data is `AnimaChange`
+    (`entity`, `previous`, `current`, `park_episode`, `emission`,
+    `max_emissions`).
+  - **Emission cap:** each (entity, park episode) can emit at most 2 events,
+    which is laya's intervention budget. Later changes in the same episode are
+    suppressed. The cap state commits in the same store transaction as the
+    event and survives restarts. Capped entities appear in
+    `GET /v1/anima/roman-anima` (`attention`) and in the watchdog notice.
+  - **Shadow mode** (`shadow = true`, the default rendering): the source
+    advances projections and caps exactly as in live mode, but it records each
+    would-be event, together with the routes that would have delivered it, as
+    a `ShadowRecord` instead of ingesting it. The newest 10 000 records are
+    kept. They are served at
+    `GET /v1/anima/roman-anima/shadow?since_ms=&limit=`, to the
+    `monitoring-reader` (operator) principal and to an event principal granted
+    `roman-anima`.
+- **Routing is data** (`EventRoute.when`,
+  `crates/akh-session-services/src/route_filter.rs`). A route can carry a
+  JSON-pointer predicate over the event data. The operators are `eq`, `in`,
+  `prefix`, `exists`, `not`, `all` and `any`; they are validated with located
+  miette diagnostics. A route without `when` behaves exactly as before.
+  `full_akh.py` renders `laya_controller.host_action` as filters (the table
+  comment above `anima_route_filters`):
+
+  | `host_action` rule | Route |
+  |---|---|
+  | a plan changed | `minerva-anima.plan.changed` (no filter) |
+  | phase `done`/`cancelled`/`draft`, or any phase except `parked` | no route (every work-item route requires `parked`) |
+  | `parked_reason` `operator-hold` / `human-parked` | no route (excluded from Janus) |
+  | `parked_reason` starting with `gate-needs-human` | no route (excluded from Janus) |
+  | `ci-infra-failing`, `ci-toolchain-broken`, `lane-circuit-breaker*` | `vesta-anima.work_item.changed` (ignores live sessions, like `host_action`) |
+  | `live_sessions > 0` | no route (Minerva and Janus need `live_sessions == 0` or no count) |
+  | `too-big` | `minerva-anima.work_item.changed` |
+  | any other parked item | `janus-anima.work_item.changed` |
+
+  Parity: `test_anima_routing.py` runs `host_action` and the filters over
+  fixture snapshots that cover every branch. A replay over the live
+  `laya-decisions.sqlite3` on 2026-09-26 (read-only) matched all 201
+  recorded decisions: 120 to nobody, 63 to Janus, 16 to Minerva and 2 to
+  Vesta. The Rust and Python evaluators share
+  `fixtures/route_filter_cases.json`.
+- **Watchdog** (`Config.watchdog`, `crates/akh-session-services/src/watchdog.rs`).
+  It replaces `observer.py`'s `notify_watchdog`. Every 60 s it builds a
+  signal from:
+  - monitor availability: a reading older than 300 s counts as unavailable;
+    health states; and feed availability from PR 5;
+  - Anima source availability, mode and capped episodes;
+  - routes whose latest settled delivery was refused (anything but
+    `superseded`), and routes with a delivery still retrying after 3 attempts.
+
+  On a change it posts one `coordination/status@v1` notice (`blocked` when
+  degraded, otherwise `complete`) to the status thread `01a0ab49…`. It posts
+  as the observer's watchdog identity: `secrets/board-watchdog.json` becomes
+  `ROMAN_BOARD_WATCHDOG` in `daemon_credentials.py events`. A failed post is
+  retried with the same idempotency key. It is rendered only at the cutover,
+  because the observer keeps its own watchdog during the shadow period.
+
+  Not carried over: the observer's `activity_available`,
+  `provider_availability` and turn-level `workflow_failure` keys. PR 4's
+  `ProviderGate` in akhomed now owns provider availability. akheventd sees
+  deliveries, not turns.
+- **Reactors and skill.** `full_akh.py` renders the reactor seeds
+  `roman-<role>-anima.work_item.changed` for Janus, Minerva and Vesta, plus
+  `roman-minerva-anima.plan.changed`.
+  - **Wake prompt:** the role's wake prompt, then the `focus`, the role's
+    Laya `scope` and the `instruction` from
+    `deploy/roman-mini/skills/laya-intervention/prompts.json`. The prompt text
+    lives in the skillpack, not in Rust.
+  - **Exit condition and report:** each seed carries the skillpack's
+    `exit_condition` and `report_thread` = the status thread.
+  - **The skillpack** `laya-intervention` has `skill.json`, `procedures.md`
+    (the procedure plus the routing table), `actions.json` (actions with
+    preconditions and effects) and `triples.json` (the outcome vocabulary).
+    `configure_core.py` copies it into each Roman's engine skills directory
+    `core-data/akh-medu/workspaces/<r>/kg/skills/laya-intervention/`.
+  - **`record_fixer_result` becomes a memory write:** `memory_write` on the
+    event's `entity`, with `intervention_outcome` (`fix_applied`,
+    `human_required`, `waiting` or `blocked`) and `intervention_next_event`
+    (`human_reply`, `dependency_changed`, `lane_recovered`, `ci_completed`,
+    `review_completed`, `work_item_changed` or `none`).
+    `schemas/roman-memory.json` 1.1.0 declares both as single-valued and
+    temporal.
+  - **Wait guard:** the controller's wait guard is now step 2 of the
+    procedure (recall the prior outcome, and record a quiet check while the
+    awaited event has not happened), together with the human-only
+    `latest_thread_message_id`.
+- **Addenda:** `roles/addenda/common.md` now has a `{mcp_servers}` placeholder
+  that is filled with the MCP servers actually rendered for each role.
+
+**Behaviour differences, on purpose.**
+
+- The per-episode cap replaces laya's `no_verified_progress` and `stale`
+  states.
+- Parked items emit again only when their projection changes: a listed
+  field, a new park episode, a live-session count or a human reply. Laya
+  re-decided on any change to the full dossier (CI runs, PR state, akh
+  thread posts).
+- Plans have no cap. Laya's budget key made each plan's budget a lifetime 2.
+- The batched `anima.janus.changed` / `anima.minerva.changed` events were
+  already off in the live deployment (`config/laya.json` `event_only`). They
+  have no producer after the cutover.
+
+### Mac-side steps (not run by this pass)
+
+Deploy from `origin/main` only (`.claude/rules/deploy-from-main.md`). PR 5 must
+already be deployed. Set `ROOT="$HOME/Library/Application Support/roman-akhs"`
+and `REPO=<clean origin/main checkout>`.
+
+#### (a) Deploy akheventd and the core from main; enable shadow mode
+
+1. **Build** from a clean checkout of origin/main. Quote both provenance lines
+   in the deploy report.
+
+   ```sh
+   cd "$REPO" && git fetch origin && git checkout --detach origin/main
+   test -z "$(git status --porcelain)" && echo clean
+   git merge-base --is-ancestor HEAD origin/main && echo "HEAD $(git rev-parse --short=12 HEAD) is on origin/main"
+   SHA=$(git rev-parse --short=12 HEAD); export CARGO_TARGET_DIR="$REPO/target"
+   cargo build --release --locked --features server --bin akhomed --bin akh
+   cargo build --release --locked -p akh-session-services --features events --bin akheventd
+   ```
+
+   The `akh` CLI is the `akhc` of step (c). Only akheventd changes among the
+   session services (`EventRoute.when`,
+   `Config.anima` and `Config.watchdog` are optional).
+2. **Back up** everything this PR touches:
+
+   ```sh
+   BK="$ROOT/evidence/pr6-$(date +%s)"; mkdir -p "$BK"
+   cp -p "$ROOT/config/events.json" "$ROOT/config/core.json" "$ROOT/config/core-release.json" \
+     "$ROOT/bin/akheventd" "$ROOT/bin/daemon_credentials.py" "$BK/"
+   cp -a "$ROOT/config/reactor-seeds" "$BK/reactor-seeds"
+   cp -a "$ROOT/core-config/akh-medu/workspaces" "$BK/workspaces"
+   ```
+
+3. **Check the credentials** the events role now reads. Neither stops
+   akheventd if it is missing: the source reports itself unavailable, and the
+   watchdog retries.
+   - `secrets/anima-token` (mode 0600) already exists for the core
+     (53f). akheventd is a LaunchDaemon and cannot reach the keychain, so
+     the file is required.
+   - `secrets/board-watchdog.json` is the observer's watchdog identity.
+
+   Both are listed without printing them:
+
+   ```sh
+   ls -l "$ROOT/secrets/anima-token" "$ROOT/secrets/board-watchdog.json"
+   ```
+
+4. **Render in shadow mode** (the default):
+
+   ```sh
+   python3 "$REPO/deploy/roman-mini/configure_core.py" --root "$ROOT" \
+     --binaries "$CARGO_TARGET_DIR/release" --repo "$REPO"
+   ```
+
+   The output must end with `roman-anima source: shadow`. This run:
+   - stages `config/events.akh-target.json` with the `roman-anima` source
+     (`shadow: true`), the `anima` endpoint (`token_env ROMAN_ANIMA_TOKEN`)
+     and the four filtered routes, and keeps the legacy `laya-*` and
+     `*-anima.<role>.changed` routes;
+   - renders the new reactor seeds into `config/reactor-seeds/`;
+   - copies `daemon_credentials.py` into `bin/`;
+   - copies the skillpack into each Roman's `kg/skills/`.
+5. **Install the events config** with
+   `python3 "$REPO/deploy/roman-mini/retarget_events.py" "$ROOT"`. The output
+   lists the three `*-anima.work_item.changed` routes and
+   `minerva-anima.plan.changed`.
+6. **Stage the new seeds** (added disabled; existing ones are skipped):
+   `python3 "$REPO/deploy/roman-mini/apply_reactor_seeds.py" "$ROOT"`. Do not
+   run `--enable` yet. In shadow mode nothing is delivered, so a disabled
+   seed changes nothing.
+7. **Install akheventd.** It is a system LaunchDaemon, so this needs sudo:
+
+   ```sh
+   git -C "$REPO" merge-base --is-ancestor "$SHA" origin/main && echo "akheventd $SHA on origin/main"
+   sudo launchctl bootout system/dev.roman-akhs.events
+   install -m 755 "$CARGO_TARGET_DIR/release/akheventd" "$ROOT/bin/akheventd"
+   shasum -a 256 "$ROOT/bin/akheventd" > "$ROOT/evidence/akheventd-main-$SHA.sha256"
+   sudo launchctl bootstrap system /Library/LaunchDaemons/dev.roman-akhs.events.plist
+   ```
+
+8. **Restart the core** (new binary, new addenda text):
+   `kill $(pgrep -f akhomed-main-)`. KeepAlive brings it back.
+9. **Verify shadow mode.** Within about 5 minutes (27 projects, 8 per poll),
+   `GET /v1/anima/roman-anima` shows `ok: true`, `shadow: true` and every
+   project `baselined: true`, with `counters.emitted` equal to 0:
+
+   ```sh
+   RK="$(cat "$ROOT/secrets/monitoring-reader.key")"
+   curl -s -H "Authorization: Bearer $RK" http://127.0.0.1:18435/v1/anima/roman-anima | python3 -m json.tool | head -40
+   ```
+
+   `logs/events.err.log` must show no `anima poll deferred` line. The
+   observer and laya-controller keep running unchanged.
+
+#### (b) The 48 h comparison
+
+1. **Structural parity**, which needs no waiting:
+   `python3 "$REPO/deploy/roman-mini/compare_anima_shadow.py" --replay`. It
+   replays the rendered filters over every snapshot Laya recorded and must
+   report `N/N` with no `MISMATCH` line (201/201 on 2026-09-26).
+2. **Shadow against Laya** after at least 48 h:
+
+   ```sh
+   python3 "$REPO/deploy/roman-mini/compare_anima_shadow.py" --hours 48
+   ```
+
+   Both databases are opened read-only (`mode=ro`):
+   `state/laya-decisions.sqlite3` and `state/events/akheventd.sqlite3`. To
+   use a saved `GET …/shadow` body instead of the store, pass
+   `--shadow-json FILE`.
+
+   **The gate:**
+   - `same roles` equals `routed by both`, and there is no `MISMATCH` line
+     (exit status 0).
+   - Entities listed as `laya_only` or `shadow_only` come from cadence, not
+     routing. Laya re-queues a parked item every 5 minutes and re-decides on
+     dossier changes, while the source emits on projection changes and caps
+     each episode at 2. Spot-check each listed entity: for `laya_only`, check
+     `GET /v1/anima/roman-anima` `attention` or an unchanged projection; for
+     `shadow_only`, check whether Laya's queue simply had not reached it.
+
+   Any `MISMATCH` stops the rollout. Fix the filter table in `full_akh.py`,
+   regenerate the fixture (`python3 test_anima_routing.py --regenerate`),
+   merge, and redeploy the shadow stage.
+
+#### (c) Cutover
+
+Run these in order. The seeds must be enabled before akheventd starts
+delivering, because an admitted event with no enabled schedule is a terminal
+`no_subscriber`.
+
+1. **Render live:**
+
+   ```sh
+   python3 "$REPO/deploy/roman-mini/configure_core.py" --root "$ROOT" \
+     --binaries "$CARGO_TARGET_DIR/release" --repo "$REPO" --live
+   ```
+
+   The output must end with `roman-anima source: LIVE (cutover)`. This run:
+   - sets `shadow: false`;
+   - adds the `watchdog` and the `board-watchdog` endpoint
+     (`token_env ROMAN_BOARD_WATCHDOG`);
+   - drops the `laya-*` and `*-anima.<role>.changed` routes and lists their
+     schedules under `remove` in each seeds file;
+   - drops `[[mcp.servers]] laya` and the `observer_status_file` key of
+     `[monitoring]`.
+2. **Install roman-memory 1.1.0** (see CUTOVER.md step 10 for `akhc`):
+
+   ```sh
+   akhc schema compile "$REPO/deploy/roman-mini/schemas/roman-memory.json" --out "$BK/roman-memory-1.1.0.akhschema"
+   akhc schema show "$BK/roman-memory-1.1.0.akhschema"      # review: intervention_outcome, intervention_next_event
+   akhc schema admit "$BK/roman-memory-1.1.0.akhschema" --yes
+   for r in janus minerva vesta; do akhc -w $r schema install roman-memory@1.1.0; done
+   ```
+
+3. **Enable the new seeds and remove the retired ones:**
+
+   ```sh
+   python3 "$REPO/deploy/roman-mini/apply_reactor_seeds.py" "$ROOT"            # adds anything new
+   python3 "$REPO/deploy/roman-mini/apply_reactor_seeds.py" "$ROOT" --enable   # includes the anima seeds
+   python3 "$REPO/deploy/roman-mini/apply_reactor_seeds.py" "$ROOT" --remove-retired
+   ```
+
+   `--remove-retired` removes `roman-laya-<role>` and
+   `roman-{janus,minerva}-anima.<role>.changed`.
+4. **Stop the observer and the laya-controller.** Both are LaunchAgents, so
+   no sudo is needed. Keep their plists as evidence so they do not reload at
+   login:
+
+   ```sh
+   launchctl bootout gui/501/dev.roman-akhs.observer
+   launchctl bootout gui/501/dev.roman-akhs.laya-controller
+   mv ~/Library/LaunchAgents/dev.roman-akhs.observer.plist ~/Library/LaunchAgents/dev.roman-akhs.laya-controller.plist "$BK/"
+   ```
+
+   `bin/observer.py`, `bin/laya_controller.py` and their databases stay until
+   the cutover is verified.
+5. **Install the live events config and restart akheventd:**
+
+   ```sh
+   python3 "$REPO/deploy/roman-mini/retarget_events.py" "$ROOT"
+   sudo launchctl bootout system/dev.roman-akhs.events
+   sudo launchctl bootstrap system /Library/LaunchDaemons/dev.roman-akhs.events.plist
+   ```
+
+6. **Restart the core** so it loads the workspaces without the `laya` server:
+   `kill $(pgrep -f akhomed-main-)`.
+7. **Activate the skillpack** in each Roman, then check that it is `Hot`:
+
+   ```sh
+   for r in janus minerva vesta; do
+     akhc -w $r acp skill activate laya-intervention
+     akhc -w $r acp skill inspect laya-intervention
+   done
+   ```
+
+   If `inspect` says the skill is unknown, check that
+   `core-data/akh-medu/workspaces/$r/kg/skills/laya-intervention/skill.json`
+   exists, then restart the core again (skills are discovered at start).
+
+#### (d) Verification
+
+The source visits every project within about 4 minutes. Deliveries are read
+with the operator key
+(`OK="$(cat "$ROOT/secrets/operator.key")"; curl -s -H "Authorization: Bearer $OK" http://127.0.0.1:18435/v1/deliveries`).
+
+1. **A parked `too-big` WI wakes Minerva.** Take a WI that is parked with
+   `parked_reason` `too-big` (an `anima-canary` one if there is one) and edit
+   its title in Anima. One delivery on route
+   `minerva-anima.work_item.changed` should appear, with
+   `event_admission.schedules_woken` = `["roman-minerva-anima.work_item.changed"]`.
+   Its `request.event.data.current.parked_reason` is `too-big`.
+2. **`ci-infra-failing` wakes Vesta.** Do the same with a WI parked
+   `ci-infra-failing`: one delivery on `vesta-anima.work_item.changed`, even
+   when the WI has a live session.
+3. **A held WI wakes nobody.** Edit the title of a WI parked `operator-hold`.
+   The event is recorded with no delivery:
+
+   ```sh
+   sqlite3 "file:$ROOT/state/events/akheventd.sqlite3?mode=ro" \
+     "select json_extract(cast(value as text),'$.event.occurred_at'), json_extract(cast(value as text),'$.deliveries')
+      from records_v1 where key like 'ingress/11:roman-anima%'
+      and cast(value as text) like '%\"subject\":\"work_item:<wi-id>\"%' order by 1 desc limit 1"
+   ```
+
+   The newest row ends in `[]`, and `/v1/deliveries` has nothing new for
+   that entity.
+4. **The third emission in an episode is suppressed and appears in the
+   watchdog.** Edit the title of the `too-big` WI from check 1 twice more,
+   waiting for one project visit (about 4 minutes) between edits. The first
+   edit (the second emission) delivers. The next one does not.
+   `GET /v1/anima/roman-anima` then lists the entity under `attention` with
+   `suppressed: 1`. Within 60 s the status thread gets a watchdog notice with
+   `state: blocked` whose `anima.roman-anima.attention` contains the entity.
+5. **The reactor report reaches the Board.** The Minerva run from check 1
+   posts `coordination/status@v1` to the status thread (its `report_thread`),
+   and `akhc -w minerva acp query "SELECT ?o WHERE { ?s ?p ?o }"` (narrowed to
+   the entity) shows `intervention_outcome` and `intervention_next_event`
+   for `work_item:<id>`.
+6. **The watchdog is healthy.** `logs/events.err.log` shows no
+   `watchdog notice deferred` line, and there is no second watchdog poster on
+   the thread (the observer is stopped).
+
+#### (e) Rollback
+
+- **During shadow mode** (before (c)): restore `$BK/events.json` to
+  `config/events.json` and `$BK/akheventd` to `bin/akheventd`, then restart
+  akheventd (`sudo launchctl bootout` and then `bootstrap`
+  `system/dev.roman-akhs.events`). The observer and laya-controller never
+  stopped. The staged seeds are disabled and harmless; remove them with
+  `reactor_manage remove` if wanted.
+- **After the cutover:**
+  1. Restore these from `$BK`: `events.json`, `core.json`,
+     `core-release.json`, the `workspaces` directory, the `reactor-seeds`
+     directory, `akheventd` and `daemon_credentials.py`.
+  2. Disable the new seeds. For each role, call `reactor_manage` with
+     `disable` `roman-<role>-anima.work_item.changed` (and
+     `roman-minerva-anima.plan.changed`) through `/v1/tools/call`.
+  3. Re-add and re-enable the legacy seeds from the restored files: run
+     `apply_reactor_seeds.py "$ROOT"`, then again with `--enable`.
+  4. Put the observer and laya-controller plists back into
+     `~/Library/LaunchAgents/`, then run
+     `launchctl bootstrap gui/501 ~/Library/LaunchAgents/dev.roman-akhs.observer.plist`
+     and the same for `dev.roman-akhs.laya-controller.plist`.
+  5. Restart akheventd (sudo) and the core.
+
+  roman-memory 1.1.0 can stay installed: its two predicates are additive.
+
+**After a verified cutover (a follow-up PR, not this one):**
+
+- In the repo, delete `observer.py`, `laya_controller.py`, `configure_laya.py`,
+  `test_observer.py` and `test_laya_controller.py`. Also delete the `laya` and
+  `changes` route kinds, the `observer` and `laya` entries in
+  `SERVER_ENDPOINTS`/`COMMON_SERVERS`, and `OBSERVER_STATUS_FILE` from
+  `full_akh.py`.
+- On the Mac, remove `bin/observer.py`, `bin/laya_controller.py`,
+  `secrets/laya-*.key` and `secrets/observer-tool.key`. Archive
+  `state/observer.sqlite3` and `state/laya-decisions.sqlite3` to `evidence/`.
+- The `monitoring_snapshot` tool then has no observer status keys. The Anima
+  coverage it used to carry is at `GET /v1/anima/roman-anima`. Extending the
+  tool to read it is a separate item.

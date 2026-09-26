@@ -137,10 +137,7 @@ impl Events {
                 return Ok(old);
             }
             let mut deliveries = vec![];
-            for route in &self.config.routes {
-                if route.source != event.source || route.event_type != event.event_type {
-                    continue;
-                }
+            for route in self.matching_routes(&event) {
                 let id = crate::digest(
                     key("delivery", &[&event.source, &event.id, &route.id]).as_bytes(),
                 );
@@ -172,6 +169,18 @@ impl Events {
             tx.put(&k, &receipt)?;
             Ok(receipt)
         }
+    }
+    /// The routes that deliver `event`: matching source and type, and a
+    /// satisfied `when` filter (Phase 53g PR 6). An event no route matches is
+    /// still recorded, with no deliveries.
+    pub fn matching_routes<'a>(
+        &'a self,
+        event: &'a EventEnvelope,
+    ) -> impl Iterator<Item = &'a crate::config::EventRoute> + 'a {
+        self.config
+            .routes
+            .iter()
+            .filter(move |route| route.matches(event))
     }
     pub(crate) fn coalesce_pending(&self) -> Result<()> {
         self.store.transaction(|tx| {
@@ -267,6 +276,14 @@ impl Events {
         for source in self.config.monitors.clone() {
             let service = self.clone();
             tokio::spawn(crate::monitor::run(service, source));
+        }
+        for source in self.config.anima.clone() {
+            let service = self.clone();
+            tokio::spawn(crate::anima_source::run(service, source));
+        }
+        if let Some(watchdog) = self.config.watchdog.clone() {
+            let service = self.clone();
+            tokio::spawn(crate::watchdog::run(service, watchdog));
         }
         for source in self.config.djehuty_inboxes.clone() {
             if !source.enabled {

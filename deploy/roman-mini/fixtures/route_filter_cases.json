@@ -1,0 +1,5955 @@
+{
+ "cases": [
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": true,
+   "filter": {
+    "eq": {
+     "pointer": "/current/current_phase",
+     "value": "parked"
+    }
+   },
+   "name": "eq string"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": false,
+   "filter": {
+    "eq": {
+     "pointer": "/current/current_phase",
+     "value": "working"
+    }
+   },
+   "name": "eq other string"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": true,
+   "filter": {
+    "eq": {
+     "pointer": "/current/live_sessions",
+     "value": 0
+    }
+   },
+   "name": "eq int"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": false,
+   "filter": {
+    "eq": {
+     "pointer": "/current/live_sessions",
+     "value": 0.0
+    }
+   },
+   "name": "eq int vs float"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": false,
+   "filter": {
+    "eq": {
+     "pointer": "/current/live_sessions",
+     "value": false
+    }
+   },
+   "name": "eq int vs bool"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": false,
+   "filter": {
+    "eq": {
+     "pointer": "/current/missing",
+     "value": null
+    }
+   },
+   "name": "eq missing"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": true,
+   "filter": {
+    "eq": {
+     "pointer": "/current/nothing",
+     "value": null
+    }
+   },
+   "name": "eq null"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": true,
+   "filter": {
+    "in": {
+     "pointer": "/current/current_phase",
+     "values": [
+      "draft",
+      "parked"
+     ]
+    }
+   },
+   "name": "in hit"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": false,
+   "filter": {
+    "in": {
+     "pointer": "/current/parked_reason",
+     "values": [
+      "too-big"
+     ]
+    }
+   },
+   "name": "in miss"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": true,
+   "filter": {
+    "prefix": {
+     "pointer": "/current/parked_reason",
+     "value": "lane-circuit-breaker"
+    }
+   },
+   "name": "prefix hit"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": false,
+   "filter": {
+    "prefix": {
+     "pointer": "/current/live_sessions",
+     "value": "0"
+    }
+   },
+   "name": "prefix on number"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": true,
+   "filter": {
+    "exists": {
+     "pointer": "/current/flags/a~1b"
+    }
+   },
+   "name": "exists escaped slash"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": true,
+   "filter": {
+    "eq": {
+     "pointer": "/current/flags/t~0x",
+     "value": 1
+    }
+   },
+   "name": "eq escaped tilde"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": false,
+   "filter": {
+    "exists": {
+     "pointer": "/current/nothing"
+    }
+   },
+   "name": "exists null"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": false,
+   "filter": {
+    "exists": {
+     "pointer": "/current/missing"
+    }
+   },
+   "name": "exists missing"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": true,
+   "filter": {
+    "eq": {
+     "pointer": "/current/list/1",
+     "value": "y"
+    }
+   },
+   "name": "array index"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": false,
+   "filter": {
+    "exists": {
+     "pointer": "/current/list/01"
+    }
+   },
+   "name": "array leading zero"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": true,
+   "filter": {
+    "not": {
+     "eq": {
+      "pointer": "/current/missing",
+      "value": "x"
+     }
+    }
+   },
+   "name": "not missing eq"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "exists": {
+       "pointer": "/current/parked_reason"
+      }
+     }
+    ]
+   },
+   "name": "all"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "exists": {
+       "pointer": "/current/missing"
+      }
+     }
+    ]
+   },
+   "name": "all one false"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": true,
+   "filter": {
+    "any": [
+     {
+      "exists": {
+       "pointer": "/current/missing"
+      }
+     },
+     {
+      "eq": {
+       "pointer": "/current/live_sessions",
+       "value": 0
+      }
+     }
+    ]
+   },
+   "name": "any"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "flags": {
+      "a/b": true,
+      "t~x": 1
+     },
+     "list": [
+      "x",
+      "y"
+     ],
+     "live_sessions": 0,
+     "nothing": null,
+     "parked_reason": "lane-circuit-breaker: 3"
+    }
+   },
+   "expected": true,
+   "filter": {
+    "exists": {
+     "pointer": ""
+    }
+   },
+   "name": "whole document"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "draft",
+     "id": "w1",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w1",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action draft -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "draft",
+     "id": "w1",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w1",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action draft -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "draft",
+     "id": "w1",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w1",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action draft -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "draft",
+     "id": "w2",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w2",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action draft-blocked -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "draft",
+     "id": "w2",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w2",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action draft-blocked -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "draft",
+     "id": "w2",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w2",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action draft-blocked -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "done",
+     "id": "w3",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w3",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action done -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "done",
+     "id": "w3",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w3",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action done -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "done",
+     "id": "w3",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w3",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action done -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "cancelled",
+     "id": "w4",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w4",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action cancelled -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "cancelled",
+     "id": "w4",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w4",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action cancelled -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "cancelled",
+     "id": "w4",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w4",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action cancelled -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "working",
+     "id": "w5",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w5",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action working -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "working",
+     "id": "w5",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w5",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action working -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "working",
+     "id": "w5",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w5",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action working -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "ready",
+     "id": "w6",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w6",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action ready -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "ready",
+     "id": "w6",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w6",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action ready -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "ready",
+     "id": "w6",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w6",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action ready -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "testing",
+     "id": "w7",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w7",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action testing -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "testing",
+     "id": "w7",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w7",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action testing -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "testing",
+     "id": "w7",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w7",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action testing -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "working",
+     "id": "w8",
+     "live_sessions": 1
+    },
+    "entity": "work_item:w8",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action working-live -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "working",
+     "id": "w8",
+     "live_sessions": 1
+    },
+    "entity": "work_item:w8",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action working-live -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "working",
+     "id": "w8",
+     "live_sessions": 1
+    },
+    "entity": "work_item:w8",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action working-live -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "ready",
+     "id": "w9",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w9",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action ready-blocked -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "ready",
+     "id": "w9",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w9",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action ready-blocked -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "ready",
+     "id": "w9",
+     "live_sessions": 0
+    },
+    "entity": "work_item:w9",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action ready-blocked -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "working",
+     "id": "w10",
+     "live_sessions": 0,
+     "parked_reason": "operator-hold"
+    },
+    "entity": "work_item:w10",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action working-with-hold-reason-text -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "working",
+     "id": "w10",
+     "live_sessions": 0,
+     "parked_reason": "operator-hold"
+    },
+    "entity": "work_item:w10",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action working-with-hold-reason-text -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "working",
+     "id": "w10",
+     "live_sessions": 0,
+     "parked_reason": "operator-hold"
+    },
+    "entity": "work_item:w10",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action working-with-hold-reason-text -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w11",
+     "live_sessions": 0,
+     "parked_reason": null
+    },
+    "entity": "work_item:w11",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-null-reason -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w11",
+     "live_sessions": 0,
+     "parked_reason": null
+    },
+    "entity": "work_item:w11",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-null-reason -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w11",
+     "live_sessions": 0,
+     "parked_reason": null
+    },
+    "entity": "work_item:w11",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-null-reason -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w12",
+     "live_sessions": 0,
+     "parked_reason": null
+    },
+    "entity": "work_item:w12",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-null-reason-blocked -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w12",
+     "live_sessions": 0,
+     "parked_reason": null
+    },
+    "entity": "work_item:w12",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-null-reason-blocked -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w12",
+     "live_sessions": 0,
+     "parked_reason": null
+    },
+    "entity": "work_item:w12",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-null-reason-blocked -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w13",
+     "live_sessions": 0,
+     "parked_reason": "no-progress"
+    },
+    "entity": "work_item:w13",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-no-progress -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w13",
+     "live_sessions": 0,
+     "parked_reason": "no-progress"
+    },
+    "entity": "work_item:w13",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-no-progress -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w13",
+     "live_sessions": 0,
+     "parked_reason": "no-progress"
+    },
+    "entity": "work_item:w13",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-no-progress -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w14",
+     "live_sessions": 0,
+     "parked_reason": "retry-budget"
+    },
+    "entity": "work_item:w14",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-retry-budget -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w14",
+     "live_sessions": 0,
+     "parked_reason": "retry-budget"
+    },
+    "entity": "work_item:w14",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-retry-budget -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w14",
+     "live_sessions": 0,
+     "parked_reason": "retry-budget"
+    },
+    "entity": "work_item:w14",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-retry-budget -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w15",
+     "live_sessions": 0,
+     "parked_reason": "rebase-conflict"
+    },
+    "entity": "work_item:w15",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-rebase-conflict-missing -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w15",
+     "live_sessions": 0,
+     "parked_reason": "rebase-conflict"
+    },
+    "entity": "work_item:w15",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-rebase-conflict-missing -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w15",
+     "live_sessions": 0,
+     "parked_reason": "rebase-conflict"
+    },
+    "entity": "work_item:w15",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-rebase-conflict-missing -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w16",
+     "live_sessions": 0,
+     "parked_reason": "turn-failure: error (Pre-push test failure (diff hash: 2fb9b2cf))"
+    },
+    "entity": "work_item:w16",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-turn-failure-prose -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w16",
+     "live_sessions": 0,
+     "parked_reason": "turn-failure: error (Pre-push test failure (diff hash: 2fb9b2cf))"
+    },
+    "entity": "work_item:w16",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-turn-failure-prose -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w16",
+     "live_sessions": 0,
+     "parked_reason": "turn-failure: error (Pre-push test failure (diff hash: 2fb9b2cf))"
+    },
+    "entity": "work_item:w16",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-turn-failure-prose -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w17",
+     "live_sessions": 0,
+     "parked_reason": "no-new-commits-loop: 3 consecutive sessions with no commits"
+    },
+    "entity": "work_item:w17",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-no-new-commits-loop -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w17",
+     "live_sessions": 0,
+     "parked_reason": "no-new-commits-loop: 3 consecutive sessions with no commits"
+    },
+    "entity": "work_item:w17",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-no-new-commits-loop -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w17",
+     "live_sessions": 0,
+     "parked_reason": "no-new-commits-loop: 3 consecutive sessions with no commits"
+    },
+    "entity": "work_item:w17",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-no-new-commits-loop -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w18",
+     "live_sessions": 0,
+     "parked_reason": "operator-hold"
+    },
+    "entity": "work_item:w18",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-operator-hold -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w18",
+     "live_sessions": 0,
+     "parked_reason": "operator-hold"
+    },
+    "entity": "work_item:w18",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-operator-hold -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w18",
+     "live_sessions": 0,
+     "parked_reason": "operator-hold"
+    },
+    "entity": "work_item:w18",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-operator-hold -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w19",
+     "live_sessions": 1,
+     "parked_reason": "operator-hold"
+    },
+    "entity": "work_item:w19",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-operator-hold-live -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w19",
+     "live_sessions": 1,
+     "parked_reason": "operator-hold"
+    },
+    "entity": "work_item:w19",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-operator-hold-live -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w19",
+     "live_sessions": 1,
+     "parked_reason": "operator-hold"
+    },
+    "entity": "work_item:w19",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-operator-hold-live -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w20",
+     "live_sessions": 0,
+     "parked_reason": "human-parked"
+    },
+    "entity": "work_item:w20",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-human-parked -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w20",
+     "live_sessions": 0,
+     "parked_reason": "human-parked"
+    },
+    "entity": "work_item:w20",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-human-parked -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w20",
+     "live_sessions": 0,
+     "parked_reason": "human-parked"
+    },
+    "entity": "work_item:w20",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-human-parked -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w21",
+     "live_sessions": 0,
+     "parked_reason": "gate-needs-human"
+    },
+    "entity": "work_item:w21",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-gate-needs-human -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w21",
+     "live_sessions": 0,
+     "parked_reason": "gate-needs-human"
+    },
+    "entity": "work_item:w21",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-gate-needs-human -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w21",
+     "live_sessions": 0,
+     "parked_reason": "gate-needs-human"
+    },
+    "entity": "work_item:w21",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-gate-needs-human -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w22",
+     "live_sessions": 0,
+     "parked_reason": "gate-needs-human: ai review exhausted"
+    },
+    "entity": "work_item:w22",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-gate-needs-human-suffix -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w22",
+     "live_sessions": 0,
+     "parked_reason": "gate-needs-human: ai review exhausted"
+    },
+    "entity": "work_item:w22",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-gate-needs-human-suffix -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w22",
+     "live_sessions": 0,
+     "parked_reason": "gate-needs-human: ai review exhausted"
+    },
+    "entity": "work_item:w22",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-gate-needs-human-suffix -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w23",
+     "live_sessions": 0,
+     "parked_reason": "ci-infra-failing"
+    },
+    "entity": "work_item:w23",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-ci-infra-failing -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w23",
+     "live_sessions": 0,
+     "parked_reason": "ci-infra-failing"
+    },
+    "entity": "work_item:w23",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-ci-infra-failing -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w23",
+     "live_sessions": 0,
+     "parked_reason": "ci-infra-failing"
+    },
+    "entity": "work_item:w23",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-ci-infra-failing -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w24",
+     "live_sessions": 1,
+     "parked_reason": "ci-infra-failing"
+    },
+    "entity": "work_item:w24",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-ci-infra-failing-live -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w24",
+     "live_sessions": 1,
+     "parked_reason": "ci-infra-failing"
+    },
+    "entity": "work_item:w24",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-ci-infra-failing-live -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w24",
+     "live_sessions": 1,
+     "parked_reason": "ci-infra-failing"
+    },
+    "entity": "work_item:w24",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-ci-infra-failing-live -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w25",
+     "live_sessions": 0,
+     "parked_reason": "ci-toolchain-broken"
+    },
+    "entity": "work_item:w25",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-ci-toolchain-broken -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w25",
+     "live_sessions": 0,
+     "parked_reason": "ci-toolchain-broken"
+    },
+    "entity": "work_item:w25",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-ci-toolchain-broken -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w25",
+     "live_sessions": 0,
+     "parked_reason": "ci-toolchain-broken"
+    },
+    "entity": "work_item:w25",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-ci-toolchain-broken -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w26",
+     "live_sessions": 0,
+     "parked_reason": "lane-circuit-breaker: 3 lane dispatch failures (executor faults)"
+    },
+    "entity": "work_item:w26",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-lane-circuit-breaker -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w26",
+     "live_sessions": 0,
+     "parked_reason": "lane-circuit-breaker: 3 lane dispatch failures (executor faults)"
+    },
+    "entity": "work_item:w26",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-lane-circuit-breaker -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w26",
+     "live_sessions": 0,
+     "parked_reason": "lane-circuit-breaker: 3 lane dispatch failures (executor faults)"
+    },
+    "entity": "work_item:w26",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-lane-circuit-breaker -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w27",
+     "live_sessions": 0,
+     "parked_reason": "too-big"
+    },
+    "entity": "work_item:w27",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-too-big -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w27",
+     "live_sessions": 0,
+     "parked_reason": "too-big"
+    },
+    "entity": "work_item:w27",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-too-big -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w27",
+     "live_sessions": 0,
+     "parked_reason": "too-big"
+    },
+    "entity": "work_item:w27",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-too-big -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w28",
+     "live_sessions": 0,
+     "parked_reason": "too-big"
+    },
+    "entity": "work_item:w28",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-too-big-missing -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w28",
+     "live_sessions": 0,
+     "parked_reason": "too-big"
+    },
+    "entity": "work_item:w28",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-too-big-missing -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w28",
+     "live_sessions": 0,
+     "parked_reason": "too-big"
+    },
+    "entity": "work_item:w28",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-too-big-missing -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w29",
+     "live_sessions": 1,
+     "parked_reason": "too-big"
+    },
+    "entity": "work_item:w29",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-too-big-live -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w29",
+     "live_sessions": 1,
+     "parked_reason": "too-big"
+    },
+    "entity": "work_item:w29",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-too-big-live -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w29",
+     "live_sessions": 1,
+     "parked_reason": "too-big"
+    },
+    "entity": "work_item:w29",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-too-big-live -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w30",
+     "live_sessions": 1,
+     "parked_reason": "no-progress"
+    },
+    "entity": "work_item:w30",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-no-progress-live -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w30",
+     "live_sessions": 1,
+     "parked_reason": "no-progress"
+    },
+    "entity": "work_item:w30",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-no-progress-live -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w30",
+     "live_sessions": 1,
+     "parked_reason": "no-progress"
+    },
+    "entity": "work_item:w30",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-no-progress-live -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w31",
+     "parked_reason": "no-progress"
+    },
+    "entity": "work_item:w31",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-sessions-unreadable -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w31",
+     "parked_reason": "no-progress"
+    },
+    "entity": "work_item:w31",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-sessions-unreadable -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w31",
+     "parked_reason": "no-progress"
+    },
+    "entity": "work_item:w31",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-sessions-unreadable -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w32",
+     "live_sessions": 0,
+     "parked_reason": "too-big-for-lane"
+    },
+    "entity": "work_item:w32",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-too-big-prefix-lookalike -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w32",
+     "live_sessions": 0,
+     "parked_reason": "too-big-for-lane"
+    },
+    "entity": "work_item:w32",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-too-big-prefix-lookalike -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w32",
+     "live_sessions": 0,
+     "parked_reason": "too-big-for-lane"
+    },
+    "entity": "work_item:w32",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-too-big-prefix-lookalike -> janus"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w33",
+     "live_sessions": 0,
+     "parked_reason": "ci-infra-failing-soon"
+    },
+    "entity": "work_item:w33",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "in": {
+         "pointer": "/current/parked_reason",
+         "values": [
+          "ci-infra-failing",
+          "ci-toolchain-broken"
+         ]
+        }
+       },
+       {
+        "prefix": {
+         "pointer": "/current/parked_reason",
+         "value": "lane-circuit-breaker"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-ci-infra-lookalike -> vesta"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w33",
+     "live_sessions": 0,
+     "parked_reason": "ci-infra-failing-soon"
+    },
+    "entity": "work_item:w33",
+    "kind": "work_item"
+   },
+   "expected": false,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "in": {
+       "pointer": "/current/parked_reason",
+       "values": [
+        "too-big"
+       ]
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "name": "host_action parked-ci-infra-lookalike -> minerva"
+  },
+  {
+   "data": {
+    "current": {
+     "current_phase": "parked",
+     "id": "w33",
+     "live_sessions": 0,
+     "parked_reason": "ci-infra-failing-soon"
+    },
+    "entity": "work_item:w33",
+    "kind": "work_item"
+   },
+   "expected": true,
+   "filter": {
+    "all": [
+     {
+      "eq": {
+       "pointer": "/current/current_phase",
+       "value": "parked"
+      }
+     },
+     {
+      "any": [
+       {
+        "eq": {
+         "pointer": "/current/live_sessions",
+         "value": 0
+        }
+       },
+       {
+        "not": {
+         "exists": {
+          "pointer": "/current/live_sessions"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "not": {
+       "any": [
+        {
+         "in": {
+          "pointer": "/current/parked_reason",
+          "values": [
+           "operator-hold",
+           "human-parked",
+           "ci-infra-failing",
+           "ci-toolchain-broken",
+           "too-big"
+          ]
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "gate-needs-human"
+         }
+        },
+        {
+         "prefix": {
+          "pointer": "/current/parked_reason",
+          "value": "lane-circuit-breaker"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "name": "host_action parked-ci-infra-lookalike -> janus"
+  }
+ ],
+ "comment": "Shared by route_filter.rs and test_anima_routing.py; regenerate with `python3 test_anima_routing.py --regenerate`."
+}
