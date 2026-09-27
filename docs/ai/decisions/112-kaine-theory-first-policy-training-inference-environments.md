@@ -142,7 +142,11 @@ P7.12 adds `theory_first` next to the emergent-property-bug and act-to-perceive 
 the KG is seeded with majority evidence for X; the engine-owned mechanism makes ¬X true on a hidden fluent. The correct
 trajectory is `conjecture → predict → intervene → observe → revise → next experiment`; the passive control answers from
 retrieval. A retrieval-only attempt trains at weight 0 with the theory-first trajectory as its corrected sibling. Disposition
-labels: Curiosity (Explorer), Courage (Rebel), Rigor (Sage). Sentinel decontamination applies as for every family.
+labels: Curiosity (Explorer, slot 3), Courage (Creator, slot 1; supporting Candor in slot 4 Rebel), Rigor (Sage, slot 2).
+Sentinel decontamination applies as for every family.
+
+> 2026-09-27: the Courage label was corrected from "Rebel" to match ADR 110 Decision 1, which is canonical for the value→slot
+> mapping (Courage primary in slot 1 with Optimism/Urgency, supporting slot 4 Candor).
 
 ### D5 — Exploration-policy code improves by replay, weights stay frozen
 
