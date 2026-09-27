@@ -1,0 +1,71 @@
+{
+  "id": "google/gemma-4-12B-it",
+  "sha": "657684fef0b5ac5d6bff39284ceb6ec3710b700e",
+  "cardData": {
+    "library_name": "transformers",
+    "license": "apache-2.0",
+    "license_link": "https://ai.google.dev/gemma/docs/gemma_4_license",
+    "pipeline_tag": "any-to-any",
+    "extra_gated_heading": "The Gemma 4 12B is being updated, we'll be back online soon",
+    "base_model": [
+      "google/gemma-4-12B"
+    ]
+  },
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "1763cfcfbcad0bb3448a815389cf87a1246ab0b4",
+      "size": 1624
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "f6af54f8c0b517fcb110e6228a3203fbeb48c9bd",
+      "size": 27948
+    },
+    {
+      "rfilename": "chat_template.jinja",
+      "blobId": "e61bbfe9a31db79ea1e4e557b046f895ad7899d0",
+      "size": 17466
+    },
+    {
+      "rfilename": "config.json",
+      "blobId": "56741bcce862f3e28225969b955971cf4978d7e5",
+      "size": 4423
+    },
+    {
+      "rfilename": "generation_config.json",
+      "blobId": "d09dccf1b9aee197ef72a6e88a1ceff74b842ff3",
+      "size": 260
+    },
+    {
+      "rfilename": "model.safetensors",
+      "blobId": "85441e32a8ab9f7cf6b2ed9b2f2a70e9b59dbb0b",
+      "size": 23919549408,
+      "lfs": {
+        "sha256": "5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d",
+        "size": 23919549408,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "processor_config.json",
+      "blobId": "b889adcd78015bf5a0139438c5fb0b7067529a61",
+      "size": 1382
+    },
+    {
+      "rfilename": "tokenizer.json",
+      "blobId": "1ff9f3e3439a939b971f9919e821bf87e835a503",
+      "size": 32169626,
+      "lfs": {
+        "sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+        "size": 32169626,
+        "pointerSize": 133
+      }
+    },
+    {
+      "rfilename": "tokenizer_config.json",
+      "blobId": "68354f96c7ddc4e5980539f4682bce599911e7c9",
+      "size": 2102
+    }
+  ]
+}

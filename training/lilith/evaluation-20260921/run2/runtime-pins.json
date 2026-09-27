@@ -1,0 +1,30 @@
+{
+  "candidate": {
+    "model": "lilith-gemma4-12b",
+    "model_path": "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_path": "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "device": {
+      "kind": "vulkan",
+      "ordinal": 0
+    },
+    "max_context_tokens": 4096,
+    "max_output_tokens": 512,
+    "max_iterations": 1
+  },
+  "reference": {
+    "model": "ptah-qwen38",
+    "model_path": "/usr/share/ollama/.ollama/models/blobs/sha256-3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+    "model_sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+    "tokenizer_path": "/home/toasty/.local/share/akh-medu/models/llm/ptah-qwen38.tokenizer.json",
+    "tokenizer_sha256": "e271c182ffa63eebd6d0f60a688fb90d3e87a1141c99c4d87a0d4508badfefea",
+    "device": {
+      "kind": "hip",
+      "ordinal": 0
+    },
+    "max_context_tokens": 4096,
+    "max_iterations": 1,
+    "max_output_tokens": 512
+  }
+}

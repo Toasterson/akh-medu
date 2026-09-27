@@ -1,0 +1,36 @@
+{
+  "schema": "lilith/native-execution@1",
+  "run_id": "ef0f99dca7b747109f2c89873368df96",
+  "guest": {
+    "host": "127.0.0.1",
+    "port": 10115,
+    "user": "akh-exec"
+  },
+  "target": "solution.py",
+  "command": [
+    "python3",
+    "oracle.py"
+  ],
+  "timeout_s": 30,
+  "timed_out": false,
+  "supervisor_status": "exit",
+  "exit_code": 0,
+  "passed": true,
+  "duration_ms": 2104,
+  "copy_in": {
+    "snapshot_sha256": "c450c0c94cf0ba32e28a70e6b9266673225e091bb83219716ce6642453f0438a",
+    "snapshot_bytes": 10240,
+    "snapshot_entries": 2,
+    "content_sha256": "c887cd10140c179a5abbf887d130ec77a4884421d1282e39d4225ea715b99c4f",
+    "content_bytes": 734
+  },
+  "stdout": "independent mathematical boundary oracle: 1728 cases passed\n",
+  "stderr": "",
+  "stdout_sha256": "2bce78ec9a3b31c2fbe9422f266d829aaa01cbdf8403e7e2dcbe3f07944e4cd7",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stdout_truncated": false,
+  "stderr_truncated": false,
+  "remote_cleanup_succeeded": true,
+  "scope": "Unscored additional boundary diagnostic, not a change to the original seven assertions",
+  "cases": 1728
+}

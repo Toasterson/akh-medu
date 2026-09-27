@@ -1,6 +1,7 @@
-use akh_runtime::{Host, ProviderConfig};
+use akh_runtime::{Host, ProviderConfig, TrainingWorkerError};
 use akh_session_types::*;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     os::unix::fs::PermissionsExt,
     sync::{Mutex, MutexGuard, atomic::AtomicBool},
@@ -76,6 +77,7 @@ fn setup(
         isolation: None,
         model_endpoint: None,
         native_candle: None,
+        training_worker: None,
         revision: "1".into(),
         kind,
         working_dir: cwd.clone(),
@@ -131,6 +133,165 @@ fn setup(
         approval_policy: ApprovalPolicy::AskWrites,
     };
     (dir, config, request)
+}
+
+fn hash(path: &std::path::Path) -> String {
+    format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
+}
+
+#[test]
+fn training_worker_uses_host_tools_and_returns_only_a_completed_frame() {
+    let _serial = serial();
+    let (dir, mut config, mut request) = setup(RuntimeKind::Internal, ExecutionMode::Brokered);
+    let worker = dir.path().join("training-worker");
+    std::fs::write(
+        &worker,
+        r#"#!/usr/bin/env python3
+import json,sys
+start=json.loads(sys.stdin.readline())
+assert start['type']=='start' and start['config_path'].endswith('worker.json')
+print(json.dumps({'type':'progress','phase':'rollout','usage':{'steps':1}}),flush=True)
+print(json.dumps({'type':'tool_call','id':'call-1','name':'echo','arguments':{'n':7}}),flush=True)
+result=json.loads(sys.stdin.readline())
+assert result['type']=='tool_result' and result['id']=='call-1'
+print(json.dumps({'type':'completed','output':result['result']['text']}),flush=True)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let worker_config = dir.path().join("worker.json");
+    std::fs::write(&worker_config, b"{}\n").unwrap();
+    config.training_worker = Some(TrainingWorker {
+        executable: worker.clone(),
+        executable_sha256: hash(&worker),
+        script: None,
+        script_sha256: None,
+        worker_config_path: worker_config.clone(),
+        worker_config_sha256: hash(&worker_config),
+        model: "test-model".into(),
+        max_iterations: 4,
+        max_context_tokens: 4096,
+        max_output_tokens: 512,
+        max_tool_calls: 2,
+    });
+    config.isolation = Some(RuntimeIsolation {
+        directory: dir.path().into(),
+        managed_files: Default::default(),
+        environment_files: Default::default(),
+        login_command: vec![],
+        status_command: vec![],
+        version_command: vec![],
+        validation_artifacts: vec![],
+    });
+    request.tools.push(ToolSpec {
+        name: "echo".into(),
+        description: "echo".into(),
+        input_schema: json!({"type":"object"}),
+        read_only: true,
+        destination: ToolDestination::Client,
+    });
+    let mut host = Witness::default();
+    let output =
+        akh_runtime::run_training_worker(&config, &request, &mut host, &AtomicBool::new(false))
+            .unwrap();
+    assert_eq!(output, "7");
+    assert_eq!(host.calls, 1);
+    assert_eq!(host.usage[0]["training"]["phase"], "rollout");
+}
+
+#[test]
+fn training_worker_rejects_uncatalogued_tool_before_host_callback() {
+    let _serial = serial();
+    let (dir, mut config, request) = setup(RuntimeKind::Internal, ExecutionMode::Brokered);
+    let worker = dir.path().join("training-worker");
+    std::fs::write(&worker, "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'type':'tool_call','id':'x','name':'write','arguments':{}}),flush=True)\n").unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let worker_config = dir.path().join("worker.json");
+    std::fs::write(&worker_config, b"{}\n").unwrap();
+    config.training_worker = Some(TrainingWorker {
+        executable: worker.clone(),
+        executable_sha256: hash(&worker),
+        script: None,
+        script_sha256: None,
+        worker_config_path: worker_config.clone(),
+        worker_config_sha256: hash(&worker_config),
+        model: "test-model".into(),
+        max_iterations: 1,
+        max_context_tokens: 4096,
+        max_output_tokens: 512,
+        max_tool_calls: 1,
+    });
+    config.isolation = Some(RuntimeIsolation {
+        directory: dir.path().into(),
+        managed_files: Default::default(),
+        environment_files: Default::default(),
+        login_command: vec![],
+        status_command: vec![],
+        version_command: vec![],
+        validation_artifacts: vec![],
+    });
+    let mut host = Witness::default();
+    let error =
+        akh_runtime::run_training_worker(&config, &request, &mut host, &AtomicBool::new(false))
+            .unwrap_err();
+    assert!(matches!(error, TrainingWorkerError::UnknownOutcome(_)));
+    assert_eq!(host.calls, 0);
+}
+
+#[test]
+fn training_worker_failure_after_a_tool_is_an_unknown_outcome() {
+    let _serial = serial();
+    let (dir, mut config, mut request) = setup(RuntimeKind::Internal, ExecutionMode::Brokered);
+    let worker = dir.path().join("training-worker");
+    std::fs::write(
+        &worker,
+        r#"#!/usr/bin/env python3
+import json,sys
+json.loads(sys.stdin.readline())
+print(json.dumps({'type':'tool_call','id':'call-1','name':'echo','arguments':{'n':7}}),flush=True)
+json.loads(sys.stdin.readline())
+print(json.dumps({'type':'completed','output':'done','untrusted_prose':'claim'}),flush=True)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let worker_config = dir.path().join("worker.json");
+    std::fs::write(&worker_config, b"{}\n").unwrap();
+    config.training_worker = Some(TrainingWorker {
+        executable: worker.clone(),
+        executable_sha256: hash(&worker),
+        script: None,
+        script_sha256: None,
+        worker_config_path: worker_config.clone(),
+        worker_config_sha256: hash(&worker_config),
+        model: "test-model".into(),
+        max_iterations: 1,
+        max_context_tokens: 4096,
+        max_output_tokens: 512,
+        max_tool_calls: 1,
+    });
+    config.isolation = Some(RuntimeIsolation {
+        directory: dir.path().into(),
+        managed_files: Default::default(),
+        environment_files: Default::default(),
+        login_command: vec![],
+        status_command: vec![],
+        version_command: vec![],
+        validation_artifacts: vec![],
+    });
+    request.tools.push(ToolSpec {
+        name: "echo".into(),
+        description: "echo".into(),
+        input_schema: json!({"type":"object"}),
+        read_only: true,
+        destination: ToolDestination::Client,
+    });
+    let mut host = Witness::default();
+    let error =
+        akh_runtime::run_training_worker(&config, &request, &mut host, &AtomicBool::new(false))
+            .unwrap_err();
+    assert!(matches!(error, TrainingWorkerError::UnknownOutcome(_)));
+    assert_eq!(host.calls, 1);
 }
 
 #[test]

@@ -1,0 +1,38 @@
+{
+  "none": {
+    "mode": "none",
+    "hits": [],
+    "context": ""
+  },
+  "text": {
+    "mode": "text",
+    "hits": [
+      {
+        "id": "d2bf9dcfd7768306639f912d1aaca655fa17a4824d585ab200cf8327d7c8f397",
+        "score": 0.2698412698412698,
+        "family": "bounded_range"
+      }
+    ],
+    "context": "Verified prior lesson (reference scope only): For bounded unsigned arithmetic, reject out-of-domain inputs first. Check the starting quantity is within the capacity before comparing the requested amount with capacity minus starting quantity. An empty request at the boundary needs an explicit contract. Python reference tests do not establish C overflow or native platform correctness.\nLesson d2bf9dcfd7768306639f912d1aaca655fa17a4824d585ab200cf8327d7c8f397; evidence source SHA-256 35c0c9b1fad048dee36690135c587756c82f96250805a369d268baf89e8a2c23",
+    "space": null
+  },
+  "vsa": {
+    "mode": "vsa",
+    "hits": [
+      {
+        "id": "d2bf9dcfd7768306639f912d1aaca655fa17a4824d585ab200cf8327d7c8f397",
+        "score": 1.0,
+        "family": "bounded_range"
+      }
+    ],
+    "context": "Verified prior lesson (reference scope only): For bounded unsigned arithmetic, reject out-of-domain inputs first. Check the starting quantity is within the capacity before comparing the requested amount with capacity minus starting quantity. An empty request at the boundary needs an explicit contract. Python reference tests do not establish C overflow or native platform correctness.\nLesson d2bf9dcfd7768306639f912d1aaca655fa17a4824d585ab200cf8327d7c8f397; evidence source SHA-256 35c0c9b1fad048dee36690135c587756c82f96250805a369d268baf89e8a2c23",
+    "space": {
+      "dimensions": 8192,
+      "encoder": "lilith-symbolic-lesson/1:sha256-counter-le:roles",
+      "encoding": "bipolar-xor-majority",
+      "scope": "local symbolic features; no neural hidden-state alignment"
+    }
+  },
+  "cold_reuse_identical": true,
+  "revoked_lesson_stays_excluded": true
+}

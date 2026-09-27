@@ -1,0 +1,53 @@
+{
+  "category": "runtime_compatibility",
+  "training_indicated": false,
+  "failures": [
+    {
+      "stage": "first Gemma Vulkan forward",
+      "error": "no Vulkan implementation for rms-norm",
+      "cause": "Gemma device dispatch only recognized HIP/CUDA; Vulkan fell into CPU custom operations",
+      "intervention": "route RMSNorm to Vulkan fused kernel and softmax/rotary embedding to device primitives",
+      "evidence": [
+        "vulkan.log",
+        "op-tests-before.log",
+        "op-tests-after.log"
+      ]
+    },
+    {
+      "stage": "full Gemma forward after routing repair",
+      "error": "Vulkan unary gelu unsupported",
+      "cause": "Vulkan unary dispatch omitted Gemma tanh-approximate GELU",
+      "intervention": "implement GELU in the existing device elementwise shader; compare contiguous and strided tensors to CPU",
+      "evidence": [
+        "fixed/vulkan.log",
+        "op-tests-all-after.log"
+      ]
+    },
+    {
+      "stage": "first review workflow, workspace acquisition before model loading",
+      "error": "HTTP 400 executor identity/generation mismatch",
+      "cause": "generated executor service_id lilith-akhexecd did not match binding.executor akhexecd",
+      "intervention": "make executor identity match the provisioner binding and endpoint key; fresh stack root prevents resuming old queued turn",
+      "evidence": [
+        "review-run1/stalled-state.json",
+        "workspace-config-before.log",
+        "workspace-config-after.log"
+      ]
+    },
+    {
+      "stage": "second review workflow, runtime dispatch",
+      "error": "runtime binding is not owned by this service",
+      "cause": "generated runtime service_id lilith-akhrtd did not match binding.runtime akhrtd",
+      "intervention": "align all generated service identities with binding/endpoint keys; cancel prior queued turn",
+      "evidence": [
+        "review-run2/stalled-state.json",
+        "runtime-config-before.log",
+        "runtime-config-after.log"
+      ]
+    }
+  ],
+  "limits": [
+    "No coding benchmark score follows from backend compatibility.",
+    "No model training or native illumos validation performed."
+  ]
+}

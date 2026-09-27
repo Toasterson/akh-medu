@@ -1,0 +1,53 @@
+{
+  "schema": "lilith/fresh-report-probe@1",
+  "driver_sha256": "6517fac22b9f74c0a17f5d33c46f23a28451cb01d21b1ab6c7ae0b4fbea5a833",
+  "model": {
+    "model": "lilith-gemma4-12b",
+    "model_path": "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_path": "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "device": {
+      "kind": "vulkan",
+      "ordinal": 0
+    },
+    "max_context_tokens": 4096,
+    "max_output_tokens": 768,
+    "max_iterations": 1
+  },
+  "binary_sha256": {
+    "akhexecd": "1d8c4a4a9f6d40e3280d57d67f824d3638e6f8d7e2cbaec1a700dd2f58a7ae92",
+    "akhsbxd": "3a6e24432bce8a55cdf7e33b91026015ebd0136ebd270f6ec7ce94be473b573f",
+    "akhrtd": "09a224fa4b07e7f2d5fe907e82c143c60d891be7a99b98a20b2c9c2104240fd1",
+    "akhsessd": "2994f0b42f390aa1ae090b4ce829c8926e5d1f459d0969dcc3637af0b945b3ef"
+  },
+  "evidence_guards": {
+    "source_sha256": "bada276b83bb8f77c36ac612030ff4f7870e470de7b171f460c0daf431f22d33",
+    "proposal_sha256": "e38140e884152d7d3a90ace78337246048befed1074fcfdfc81f45d66cb65f1a",
+    "verification_sha256": "6feada45e56ae74c1cbc08a87b0677d7851b9852e8c7fcaa0e4dee3e39b9fc06",
+    "review_sha256": "b0f594f093d38d69cb5ab6d090cdf228278fae8bc79f2fe98a5444c20a28a1eb",
+    "return_text_sha256": "4069985982fbf4ef4f9b9ed3bfd4e1345113895b8e508505db9201b0e84a9b6f"
+  },
+  "capsule": true,
+  "request_text_sha256": "1845d92cb902f7386fdaadff40dcb0af54446e572f687611f863e539e9515aa8",
+  "profile": {
+    "runtime": {
+      "runtime": "akhrtd",
+      "profile": "lilith",
+      "revision": "lilith-local-v1",
+      "kind": "internal",
+      "execution_mode": "brokered",
+      "model": "lilith-gemma4-12b"
+    },
+    "instructions": "You are Lilith. Concisely report only the supplied test evidence and reviewer opinion. No tools are available. Do not claim the original repository changed or infer broader release validation.",
+    "workspace_profiles": [
+      "local-dev"
+    ],
+    "approval_policy": "allow_granted",
+    "tools": []
+  },
+  "private_root": "/home/toasty/.local/share/akh-medu/lilith-report-f59eb5e3f7004b1d8065f074cdd60e80",
+  "prior_assignment_id": "7b37f2d551db891cf32191f1996b8e8201f8cc1b4ce5a036bdae29bc103726ba",
+  "encoder_batching": true,
+  "scope": "New tool-free session, exact saved user report payload, no prior conversation history. Original unknown turn remains unresolved. Not a driver fix or quality benchmark."
+}

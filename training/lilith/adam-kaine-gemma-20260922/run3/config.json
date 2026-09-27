@@ -1,0 +1,147 @@
+{
+  "train_tasks": 4,
+  "development_tasks": 4,
+  "independent_eval_tasks": 4,
+  "max_new_tokens": 800,
+  "max_context_tokens": 1024,
+  "max_reasoning_completion_tokens": 320,
+  "mc_samples": 8,
+  "temperature": 1.0,
+  "scoring_chunk": 8,
+  "drift_chunk_fallback_threshold": 0.0001,
+  "beta": 0.1,
+  "learning_rate": 0.0001,
+  "optimizer_steps_per_arm": 1,
+  "eos_ids": [
+    1,
+    106
+  ],
+  "chat_template_sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0",
+  "task_module_sha256": "db809ecfb4a7fe1663be3306d9c81ba7bc36c9e6952661f8e13351b00f150066",
+  "trajectory_module_sha256": "da7fa533df75e59522b0523f6ae8f552c8d70485c347960b851615e8e6ebe5fa",
+  "prompt_lengths": {
+    "signed-clamp/2": 147,
+    "bounded-add/2": 154,
+    "align-up-power2/2": 171,
+    "aligned-offset-valid/2": 165,
+    "signed-field-extract/2": 168,
+    "field-fits-unsigned/2": 144,
+    "window-end/2": 176,
+    "windows-overlap/2": 155,
+    "saturating-sub/3": 152,
+    "power-two-in-range/3": 149,
+    "unsigned-field-at-offset/3": 178,
+    "intervals-adjacent/3": 153
+  },
+  "canonical_train_token_lengths": {
+    "signed-clamp/2": 56,
+    "bounded-add/2": 86,
+    "align-up-power2/2": 66,
+    "aligned-offset-valid/2": 51
+  },
+  "sampler": "full-support FP64 CPU categorical from actual logits; trainer FP32; MC8 IID replacement separate generator",
+  "uninformative_reward_rule": "skip KLPO if fewer than two distinct eligible complete rewards",
+  "reasoning_mode": "Gemma template enable_thinking=true; full reasoning tokens retain policy logps; verifier strips only complete <|channel>thought...<channel|> blocks; 512/320 initial with frozen all-truncated 1024/800 escalation",
+  "authoritative_tasks": {
+    "signed-clamp/2": {
+      "id": "signed-clamp/2",
+      "family": "bounded_normalization",
+      "split": "train",
+      "prompt_sha256": "c15b7f71c80b11457757e6e5031d179a233d18b36b9d3f4abeec57f574f7da51"
+    },
+    "bounded-add/2": {
+      "id": "bounded-add/2",
+      "family": "bounded_normalization",
+      "split": "train",
+      "prompt_sha256": "e4f0e1010bc53e49d8d8a22494bc0d05f9503ca86ae7f971081b30672ec6df08"
+    },
+    "align-up-power2/2": {
+      "id": "align-up-power2/2",
+      "family": "alignment",
+      "split": "train",
+      "prompt_sha256": "ee426b1f2988ded7dc8141816f53c57818a13ac8cdff1103256017846fa6c8c4"
+    },
+    "aligned-offset-valid/2": {
+      "id": "aligned-offset-valid/2",
+      "family": "alignment",
+      "split": "train",
+      "prompt_sha256": "0b05fe6a01ea42c9daf3f4addf61a15f3b580cda71b7e84fcadfe07d78ad23e7"
+    },
+    "signed-field-extract/2": {
+      "id": "signed-field-extract/2",
+      "family": "packed_fields",
+      "split": "development_holdout",
+      "prompt_sha256": "d0129b6d8432fff1eee054d230e6871fa6c490083a33a41fa12257f765d18956"
+    },
+    "field-fits-unsigned/2": {
+      "id": "field-fits-unsigned/2",
+      "family": "packed_fields",
+      "split": "development_holdout",
+      "prompt_sha256": "58b5666dfd62c3dd48bb534daad77260e05b6c7cc6d8f208e2e372a7df851a0c"
+    },
+    "window-end/2": {
+      "id": "window-end/2",
+      "family": "range_windows",
+      "split": "development_holdout",
+      "prompt_sha256": "7e273c593c613916fa0d77453c5643c50dbaf170d1e78d98da08a5f9fc1ada9f"
+    },
+    "windows-overlap/2": {
+      "id": "windows-overlap/2",
+      "family": "range_windows",
+      "split": "development_holdout",
+      "prompt_sha256": "84090311197c900ff8ee3f12ef36b85068cb5526bca8de3dfd6aa21ea89d341c"
+    },
+    "saturating-sub/3": {
+      "id": "saturating-sub/3",
+      "family": "signed_arithmetic",
+      "split": "independent_eval",
+      "prompt_sha256": "7c23efdce7bf3097310677815828d356c55fc4b580702562113565dc99715456"
+    },
+    "power-two-in-range/3": {
+      "id": "power-two-in-range/3",
+      "family": "bit_properties",
+      "split": "independent_eval",
+      "prompt_sha256": "fbe7b47a8bcaccf2122b88b1cd295fde04023e88efb8db968d8128f8daad205b"
+    },
+    "unsigned-field-at-offset/3": {
+      "id": "unsigned-field-at-offset/3",
+      "family": "packed_offsets",
+      "split": "independent_eval",
+      "prompt_sha256": "5aaf48e53deb2e76389af7c4f21950fc7b4f69a82877c65931aa5582ff139854"
+    },
+    "intervals-adjacent/3": {
+      "id": "intervals-adjacent/3",
+      "family": "interval_adjacency",
+      "split": "independent_eval",
+      "prompt_sha256": "b300f9652f66bfa1d48eb9d3b5b8505aa02839c045eef86de6381881209be945"
+    }
+  },
+  "task_manifest_sha256": "c0491f56454ae407a659c1bf73fb56ad754985d22154c19f13781c5bd0b1dc3a",
+  "transcript_dataset_sha256": "e662d28289165d8cc419a4b65bba63d7eb88b414e5f7ce63aff62c7a3028dd94",
+  "transcript_selection": {
+    "rule": "sha256(record_id, fixed policy), ascending; structural filters before cap; no truncation",
+    "record_ids": [
+      "f147f7c594ab4572e0dc4ae40ec5dcb073655c4f19af93e9df30da407ca57846",
+      "560a56717be296a6478ed0dad8876f0b2f112f337650b05ea580a751869c2da1",
+      "9902ce9f0b785b45c9488c9bbdafbdb77ea5b779ae4acdfaeabc0973f7a7b3a7",
+      "95ed42aa56c022f9dcd6b0675b07566791001465436d076e5008cbf699dd4ba3",
+      "5e5857e3221d021a6025ef0e2ddd66825ed6f0fbbf7593b220b255efc2d2366f",
+      "880672db7c7d63d761bb615f18c7609886dbc66d1b7fe7d137fe3c2655a70a4a",
+      "7d14c6fcec7085c8ecc9fd45ad8ca73ad7a9d5c54d31c78b39f653270914f827",
+      "99ec419253d149abbbb33ef72f100b3bb4c4ed06b675a3c8d78460a051d27897"
+    ],
+    "validation_record_ids": [
+      "420d8996c8dc9f2b24665ec049520d8bb4039ab62a0cbdb21dfc84541725f024",
+      "541c37c816decc80e6b5b9506bf40ad3a27c8e6bde0faa78eecbab1c1836aca8",
+      "4747453930dd011e2051c805511901f72f4b6fe306a22769c2ed6c8f7a2c58bd",
+      "2a752d4e1ba125a7c7c767374e27996b5063a43139dbb7dde24fceba161f4a34",
+      "4e23daead53aa14f9838edaa979cfac36195e2d114516f05c5e305e8f8974721",
+      "610a318f94564550ec8711d20b8d85e47af67f57487e35643e16c88d8abbef16",
+      "b4a9b894d62064ec94d4bf5f70dcf2beed9f209e80afa144d800fd10fac07249",
+      "28d6d385976154b3305fdfcb58fff5e975a17f132f770cf38005b363dc901618"
+    ],
+    "validation_records_used_for_fit": 0
+  },
+  "optimizer_steps_per_rl_arm": 3,
+  "reasoning_envelope_selected": "1024-total/800-new after all 512-envelope train rollouts truncated"
+}

@@ -1,0 +1,18 @@
+{
+  "pid": 129452,
+  "command": [
+    "/home/toasty/.local/share/akh-medu/lilith-training/venv310/bin/python",
+    "/home/toasty/ws/agi/akh-medu/scripts/session-platform/lilith_runtime_training_stack.py",
+    "--runtime-binary",
+    "/home/toasty/.local/share/akh-medu/lilith-runtime-training-target/release/akhrtd",
+    "--output",
+    "/home/toasty/ws/agi/akh-medu/training/lilith/runtime-training-stack-20260922/train1",
+    "--worker-config",
+    "/home/toasty/ws/agi/akh-medu/training/lilith/runtime-training-stack-20260922/train1-config.json",
+    "--timeout",
+    "259200",
+    "--base-port",
+    "18620"
+  ],
+  "log": "/home/toasty/ws/agi/akh-medu/training/lilith/runtime-training-stack-20260922/train1-launch.log"
+}

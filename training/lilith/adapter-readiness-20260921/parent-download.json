@@ -1,0 +1,49 @@
+{
+  "repo": "google/gemma-4-12B-it",
+  "revision": "5926caa4ec0cac5cbfadaf4077420520de1d5205",
+  "cache": "/home/toasty/.local/share/akh-medu/lilith-training/parent-5926caa4",
+  "artifacts": [
+    {
+      "name": "chat_template.jinja",
+      "bytes": 17466,
+      "sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0",
+      "expected_sha256": null
+    },
+    {
+      "name": "config.json",
+      "bytes": 4423,
+      "sha256": "478c46e8d2c52d5c2d85bf67e3b3e8c90e7c9d91086cee27e3c267907e936bd9",
+      "expected_sha256": null
+    },
+    {
+      "name": "generation_config.json",
+      "bytes": 260,
+      "sha256": "a8349d9bd64cc5841297fcb5002f0fdc4749c473c8f1b10ea337f9ce4ee7014e",
+      "expected_sha256": null
+    },
+    {
+      "name": "model.safetensors",
+      "bytes": 23919549408,
+      "sha256": "5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d",
+      "expected_sha256": "5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d"
+    },
+    {
+      "name": "processor_config.json",
+      "bytes": 1382,
+      "sha256": "6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9",
+      "expected_sha256": null
+    },
+    {
+      "name": "tokenizer.json",
+      "bytes": 32169626,
+      "sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+      "expected_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
+    },
+    {
+      "name": "tokenizer_config.json",
+      "bytes": 2102,
+      "sha256": "09e6222fd7049dae603d0f61a8b10af5a813f22dca10e6cdc6918f76d7661104",
+      "expected_sha256": null
+    }
+  ]
+}

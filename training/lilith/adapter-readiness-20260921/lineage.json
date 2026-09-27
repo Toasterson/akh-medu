@@ -1,0 +1,109 @@
+{
+  "schema": "lilith/model-lineage@1",
+  "inference_artifact": {
+    "repo": "unsloth/gemma-4-12b-it-GGUF",
+    "revision": "3f09de26549e6d7ea54f1b83755149f840fcd333",
+    "file": {
+      "rfilename": "gemma-4-12b-it-Q4_K_M.gguf",
+      "blobId": "b9a3a6ce9f1da35641808fad66f5544dfbbfd4e3",
+      "size": 7121860000,
+      "lfs": {
+        "sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+        "size": 7121860000,
+        "pointerSize": 135
+      }
+    },
+    "local_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "exact_hash_match": true
+  },
+  "trainable_parent_candidate": {
+    "repo": "google/gemma-4-12B-it",
+    "revision": "5926caa4ec0cac5cbfadaf4077420520de1d5205",
+    "weights": {
+      "rfilename": "model.safetensors",
+      "blobId": "85441e32a8ab9f7cf6b2ed9b2f2a70e9b59dbb0b",
+      "size": 23919549408,
+      "lfs": {
+        "sha256": "5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d",
+        "size": 23919549408,
+        "pointerSize": 136
+      }
+    },
+    "embedded_base_repo": "https://huggingface.co/google/gemma-4-12b-it",
+    "historical_current_weight_hash_equal": true,
+    "weights_downloaded": true,
+    "conversion_source_revision_proven": false,
+    "selection_reason": "Pre-download revision with full-context configuration correction; weight and tokenizer hashes unchanged from initial release.",
+    "access": {
+      "gated": false,
+      "private": false,
+      "disabled": false,
+      "public_api_and_small_config_access_without_credentials": true
+    },
+    "download_receipt": "parent-download.json"
+  },
+  "tokenizer": {
+    "parent_file": {
+      "rfilename": "tokenizer.json",
+      "blobId": "1ff9f3e3439a939b971f9919e821bf87e835a503",
+      "size": 32169626,
+      "lfs": {
+        "sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+        "size": 32169626,
+        "pointerSize": 133
+      }
+    },
+    "local_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "historical_current_hash_equal": true
+  },
+  "template": {
+    "parent_revision": "5926caa4ec0cac5cbfadaf4077420520de1d5205",
+    "parent_template_sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0",
+    "gguf_template": {
+      "utf8_sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0",
+      "characters": 17466
+    },
+    "exact_match": true
+  },
+  "remaining_blockers": [
+    "Quantizer recipe/source commit not recorded in GGUF; reproduce or explicitly certify a newly derived deployment artifact.",
+    "Pinned parent downloaded and hashverified; full model training/save-reload/export probe outcome is recorded separately."
+  ],
+  "configuration_comparison": {
+    "num_hidden_layers": {
+      "parent": 48,
+      "gguf": 48,
+      "equal": true
+    },
+    "hidden_size": {
+      "parent": 3840,
+      "gguf": 3840,
+      "equal": true
+    },
+    "intermediate_size": {
+      "parent": 15360,
+      "gguf": 15360,
+      "equal": true
+    },
+    "num_attention_heads": {
+      "parent": 16,
+      "gguf": 16,
+      "equal": true
+    },
+    "max_position_embeddings": {
+      "parent": 262144,
+      "gguf": 262144,
+      "equal": true
+    },
+    "sliding_window": {
+      "parent": 1024,
+      "gguf": 1024,
+      "equal": true
+    },
+    "final_logit_softcapping": {
+      "parent": 30.0,
+      "gguf": 30.0,
+      "equal": true
+    }
+  }
+}

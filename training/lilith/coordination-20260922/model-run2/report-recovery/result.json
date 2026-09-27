@@ -1,0 +1,7 @@
+{
+  "status": "interrupted",
+  "services_stopped": true,
+  "ptah_runtime_available": false,
+  "original_return_status": "unknown",
+  "error": "operator interrupted after the first fresh report turn remained nonterminal without a runtime job; retry turn and immutable guards remain durable in the ledger"
+}

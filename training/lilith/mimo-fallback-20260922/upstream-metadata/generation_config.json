@@ -1,0 +1,10 @@
+{
+  "eos_token_id": [
+    248046,
+    248044
+  ],
+  "do_sample": true,
+  "temperature": 0.6,
+  "top_k": 20,
+  "top_p": 0.95
+}

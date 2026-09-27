@@ -1,0 +1,21 @@
+{
+  "exit_code": 1,
+  "timeout": false,
+  "wall_seconds": 25.343354712997098,
+  "command": [
+    "target/release/examples/candle_session_probe",
+    "--model",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+    "--tokenizer",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+    "--tokens",
+    "64",
+    "--prompt",
+    "<|turn>user\nSay hello in one short sentence.<turn|>\n<|turn>model\n",
+    "--device",
+    "vulkan",
+    "--hidden-dump",
+    "training/lilith/vulkan-20260921/vulkan.f32"
+  ],
+  "binary_sha256": "3cd5fa093c8c037025b8add5116be7e490917479ef962b3b0c18cc6c4738bc54"
+}

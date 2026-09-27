@@ -1,0 +1,10 @@
+{
+  "status": "interrupted",
+  "services_stopped": true,
+  "ptah_runtime_available": false,
+  "original_return_status": "queued",
+  "original_return_reconciled_status": "queued",
+  "original_return_cancel_requested": true,
+  "original_return_after_cancel": "cancelled",
+  "error": "same-session recovery request remained queued with zero dispatch failures after the provider session was lost; it was cancelled through the API before stopping services"
+}

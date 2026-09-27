@@ -1,0 +1,21 @@
+{
+  "schema": "lilith/runtime-training-fixture-audit@1",
+  "passed": true,
+  "checks": {
+    "tool_sequence": [
+      "write_file",
+      "read_file"
+    ],
+    "catalog_sha256": "fc659ea7c9296a2d33e2dc1f7719d3927f6b48c6d9e066435b5cb465aa6a7873",
+    "write_revision": "730d9b62659f650fa6d6d534cdff685136dcfe1b65a694f7c18a1f0c9f353323",
+    "read_revision": "730d9b62659f650fa6d6d534cdff685136dcfe1b65a694f7c18a1f0c9f353323",
+    "write_bytes": 44,
+    "read_bytes": 44,
+    "optimizer_steps": 0,
+    "services_stopped": true,
+    "private_root_removed": true,
+    "deployed_weights_changed": false
+  },
+  "protocol_sha256": "9479fd71b8b4bc4ecb2de2ad8195988b00b41405c26298c5c2dbf1ff9e875782",
+  "tool_records_sha256": "5fe6aba6d9952615c5a7940886c5803d49ce5592b4a2a26b6fd0d61490f17e0d"
+}

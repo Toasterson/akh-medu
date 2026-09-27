@@ -1,0 +1,11 @@
+{
+  "status": "failed",
+  "model_backed": true,
+  "executor": "lilith_vm_executor:local_executor",
+  "execution_boundary": "ssh_guest",
+  "services_stopped": true,
+  "truth_review": "not_applicable",
+  "assignment_status": "failed",
+  "session_id": "01a0c932-7d1f-70c3-9dc6-9d4a28967565",
+  "turn_id": "01a0c932-7d21-74b2-ad0f-57389a6259a2"
+}

@@ -1,0 +1,5 @@
+{
+  "session_id": "01a0c920-259e-7f43-9cfb-a3dcf22eae00",
+  "turn_id": "01a0c920-259f-7931-87ec-d1be54439697",
+  "prompt": "Inputs are arbitrary integers. Return bool indicating that a is in 0..65535, b is one of 1,2,4,8,16,32,64, and a is aligned to b. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63."
+}

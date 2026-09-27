@@ -1,0 +1,11 @@
+{
+  "source_snapshot": "def range_within_u64(start, length, limit):\n    return False\n",
+  "patch_proposal": null,
+  "verification": {
+    "error": "Expecting value: line 1 column 1 (char 0)",
+    "kind": "proposal_validation",
+    "passed": false
+  },
+  "reviewer_output": null,
+  "lilith_report": null
+}

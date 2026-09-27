@@ -1,0 +1,9 @@
+{
+  "reference_warm_tps": 22.441922372904422,
+  "candidate_warm_tps": 26.179202002195197,
+  "speedup": 1.166531171759289,
+  "exact_text": true,
+  "exact_hidden": true,
+  "target_relative_improvement": 0.1,
+  "passed": true
+}

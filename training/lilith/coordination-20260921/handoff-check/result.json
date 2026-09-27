@@ -1,0 +1,6 @@
+{
+  "status": "failed",
+  "kind": "clarified_handoff_review_probe",
+  "error": "reviewer still tried to read an unmounted source instead of the inline snapshot",
+  "services_stopped": true
+}

@@ -1,0 +1,10 @@
+{
+  "schema": "lilith/training-engine-control-attempt@1",
+  "status": "oom",
+  "tokens_requested": 8192,
+  "prefill": "single no-gradient GPU-resident DynamicCache forward",
+  "optimizer_steps": 0,
+  "error": "torch.OutOfMemoryError: HIP out of memory; tried to allocate 240.00 MiB",
+  "memory": {"gpu_total_gib": 23.98, "free_mib_at_failure": 176, "pytorch_allocated_gib": 23.28, "pytorch_reserved_unallocated_mib": 258.23},
+  "finding": "activation and GPU-resident cache cannot share the remaining VRAM with the parent"
+}

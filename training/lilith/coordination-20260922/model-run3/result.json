@@ -1,0 +1,13 @@
+{
+  "status": "completed",
+  "model_backed": true,
+  "executor": "lilith_vm_executor:local_executor",
+  "execution_boundary": "ssh_guest",
+  "services_stopped": true,
+  "truth_review": "passed",
+  "assignment_status": "completed",
+  "session_id": "01a0c960-7500-7ff3-a222-f88d348a9add",
+  "turn_id": "01a0c960-7504-7e12-9ee6-5c3088dc9ac1",
+  "truth_review_receipt": "truth-review.json",
+  "candidate_patch": "candidate.patch"
+}

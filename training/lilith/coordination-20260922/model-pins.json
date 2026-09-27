@@ -1,0 +1,27 @@
+{
+  "schema": "lilith/coordination-model-pins@1",
+  "script_sha256": "e80ee9e026ad628a3cf4b4927718f22a3737b0e9976744506e74ac2ad085531d",
+  "coordinator_sha256": "d397528aa3504d454f1d952e5d01f1fff7b8a55970446fb259e61dafc3c0d325",
+  "boundary_sha256": "f1ff99bf0d6fe242fc3f380dc77d8cc7f8d01c9fc5d22ac7bd5f5851644854fc",
+  "token_counter": {
+    "python_sha256": "a2f33a6e006989270f4340528eb61f8f97366e00a5d1b602ac8672ea44fc56ae",
+    "tokenizers_extension_sha256": "c116fcf1e80d461ce0a35c332974f25949e8359416f50b3d53371810d2ce1ccc"
+  },
+  "binaries": {
+    "akhexecd": "1d8c4a4a9f6d40e3280d57d67f824d3638e6f8d7e2cbaec1a700dd2f58a7ae92",
+    "akhsbxd": "3a6e24432bce8a55cdf7e33b91026015ebd0136ebd270f6ec7ce94be473b573f",
+    "akhrtd": "09a224fa4b07e7f2d5fe907e82c143c60d891be7a99b98a20b2c9c2104240fd1",
+    "akhsessd": "2994f0b42f390aa1ae090b4ce829c8926e5d1f459d0969dcc3637af0b945b3ef"
+  },
+  "runtimes": {
+    "lilith": {
+      "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+      "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
+    },
+    "ptah": {
+      "model_sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+      "tokenizer_sha256": "e271c182ffa63eebd6d0f60a688fb90d3e87a1141c99c4d87a0d4508badfefea"
+    }
+  },
+  "executor_contract_sha256": "ce73f2c4da203e537a4c3899453bccec0093b127ae47b989ee2d9b5881217b59"
+}

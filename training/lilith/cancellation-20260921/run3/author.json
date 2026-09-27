@@ -1,0 +1,140 @@
+{
+  "closed_at": null,
+  "core_service": null,
+  "schema_version": 1,
+  "id": "01a0c4e3-3a74-7b23-adc6-da7af71fd7d7",
+  "principal": "operator",
+  "akh": "lilith",
+  "conversation_key": null,
+  "workspace_profile": "local-dev",
+  "workspace": {
+    "id": "akh-7e5a41caef0b1faf85b547a3e04d9e81",
+    "sandbox_id": "akh-7e5a41caef0b1faf85b547a3e04d9e81",
+    "executor": "akhexecd",
+    "generation": 1,
+    "site": "hephaistos",
+    "root": "/home/toasty/.local/share/akh-medu/lilith-dev-vulkan-20260921/workspaces/akh-7e5a41caef0b1faf85b547a3e04d9e81",
+    "platform": "linux",
+    "confinement": "unconfined"
+  },
+  "runtime": {
+    "runtime": "akhrtd",
+    "profile": "lilith",
+    "revision": "lilith-local-v1",
+    "kind": "internal",
+    "model": "lilith-gemma4-12b",
+    "execution_mode": "brokered"
+  },
+  "instructions": "You are Lilith, the human interface and coordinator of Akhs. Complete assigned work within its scope, inspect evidence, verify results, and report uncertainty. This is a local development workspace; illumos validation is not available yet.",
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read a UTF-8 file in the assigned workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "read_only": true,
+      "destination": {
+        "kind": "workspace",
+        "operation": "read"
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Write a UTF-8 file in the assigned workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "create": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content",
+          "create"
+        ],
+        "type": "object"
+      },
+      "read_only": false,
+      "destination": {
+        "kind": "workspace",
+        "operation": "write"
+      }
+    },
+    {
+      "name": "request_review",
+      "description": "Queue Ptah review of the assigned clamp_u8.py artifact after independent verification. Finish your turn after acknowledgement; the review returns later.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "objective": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "path": {
+            "enum": [
+              "clamp_u8.py"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "objective"
+        ],
+        "type": "object"
+      },
+      "read_only": false,
+      "destination": {
+        "kind": "client"
+      }
+    }
+  ],
+  "approval_policy": "allow_granted",
+  "generation": 1,
+  "next_sequence": 9,
+  "turns": [
+    {
+      "id": "01a0c4e3-3a76-7760-8098-4ddd2c1b495f",
+      "request_id": "fd3af0276a0f465881b1301517c242be-author",
+      "input": {
+        "origin": {
+          "kind": "human",
+          "principal": "operator"
+        },
+        "text": "Reply with exactly Ready. Do not call tools.",
+        "data": null,
+        "artifacts": []
+      },
+      "status": "completed",
+      "generation": 1,
+      "runtime_job_id": "01a0c4e3-3a76-7760-8098-4ddd2c1b495f",
+      "cancel_requested": false,
+      "output": "Ready.",
+      "error": null,
+      "created_at": 1790009621110
+    }
+  ],
+  "provider_session": "internal-01a0c4e3-3dd0-7991-8f3a-456cec8b1686",
+  "controller": null,
+  "created_at": 1790009621108,
+  "last_progress_at": 1790009677958,
+  "dispatch_failures": 0
+}

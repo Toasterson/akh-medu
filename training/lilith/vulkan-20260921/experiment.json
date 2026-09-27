@@ -1,0 +1,18 @@
+{
+  "kind": "development_backend_and_review_integration",
+  "not_a_quality_benchmark": true,
+  "devices": {
+    "lilith": "Vulkan on RADV gfx1100",
+    "ptah": "HIP on gfx1100"
+  },
+  "initial_failure": "Gemma Vulkan forward_with_hidden: no Vulkan implementation for rms-norm",
+  "gates": [
+    "Gemma device helper CPU/Vulkan element parity: abs error < 2e-5",
+    "same-prompt HIP/Vulkan hidden-state cosine >= 0.9999",
+    "repeated greedy Vulkan replies equal",
+    "real write_file receipt and deterministic clamp test",
+    "independent Ptah read_file receipt and nonempty review",
+    "same-process model unload/reload and Lilith session continuation"
+  ],
+  "native_illumos_validation": "deferred per user"
+}

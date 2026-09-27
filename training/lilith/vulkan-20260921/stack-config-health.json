@@ -1,0 +1,27 @@
+{
+  "kind": "isolated_startup_not_model_or_native_validation",
+  "services": {
+    "akhexecd": {
+      "schema_version": 1,
+      "service_id": "lilith-akhexecd",
+      "status": "listening"
+    },
+    "akhsbxd": {
+      "schema_version": 1,
+      "service_id": "lilith-akhsbxd",
+      "status": "listening"
+    },
+    "akhrtd": {
+      "schema_version": 1,
+      "service_id": "lilith-akhrtd",
+      "status": "listening"
+    },
+    "akhsessd": {
+      "schema_version": 1,
+      "service_id": "lilith-akhsessd",
+      "status": "listening"
+    }
+  },
+  "status": "passed",
+  "services_stopped": true
+}

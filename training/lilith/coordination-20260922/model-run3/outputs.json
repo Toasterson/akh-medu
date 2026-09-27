@@ -1,0 +1,49 @@
+{
+  "source_snapshot": "def range_within_u64(start, length, limit):\n    return False\n",
+  "patch_proposal": {
+    "content": "def range_within_u64(start, length, limit):\n    u64_max = 18446744073709551615\n    \n    # Check if any input is outside the 64-bit unsigned range\n    if not (0 <= start <= u64_max) or not (0 <= length <= u64_max) or not (0 <= limit <= u64_max):\n        return False\n    \n    # Reject start > limit\n    if start > limit:\n        return False\n    \n    # Special case: empty range at start == limit is valid\n    if start == limit and length == 0:\n        return True\n    \n    # Check if length fits within [0, limit)\n    # Since start <= limit, we check if start + length <= limit\n    # We use subtraction to avoid potential overflow if start + length > u64_max\n    if length <= (limit - start):\n        return True\n    \n    return False",
+    "path": "solution.py"
+  },
+  "verification": {
+    "command": [
+      "python3",
+      "-m",
+      "unittest",
+      "-q"
+    ],
+    "copy_in": {
+      "content_bytes": 734,
+      "content_sha256": "c887cd10140c179a5abbf887d130ec77a4884421d1282e39d4225ea715b99c4f",
+      "snapshot_bytes": 10240,
+      "snapshot_entries": 2,
+      "snapshot_sha256": "c0a1b7736b553167b1447a54a3cb42fb7e172c8ccde17dc735d1098b5bfe678b"
+    },
+    "duration_ms": 2486,
+    "exit_code": 0,
+    "guest": {
+      "host": "127.0.0.1",
+      "port": 10115,
+      "user": "akh-exec"
+    },
+    "passed": true,
+    "presentation": "single_json_fence",
+    "proposal_output_sha256": "59dd31dd54acbbefef574028bc74810868e702a38eca1a4bcc817f37a4a0776b",
+    "remote_cleanup_succeeded": true,
+    "repository_sha256": "4102f9b264daf5ef61b867ec1a7a0714c81be113d63379b843f2a855cb3491c7",
+    "run_id": "da56eb0a6d594fca8263a33de28bc38b",
+    "schema": "lilith/native-execution@1",
+    "source_sha256": "c887cd10140c179a5abbf887d130ec77a4884421d1282e39d4225ea715b99c4f",
+    "stderr": "----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n",
+    "stderr_sha256": "445221b98f22d14309aaea4fee1a9f41c9659ced4c922d71fbc0dcbbde571045",
+    "stderr_truncated": false,
+    "stdout": "",
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout_truncated": false,
+    "supervisor_status": "exit",
+    "target": "solution.py",
+    "timed_out": false,
+    "timeout_s": 30
+  },
+  "reviewer_output": "No defect found.\n\nThe implementation correctly handles the specified edge cases:\n1.  **Input Validation**: It checks if `start`, `length`, and `limit` are within the 64-bit unsigned integer range ($0 \\le x \\le 2^{64}-1$).\n2.  **Range Containment**: It correctly rejects `start > limit`.\n3.  **Empty Range**: It explicitly handles the case where `start == limit` and `length == 0` as valid.\n4.  **Overflow Safety**: By checking `length <= (limit - start)` instead of `start + length <= limit`, it avoids potential overflow issues in languages with fixed-width integers (though Python integers are arbitrary precision, this logic is robust and matches the requirement to use subtraction after checking `start <= limit`).\n5.  **Verification**: The provided verification receipt shows `exit_code: 0` and `passed: true` for the unittest suite, confirming the logic passes the available tests.\n\nThe code aligns with the objective: \"Return false if any input is outside 0..18446744073709551615. Otherwise return whether [start,start+length) fits within [0,limit). An empty range at start==limit is valid; reject start>limit and use length <= limit-start after checking start <= limit.\"",
+  "lilith_report": "**Objective:**\nImplement `range_within_u64(start, length, limit)`. Inputs are arbitrary integers. Return false if any input is outside 0..18446744073709551615. Otherwise return whether [start,start+length) fits within [0,limit). An empty range at start==limit is valid; reject start>limit and use length <= limit-start after checking start <= limit.\n\n**Reviewer Opinion:**\nNo defect found.\nThe implementation correctly handles the specified edge cases:\n1. **Input Validation**: It checks if `start`, `length`, and `limit` are within the 64-bit unsigned integer range ($0 \\le x \\le 2^{64}-1$).\n2. **Range Containment**: It correctly rejects `start > limit`.\n3. **Empty Range**: It explicitly handles the case where `start == limit` and `length == 0` as valid.\n4. **Overflow Safety**: By checking `length <= (limit - start)` instead of `start + length <= limit`, it avoids potential overflow issues in languages with fixed-width integers (though Python integers are arbitrary precision, this logic is robust and matches the requirement to use subtraction after checking `start <= limit`).\n5. **Verification**: The provided verification receipt shows `exit_code: 0` and `passed: true` for the unittest suite, confirming the logic passes the available tests.\nThe code aligns with the objective: \"Return false if any input is outside 0..18446744073709551615. Otherwise return whether [start,start+length) fits within [0,limit). An empty range at start==limit is valid; reject start>limit and use length <= limit-start after checking start <= limit.\"\n\n**Execution Boundary:**\n- **Guest Identity:** ssh_guest (host: 127.0.0.1, port: 10115, user: akh-exec)\n- **Status:** Passed (exit_code: 0)"
+}

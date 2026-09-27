@@ -1,0 +1,367 @@
+[
+  {
+    "role": "lilith",
+    "task_id": "signed-clamp/2",
+    "family": "bounded_normalization",
+    "split": "train",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> int:\n    if b < 0 or b > 255:\n        return -1\n    \n    # Clamp a to the interval [-b, b]\n    # Lower bound: max(-b, a)\n    # Upper bound: min(b, a)\n    # Result: max(-b, min(b, a))\n    \n    # Using bitwise/arithmetic logic to simulate min/max\n    # min(b, a) = a if a < b else b\n    # max(-b, x) = -b if -b > x else x\n    \n    # Step 1: limit_upper = min(b, a)\n    # If a < b, limit_upper = a. If a > b, limit_upper = b.\n    # We can use the property: min(x, y) = x - ((x - y) >> 31) * (x - y) \n    # But since we can't use large shifts or complex logic easily, \n    # let's use simple if/else.\n    \n    upper = a if a < b else b\n    lower = -b if -b > upper else upper\n    \n    return lower\n```",
+    "evidence": {
+      "passed": false,
+      "category": "grammar",
+      "counterexample": null,
+      "cases": 0,
+      "total_cases": 496,
+      "generated_text_sha256": "701217dac5e317184063b31913f71b05b30ce58d6d2138244eb9d7c37c1201ec",
+      "artifact_sha256": "5afdb6b164707a3ab645d8b477d7d2d86b306d778b57180831c85b1498d70418",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 84.9591411170004,
+    "session_id": "01a0c91b-439a-71c0-91ae-f5c409c0e3d9",
+    "turn_id": "01a0c91b-439c-7dc3-9dc6-f0b3df3b09a1"
+  },
+  {
+    "role": "lilith",
+    "task_id": "bounded-add/2",
+    "family": "bounded_normalization",
+    "split": "train",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> int:\n    if a < -128 or a > 127 or b < -128 or b > 127:\n        return -1\n    res = a + b\n    if res < -128:\n        return -128\n    if res > 127:\n        return 127\n    return res\n```",
+    "evidence": {
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "cases": 961,
+      "total_cases": 961,
+      "generated_text_sha256": "2de7ac3e5417810c090907dc5ca3e162ea2731f42ed18ad5fdb30d854daf22fd",
+      "artifact_sha256": "6e2b07d1e5704f8b290169aa2ac8f027871501226fcc05a10ee082f0c5ff65e9",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 9.95905354199931,
+    "session_id": "01a0c91c-8f82-7922-b27d-9868d7f48b9d",
+    "turn_id": "01a0c91c-8f86-7c21-89aa-93af684e571a"
+  },
+  {
+    "role": "lilith",
+    "task_id": "align-up-power2/2",
+    "family": "alignment",
+    "split": "train",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> int:\n    if not (0 <= a <= 65535 and b in (1, 2, 4, 8, 16, 32, 64)):\n        return -1\n    return (a + b - 1) // b * b\n```",
+    "evidence": {
+      "passed": false,
+      "category": "grammar",
+      "counterexample": null,
+      "cases": 0,
+      "total_cases": 374,
+      "generated_text_sha256": "dc4c779238af6a7e0ff7880a792ba000f1f1fc2e72f6d9ab85a10ff34fc36433",
+      "artifact_sha256": "f9c15afcea58f4d5bd7c410cbd4646de566d6ebfbf75d59afd86bcdf31b8870a",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 10.242662461998407,
+    "session_id": "01a0c91c-b66d-7b03-ad1d-f07675ef53b3",
+    "turn_id": "01a0c91c-b66e-7a41-a56c-930368776e53"
+  },
+  {
+    "role": "lilith",
+    "task_id": "aligned-offset-valid/2",
+    "family": "alignment",
+    "split": "train",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> bool:\n    # Check if a is in the range [0, 65535]\n    # Check if b is one of the powers of 2: 1, 2, 4, 8, 16, 32, 64\n    # Check if a is aligned to b (a % b == 0)\n    \n    # Range check\n    in_range = a >= 0 and a <= 65535\n    \n    # Valid b check: b must be in {1, 2, 4, 8, 16, 32, 64}\n    # These are powers of 2 from 2^0 to 2^6.\n    # A number is a power of 2 if (b > 0) and (b & (b - 1) == 0).\n    # We also need to ensure b <= 64.\n    is_power_of_2 = b > 0 and (b & (b - 1)) == 0\n    is_b_valid = is_power_of_2 and b <= 64\n    \n    # Alignment check: a is aligned to b if a is a multiple of b\n    is_aligned = (a % b) == 0\n    \n    return in_range and is_b_valid and is_aligned\n```",
+    "evidence": {
+      "passed": false,
+      "category": "division_by_zero",
+      "counterexample": {
+        "inputs": [
+          -1025,
+          0
+        ],
+        "expected": false
+      },
+      "cases": 1,
+      "total_cases": 363,
+      "generated_text_sha256": "a89dbe739485cb4fa43c80cba02ee6356c6cb6366d693a8c8b3127ebd2003f83",
+      "artifact_sha256": "de943022c5311026ab48207e76a19f6f3f9c87256194bd62add892740eaa9a67",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 21.71934967100242,
+    "session_id": "01a0c91c-de71-73e3-8134-0de80e723c1a",
+    "turn_id": "01a0c91c-de82-78b2-9499-bd58002fad0d"
+  },
+  {
+    "role": "lilith",
+    "task_id": "signed-field-extract/2",
+    "family": "packed_fields",
+    "split": "development_holdout",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> int:\n    if 0 <= a <= 65535 and 1 <= b <= 8:\n        # Extract the low b bits\n        low_bits = a & ((1 << b) - 1)\n        # If the MSB of the b-bit field is set, it's negative in 2's complement\n        if low_bits & (1 << (b - 1)):\n            return low_bits - (1 << b)\n        else:\n            return low_bits\n    else:\n        return -1\n```",
+    "evidence": {
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "cases": 350,
+      "total_cases": 350,
+      "generated_text_sha256": "802f626356fb964d483fba3c4e0b0bce205fdaf081d5e7b938b3ee4c8d5ba641",
+      "artifact_sha256": "0f63960919aad055f3c3dfb8533b2a7d6a1600100d8e9ea33b136358dbef63c1",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 12.056711763998464,
+    "session_id": "01a0c91d-335a-75a0-9602-68a57e1f94b7",
+    "turn_id": "01a0c91d-335b-7bb3-9100-7d020dec7b07"
+  },
+  {
+    "role": "lilith",
+    "task_id": "field-fits-unsigned/2",
+    "family": "packed_fields",
+    "split": "development_holdout",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> bool:\n    # An unsigned field of width b can hold values from 0 to (2^b - 1).\n    # We must check if a is within this range.\n    # Since a is an arbitrary integer, we check if 0 <= a < 2^b.\n    # 2^b can be calculated as 1 << b.\n    limit = 1 << b\n    return a >= 0 and a < limit\n```",
+    "evidence": {
+      "passed": false,
+      "category": "contract_mismatch",
+      "counterexample": {
+        "inputs": [
+          0,
+          0
+        ],
+        "expected": false,
+        "actual": true
+      },
+      "cases": 271,
+      "total_cases": 630,
+      "generated_text_sha256": "a04109a3502db41b54a273479258587282550c13cf0b40df4d46d0f34ab377e3",
+      "artifact_sha256": "6ad31bbb1a943214e3343a4d9ef507ac48d9e7966631a2afe0300f2135d64c67",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 11.177067542997975,
+    "session_id": "01a0c91d-6275-7250-9c32-1665a4eed3cd",
+    "turn_id": "01a0c91d-6276-7d83-9b3a-ae5d0cd7f19e"
+  },
+  {
+    "role": "lilith",
+    "task_id": "window-end/2",
+    "family": "range_windows",
+    "split": "development_holdout",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> int:\n    # Check constraints:\n    # 0 <= a <= 65535\n    # 1 <= b <= 256\n    # end (a + b - 1) <= 65535\n    \n    # Condition 1: 0 <= a <= 65535\n    c1 = (a >= 0) & (a <= 65535)\n    # Condition 2: 1 <= b <= 256\n    c2 = (b >= 1) & (b <= 256)\n    # Condition 3: a + b - 1 <= 65535\n    # This is equivalent to a + b <= 65536\n    c3 = (a + b <= 65536)\n    \n    # Combine conditions\n    valid = c1 & c2 & c3\n    \n    # If valid, return a + b - 1, else -1\n    # Using if/else for clarity as allowed\n    if valid:\n        return a + b - 1\n    else:\n        return -1\n```",
+    "evidence": {
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "cases": 578,
+      "total_cases": 578,
+      "generated_text_sha256": "bb28c6e34a03049dfc0612c8efedf1cf34641e829213a38c628c1d3b40a4a2e3",
+      "artifact_sha256": "c1250236a68c88a1fe113c4da934854cdffcd3933757a9955e5e218b8e05f8e7",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 17.80915799200011,
+    "session_id": "01a0c91d-8e20-7623-b9d1-374b695787a9",
+    "turn_id": "01a0c91d-8e6d-71c0-9317-7ad09d28f526"
+  },
+  {
+    "role": "lilith",
+    "task_id": "windows-overlap/2",
+    "family": "range_windows",
+    "split": "development_holdout",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> bool:\n    # Extract high bytes (start) and low bytes (length)\n    # Assuming 16-bit packed windows: high byte is bits 8-15, low byte is 0-7\n    a_start = (a >> 8) & 0xFF\n    a_len = a & 0xFF\n    b_start = (b >> 8) & 0xFF\n    b_len = b & 0xFF\n\n    # Return False if either length is zero\n    if a_len == 0 or b_len == 0:\n        return False\n\n    # Calculate end points (half-open: [start, start + len))\n    a_end = a_start + a_len\n    b_end = b_start + b_len\n\n    # Two windows [a_start, a_end) and [b_start, b_end) overlap if:\n    # a_start < b_end AND b_start < a_end\n    if a_start < b_end and b_start < a_end:\n        return True\n    else:\n        return False\n```",
+    "evidence": {
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "cases": 121,
+      "total_cases": 121,
+      "generated_text_sha256": "6747d97a5950ef4dfe769eb22bf58b9c8a3942cb471f500f04731a3b9f3059a8",
+      "artifact_sha256": "cff9bd92623ab57d9ea0c2960d74a737bde4065b47eee46ad24ccc5fb2bd5dbc",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 16.87081463099821,
+    "session_id": "01a0c91d-d419-7691-8c05-b1299c5bcc5d",
+    "turn_id": "01a0c91d-d41a-77b0-bbd2-2e7fff297083"
+  },
+  {
+    "role": "ptah",
+    "task_id": "signed-clamp/2",
+    "family": "bounded_normalization",
+    "split": "train",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> int:\n    if b < 0 or b > 255:\n        return -1\n    if a > b:\n        return b\n    if a < -b:\n        return -b\n    return a\n```",
+    "evidence": {
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "cases": 496,
+      "total_cases": 496,
+      "generated_text_sha256": "80224f4a65e9a83acb5f2575aea3cc9743118a63da52155c04b676908f91eff0",
+      "artifact_sha256": "1b89b7d0c2734cbe4802ef2609fce8b628a22db20ecf79f02ee228f2e80327e9",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 111.22211202100152,
+    "session_id": "01a0c91e-1602-7221-86d9-1833b72a55ff",
+    "turn_id": "01a0c91e-1603-7cb2-9bd8-45bb22a3da18"
+  },
+  {
+    "role": "ptah",
+    "task_id": "bounded-add/2",
+    "family": "bounded_normalization",
+    "split": "train",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> int:\n    if a < -128 or a > 127 or b < -128 or b > 127:\n        return -1\n    s = a + b\n    if s < -128:\n        return -128\n    if s > 127:\n        return 127\n    return s\n```",
+    "evidence": {
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "cases": 961,
+      "total_cases": 961,
+      "generated_text_sha256": "5a6171bef47a23bbe38810954bb0e39746951626fce05d84df376c01367deb95",
+      "artifact_sha256": "291a3f15391ad1293d7c596b5c1c559716d3dd29b01cea7d4716fa26b8f4c5e9",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 10.88138761099981,
+    "session_id": "01a0c91f-c880-7831-97dd-1b1534ebadae",
+    "turn_id": "01a0c91f-c882-7113-998e-b434e6760dbe"
+  },
+  {
+    "role": "ptah",
+    "task_id": "align-up-power2/2",
+    "family": "alignment",
+    "split": "train",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> int:\n    if not (0 <= a <= 65535):\n        return -1\n    if b not in (1, 2, 4, 8, 16, 32, 64):\n        return -1\n    return ((a + b - 1) // b) * b\n```",
+    "evidence": {
+      "passed": false,
+      "category": "grammar",
+      "counterexample": null,
+      "cases": 0,
+      "total_cases": 374,
+      "generated_text_sha256": "38055fda14d112d5906d3c9c04dc0d7fecc63b82d444ecd2efc86908448f3a2d",
+      "artifact_sha256": "4d70df341076e897f80d0b0cae81963c50d9dd31c1c654dfb077df87da4016ca",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 12.952143835002062,
+    "session_id": "01a0c91f-f304-7d00-9f07-d3ee5ef3b06c",
+    "turn_id": "01a0c91f-f305-7b41-aa1d-311a33749339"
+  },
+  {
+    "role": "ptah",
+    "task_id": "aligned-offset-valid/2",
+    "family": "alignment",
+    "split": "train",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> bool:\n    return (0 <= a <= 65535) and (b in (1, 2, 4, 8, 16, 32, 64)) and ((a & (b - 1)) == 0)\n```",
+    "evidence": {
+      "passed": false,
+      "category": "grammar",
+      "counterexample": null,
+      "cases": 0,
+      "total_cases": 363,
+      "generated_text_sha256": "ac59cd2de495a25382f785d3aae12c1b03a95f53698d324afcf3038f596e219f",
+      "artifact_sha256": "de646e2b554e71c2fb3aeb80134d2eae6ad408ce0fd10daa3008ec08106b6b2d",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 8.134020616998896,
+    "session_id": "01a0c920-259e-7f43-9cfb-a3dcf22eae00",
+    "turn_id": "01a0c920-259f-7931-87ec-d1be54439697"
+  },
+  {
+    "role": "ptah",
+    "task_id": "signed-field-extract/2",
+    "family": "packed_fields",
+    "split": "development_holdout",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> int:\n    if not (0 <= a <= 65535 and 1 <= b <= 8):\n        return -1\n    mask = (1 << b) - 1\n    x = a & mask\n    if x >= (1 << (b - 1)):\n        return x - (1 << b)\n    return x\n```",
+    "evidence": {
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "cases": 350,
+      "total_cases": 350,
+      "generated_text_sha256": "7004089a3dcf1c930be861a1387f97d846833fedf61b22236eb23638a04a12a8",
+      "artifact_sha256": "f3e9d6d9eb8a64db6fc97bc392b1ba2349d9a45db2ae8b30d41ef06361eb6cb5",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 13.868613550999726,
+    "session_id": "01a0c920-4566-7f31-815a-33e7611a2222",
+    "turn_id": "01a0c920-4568-7780-bfdc-137f9bb3eb3f"
+  },
+  {
+    "role": "ptah",
+    "task_id": "field-fits-unsigned/2",
+    "family": "packed_fields",
+    "split": "development_holdout",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> bool:\n    if b < 1 or b > 16:\n        return False\n    if a < 0:\n        return False\n    return a < (1 << b)\n```",
+    "evidence": {
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "cases": 630,
+      "total_cases": 630,
+      "generated_text_sha256": "01041dca23d4f97bf247fde351e2ded90f2e4f2c40e13a636c4d05006d2cfda5",
+      "artifact_sha256": "51892bf00a614a9ccf5b5163fe7391a82aad844f4d668b9aa0d94c41830b3fdf",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 9.948072240000329,
+    "session_id": "01a0c920-7b96-7b50-9d14-0b69ef887be3",
+    "turn_id": "01a0c920-7b98-7130-8fae-8761b5c9e82e"
+  },
+  {
+    "role": "ptah",
+    "task_id": "window-end/2",
+    "family": "range_windows",
+    "split": "development_holdout",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> int:\n    if 0 <= a <= 65535 and 1 <= b <= 256:\n        end = a + b - 1\n        if end <= 65535:\n            return end\n    return -1\n```",
+    "evidence": {
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "cases": 578,
+      "total_cases": 578,
+      "generated_text_sha256": "0b87305f29da8d4eb174a4d9b312fc8e9a7828956826c07c749f55535e8cefb5",
+      "artifact_sha256": "25bb928764dab7a4be2d0e0b346a4fded9be164bb34c78dcbea2bac46848aa1c",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 12.954760578999412,
+    "session_id": "01a0c920-a274-75c3-9916-05cfb9f5a466",
+    "turn_id": "01a0c920-a276-7f12-9d88-95507a1cbf7c"
+  },
+  {
+    "role": "ptah",
+    "task_id": "windows-overlap/2",
+    "family": "range_windows",
+    "split": "development_holdout",
+    "status": "completed",
+    "source": "```python\ndef f(a: int, b: int) -> bool:\n    a_start = a >> 8\n    a_len = a & 0xFF\n    b_start = b >> 8\n    b_len = b & 0xFF\n    if a_len == 0 or b_len == 0:\n        return False\n    a_end = a_start + a_len\n    b_end = b_start + b_len\n    return a_start < b_end and b_start < a_end\n```",
+    "evidence": {
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "cases": 121,
+      "total_cases": 121,
+      "generated_text_sha256": "e9458ae0781ec55c292ec3e89eadeef544a20e3fed30f9ab0b7c3187a76c00b0",
+      "artifact_sha256": "7f6ce9765cfb9ca1b8bfba6923ff1ab85952f532313ab90fd407f361d7a934e7",
+      "presentation": "single_markdown_fence",
+      "formatting_compliant": false
+    },
+    "elapsed_seconds": 17.168732564001402,
+    "session_id": "01a0c920-d512-74b1-8b85-0dac3191e72e",
+    "turn_id": "01a0c920-d513-7a83-aa7d-20f7c22ee27c"
+  }
+]

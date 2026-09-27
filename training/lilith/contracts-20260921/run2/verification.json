@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "cases": 2926,
+  "source_sha256": "35c0c9b1fad048dee36690135c587756c82f96250805a369d268baf89e8a2c23",
+  "scope": "Python unsigned-64 range reference fixture; not C overflow, ABI, kernel or native illumos validation",
+  "contract": {
+    "id": "u64-range/1",
+    "artifact": "range_within_u64.py",
+    "specification": "Write range_within_u64(start: int, length: int, limit: int) -> bool. Inputs are integers. Return False if any input is outside unsigned 64-bit range 0..18446744073709551615. Otherwise return whether the half-open range [start, start+length) fits within [0, limit). An empty range at start==limit is valid. Reject start>limit even for an empty range. Use the overflow-safe comparison length <= limit - start after checking start <= limit. Use only integer/bool literals, comparisons, boolean operators, subtraction, if and return.",
+    "verifier_sha256": "e2682f782429123d8c0c0d0436192e7cf06fa1e3d5a210697ccc77b6b06c84c6"
+  }
+}

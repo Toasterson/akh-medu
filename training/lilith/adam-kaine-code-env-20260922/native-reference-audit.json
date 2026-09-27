@@ -1,0 +1,1132 @@
+{
+  "executor_contract": {
+    "cleanup_policy": "unique-run-directory-removed-after-every-attempt",
+    "execution_boundary": "ssh_guest",
+    "executor_source_sha256": "ce45f0b90b09c58c65c669152a012f2d499bff5d2fc9bb1c0e523e6b62b2d339",
+    "guest_identity": "lilith-illumos-20260922",
+    "host_exposure": "SLIRP loopback SSH only; no host mounts or forwarded secrets",
+    "known_hosts_sha256": "aa8a5572c99c8529d8df19c9269c2690a500205bf0d4a5ba058f7ce75aeb90ee",
+    "max_output_bytes": 65536,
+    "max_snapshot_bytes": 33554432,
+    "max_timeout_s": 60,
+    "privilege_policy": "unprivileged akh-exec; executor never invokes sudo",
+    "rootfs_sha256": "437edebceb20931ffee43d0838b0caf284e174368a1def421128a4375ac4f8ee",
+    "schema": "lilith/native-executor-contract@1",
+    "ssh": {
+      "host": "127.0.0.1",
+      "host_key_fingerprint": "SHA256:9XvZc8Pd/zkdM9zOqOQEXp2Z0ZDej3IPI3ommnQeVj0",
+      "port": 10115,
+      "user": "akh-exec"
+    },
+    "staging_protocol": "tar-stdin+exact-content-v1",
+    "supervisor_sha256": "bd57d20c6cb3837cf43078c09571edfc28633609fbad3619994546c92c64ae89"
+  },
+  "results": [
+    {
+      "family": "bounded_normalization",
+      "result": {
+        "artifact_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10",
+        "executed": true,
+        "native_receipt": {
+          "command": [
+            "python3",
+            "candidate.py"
+          ],
+          "copy_in": {
+            "content_bytes": 7591,
+            "content_sha256": "45b5b50dc72d1015beef0c0f922fd8a0fc22ba0e90262abc38715f382d343896",
+            "snapshot_bytes": 10240,
+            "snapshot_entries": 1,
+            "snapshot_sha256": "c9de942907b92eefd4a8763f5924c0e84ed2fe9809f213f3e531e75d20001b69"
+          },
+          "duration_ms": 1796,
+          "exit_code": 0,
+          "guest": {
+            "host": "127.0.0.1",
+            "port": 10115,
+            "user": "akh-exec"
+          },
+          "passed": true,
+          "remote_cleanup_succeeded": true,
+          "run_id": "2d66ed4a85f04e87b1f6203ec58d8c29",
+          "schema": "lilith/native-execution@1",
+          "stderr": "",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_truncated": false,
+          "stdout": "native-cases-ok 496\n",
+          "stdout_sha256": "b875a7ff22114252bf315b5fa095466b4017418bc6a28c994b0c89d90eb7a42d",
+          "stdout_truncated": false,
+          "supervisor_status": "exit",
+          "target": "candidate.py",
+          "timed_out": false,
+          "timeout_s": 30
+        },
+        "passed": true,
+        "reward": {
+          "episode_steps": [
+            {
+              "action": "observe",
+              "receipt_sha256": "65def3e8fa8a1c9d865d3a91a6571bf2830ce897355c2d9c6432b1f3f1b80cfb"
+            },
+            {
+              "action": "patch",
+              "receipt_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10"
+            },
+            {
+              "action": "test",
+              "passed": true,
+              "receipt_sha256": "c84d6f99f25a5d0aec9b4d64b2151e317346fe0f97bea7084b8b22c5b815e6aa"
+            },
+            {
+              "action": "report",
+              "receipt_sha256": "a11d39d7d7cdb775466b02321fe2ee8f7dfe0f1072a011a150158e4b733dd8d7"
+            }
+          ],
+          "evidence": {
+            "artifact_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10",
+            "cases": 496,
+            "category": "passed",
+            "counterexample": null,
+            "formatting_compliant": true,
+            "generated_text_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10",
+            "passed": true,
+            "presentation": "raw_source",
+            "total_cases": 496
+          },
+          "family": "bounded_normalization",
+          "generated_text_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10",
+          "klpo_reward": 1.0,
+          "passed": true,
+          "policy": "verified_code_effect_v1",
+          "presentation": "raw_source",
+          "reward": {
+            "budget": 1.0,
+            "disposition": 1.0,
+            "effect": 1.0,
+            "provenance": 1.0,
+            "validity": 1.0
+          },
+          "schema": "lilith/adam-kaine-code-reward@1",
+          "split": "train",
+          "task_id": "signed-clamp/2"
+        }
+      },
+      "split": "train",
+      "task_id": "signed-clamp/2"
+    },
+    {
+      "family": "bounded_normalization",
+      "result": {
+        "artifact_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681",
+        "executed": true,
+        "native_receipt": {
+          "command": [
+            "python3",
+            "candidate.py"
+          ],
+          "copy_in": {
+            "content_bytes": 15220,
+            "content_sha256": "6aeeca66f4be3169c8abf9e9b718212bf6a751b3b9ce2ee6149e84a2ec52b2ae",
+            "snapshot_bytes": 10240,
+            "snapshot_entries": 1,
+            "snapshot_sha256": "c9de942907b92eefd4a8763f5924c0e84ed2fe9809f213f3e531e75d20001b69"
+          },
+          "duration_ms": 1864,
+          "exit_code": 0,
+          "guest": {
+            "host": "127.0.0.1",
+            "port": 10115,
+            "user": "akh-exec"
+          },
+          "passed": true,
+          "remote_cleanup_succeeded": true,
+          "run_id": "5bc123b327fb459fa0908006260e68d2",
+          "schema": "lilith/native-execution@1",
+          "stderr": "",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_truncated": false,
+          "stdout": "native-cases-ok 961\n",
+          "stdout_sha256": "4105610162e411cff4ce32e4ea21ed71e88c92320a01ca6b35eb139a515a8541",
+          "stdout_truncated": false,
+          "supervisor_status": "exit",
+          "target": "candidate.py",
+          "timed_out": false,
+          "timeout_s": 30
+        },
+        "passed": true,
+        "reward": {
+          "episode_steps": [
+            {
+              "action": "observe",
+              "receipt_sha256": "c642a94d402cd4ac0f5ef5b8d996bca9b597ddfa0c62ea462c0d1c78370652a0"
+            },
+            {
+              "action": "patch",
+              "receipt_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681"
+            },
+            {
+              "action": "test",
+              "passed": true,
+              "receipt_sha256": "3b070531a42a0a26c0f523cb656e5b0576fa83fd7bbf658d4279e9c71e21364d"
+            },
+            {
+              "action": "report",
+              "receipt_sha256": "0a4ff3d569dce8166ea375d6eefcf6a81730bbb9639c6fc5f9d8bcbd6cbcf2ab"
+            }
+          ],
+          "evidence": {
+            "artifact_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681",
+            "cases": 961,
+            "category": "passed",
+            "counterexample": null,
+            "formatting_compliant": true,
+            "generated_text_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681",
+            "passed": true,
+            "presentation": "raw_source",
+            "total_cases": 961
+          },
+          "family": "bounded_normalization",
+          "generated_text_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681",
+          "klpo_reward": 1.0,
+          "passed": true,
+          "policy": "verified_code_effect_v1",
+          "presentation": "raw_source",
+          "reward": {
+            "budget": 1.0,
+            "disposition": 1.0,
+            "effect": 1.0,
+            "provenance": 1.0,
+            "validity": 1.0
+          },
+          "schema": "lilith/adam-kaine-code-reward@1",
+          "split": "train",
+          "task_id": "bounded-add/2"
+        }
+      },
+      "split": "train",
+      "task_id": "bounded-add/2"
+    },
+    {
+      "family": "alignment",
+      "result": {
+        "artifact_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616",
+        "executed": true,
+        "native_receipt": {
+          "command": [
+            "python3",
+            "candidate.py"
+          ],
+          "copy_in": {
+            "content_bytes": 5713,
+            "content_sha256": "b892a4f1bfe1f4569d664d2664e125d6c44b3d77640663d4742ddfe9a0571040",
+            "snapshot_bytes": 10240,
+            "snapshot_entries": 1,
+            "snapshot_sha256": "c9de942907b92eefd4a8763f5924c0e84ed2fe9809f213f3e531e75d20001b69"
+          },
+          "duration_ms": 1866,
+          "exit_code": 0,
+          "guest": {
+            "host": "127.0.0.1",
+            "port": 10115,
+            "user": "akh-exec"
+          },
+          "passed": true,
+          "remote_cleanup_succeeded": true,
+          "run_id": "2ec5cfc5cd27456394839e4bb73c56de",
+          "schema": "lilith/native-execution@1",
+          "stderr": "",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_truncated": false,
+          "stdout": "native-cases-ok 374\n",
+          "stdout_sha256": "39505a97895be736c672f6ddcb344f9537cac4b857c8ae9661f41c2ba015ca54",
+          "stdout_truncated": false,
+          "supervisor_status": "exit",
+          "target": "candidate.py",
+          "timed_out": false,
+          "timeout_s": 30
+        },
+        "passed": true,
+        "reward": {
+          "episode_steps": [
+            {
+              "action": "observe",
+              "receipt_sha256": "240fcaee166b5164863d8d512892c05d1c6c06915356b98f23938dce219347be"
+            },
+            {
+              "action": "patch",
+              "receipt_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616"
+            },
+            {
+              "action": "test",
+              "passed": true,
+              "receipt_sha256": "f2593a98c59233ff51ffe7b220f05f19ed02452a20d4792c03cbdc104969138f"
+            },
+            {
+              "action": "report",
+              "receipt_sha256": "ef816742f3afe0f8b9a1971887eedcbe65d412321e64270ffb53903a5d8fd092"
+            }
+          ],
+          "evidence": {
+            "artifact_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616",
+            "cases": 374,
+            "category": "passed",
+            "counterexample": null,
+            "formatting_compliant": true,
+            "generated_text_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616",
+            "passed": true,
+            "presentation": "raw_source",
+            "total_cases": 374
+          },
+          "family": "alignment",
+          "generated_text_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616",
+          "klpo_reward": 1.0,
+          "passed": true,
+          "policy": "verified_code_effect_v1",
+          "presentation": "raw_source",
+          "reward": {
+            "budget": 1.0,
+            "disposition": 1.0,
+            "effect": 1.0,
+            "provenance": 1.0,
+            "validity": 1.0
+          },
+          "schema": "lilith/adam-kaine-code-reward@1",
+          "split": "train",
+          "task_id": "align-up-power2/2"
+        }
+      },
+      "split": "train",
+      "task_id": "align-up-power2/2"
+    },
+    {
+      "family": "alignment",
+      "result": {
+        "artifact_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4",
+        "executed": true,
+        "native_receipt": {
+          "command": [
+            "python3",
+            "candidate.py"
+          ],
+          "copy_in": {
+            "content_bytes": 6463,
+            "content_sha256": "080c3f56acb86fe4e2abc5a6800715f2c70f5c311e4ff892ee81561337069a3f",
+            "snapshot_bytes": 10240,
+            "snapshot_entries": 1,
+            "snapshot_sha256": "c9de942907b92eefd4a8763f5924c0e84ed2fe9809f213f3e531e75d20001b69"
+          },
+          "duration_ms": 1830,
+          "exit_code": 0,
+          "guest": {
+            "host": "127.0.0.1",
+            "port": 10115,
+            "user": "akh-exec"
+          },
+          "passed": true,
+          "remote_cleanup_succeeded": true,
+          "run_id": "ffb1b2d092a0443a8dbf5c320bdca68e",
+          "schema": "lilith/native-execution@1",
+          "stderr": "",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_truncated": false,
+          "stdout": "native-cases-ok 363\n",
+          "stdout_sha256": "dc92b01b17fec54059b695c0c5e35853a03bf28c63966e3dc23e285e92d9c6c9",
+          "stdout_truncated": false,
+          "supervisor_status": "exit",
+          "target": "candidate.py",
+          "timed_out": false,
+          "timeout_s": 30
+        },
+        "passed": true,
+        "reward": {
+          "episode_steps": [
+            {
+              "action": "observe",
+              "receipt_sha256": "c3eca33ba128cb56ebb3f296017cc633eaacac3200053880e69301d018612fdc"
+            },
+            {
+              "action": "patch",
+              "receipt_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4"
+            },
+            {
+              "action": "test",
+              "passed": true,
+              "receipt_sha256": "d238ded8f4acb706db3e2716e4d91db1ccd8f7b7c0fdc8980e747c532517d79d"
+            },
+            {
+              "action": "report",
+              "receipt_sha256": "84f91543157fcbc554757bad3ddf096e25962c99a21901945bc5154b8b9556bd"
+            }
+          ],
+          "evidence": {
+            "artifact_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4",
+            "cases": 363,
+            "category": "passed",
+            "counterexample": null,
+            "formatting_compliant": true,
+            "generated_text_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4",
+            "passed": true,
+            "presentation": "raw_source",
+            "total_cases": 363
+          },
+          "family": "alignment",
+          "generated_text_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4",
+          "klpo_reward": 1.0,
+          "passed": true,
+          "policy": "verified_code_effect_v1",
+          "presentation": "raw_source",
+          "reward": {
+            "budget": 1.0,
+            "disposition": 1.0,
+            "effect": 1.0,
+            "provenance": 1.0,
+            "validity": 1.0
+          },
+          "schema": "lilith/adam-kaine-code-reward@1",
+          "split": "train",
+          "task_id": "aligned-offset-valid/2"
+        }
+      },
+      "split": "train",
+      "task_id": "aligned-offset-valid/2"
+    },
+    {
+      "family": "packed_fields",
+      "result": {
+        "artifact_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676",
+        "executed": true,
+        "native_receipt": {
+          "command": [
+            "python3",
+            "candidate.py"
+          ],
+          "copy_in": {
+            "content_bytes": 5174,
+            "content_sha256": "13a7c29b12ef81f81a8927ceeef5625cc53d7d298d05ec1ae88740417ca69fc8",
+            "snapshot_bytes": 10240,
+            "snapshot_entries": 1,
+            "snapshot_sha256": "c9de942907b92eefd4a8763f5924c0e84ed2fe9809f213f3e531e75d20001b69"
+          },
+          "duration_ms": 1875,
+          "exit_code": 0,
+          "guest": {
+            "host": "127.0.0.1",
+            "port": 10115,
+            "user": "akh-exec"
+          },
+          "passed": true,
+          "remote_cleanup_succeeded": true,
+          "run_id": "c03c51b2137d487583909229725e7474",
+          "schema": "lilith/native-execution@1",
+          "stderr": "",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_truncated": false,
+          "stdout": "native-cases-ok 350\n",
+          "stdout_sha256": "d091b9b1780992b441af88cc9a014e30e82b545ae341cf762fc2eb01f5e63a6a",
+          "stdout_truncated": false,
+          "supervisor_status": "exit",
+          "target": "candidate.py",
+          "timed_out": false,
+          "timeout_s": 30
+        },
+        "passed": true,
+        "reward": {
+          "episode_steps": [
+            {
+              "action": "observe",
+              "receipt_sha256": "3911abfabd4c6c741f21cfa43cccef7864fec2901470fb9d0d2f407a4cffc626"
+            },
+            {
+              "action": "patch",
+              "receipt_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676"
+            },
+            {
+              "action": "test",
+              "passed": true,
+              "receipt_sha256": "5fee15db73fbeb42c2dcb8c2240fc9a308ba44d4ae8636fa27e3c0ac31131f91"
+            },
+            {
+              "action": "report",
+              "receipt_sha256": "60f3fae29c98aa5cf9a024936c3efaf33bec28c13264485afb71b25787b3bd7d"
+            }
+          ],
+          "evidence": {
+            "artifact_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676",
+            "cases": 350,
+            "category": "passed",
+            "counterexample": null,
+            "formatting_compliant": true,
+            "generated_text_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676",
+            "passed": true,
+            "presentation": "raw_source",
+            "total_cases": 350
+          },
+          "family": "packed_fields",
+          "generated_text_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676",
+          "klpo_reward": 1.0,
+          "passed": true,
+          "policy": "verified_code_effect_v1",
+          "presentation": "raw_source",
+          "reward": {
+            "budget": 1.0,
+            "disposition": 1.0,
+            "effect": 1.0,
+            "provenance": 1.0,
+            "validity": 1.0
+          },
+          "schema": "lilith/adam-kaine-code-reward@1",
+          "split": "development_holdout",
+          "task_id": "signed-field-extract/2"
+        }
+      },
+      "split": "development_holdout",
+      "task_id": "signed-field-extract/2"
+    },
+    {
+      "family": "packed_fields",
+      "result": {
+        "artifact_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a",
+        "executed": true,
+        "native_receipt": {
+          "command": [
+            "python3",
+            "candidate.py"
+          ],
+          "copy_in": {
+            "content_bytes": 10996,
+            "content_sha256": "cf0f93a0549067755a5a02bb08a9ab659683d55224fe5661950870463c48a783",
+            "snapshot_bytes": 10240,
+            "snapshot_entries": 1,
+            "snapshot_sha256": "c9de942907b92eefd4a8763f5924c0e84ed2fe9809f213f3e531e75d20001b69"
+          },
+          "duration_ms": 1769,
+          "exit_code": 0,
+          "guest": {
+            "host": "127.0.0.1",
+            "port": 10115,
+            "user": "akh-exec"
+          },
+          "passed": true,
+          "remote_cleanup_succeeded": true,
+          "run_id": "bac95b12f2204f3b9f28752aa2288044",
+          "schema": "lilith/native-execution@1",
+          "stderr": "",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_truncated": false,
+          "stdout": "native-cases-ok 630\n",
+          "stdout_sha256": "0197497e452f1d622483e722b8793d9961e1820fd1243123fe93fd2efa7cadaa",
+          "stdout_truncated": false,
+          "supervisor_status": "exit",
+          "target": "candidate.py",
+          "timed_out": false,
+          "timeout_s": 30
+        },
+        "passed": true,
+        "reward": {
+          "episode_steps": [
+            {
+              "action": "observe",
+              "receipt_sha256": "3aee8d602d2f25054a2580457562ce42bd82e109ce0714ec57792a27eeb6c0ca"
+            },
+            {
+              "action": "patch",
+              "receipt_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a"
+            },
+            {
+              "action": "test",
+              "passed": true,
+              "receipt_sha256": "216e4a307e4292b39efe850c08bc892cd78e0d3ce46ccbd232bacac20d5d9071"
+            },
+            {
+              "action": "report",
+              "receipt_sha256": "6b802ca0a49a25e8add8266affb7162eec4d19361e75649cfe996a523042affe"
+            }
+          ],
+          "evidence": {
+            "artifact_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a",
+            "cases": 630,
+            "category": "passed",
+            "counterexample": null,
+            "formatting_compliant": true,
+            "generated_text_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a",
+            "passed": true,
+            "presentation": "raw_source",
+            "total_cases": 630
+          },
+          "family": "packed_fields",
+          "generated_text_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a",
+          "klpo_reward": 1.0,
+          "passed": true,
+          "policy": "verified_code_effect_v1",
+          "presentation": "raw_source",
+          "reward": {
+            "budget": 1.0,
+            "disposition": 1.0,
+            "effect": 1.0,
+            "provenance": 1.0,
+            "validity": 1.0
+          },
+          "schema": "lilith/adam-kaine-code-reward@1",
+          "split": "development_holdout",
+          "task_id": "field-fits-unsigned/2"
+        }
+      },
+      "split": "development_holdout",
+      "task_id": "field-fits-unsigned/2"
+    },
+    {
+      "family": "range_windows",
+      "result": {
+        "artifact_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20",
+        "executed": true,
+        "native_receipt": {
+          "command": [
+            "python3",
+            "candidate.py"
+          ],
+          "copy_in": {
+            "content_bytes": 9070,
+            "content_sha256": "f2b373f64260c6cb69c421886deab2633f7cbf577678a0dace33e1c237bc62ef",
+            "snapshot_bytes": 10240,
+            "snapshot_entries": 1,
+            "snapshot_sha256": "c9de942907b92eefd4a8763f5924c0e84ed2fe9809f213f3e531e75d20001b69"
+          },
+          "duration_ms": 1820,
+          "exit_code": 0,
+          "guest": {
+            "host": "127.0.0.1",
+            "port": 10115,
+            "user": "akh-exec"
+          },
+          "passed": true,
+          "remote_cleanup_succeeded": true,
+          "run_id": "984d5e3454cb4103a7a65b54eb690091",
+          "schema": "lilith/native-execution@1",
+          "stderr": "",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_truncated": false,
+          "stdout": "native-cases-ok 578\n",
+          "stdout_sha256": "d8566a7f4f7b14de1f9ecf0a77c1dfdb50f6a89f820e9b5a522ee453dc54b054",
+          "stdout_truncated": false,
+          "supervisor_status": "exit",
+          "target": "candidate.py",
+          "timed_out": false,
+          "timeout_s": 30
+        },
+        "passed": true,
+        "reward": {
+          "episode_steps": [
+            {
+              "action": "observe",
+              "receipt_sha256": "9118740e8addf19430f0d9a9059cd5d1304b008846ed82faa6b846b991a92b2b"
+            },
+            {
+              "action": "patch",
+              "receipt_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20"
+            },
+            {
+              "action": "test",
+              "passed": true,
+              "receipt_sha256": "d62ee378c3f2dd8f324b78ccf901bd204c0e00e7e0a9635955a55e3463b25122"
+            },
+            {
+              "action": "report",
+              "receipt_sha256": "20656cbbb052cde19a910c8cf301d8427e364846418a433782c13cb3e20b8d87"
+            }
+          ],
+          "evidence": {
+            "artifact_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20",
+            "cases": 578,
+            "category": "passed",
+            "counterexample": null,
+            "formatting_compliant": true,
+            "generated_text_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20",
+            "passed": true,
+            "presentation": "raw_source",
+            "total_cases": 578
+          },
+          "family": "range_windows",
+          "generated_text_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20",
+          "klpo_reward": 1.0,
+          "passed": true,
+          "policy": "verified_code_effect_v1",
+          "presentation": "raw_source",
+          "reward": {
+            "budget": 1.0,
+            "disposition": 1.0,
+            "effect": 1.0,
+            "provenance": 1.0,
+            "validity": 1.0
+          },
+          "schema": "lilith/adam-kaine-code-reward@1",
+          "split": "development_holdout",
+          "task_id": "window-end/2"
+        }
+      },
+      "split": "development_holdout",
+      "task_id": "window-end/2"
+    },
+    {
+      "family": "range_windows",
+      "result": {
+        "artifact_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7",
+        "executed": true,
+        "native_receipt": {
+          "command": [
+            "python3",
+            "candidate.py"
+          ],
+          "copy_in": {
+            "content_bytes": 2646,
+            "content_sha256": "ab8d5dfad8b136d1a943a513f0ffb171f61a4837aefd8373880fa9c463566188",
+            "snapshot_bytes": 10240,
+            "snapshot_entries": 1,
+            "snapshot_sha256": "c9de942907b92eefd4a8763f5924c0e84ed2fe9809f213f3e531e75d20001b69"
+          },
+          "duration_ms": 1898,
+          "exit_code": 0,
+          "guest": {
+            "host": "127.0.0.1",
+            "port": 10115,
+            "user": "akh-exec"
+          },
+          "passed": true,
+          "remote_cleanup_succeeded": true,
+          "run_id": "8761f4b3b659475e9144c1f31d231d04",
+          "schema": "lilith/native-execution@1",
+          "stderr": "",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_truncated": false,
+          "stdout": "native-cases-ok 121\n",
+          "stdout_sha256": "0b4a99b5232ecad3e0000508f4dacf255b73bf7dfb07bccb602833e20c828332",
+          "stdout_truncated": false,
+          "supervisor_status": "exit",
+          "target": "candidate.py",
+          "timed_out": false,
+          "timeout_s": 30
+        },
+        "passed": true,
+        "reward": {
+          "episode_steps": [
+            {
+              "action": "observe",
+              "receipt_sha256": "372bf892c840046461f2f38a8564e1ef1cd1b2df23bf60702cdc27bca0deb421"
+            },
+            {
+              "action": "patch",
+              "receipt_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7"
+            },
+            {
+              "action": "test",
+              "passed": true,
+              "receipt_sha256": "040ac06cc2effdc7db4806e2a7948b6a8078e17c61fb71aaad93203d8d068139"
+            },
+            {
+              "action": "report",
+              "receipt_sha256": "fedf96a84a22adc65c5be59c0664223f1f4add9450edc87a52f14cf68645462b"
+            }
+          ],
+          "evidence": {
+            "artifact_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7",
+            "cases": 121,
+            "category": "passed",
+            "counterexample": null,
+            "formatting_compliant": true,
+            "generated_text_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7",
+            "passed": true,
+            "presentation": "raw_source",
+            "total_cases": 121
+          },
+          "family": "range_windows",
+          "generated_text_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7",
+          "klpo_reward": 1.0,
+          "passed": true,
+          "policy": "verified_code_effect_v1",
+          "presentation": "raw_source",
+          "reward": {
+            "budget": 1.0,
+            "disposition": 1.0,
+            "effect": 1.0,
+            "provenance": 1.0,
+            "validity": 1.0
+          },
+          "schema": "lilith/adam-kaine-code-reward@1",
+          "split": "development_holdout",
+          "task_id": "windows-overlap/2"
+        }
+      },
+      "split": "development_holdout",
+      "task_id": "windows-overlap/2"
+    },
+    {
+      "family": "signed_arithmetic",
+      "result": {
+        "artifact_sha256": "c6b9fa9a9839337d982efe0cb5b48e9d6c485cfd01ab8d0015313b75d7dad862",
+        "executed": true,
+        "native_receipt": {
+          "command": [
+            "python3",
+            "candidate.py"
+          ],
+          "copy_in": {
+            "content_bytes": 5527,
+            "content_sha256": "3b09244666611ec326632e3d0bb85c57cf573599e3b6d61a5b99968c78c7098a",
+            "snapshot_bytes": 10240,
+            "snapshot_entries": 1,
+            "snapshot_sha256": "c9de942907b92eefd4a8763f5924c0e84ed2fe9809f213f3e531e75d20001b69"
+          },
+          "duration_ms": 1870,
+          "exit_code": 0,
+          "guest": {
+            "host": "127.0.0.1",
+            "port": 10115,
+            "user": "akh-exec"
+          },
+          "passed": true,
+          "remote_cleanup_succeeded": true,
+          "run_id": "d100da740b8946c78cb2fe1cae802efb",
+          "schema": "lilith/native-execution@1",
+          "stderr": "",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_truncated": false,
+          "stdout": "native-cases-ok 324\n",
+          "stdout_sha256": "c811d195b4c4bb47ac216c2ea7457e9b0f1f9cd8957bd6332fb86095e304be83",
+          "stdout_truncated": false,
+          "supervisor_status": "exit",
+          "target": "candidate.py",
+          "timed_out": false,
+          "timeout_s": 30
+        },
+        "passed": true,
+        "reward": {
+          "episode_steps": [
+            {
+              "action": "observe",
+              "receipt_sha256": "5a47bb3be41dcc725aa44a50f2b333c5c722c5fcfbdea18d0cc179ea2cd54c34"
+            },
+            {
+              "action": "patch",
+              "receipt_sha256": "c6b9fa9a9839337d982efe0cb5b48e9d6c485cfd01ab8d0015313b75d7dad862"
+            },
+            {
+              "action": "test",
+              "passed": true,
+              "receipt_sha256": "9f790a4360b370a61c39dd532a8d4ee51f1b0e9c54144282f8b922466582a9ad"
+            },
+            {
+              "action": "report",
+              "receipt_sha256": "253617a752cf375071ecec791f0c1f686df1d7735c1de82df4bdbae302dd75e5"
+            }
+          ],
+          "evidence": {
+            "artifact_sha256": "c6b9fa9a9839337d982efe0cb5b48e9d6c485cfd01ab8d0015313b75d7dad862",
+            "cases": 324,
+            "category": "passed",
+            "counterexample": null,
+            "formatting_compliant": true,
+            "generated_text_sha256": "c6b9fa9a9839337d982efe0cb5b48e9d6c485cfd01ab8d0015313b75d7dad862",
+            "passed": true,
+            "presentation": "raw_source",
+            "total_cases": 324
+          },
+          "family": "signed_arithmetic",
+          "generated_text_sha256": "c6b9fa9a9839337d982efe0cb5b48e9d6c485cfd01ab8d0015313b75d7dad862",
+          "klpo_reward": 1.0,
+          "passed": true,
+          "policy": "verified_code_effect_v1",
+          "presentation": "raw_source",
+          "reward": {
+            "budget": 1.0,
+            "disposition": 1.0,
+            "effect": 1.0,
+            "provenance": 1.0,
+            "validity": 1.0
+          },
+          "schema": "lilith/adam-kaine-code-reward@1",
+          "split": "independent_eval",
+          "task_id": "saturating-sub/3"
+        }
+      },
+      "split": "independent_eval",
+      "task_id": "saturating-sub/3"
+    },
+    {
+      "family": "bit_properties",
+      "result": {
+        "artifact_sha256": "165908d5a373040eda4f9b94fa01f62e2cadcf3668771368893e389482904d37",
+        "executed": true,
+        "native_receipt": {
+          "command": [
+            "python3",
+            "candidate.py"
+          ],
+          "copy_in": {
+            "content_bytes": 4529,
+            "content_sha256": "c607cafc3ec4080ca88f16f70c70c3018b9123f82cd4135cdb501f007e176aa9",
+            "snapshot_bytes": 10240,
+            "snapshot_entries": 1,
+            "snapshot_sha256": "c9de942907b92eefd4a8763f5924c0e84ed2fe9809f213f3e531e75d20001b69"
+          },
+          "duration_ms": 1890,
+          "exit_code": 0,
+          "guest": {
+            "host": "127.0.0.1",
+            "port": 10115,
+            "user": "akh-exec"
+          },
+          "passed": true,
+          "remote_cleanup_succeeded": true,
+          "run_id": "8dec4485a8de4132ad134f0dd9bf15f1",
+          "schema": "lilith/native-execution@1",
+          "stderr": "",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_truncated": false,
+          "stdout": "native-cases-ok 247\n",
+          "stdout_sha256": "0c67a9e9241ac587b964ef00006f7840f5e63db28e5a5f3317853b3218951bd0",
+          "stdout_truncated": false,
+          "supervisor_status": "exit",
+          "target": "candidate.py",
+          "timed_out": false,
+          "timeout_s": 30
+        },
+        "passed": true,
+        "reward": {
+          "episode_steps": [
+            {
+              "action": "observe",
+              "receipt_sha256": "0912be012de01d6fb4c2e709b6d631140964c74ebd0c49a3011665327423ad2f"
+            },
+            {
+              "action": "patch",
+              "receipt_sha256": "165908d5a373040eda4f9b94fa01f62e2cadcf3668771368893e389482904d37"
+            },
+            {
+              "action": "test",
+              "passed": true,
+              "receipt_sha256": "16fe2b4f3b66a32a2e558b9778b32ec5001e05815fa91398c3029382eaa86448"
+            },
+            {
+              "action": "report",
+              "receipt_sha256": "185911ffd844354107b74272c374a1ff4f329ba9363df088ac4fb9cb9b62ca5d"
+            }
+          ],
+          "evidence": {
+            "artifact_sha256": "165908d5a373040eda4f9b94fa01f62e2cadcf3668771368893e389482904d37",
+            "cases": 247,
+            "category": "passed",
+            "counterexample": null,
+            "formatting_compliant": true,
+            "generated_text_sha256": "165908d5a373040eda4f9b94fa01f62e2cadcf3668771368893e389482904d37",
+            "passed": true,
+            "presentation": "raw_source",
+            "total_cases": 247
+          },
+          "family": "bit_properties",
+          "generated_text_sha256": "165908d5a373040eda4f9b94fa01f62e2cadcf3668771368893e389482904d37",
+          "klpo_reward": 1.0,
+          "passed": true,
+          "policy": "verified_code_effect_v1",
+          "presentation": "raw_source",
+          "reward": {
+            "budget": 1.0,
+            "disposition": 1.0,
+            "effect": 1.0,
+            "provenance": 1.0,
+            "validity": 1.0
+          },
+          "schema": "lilith/adam-kaine-code-reward@1",
+          "split": "independent_eval",
+          "task_id": "power-two-in-range/3"
+        }
+      },
+      "split": "independent_eval",
+      "task_id": "power-two-in-range/3"
+    },
+    {
+      "family": "packed_offsets",
+      "result": {
+        "artifact_sha256": "c81a19c1bfeb8d9c5c3eb2854fc629a7cde6b9484803bcddd3b36820ec24d470",
+        "executed": true,
+        "native_receipt": {
+          "command": [
+            "python3",
+            "candidate.py"
+          ],
+          "copy_in": {
+            "content_bytes": 4544,
+            "content_sha256": "442e6cf7097e78a6e78f0a0a5613bcc49a64b2e3e4f0e9fd6931de1afe1e9fd0",
+            "snapshot_bytes": 10240,
+            "snapshot_entries": 1,
+            "snapshot_sha256": "c9de942907b92eefd4a8763f5924c0e84ed2fe9809f213f3e531e75d20001b69"
+          },
+          "duration_ms": 1855,
+          "exit_code": 0,
+          "guest": {
+            "host": "127.0.0.1",
+            "port": 10115,
+            "user": "akh-exec"
+          },
+          "passed": true,
+          "remote_cleanup_succeeded": true,
+          "run_id": "95b24405152543e6b11deaafeefdada0",
+          "schema": "lilith/native-execution@1",
+          "stderr": "",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_truncated": false,
+          "stdout": "native-cases-ok 264\n",
+          "stdout_sha256": "9e1a2b373ade512ecb55963014f82ece05c2cf2d5f978bda159c6be838383ac8",
+          "stdout_truncated": false,
+          "supervisor_status": "exit",
+          "target": "candidate.py",
+          "timed_out": false,
+          "timeout_s": 30
+        },
+        "passed": true,
+        "reward": {
+          "episode_steps": [
+            {
+              "action": "observe",
+              "receipt_sha256": "d468bf7408d2a8994fa65fe2cfb1d9336d1dfa81d2f6fce73dd9b745c589733f"
+            },
+            {
+              "action": "patch",
+              "receipt_sha256": "c81a19c1bfeb8d9c5c3eb2854fc629a7cde6b9484803bcddd3b36820ec24d470"
+            },
+            {
+              "action": "test",
+              "passed": true,
+              "receipt_sha256": "89e0cfe83bef1841cb9fd0e5995df7b2fce8251f1a29eddfde4490e261258755"
+            },
+            {
+              "action": "report",
+              "receipt_sha256": "b6dfba4d1090dbc008792b3ad4734b41c897bb2c9eb6451ad41813f8a5ec008d"
+            }
+          ],
+          "evidence": {
+            "artifact_sha256": "c81a19c1bfeb8d9c5c3eb2854fc629a7cde6b9484803bcddd3b36820ec24d470",
+            "cases": 264,
+            "category": "passed",
+            "counterexample": null,
+            "formatting_compliant": true,
+            "generated_text_sha256": "c81a19c1bfeb8d9c5c3eb2854fc629a7cde6b9484803bcddd3b36820ec24d470",
+            "passed": true,
+            "presentation": "raw_source",
+            "total_cases": 264
+          },
+          "family": "packed_offsets",
+          "generated_text_sha256": "c81a19c1bfeb8d9c5c3eb2854fc629a7cde6b9484803bcddd3b36820ec24d470",
+          "klpo_reward": 1.0,
+          "passed": true,
+          "policy": "verified_code_effect_v1",
+          "presentation": "raw_source",
+          "reward": {
+            "budget": 1.0,
+            "disposition": 1.0,
+            "effect": 1.0,
+            "provenance": 1.0,
+            "validity": 1.0
+          },
+          "schema": "lilith/adam-kaine-code-reward@1",
+          "split": "independent_eval",
+          "task_id": "unsigned-field-at-offset/3"
+        }
+      },
+      "split": "independent_eval",
+      "task_id": "unsigned-field-at-offset/3"
+    },
+    {
+      "family": "interval_adjacency",
+      "result": {
+        "artifact_sha256": "00a1f4c50db0f5fd5f88a6c75142f07286e22f213e22e7ed159bc5b9eb33a6b4",
+        "executed": true,
+        "native_receipt": {
+          "command": [
+            "python3",
+            "candidate.py"
+          ],
+          "copy_in": {
+            "content_bytes": 3544,
+            "content_sha256": "1d7e7e848a25131c2e2ccff381bd99ad34349c2bb8a3415a9381b53e389b7248",
+            "snapshot_bytes": 10240,
+            "snapshot_entries": 1,
+            "snapshot_sha256": "c9de942907b92eefd4a8763f5924c0e84ed2fe9809f213f3e531e75d20001b69"
+          },
+          "duration_ms": 1845,
+          "exit_code": 0,
+          "guest": {
+            "host": "127.0.0.1",
+            "port": 10115,
+            "user": "akh-exec"
+          },
+          "passed": true,
+          "remote_cleanup_succeeded": true,
+          "run_id": "8720ef124038494087cf051127ef12b2",
+          "schema": "lilith/native-execution@1",
+          "stderr": "",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_truncated": false,
+          "stdout": "native-cases-ok 169\n",
+          "stdout_sha256": "d4d0abc5997fdfef68ac6c460bd4b9b3e70abc02dd48e0b68e05074fe6fb1800",
+          "stdout_truncated": false,
+          "supervisor_status": "exit",
+          "target": "candidate.py",
+          "timed_out": false,
+          "timeout_s": 30
+        },
+        "passed": true,
+        "reward": {
+          "episode_steps": [
+            {
+              "action": "observe",
+              "receipt_sha256": "487784b121eaf6738e1f5f9d881e643a031660bb6c0104f94fee7cc0943baba6"
+            },
+            {
+              "action": "patch",
+              "receipt_sha256": "00a1f4c50db0f5fd5f88a6c75142f07286e22f213e22e7ed159bc5b9eb33a6b4"
+            },
+            {
+              "action": "test",
+              "passed": true,
+              "receipt_sha256": "831224a4d10b5b98ac2dacf3d8305412c46ceb01ce7a145616bc9f78dbb84be2"
+            },
+            {
+              "action": "report",
+              "receipt_sha256": "977e1e6d56763d526e057d327f081d5dcddb0d0d78426b3a14eaa1ccf2a9c340"
+            }
+          ],
+          "evidence": {
+            "artifact_sha256": "00a1f4c50db0f5fd5f88a6c75142f07286e22f213e22e7ed159bc5b9eb33a6b4",
+            "cases": 169,
+            "category": "passed",
+            "counterexample": null,
+            "formatting_compliant": true,
+            "generated_text_sha256": "00a1f4c50db0f5fd5f88a6c75142f07286e22f213e22e7ed159bc5b9eb33a6b4",
+            "passed": true,
+            "presentation": "raw_source",
+            "total_cases": 169
+          },
+          "family": "interval_adjacency",
+          "generated_text_sha256": "00a1f4c50db0f5fd5f88a6c75142f07286e22f213e22e7ed159bc5b9eb33a6b4",
+          "klpo_reward": 1.0,
+          "passed": true,
+          "policy": "verified_code_effect_v1",
+          "presentation": "raw_source",
+          "reward": {
+            "budget": 1.0,
+            "disposition": 1.0,
+            "effect": 1.0,
+            "provenance": 1.0,
+            "validity": 1.0
+          },
+          "schema": "lilith/adam-kaine-code-reward@1",
+          "split": "independent_eval",
+          "task_id": "intervals-adjacent/3"
+        }
+      },
+      "split": "independent_eval",
+      "task_id": "intervals-adjacent/3"
+    }
+  ],
+  "reward_source_sha256": "33b82ed7d5de572542b64e840e1ffefc2d9d55626c96038b1fb736db1e8fd29f",
+  "schema": "lilith/adam-kaine-native-audit@3"
+}

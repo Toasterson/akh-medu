@@ -1,0 +1,308 @@
+{
+  "schema": "lilith/rl-tasks@1",
+  "tasks": [
+    {
+      "id": "mask-intersection-u8/1",
+      "family": "permission_masks",
+      "split": "train",
+      "prompt": "Inputs a,b are arbitrary integers. Return -1 if either is outside 0..255; otherwise return their bit-mask intersection as an integer. Output only Python source defining f(a, b), with optional int/bool annotations and no defaults. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "ef27b8261fe668df1d42602cd693513c7a9bc2b9ea92ff09c6923543c95da84a",
+      "source_sha256": "006e0a643bf8bb7c74e18515abcea50d90f83b8540883d7114cb566a6cd6a987",
+      "cases_sha256": "bbe8ec2237472b402fb2bb9433b90c59732847885b3954540e7b619691ea08f6",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 225,
+        "total_cases": 225,
+        "source_sha256": "006e0a643bf8bb7c74e18515abcea50d90f83b8540883d7114cb566a6cd6a987"
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            -256,
+            -256
+          ],
+          "expected": -1,
+          "actual": -256
+        },
+        "cases": 1,
+        "total_cases": 225,
+        "source_sha256": "22865c36d57340f92fe0e0ba3c2bc4e0d2a25d23dad64237cb9221d815983d41"
+      }
+    },
+    {
+      "id": "required-flags-u8/1",
+      "family": "permission_masks",
+      "split": "train",
+      "prompt": "Inputs a,b are guaranteed integers in 0..255. Return bool: all flags in required mask b are present in available mask a. Zero required flags succeeds. No out-of-domain validation is required. Output only Python source defining f(a, b), with optional int/bool annotations and no defaults. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "f77a2baa5804c62412feaf101b3b5b2970a4995a99acc49abaff1590a99ac179",
+      "source_sha256": "5ed40d0f62f8847e77803e430889f30f94b12f39ac0b91f6d1727cb159298f87",
+      "cases_sha256": "763164ab6ca62d910155de90de660e9d3d05b9e5429adb2452279e405c3e6039",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 1024,
+        "total_cases": 1024,
+        "source_sha256": "5ed40d0f62f8847e77803e430889f30f94b12f39ac0b91f6d1727cb159298f87"
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            0,
+            0
+          ],
+          "expected": true,
+          "actual": false
+        },
+        "cases": 1,
+        "total_cases": 1024,
+        "source_sha256": "ae9eae212aae56479faef7b43163ac138a9625923e7cdb1f866b2351d03316d2"
+      }
+    },
+    {
+      "id": "compose-le16/1",
+      "family": "byte_order",
+      "split": "train",
+      "prompt": "Inputs a,b are arbitrary integers. Return -1 if either is outside 0..255; otherwise decode two little-endian bytes a then b as an unsigned integer. Output only Python source defining f(a, b), with optional int/bool annotations and no defaults. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "c1f0e7af396d53d309a393c7b396124c934a618b15a5a58b068973385a5e5ce5",
+      "source_sha256": "70f456271a61c5c8f828296660410bc36abd751d28862f6d97dea943c6b144c8",
+      "cases_sha256": "31221604d990543bc37216791612b454c808f00c229e52a1953af166441a1adc",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 225,
+        "total_cases": 225,
+        "source_sha256": "70f456271a61c5c8f828296660410bc36abd751d28862f6d97dea943c6b144c8"
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            -256,
+            -256
+          ],
+          "expected": -1,
+          "actual": -65792
+        },
+        "cases": 1,
+        "total_cases": 225,
+        "source_sha256": "a70bcc13f123be005609d187255b3788ee7822a86b3b052bbdbee0ef0e901b1c"
+      }
+    },
+    {
+      "id": "select-le16-byte/1",
+      "family": "byte_order",
+      "split": "train",
+      "prompt": "Input a is guaranteed an unsigned 16-bit integer; b is guaranteed 0 or 1. Return byte b of a in little-endian order as an integer. No out-of-domain validation is required. Output only Python source defining f(a, b), with optional int/bool annotations and no defaults. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "ec1521482168ba84b46f2c395bf9be210e9a55c9b9440f49b5e7711989de5b61",
+      "source_sha256": "d714c80f0b1f59fd55c321cc78281052251e635372e8c57bc8704decd6283f6c",
+      "cases_sha256": "8ba2009a98f7a4974f1a913a62c284a491d844bc74619e086d8cb5173646a338",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 148,
+        "total_cases": 148,
+        "source_sha256": "d714c80f0b1f59fd55c321cc78281052251e635372e8c57bc8704decd6283f6c"
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            1021,
+            0
+          ],
+          "expected": 253,
+          "actual": 3
+        },
+        "cases": 3,
+        "total_cases": 148,
+        "source_sha256": "f2b1f97afdd390686cff70f2bb2b7cad3c9f96ab5dfee1aebef7ac536c349d81"
+      }
+    },
+    {
+      "id": "table-slot-offset/1",
+      "family": "table_index",
+      "split": "development_holdout",
+      "prompt": "Inputs a,b are arbitrary integers. A table has b slots, each 8 bytes. Return byte offset of slot a. Return -1 unless 0 <= b <= 255 and 0 <= a < b. Output only Python source defining f(a, b), with optional int/bool annotations and no defaults. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "f778d293d8a64aead9e64f4f935b8b0130cb0ca534f9c6be8933f762313fc469",
+      "source_sha256": "c7e37fc7b1f3bd26e503a930d27cae2edb46f5e602b8d0548e19141827941659",
+      "cases_sha256": "ac88e5160bde210c3080d65ce8681a31f2de5b40d614d4c455984e4ffd9c529f",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 225,
+        "total_cases": 225,
+        "source_sha256": "c7e37fc7b1f3bd26e503a930d27cae2edb46f5e602b8d0548e19141827941659"
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            0,
+            0
+          ],
+          "expected": -1,
+          "actual": 0
+        },
+        "cases": 33,
+        "total_cases": 225,
+        "source_sha256": "5df730661d2d5f9676e40e4821e3118a7aabcbb8c976f45bd2686ce600a3e56b"
+      }
+    },
+    {
+      "id": "table-slot-valid/1",
+      "family": "table_index",
+      "split": "development_holdout",
+      "prompt": "Inputs a,b are guaranteed integers with 0 <= a <= 255 and 0 <= b <= 255. Return bool: a is a valid zero-based slot index for a table with b slots. A zero-slot table has no valid index. Output only Python source defining f(a, b), with optional int/bool annotations and no defaults. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "4838fe4e4d834fdf23cc50bdbbb665e6af4b1952e364247de39f112869058e8f",
+      "source_sha256": "f8f30e505fc5e0902e87a15f2898a1cc4714f97d2695b35068f8ab1cb556a9f9",
+      "cases_sha256": "2e39e3dde6a99427699343a456a575cc7515e0c5af1e95084eb079502069ca79",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 1024,
+        "total_cases": 1024,
+        "source_sha256": "f8f30e505fc5e0902e87a15f2898a1cc4714f97d2695b35068f8ab1cb556a9f9"
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            0,
+            0
+          ],
+          "expected": false,
+          "actual": true
+        },
+        "cases": 1,
+        "total_cases": 1024,
+        "source_sha256": "993c63a39abb9d44cd0f35bf4974e7c0ac43c14ec0b71b1e89c0eb0826cab8fe"
+      }
+    },
+    {
+      "id": "resource-unit-bytes/1",
+      "family": "resource_units",
+      "split": "development_holdout",
+      "prompt": "Inputs a,b are arbitrary integers. Return bytes occupied by a units of b bytes each. Return -1 unless 0 <= a <= 31 and 1 <= b <= 16. Output only Python source defining f(a, b), with optional int/bool annotations and no defaults. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "540dcd04504b1b44baaadd3ea13fad41857014137a741d0f9826470f6e306951",
+      "source_sha256": "a212c0f62e6ef348c0b1080d9286e869f02a015b7783f4883688dbdfc4321482",
+      "cases_sha256": "43928dab7d59aa32e1893f5fb799c577120b965f8dade6ede197a9266a5eb89f",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 700,
+        "total_cases": 700,
+        "source_sha256": "a212c0f62e6ef348c0b1080d9286e869f02a015b7783f4883688dbdfc4321482"
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            -1,
+            -1
+          ],
+          "expected": -1,
+          "actual": 1
+        },
+        "cases": 1,
+        "total_cases": 700,
+        "source_sha256": "4ad48f4674182e65b1866ee9748df38c90490746c0b1e9530fca91cdb8986a56"
+      }
+    },
+    {
+      "id": "complete-resource-units/1",
+      "family": "resource_units",
+      "split": "development_holdout",
+      "prompt": "Inputs a,b are guaranteed integers with 0 <= a <= 255 and 1 <= b <= 16. Return the count of complete b-byte units fitting in a bytes. Discard leftover bytes; no out-of-domain validation is required. Output only Python source defining f(a, b), with optional int/bool annotations and no defaults. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "06e4897060bbfd034de3b8f8ce7efaebb954db956382fd02c064605c96a68fa5",
+      "source_sha256": "15f3956aca57a89b67cc5038f8d773859c826b22537fa19dd7eb5adc18093a3a",
+      "cases_sha256": "a1566e6af9c0a8273afda9d26ecf2abae2acaabfccbc70caa4cc65f20383eb74",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 4096,
+        "total_cases": 4096,
+        "source_sha256": "15f3956aca57a89b67cc5038f8d773859c826b22537fa19dd7eb5adc18093a3a"
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            1,
+            2
+          ],
+          "expected": 0,
+          "actual": 1
+        },
+        "cases": 18,
+        "total_cases": 4096,
+        "source_sha256": "1583964e0e00153f31d65868155767a56636609689911c57fb5c5ae542711039"
+      }
+    }
+  ],
+  "training_targets": [
+    {
+      "id": "mask-intersection-u8/1",
+      "family": "permission_masks",
+      "input": "Inputs a,b are arbitrary integers. Return -1 if either is outside 0..255; otherwise return their bit-mask intersection as an integer. Output only Python source defining f(a, b), with optional int/bool annotations and no defaults. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "output": "def f(a, b):\n    if not (0 <= a <= 255 and 0 <= b <= 255):\n        return -1\n    return a & b\n",
+      "source_sha256": "006e0a643bf8bb7c74e18515abcea50d90f83b8540883d7114cb566a6cd6a987",
+      "origin": "assistant_authored_reference",
+      "teacher_model": null
+    },
+    {
+      "id": "required-flags-u8/1",
+      "family": "permission_masks",
+      "input": "Inputs a,b are guaranteed integers in 0..255. Return bool: all flags in required mask b are present in available mask a. Zero required flags succeeds. No out-of-domain validation is required. Output only Python source defining f(a, b), with optional int/bool annotations and no defaults. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "output": "def f(a, b):\n    return a & b == b\n",
+      "source_sha256": "5ed40d0f62f8847e77803e430889f30f94b12f39ac0b91f6d1727cb159298f87",
+      "origin": "assistant_authored_reference",
+      "teacher_model": null
+    },
+    {
+      "id": "compose-le16/1",
+      "family": "byte_order",
+      "input": "Inputs a,b are arbitrary integers. Return -1 if either is outside 0..255; otherwise decode two little-endian bytes a then b as an unsigned integer. Output only Python source defining f(a, b), with optional int/bool annotations and no defaults. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "output": "def f(a, b):\n    if not (0 <= a <= 255 and 0 <= b <= 255):\n        return -1\n    return a + 256 * b\n",
+      "source_sha256": "70f456271a61c5c8f828296660410bc36abd751d28862f6d97dea943c6b144c8",
+      "origin": "assistant_authored_reference",
+      "teacher_model": null
+    },
+    {
+      "id": "select-le16-byte/1",
+      "family": "byte_order",
+      "input": "Input a is guaranteed an unsigned 16-bit integer; b is guaranteed 0 or 1. Return byte b of a in little-endian order as an integer. No out-of-domain validation is required. Output only Python source defining f(a, b), with optional int/bool annotations and no defaults. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "output": "def f(a, b):\n    return (a >> (8 * b)) & 255\n",
+      "source_sha256": "d714c80f0b1f59fd55c321cc78281052251e635372e8c57bc8704decd6283f6c",
+      "origin": "assistant_authored_reference",
+      "teacher_model": null
+    }
+  ],
+  "verifier_sha256": "e038d465c0d4d9d04e97b1b01abea0916ad99ab48d2ac86f11f48ac21bf94a0f",
+  "limitations": [
+    "public development holdout, not sealed or secret",
+    "family split does not imply unseen mathematical concepts",
+    "training families permission_masks and byte_order were already exposed",
+    "prior exposed families saturation, bounded_range, error_conventions; prior public evaluation alignment, interval_intersection, modular_sequence_order",
+    "Python reference checks only; no native illumos validation",
+    "assistant-authored references; no teacher provenance or trained improvement claimed"
+  ]
+}

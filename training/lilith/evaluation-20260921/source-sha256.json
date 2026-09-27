@@ -1,0 +1,7 @@
+{
+  "scripts/session-platform/lilith_eval.py": "4dc89010085072b08c953a4b7770c82702579f3eae57d4e76fcd401e38b38d05",
+  "scripts/session-platform/test_lilith_eval.py": "a9d2d64e456b62aacf01bc7603a116c623f507070f39bb24c3831ed0bbc812ae",
+  "benchmarks/lilith/apprenticeship-v2/manifest.json": "661636ca211d6b38e823926546d0f8e6326c43d4963f3847328983d746ddeb5c",
+  "training/lilith/evaluation-20260921/run.py": "16d31d092884b305c1cc2edd4717a33c24e596d98c86ad0fe52698696b9eb42d",
+  "training/lilith/evaluation-20260921/diagnose.py": "d7dba1e9c6dac5e64181d77746d85b0b6b45481c58de6c0f6a242bb0d3ae837e"
+}

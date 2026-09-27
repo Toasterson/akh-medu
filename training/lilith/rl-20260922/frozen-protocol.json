@@ -1,0 +1,32 @@
+{
+  "schema": "lilith/rl-quality-protocol@2",
+  "frozen_before_generation": true,
+  "task_manifest_sha256": "f4f0e5918ef4fffdcd18a5193a2c54b4cf960c655bf1171b4b0672614af9c437",
+  "entrypoint_sha256": "dd5242de2ae51d450d1536cc0262a2a91f9a006ddaeca3e97e653d7d9acc9655",
+  "runner_sha256": "ed03a1564914a3bea25229f6865dc09c79298c8b8b75b950a4c06712c541ce56",
+  "trajectory_core_sha256": "da7fa533df75e59522b0523f6ae8f552c8d70485c347960b851615e8e6ebe5fa",
+  "v2_verifier_sha256": "ca7d125daf1448b0890b8d6f97f2c85773c1400edd51659769a0578d51c9664c",
+  "interpreter_core_sha256": "e038d465c0d4d9d04e97b1b01abea0916ad99ab48d2ac86f11f48ac21bf94a0f",
+  "primary_comparison": {
+    "arms": ["base", "sft", "klpo"],
+    "training_tasks": 4,
+    "disjoint_family_development_tasks": 4,
+    "optimizer_steps_per_updated_arm": 1,
+    "paired_rng": true
+  },
+  "reward_contract": {
+    "scalar": "binary semantic correctness of one extracted Python artifact",
+    "accepted_artifacts": ["raw source", "one complete enclosing python or unlabelled Markdown fence"],
+    "formatting_compliant": "recorded separately and excluded from scalar reward"
+  },
+  "retention": {
+    "source_manifest": "training/lilith/rl-20260921/tasks.json",
+    "source_manifest_sha256": "5039d69b828095516eadd6f814ec92a2b547381b3cf20fafe4e9381748601abf",
+    "task_ids": ["mask-intersection-u8/1", "required-flags-u8/1", "compose-le16/1", "select-le16-byte/1"],
+    "arms": ["base", "sft", "klpo"],
+    "use_for_updates": false,
+    "artifact_contract": "same v2 extraction before unchanged v1 interpreter verification",
+    "generation_budget": "same 128 generated-token and context policy as primary comparison",
+    "decision_rule": "report all outcomes; do not tune, repeat, or select based on retention results"
+  }
+}

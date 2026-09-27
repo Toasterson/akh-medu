@@ -1,0 +1,898 @@
+{
+  "schema": "lilith/training-cache-control@1",
+  "status": "passed",
+  "phase": "finished",
+  "positions": [
+    1023,
+    1024,
+    1025
+  ],
+  "tolerance": 0.0001,
+  "reference": "GPU-resident tokenwise cache",
+  "full_bf16_is_diagnostic_only": true,
+  "optimizer_steps": 0,
+  "engine_sha256": "5c68f6a1d451c87b6d77e3a54c2786305208a35b5b366ad8661a9ca0bbcb73d0",
+  "control_sha256": "b5dc74b5914ddda74f5510f97f6b06f85e4b9aeb67516c6270bb474f506ba0fa",
+  "versions": {
+    "python": "3.10.12 (main, Aug 31 2026, 10:18:17) [GCC 11.4.0]",
+    "torch": "2.7.1+rocm6.3",
+    "transformers": "5.10.1",
+    "hip": "6.3.42131-fa1d09cbd"
+  },
+  "runtime": {
+    "device": "cuda:0",
+    "device_name": "AMD Radeon Graphics",
+    "dtype": "torch.bfloat16",
+    "attention_backend": "sdpa"
+  },
+  "initial_policy_identity": {
+    "parent_sha256": "5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "adapter_sha256": "df17c9026bd01f975d58ebf9857f1bb2471821871f4310ad81f12056855e9367",
+    "engine_sha256": "5c68f6a1d451c87b6d77e3a54c2786305208a35b5b366ad8661a9ca0bbcb73d0",
+    "digest": "995393fc6d7c986ce6c6199e3e7059fe9e9ff18f48f3065499f46cf402145e8e"
+  },
+  "contract": {
+    "schema": "lilith/akhrtd-training-engine@1",
+    "context_tokens": 32768,
+    "max_new_tokens": 16384,
+    "thinking": true,
+    "prefill_chunk_tokens": 1,
+    "cache_offloading": true,
+    "cache_transfer": "synchronous_caller_stream",
+    "cache": "explicit hybrid layers, detached KV",
+    "update": "one optimizer step after full eligible bank",
+    "target_module": "model.language_model.layers.47.self_attn.q_proj",
+    "rank": 2
+  },
+  "variants": {
+    "resident": {
+      "mean_selected_token_loss": 23.93881607055664,
+      "gradient_norms": {
+        "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": 0.009709508158266544,
+        "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": 0.015069776214659214
+      },
+      "cache": {
+        "layer_count": 48,
+        "detached_tensors_checked": 136,
+        "layers": [
+          {
+            "index": 0,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 1,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 2,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 3,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 4,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 5,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cuda:0"
+          },
+          {
+            "index": 6,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 7,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 8,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 9,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 10,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 11,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cuda:0"
+          },
+          {
+            "index": 12,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 13,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 14,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 15,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 16,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 17,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cuda:0"
+          },
+          {
+            "index": 18,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 19,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 20,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 21,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 22,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 23,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cuda:0"
+          },
+          {
+            "index": 24,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 25,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 26,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 27,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 28,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 29,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cuda:0"
+          },
+          {
+            "index": 30,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 31,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 32,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 33,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 34,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 35,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cuda:0"
+          },
+          {
+            "index": 36,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 37,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 38,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 39,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 40,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 41,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cuda:0"
+          },
+          {
+            "index": 42,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 43,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 44,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 45,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 46,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cuda:0"
+          },
+          {
+            "index": 47,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cuda:0"
+          }
+        ]
+      }
+    },
+    "synchronous_offload": {
+      "mean_selected_token_loss": 23.93881607055664,
+      "gradient_norms": {
+        "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": 0.009709508158266544,
+        "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": 0.015069776214659214
+      },
+      "cache": {
+        "layer_count": 48,
+        "detached_tensors_checked": 136,
+        "layers": [
+          {
+            "index": 0,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 1,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 2,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 3,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 4,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 5,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cpu"
+          },
+          {
+            "index": 6,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 7,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 8,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 9,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 10,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 11,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cpu"
+          },
+          {
+            "index": 12,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 13,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 14,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 15,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 16,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 17,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cpu"
+          },
+          {
+            "index": 18,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 19,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 20,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 21,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 22,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 23,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cpu"
+          },
+          {
+            "index": 24,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 25,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 26,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 27,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 28,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 29,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cpu"
+          },
+          {
+            "index": 30,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 31,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 32,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 33,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 34,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 35,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cpu"
+          },
+          {
+            "index": 36,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 37,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 38,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 39,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 40,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 41,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cpu"
+          },
+          {
+            "index": 42,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 43,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 44,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 45,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 46,
+            "type": "DynamicSlidingWindowLayer",
+            "is_sliding": true,
+            "sequence_length": 1025,
+            "stored_length": 1023,
+            "device": "cpu"
+          },
+          {
+            "index": 47,
+            "type": "DynamicLayer",
+            "is_sliding": false,
+            "sequence_length": 1025,
+            "stored_length": 1025,
+            "device": "cpu"
+          }
+        ]
+      }
+    }
+  },
+  "trainable_names": [
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight",
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight"
+  ],
+  "elapsed_seconds": 239.98799881299783,
+  "resident_vs_synchronous": {
+    "logit_max_abs": {
+      "1023": 0.0,
+      "1024": 0.0,
+      "1025": 0.0
+    },
+    "loss_abs": 0.0,
+    "gradient_max_abs": {
+      "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": 2.9103830456733704e-11,
+      "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": 0.0
+    }
+  },
+  "full_bf16_diagnostic": {
+    "1023": {
+      "max_abs": 17.12255859375,
+      "mean_abs": 1.3963088989257812
+    },
+    "1024": {
+      "max_abs": 5.0,
+      "mean_abs": 0.7043335437774658
+    },
+    "1025": {
+      "max_abs": 2.5625,
+      "mean_abs": 0.6220170855522156
+    }
+  },
+  "generate_replay": {
+    "trajectory_id": "ddca62ccc19985263d97fab1cb723a9554a9310f782a7cd2726f135ec04d1b0d",
+    "completion_status": "max_new_tokens",
+    "generated_tokens": 4,
+    "policy_sha256": "a9ae2560237e349e9664585ee9752ce06eaa80981d831357e27bbf67e602fd85",
+    "receipt_policy_sha256": "a9ae2560237e349e9664585ee9752ce06eaa80981d831357e27bbf67e602fd85",
+    "tokens_scored": 4,
+    "max_sampler_logp_drift": 4.5609492249631955e-07,
+    "cache_tensors_checked": 544,
+    "gradient_norms": {
+      "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": 0.0035482575185596943,
+      "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": 0.0026271354872733355
+    }
+  },
+  "peak_gpu_bytes": 24387159040,
+  "restored_policy_identity": {
+    "parent_sha256": "5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "adapter_sha256": "df17c9026bd01f975d58ebf9857f1bb2471821871f4310ad81f12056855e9367",
+    "engine_sha256": "5c68f6a1d451c87b6d77e3a54c2786305208a35b5b366ad8661a9ca0bbcb73d0",
+    "digest": "995393fc6d7c986ce6c6199e3e7059fe9e9ff18f48f3065499f46cf402145e8e"
+  },
+  "initial_policy_identity_restored": true
+}

@@ -1,0 +1,21 @@
+{
+  "schema": "lilith/apprenticeship-development-probe@1",
+  "weights": "frozen Gemma 4 local artifact",
+  "arms": ["none", "text", "vsa"],
+  "lessons": ["integer-clamp/1", "u64-range/1"],
+  "task_family": "bounded_range",
+  "task": "can_reserve(used, requested, capacity): bool over unsigned 16-bit integers; empty request at capacity allowed; reject invalid domains and used above capacity",
+  "retrieval_features": [["domain","integer"],["operation","capacity_check"],["boundary","empty_allowed"],["policy","reject_invalid"],["evidence","host_python"]],
+  "retrieval_feature_origin": "operator-authored from task specification; available to both retrieval arms",
+  "max_lesson_bytes": 1400,
+  "max_output_tokens": 512,
+  "max_context_tokens": 2048,
+  "attempts_per_arm": 1,
+  "specialist_delegation": false,
+  "model_tools": [],
+  "analysis": "report executable correctness, rejected syntax, complete outputs, selected lessons, and latency; do not infer a quality gain from one task",
+  "split": "development transfer within a related semantic family; not sealed or family-held-out certification",
+  "evaluation_solution_policy": "generated probe solutions never admitted or exported into the lesson corpus",
+  "success_gate": "admission/revocation/cold retrieval proven; all three arms measured under the same model and output cap",
+  "promotion_gate": "no adapter training or VSA superiority claim from this pilot"
+}

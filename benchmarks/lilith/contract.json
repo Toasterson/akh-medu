@@ -1,0 +1,329 @@
+{
+  "schema_version": 1,
+  "project": "Lilith",
+  "status": "draft_not_release_frozen",
+  "primary_os": "illumos",
+  "development_host": "hephaistos",
+  "candidate": {
+    "family": "Gemma 4 12B",
+    "artifact_inventory": "../../training/lilith/startup-20260921/inventory.json"
+  },
+  "reference": {
+    "family": "Qwen 3.8 27B",
+    "revision": null,
+    "endpoint": null,
+    "discovered_candidate_endpoint": "http://127.0.0.1:18080/v1",
+    "discovered_alias": "ptah-qwen3.8:sharp",
+    "endpoint_probe": "connection_refused",
+    "alias_is_verified_reference": false,
+    "role": "ptah-validator",
+    "placement": "shared_local_akhrtd_serial_residency",
+    "model_path": "/usr/share/ollama/.ollama/models/blobs/sha256-3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+    "model_sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+    "variant": "Ptah local Qwen derivative; tokenizer provenance names JonathanColetti/Qwen3.8-27B-Uncensored",
+    "artifact_hash_verified": true,
+    "upstream_reference_equivalence_verified": false
+  },
+  "comparisons": [
+    "same_harness_no_specialist_delegation",
+    "same_harness_equal_specialist_access"
+  ],
+  "release_gate": {
+    "requirement": "match_or_beat_reference_per_primary_benchmark_and_critical_illumos_family",
+    "equivalence_margins": null,
+    "power_analysis": null,
+    "sealed_task_pack": null,
+    "missing_evidence": "block_release"
+  },
+  "startup_budget": {
+    "model_load_timeout_seconds": 120,
+    "max_new_tokens": 16,
+    "paid_requests": 0,
+    "training_runs": 0
+  },
+  "existing_task_packs": {
+    "illumos-e2e": {
+      "role": "development_only_existing_exposed_fixtures",
+      "files": [
+        {
+          "path": "benchmarks/illumos-e2e/tasks/c-01-kstat-cpu-count/meta.toml",
+          "sha256": "0ad0fe25e5ffad8953a151b654d782bfb5e71886ac7baa1227498a9b1f5da3a8"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/c-01-kstat-cpu-count/prompt.md",
+          "sha256": "25a41604bc282bc58b857a47191423a373d9d23e44ec50fea6a8f8cd9ab2239c"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/c-01-kstat-cpu-count/setup.sh",
+          "sha256": "6dafadff55d68a58c34b5427ef23559ca26d0ad4e2aa36c02cfdc180d0c8b35c"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/c-01-kstat-cpu-count/verify.sh",
+          "sha256": "ca048cec60106e7b062e5e6558d12d1b2c42f733e8f3e745fcf7761eb7d60b90"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/c-02-libscf-read-prop/meta.toml",
+          "sha256": "e30ddc7036769ea39bc440bc2e0694843137f7dcb0e4c5dbf0685481d7638a78"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/c-02-libscf-read-prop/prompt.md",
+          "sha256": "5b5dd95078b5ff6cb7cc589a140c67eeea8702fefa904b6d6dd0b70c50bacd79"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/c-02-libscf-read-prop/setup.sh",
+          "sha256": "6580db38211e00ce9649dfbd736762be387c5346dc58092e1c192ff822438d33"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/c-02-libscf-read-prop/verify.sh",
+          "sha256": "aa0591cf2afd159186f7a77f1e8caa1d40a1fe70c817ff8912f5524de2146745"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/c-03-libscf-smf-state/meta.toml",
+          "sha256": "6fe61312b8a6642ba57ebb2b29b73a97d383f95af502091929824fa99fc6a8a2"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/c-03-libscf-smf-state/prompt.md",
+          "sha256": "309249de188964915f91ce175148a702f3e52ecd796fcbe2b0f074f6d03c5493"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/c-03-libscf-smf-state/setup.sh",
+          "sha256": "ebf5fd8dd5a6401a8184aa5adbf7aa4730f937cb4efbd8fc9e0c32c5cc8e228c"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/c-03-libscf-smf-state/verify.sh",
+          "sha256": "97bc993cbcbbb5756edb10fcff83afe9b489ee4552f4eb5b192170d88b201b01"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/discover-01-cpu-info/meta.toml",
+          "sha256": "074b240866980e46636ae4c25b9aed8f80de1f5950ccd81deda864fd9c42f7fb"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/discover-01-cpu-info/prompt.md",
+          "sha256": "ba920c7b1f45d70bdc23fe415684a2717381230ac20a2b1b76bf81c28bbb2456"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/discover-01-cpu-info/setup.sh",
+          "sha256": "c9cf604a43646c0ef9ca7d2d95d6dc83c2e0b3cdb8429f8f9faf7f4bcc4a86d2"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/discover-01-cpu-info/verify.sh",
+          "sha256": "fe3f225827ae9df757e76ac0213ef4986b83804dd632cff119c189f5fee28f82"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/discover-02-nic-speed/meta.toml",
+          "sha256": "8a8d80d53eaed74964cc08d8130e735a3941a2485ee3ae80a72df67bdef2f168"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/discover-02-nic-speed/prompt.md",
+          "sha256": "8888827dd0522b84bb65b6f1eae4e902f3862ee71e0bc7aee77761d968f4c19f"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/discover-02-nic-speed/setup.sh",
+          "sha256": "4ee7e9e504063e90afd29a1c793dcbe153e5fda7b2caa662062c032d0f57efae"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/discover-02-nic-speed/verify.sh",
+          "sha256": "dae5ce205744ece15ef7d8fc0009155b3e6e70e305aaab9ebc0da6d0b2495397"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/discover-03-zpool-create/meta.toml",
+          "sha256": "41740ab825c3170cea1a4cbeb84852170ebabd791e4871c2a988a94bd86ec69a"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/discover-03-zpool-create/prompt.md",
+          "sha256": "71a9165d06735616967cfc52abdcbcb97e3522750de17682113fc22d711c367b"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/discover-03-zpool-create/setup.sh",
+          "sha256": "bac17cdfcfb59133707437583b22598eec8b414ff2c7cc04d26bedb017eb9244"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/discover-03-zpool-create/verify.sh",
+          "sha256": "1f01ebd856f5240c955690dce55653315b786fe0814dacf6fd656584c58edd7c"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rbac-01-create-role/meta.toml",
+          "sha256": "302451b7e4996815a75e117aec3bb8061286f8adc337923e69f9ce826142b141"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rbac-01-create-role/prompt.md",
+          "sha256": "2fb2e4a0396a2579c386a48a386801983747c68a9edd49ac4ac0c20fc9bfef97"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rbac-01-create-role/setup.sh",
+          "sha256": "d3d38321c5de79fcfdd3e3a2738ac3afe9da27d6595a1c307c9444cfbc73aaa5"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rbac-01-create-role/verify.sh",
+          "sha256": "33bbd437115b1ee1139a839f7b1bc3f2b412037d49c41ec26edd2bab3ae9e1ca"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rbac-02-custom-profile/meta.toml",
+          "sha256": "e07aedb53dccd9e1ac88f0a1eceb1fcd399c60f89f6a23cba78166b403337c4b"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rbac-02-custom-profile/prompt.md",
+          "sha256": "2c4670aa5ee93523975ac47f351e363bb3b6c4eef32823314027fbf27fcd2f63"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rbac-02-custom-profile/setup.sh",
+          "sha256": "72590c38cab84acec05b53392a527059adce1a845e05aab376649c955d28a1fb"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rbac-02-custom-profile/verify.sh",
+          "sha256": "3d2dbcbe9122ae6f901956e22dc8b6b1f892cd239d34ce5a8d7f45a75223e3e5"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rbac-03-restrict-privileges/meta.toml",
+          "sha256": "e5fb4eee0ded9c3c24cdabe61d8744723d5c6e90a17b4b2334b37838b95e0521"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rbac-03-restrict-privileges/prompt.md",
+          "sha256": "c1b8bcaa25e705b86261bb8595a7a88716dce54f61ecc49d06c1427a32005854"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rbac-03-restrict-privileges/setup.sh",
+          "sha256": "7fd6575099ba311620c47597847b2012f05e5efd1b63278338d7eff815d0cd8b"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rbac-03-restrict-privileges/verify.sh",
+          "sha256": "cc0fc314af5534e8733714fcaa7eda926f8f2293fb789f832d87c178400abc72"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rust-01-processor-info/meta.toml",
+          "sha256": "e9a694bb3de0cf11209f3e30167cdc607c23bb42113153259ca547b09128fc27"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rust-01-processor-info/prompt.md",
+          "sha256": "1993311d85d086fbdc1acae53d9a2899de80d0dbe9ff66550c53cfab4c1eaf71"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rust-01-processor-info/setup.sh",
+          "sha256": "148632db1a8a57a319c4aa9f3cf04e42da5673b76026a5644af497044bfa0f12"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rust-01-processor-info/verify.sh",
+          "sha256": "daa0250cf05a6c973748ba1ec28884210ee64736482238055b65eb11fd816e71"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rust-02-door-roundtrip/meta.toml",
+          "sha256": "80851252755e7db7ce3ad3b90bfe5353e4d7dd7e63097935759fc005266f205b"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rust-02-door-roundtrip/prompt.md",
+          "sha256": "737bdc63120429aa29065f42b53fcee5055409f8f5fb47e66048de7673459f44"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rust-02-door-roundtrip/setup.sh",
+          "sha256": "8b728309c53fcd695dfb9439b370ca946708c60f47624471fcf23718ace06e44"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rust-02-door-roundtrip/verify.sh",
+          "sha256": "d8eaa2626fc54c5105146fe8098bdd6ec2d9418a6d9d59aff99ab57fbc6f80dd"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rust-03-xattr/meta.toml",
+          "sha256": "2b8c9bafffa7e4ee24463578c158c422cbcc2defdc501c282057412c4624cebb"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rust-03-xattr/prompt.md",
+          "sha256": "178bdad744e094a39540f72aa844d33a71cff9b021e5384159a17729069c03c1"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rust-03-xattr/setup.sh",
+          "sha256": "4b7c5c883aaf09701d945d6069b914746945962bcf75359e84031caa75750924"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/rust-03-xattr/verify.sh",
+          "sha256": "880146ac44cc03df607d13fa8b803a790287577ace55517f69e419765063e437"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/smf-01-clear-maintenance/meta.toml",
+          "sha256": "cd7a44ed44b5769a9a7d9047ec9cbffd453b7f7eed2d4f764b119b5079d69f35"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/smf-01-clear-maintenance/prompt.md",
+          "sha256": "1c02f6dae12ad9ffa54136095ee489a5aaccbeeea13e9deb70bf443177714028"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/smf-01-clear-maintenance/setup.sh",
+          "sha256": "9c306d8bcd1cf8f81efcbb8b14a78534808c93f69d1a48477c7d6c1813316c5a"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/smf-01-clear-maintenance/verify.sh",
+          "sha256": "f7282a851e3fc61b9500c9abfedb84d1d56abdd1933d374faf511c017fc9dcc3"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/smf-02-enable-configure/meta.toml",
+          "sha256": "2dee688e6f557aefef460f6aad58ac1e1d8c1afb714c2f1076c546f9b8a948cd"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/smf-02-enable-configure/prompt.md",
+          "sha256": "6e2c2664f0779f07ee244b576b056e936aa9f9896463d99957acecaeaf4ef550"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/smf-02-enable-configure/setup.sh",
+          "sha256": "0e85a4d3955e8b2233155e190d204ca1e21e046e22b9d96e571542b9df3d2807"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/smf-02-enable-configure/verify.sh",
+          "sha256": "a09f33c4cbe4a9ab31c42cf244c4fdb35a868e67951418abeba5419a99a783d5"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/smf-03-import-manifest/meta.toml",
+          "sha256": "9e53ae8b88b76c09baaa995c1771d711c51edd8fc73e825fbaf4665a2c1490d8"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/smf-03-import-manifest/prompt.md",
+          "sha256": "9b5e97f04d7c7e6f3322a4b0d911d265335eea98a98b3f4506534fe7b8e95ba8"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/smf-03-import-manifest/setup.sh",
+          "sha256": "4bd23a624f0c36f856bb1909e6184d77f8c50d02d86b31561e5e2c028b2049c7"
+        },
+        {
+          "path": "benchmarks/illumos-e2e/tasks/smf-03-import-manifest/verify.sh",
+          "sha256": "131a218231818c0806638f4192b0d769e5121e8e290c25a5ea607b2bd2421fc1"
+        }
+      ]
+    },
+    "illumos-orchestration": {
+      "role": "development_only_existing_exposed_fixtures",
+      "files": [
+        {
+          "path": "benchmarks/illumos-orchestration/tasks/relay-group-3svc/meta.toml",
+          "sha256": "cc384c13dc2889ae048112acf52be34bdf09459d009f1f84879cabf4ec71d173"
+        },
+        {
+          "path": "benchmarks/illumos-orchestration/tasks/relay-group-3svc/prompt.md",
+          "sha256": "5a2c3bfe638927f0a4f1655e5cf36fa2df85d0b9d0b9a10efb75ba5defd41a8f"
+        },
+        {
+          "path": "benchmarks/illumos-orchestration/tasks/relay-group-3svc/setup.sh",
+          "sha256": "f5f91518a037aa44ed6b1adcbb33a4a2308813f1a79a776e26a0378b2f4b9217"
+        },
+        {
+          "path": "benchmarks/illumos-orchestration/tasks/relay-group-3svc/validate.sh",
+          "sha256": "2a57ed4c0a2336b7aa184f9a48af1a648fef47c41622c732659e4246c1b362d0"
+        },
+        {
+          "path": "benchmarks/illumos-orchestration/tasks/relay-group-3svc/verify.sh",
+          "sha256": "74558864a4b5055fe5c7bddb0d9881afaff345f124264fad289b21c9f145630d"
+        }
+      ]
+    }
+  },
+  "blockers": [
+    "Anima PAT unavailable",
+    "clean snapshot runner and independent sealed tasks required",
+    "statistical tolerances and sample sizes not frozen",
+    "illumos VMs on hephaistos: host setup pending; validation deferred",
+    "Paired evaluation deferred; Ptah derivative must be labeled separately from upstream Qwen"
+  ],
+  "validation": {
+    "status": "deferred_by_user_until_host_setup_ready",
+    "native_target": "illumos VMs on hephaistos",
+    "local_engineering_may_proceed": true,
+    "release_gates_unchanged": true
+  }
+}

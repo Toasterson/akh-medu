@@ -1,0 +1,14 @@
+{
+  "schema": "lilith/rl-probe@1",
+  "status": "passed",
+  "pid": 302072,
+  "deployed_weights_changed": false,
+  "quality_claim": false,
+  "source_sha256": "ed03a1564914a3bea25229f6865dc09c79298c8b8b75b950a4c06712c541ce56",
+  "phase": "finished",
+  "elapsed_seconds": 153.34569759000442,
+  "previous_pid": 300816,
+  "cold_reload_exact": true,
+  "selected_arm": "klpo",
+  "candidate_sha256": "35689119596f37bf920e629dea3d6a2c5601302fbb8fddc941a089efc6c0a95b"
+}

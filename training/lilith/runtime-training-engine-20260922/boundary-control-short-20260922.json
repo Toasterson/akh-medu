@@ -1,0 +1,50 @@
+{
+  "schema": "lilith/training-engine-boundary-control@2",
+  "status": "failed_equivalence",
+  "shared_kv_persisted": false,
+  "positions": [
+    2,
+    4,
+    8
+  ],
+  "tolerances": {
+    "logit_max_abs": 0.0001,
+    "gradient_max_abs": 0.0001
+  },
+  "logit_differences": {
+    "2": {
+      "max_abs": 0.28125,
+      "mean_abs": 0.033024974167346954
+    },
+    "4": {
+      "max_abs": 0.375,
+      "mean_abs": 0.06018095836043358
+    },
+    "8": {
+      "max_abs": 0.5625,
+      "mean_abs": 0.05707980692386627
+    }
+  },
+  "losses": {
+    "full": 2.891024112701416,
+    "cached": 2.887763261795044,
+    "abs": 0.0032608509063720703
+  },
+  "gradient_differences": {
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": {
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "full_norm": 0.0,
+      "cached_norm": 0.0
+    },
+    "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": {
+      "max_abs": 0.010480709373950958,
+      "mean_abs": 0.00013720663264393806,
+      "full_norm": 0.30159100890159607,
+      "cached_norm": 0.31715378165245056
+    }
+  },
+  "cache_tensors_checked": 96,
+  "peak_gpu_bytes": 23992850944,
+  "elapsed_seconds": 166.88383057500323
+}

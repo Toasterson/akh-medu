@@ -1,0 +1,43 @@
+[
+    {
+        "backing-filename-format": "qcow2",
+        "virtual-size": 32161923072,
+        "filename": "/home/toasty/.local/share/vmctl/vms/exec1/overlay.qcow2",
+        "cluster-size": 65536,
+        "format": "qcow2",
+        "actual-size": 24007836672,
+        "format-specific": {
+            "type": "qcow2",
+            "data": {
+                "compat": "1.1",
+                "compression-type": "zlib",
+                "lazy-refcounts": false,
+                "refcount-bits": 16,
+                "corrupt": false,
+                "extended-l2": false
+            }
+        },
+        "full-backing-filename": "/home/toasty/.local/share/vmctl/images/openindiana-hipster-cloud-fixed.qcow2",
+        "backing-filename": "/home/toasty/.local/share/vmctl/images/openindiana-hipster-cloud-fixed.qcow2",
+        "dirty-flag": false
+    },
+    {
+        "virtual-size": 2097152000,
+        "filename": "/home/toasty/.local/share/vmctl/images/openindiana-hipster-cloud-fixed.qcow2",
+        "cluster-size": 65536,
+        "format": "qcow2",
+        "actual-size": 982066176,
+        "format-specific": {
+            "type": "qcow2",
+            "data": {
+                "compat": "1.1",
+                "compression-type": "zlib",
+                "lazy-refcounts": false,
+                "refcount-bits": 16,
+                "corrupt": false,
+                "extended-l2": false
+            }
+        },
+        "dirty-flag": false
+    }
+]

@@ -1,0 +1,13 @@
+{
+  "schema": "lilith/rl-unscored-diagnostics@2",
+  "scored": false,
+  "task": "align-up-power2/2",
+  "applies_to_arms": ["base", "sft", "klpo"],
+  "observation": "The completed artifact is valid Python but outside the frozen candidate grammar solely because it uses constant-tuple membership (AST In and Tuple).",
+  "transformation": "Expand b in (1,2,4,8,16,32,64) into the equivalent disjunction of equality comparisons, then use the unchanged bounded Interpreter.",
+  "finite_cases": 374,
+  "mismatches": 0,
+  "passed_after_transformation": true,
+  "effect_on_official_scores": null,
+  "limitations": ["diagnostic transformation rewrites syntax", "finite cases are not a proof", "official grammar failure and 4/8 scores remain unchanged"]
+}

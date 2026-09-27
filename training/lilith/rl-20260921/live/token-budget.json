@@ -1,0 +1,46 @@
+[
+  {
+    "id": "mask-intersection-u8/1",
+    "split": "train",
+    "prompt_tokens": 135,
+    "reference_tokens": 44
+  },
+  {
+    "id": "required-flags-u8/1",
+    "split": "train",
+    "prompt_tokens": 148,
+    "reference_tokens": 17
+  },
+  {
+    "id": "compose-le16/1",
+    "split": "train",
+    "prompt_tokens": 139,
+    "reference_tokens": 49
+  },
+  {
+    "id": "select-le16-byte/1",
+    "split": "train",
+    "prompt_tokens": 148,
+    "reference_tokens": 25
+  },
+  {
+    "id": "table-slot-offset/1",
+    "split": "development_holdout",
+    "prompt_tokens": 149
+  },
+  {
+    "id": "table-slot-valid/1",
+    "split": "development_holdout",
+    "prompt_tokens": 159
+  },
+  {
+    "id": "resource-unit-bytes/1",
+    "split": "development_holdout",
+    "prompt_tokens": 143
+  },
+  {
+    "id": "complete-resource-units/1",
+    "split": "development_holdout",
+    "prompt_tokens": 158
+  }
+]

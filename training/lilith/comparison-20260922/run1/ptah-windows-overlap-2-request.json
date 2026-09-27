@@ -1,0 +1,5 @@
+{
+  "session_id": "01a0c920-d512-74b1-8b85-0dac3191e72e",
+  "turn_id": "01a0c920-d513-7a83-aa7d-20f7c22ee27c",
+  "prompt": "Inputs a and b are packed windows: high byte is start and low byte is positive length. Return bool indicating whether the two half-open windows overlap. Return False if either low byte is zero. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63."
+}

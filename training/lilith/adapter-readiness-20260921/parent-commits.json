@@ -1,0 +1,109 @@
+[
+  {
+    "id": "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7",
+    "title": "Add response_template to tokenizer_config.json (#43)",
+    "message": "\n\n\n- Add response_template to tokenizer_config.json (6e8c319d55ae02b6feed78c5576e7062671d846c)\n- Add response_template to tokenizer_config.json (277d410b608fcfb08b7fa241cd38056e2dec5030)\n- Update README.md (03be7fbdf2a342429885b43267952ef251b819fe)\n\n\nCo-authored-by: Matthew Carrigan <Rocketknight1@users.noreply.huggingface.co>\n",
+    "authors": [
+      {
+        "user": "MaartenGr",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ea1ac3cc08a09aa6d3ec95/_74xXYEYLLjNVJ9zQucfn.jpeg"
+      },
+      {
+        "user": "Rocketknight1",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/1660312628256-60ba519750effef3a58beac3.png"
+      }
+    ],
+    "date": "2026-07-20T16:42:08.000Z"
+  },
+  {
+    "id": "12ace6d648d72bd41519e140f1185f34d38c7e3d",
+    "title": "Update README (#47)",
+    "message": "\n\n\n- Update README (f82caf94edf90ee1f34935982943d88506eb9f86)\n\n",
+    "authors": [
+      {
+        "user": "MaartenGr",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ea1ac3cc08a09aa6d3ec95/_74xXYEYLLjNVJ9zQucfn.jpeg"
+      }
+    ],
+    "date": "2026-07-15T16:41:03.000Z"
+  },
+  {
+    "id": "711c1368e39f1712f48ff0eb7bcdbbb760d52db0",
+    "title": "fix: chat template \u2014 null handling, reasoning preservation, turn-tag balance, input validation (#35)",
+    "message": "\n\n\n- fix: chat template \u2014 null handling, reasoning preservation, turn-tag balance, input validation (14d9d4bc3e6ace221dd4906495c83f67544545c0)\n- fix: restore model turn + thinking cue after tool responses (5330c5fff988120cc1fcb0b394dbda09c7019363)\n- fix: emit empty thought-channel primer on historical assistant turns for APC (706856c4cd89f5808166db543d84fda040caa492)\n- fix: prevent extra <turn|> when assistant has content + tool_calls + continuation (b1e00611d6d3c7d57c6ec8e1417bd44187345ef1)\n- fix: revert add_generation_prompt regression + preserve_thinking default (42363621b8cf6a560498839a355cc774123cbe6e)\n- fix: render thinking channel regardless of tool_calls presence (dfcf8d5b7fc94e9ffa3710fb13ff083309e34d44)\n- fix: update stale comment \u2014 thinking channel no longer tool-call-only (1f9aeb9c97221c68f95cbd0ca65b3d39c8cb35d5)\n- fix: remove APC primer from history, scope preserve_thinking to tool-call turns (aee1cb722d4d7650fccba2affb4f444961355a5d)\n- fix: remove APC primer from history, scope preserve_thinking to tool-call turns, remove extra newline in continuation turns (f9f699f371afb3b21af121918959dc545cb58548)\n- Add canonical header to chat template (acdb1defcec5520dcf871fa8a3cff4823163c2ed)\n- Fix chat template turn closure after tool-call-only turns (3ba05ed24de502e2b6d1f9a1de1bfed0247c6d8a)\n\n\nCo-authored-by: Luciano Martins <lucianommartins@users.noreply.huggingface.co>\n",
+    "authors": [
+      {
+        "user": "MaartenGr",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ea1ac3cc08a09aa6d3ec95/_74xXYEYLLjNVJ9zQucfn.jpeg"
+      },
+      {
+        "user": "lucianommartins",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/617c3b1ce1dfc7bbb3375ab8/RqT70BjCzdexHbQlkxJjf.jpeg"
+      }
+    ],
+    "date": "2026-07-15T16:35:05.000Z"
+  },
+  {
+    "id": "0e2b1058541244490925fbacf8972041435691ac",
+    "title": "Add Technical Report",
+    "message": "",
+    "authors": [
+      {
+        "user": "MaartenGr",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ea1ac3cc08a09aa6d3ec95/_74xXYEYLLjNVJ9zQucfn.jpeg"
+      }
+    ],
+    "date": "2026-07-10T08:43:13.000Z"
+  },
+  {
+    "id": "5926caa4ec0cac5cbfadaf4077420520de1d5205",
+    "title": "Update max_position_embeddings to full context length (#21)",
+    "message": "\n\n\n- Update max_position_embeddings to full context length (3a85a14daee049a05bc4e67c415cfb36e09be3b7)\n\n\nCo-authored-by: Douglas Reid <dougreid@users.noreply.huggingface.co>\n",
+    "authors": [
+      {
+        "user": "osanseviero",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/6032802e1f993496bc14d9e3/w6hr-DEQot4VVkoyRIBiy.png"
+      },
+      {
+        "user": "dougreid",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/no-auth/RTbhcazut-YOIk0_R3F7g.png"
+      }
+    ],
+    "date": "2026-06-04T11:58:10.000Z"
+  },
+  {
+    "id": "66bc78a7534d523aa32004652cb02cc2e6354c62",
+    "title": "Update README.md",
+    "message": "",
+    "authors": [
+      {
+        "user": "osanseviero",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/6032802e1f993496bc14d9e3/w6hr-DEQot4VVkoyRIBiy.png"
+      }
+    ],
+    "date": "2026-06-03T21:50:54.000Z"
+  },
+  {
+    "id": "657684fef0b5ac5d6bff39284ceb6ec3710b700e",
+    "title": "Super-squash branch 'main' using huggingface_hub",
+    "message": "\n\n\nCo-authored-by: osanseviero <osanseviero@users.noreply.huggingface.co>\nCo-authored-by: MaartenGr <MaartenGr@users.noreply.huggingface.co>\nCo-authored-by: douglas reid <douglas reid@users.noreply.huggingface.co>\n",
+    "authors": [
+      {
+        "user": "dougreid",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/no-auth/RTbhcazut-YOIk0_R3F7g.png"
+      },
+      {
+        "user": "osanseviero",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/6032802e1f993496bc14d9e3/w6hr-DEQot4VVkoyRIBiy.png"
+      },
+      {
+        "user": "MaartenGr",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ea1ac3cc08a09aa6d3ec95/_74xXYEYLLjNVJ9zQucfn.jpeg"
+      },
+      {
+        "user": "douglas reid"
+      }
+    ],
+    "date": "2026-06-03T21:14:23.000Z"
+  }
+]

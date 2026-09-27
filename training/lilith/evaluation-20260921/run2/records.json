@@ -1,0 +1,866 @@
+[
+  {
+    "task": "alignment-8",
+    "arm": "none",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 64.17074233200401
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def align_up(value: int, alignment: int) -> int:\n    if not (0 <= value <= 255) or not (0 <= alignment <= 255) or alignment == 0:\n        return -1\n    if not (alignment & (alignment - 1) == 0):\n        return -1\n    result = ((value + alignment - 1) // alignment) * alignment\n    if result > 255:\n        return -1\n    return result",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c522-2bed-7db1-b698-93175b639881",
+    "turn_id": "01a0c522-2bf6-7ad1-bdce-627ad237803f",
+    "actual_order": 1,
+    "elapsed_including_cancellation_seconds": 64.17074233200401,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "alignment-8",
+    "arm": "text",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 11.034697985000093
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def align_up(value: int, alignment: int) -> int:\n    if not (0 <= value <= 255) or not (0 <= alignment <= 255) or alignment == 0:\n        return -1\n    if not (alignment & (alignment - 1) == 0):\n        return -1\n    result = ((value + alignment - 1) // alignment) * alignment\n    if result > 255:\n        return -1\n    return result",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c523-26b2-79d1-9785-68520c5efb5f",
+    "turn_id": "01a0c523-26b4-7122-bd65-47e9c78bb033",
+    "actual_order": 2,
+    "elapsed_including_cancellation_seconds": 11.034697985000093,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "alignment-8",
+    "arm": "vsa",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 11.035764400003245
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def align_up(value: int, alignment: int) -> int:\n    if not (0 <= value <= 255) or not (0 <= alignment <= 255) or alignment == 0:\n        return -1\n    if not (alignment & (alignment - 1) == 0):\n        return -1\n    result = ((value + alignment - 1) // alignment) * alignment\n    if result > 255:\n        return -1\n    return result",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c523-51e0-7401-bec7-40bc57e42590",
+    "turn_id": "01a0c523-51e2-7953-9822-9f89392fed22",
+    "actual_order": 3,
+    "elapsed_including_cancellation_seconds": 11.035764400003245,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "alignment-16",
+    "arm": "text",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 13.04030704699835
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def align_up(value: int, alignment: int) -> int:\n    if not (0 <= value <= 65535) or not (0 <= alignment <= 65535):\n        return -1\n    if alignment <= 0 or (alignment & (alignment - 1)) != 0:\n        return -1\n    remainder = value % alignment\n    if remainder == 0:\n        result = value\n    else:\n        result = value + (alignment - remainder)\n    if result > 65535:\n        return -1\n    return result",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c523-7d11-7651-a767-1a9ee0097a72",
+    "turn_id": "01a0c523-7d13-7ca1-99f8-24e84cada6fc",
+    "actual_order": 4,
+    "elapsed_including_cancellation_seconds": 13.04030704699835,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "alignment-16",
+    "arm": "vsa",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 11.536696213996038
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def align_up(value: int, alignment: int) -> int:\n    if not (0 <= value <= 65535) or not (0 <= alignment <= 65535):\n        return -1\n    if alignment <= 0 or (alignment & (alignment - 1)) != 0:\n        return -1\n    remainder = value % alignment\n    if remainder == 0:\n        result = value\n    else:\n        result = value + (alignment - remainder)\n    if result > 65535:\n        return -1\n    return result",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c523-b01b-7751-b803-192c709eb8a5",
+    "turn_id": "01a0c523-b01d-71c1-95db-591b7cfd3976",
+    "actual_order": 5,
+    "elapsed_including_cancellation_seconds": 11.536696213996038,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "alignment-16",
+    "arm": "none",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 12.038934609001444
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def align_up(value: int, alignment: int) -> int:\n    if not (0 <= value <= 65535) or not (0 <= alignment <= 65535):\n        return -1\n    if alignment <= 0 or (alignment & (alignment - 1)) != 0:\n        return -1\n    remainder = value % alignment\n    if remainder == 0:\n        result = value\n    else:\n        result = value + (alignment - remainder)\n    if result > 65535:\n        return -1\n    return result",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c523-dd3e-7023-8ce5-943d5a5f0246",
+    "turn_id": "01a0c523-dd40-7cf3-b5f9-cbc08e3237d6",
+    "actual_order": 6,
+    "elapsed_including_cancellation_seconds": 12.038934609001444,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "interval_intersection-8",
+    "arm": "vsa",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 18.050185366999358
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int:\n    if not (0 <= a_start <= 255 and 0 <= a_end <= 255 and 0 <= b_start <= 255 and 0 <= b_end <= 255):\n        return -1\n    if a_end < a_start or b_end < b_start:\n        return -1\n    \n    max_start = a_start if a_start > b_start else b_start\n    min_end = a_end if a_end < b_end else b_end\n    \n    overlap = min_end - max_start\n    return overlap if overlap > 0 else 0",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c524-0c63-7bd3-bc46-da2604a71222",
+    "turn_id": "01a0c524-0c66-71e0-9848-1051a64e3a1c",
+    "actual_order": 7,
+    "elapsed_including_cancellation_seconds": 18.050185366999358,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "interval_intersection-8",
+    "arm": "none",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 15.546897853993869
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int:\n    if not (0 <= a_start <= 255 and 0 <= a_end <= 255 and 0 <= b_start <= 255 and 0 <= b_end <= 255):\n        return -1\n    if a_end < a_start or b_end < b_start:\n        return -1\n    \n    max_start = a_start if a_start > b_start else b_start\n    min_end = a_end if a_end < b_end else b_end\n    \n    overlap = min_end - max_start\n    return overlap if overlap > 0 else 0",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c524-5478-7e62-9047-35743ad80cab",
+    "turn_id": "01a0c524-547a-70f3-8741-d6f815d9dd5e",
+    "actual_order": 8,
+    "elapsed_including_cancellation_seconds": 15.546897853993869,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "interval_intersection-8",
+    "arm": "text",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 15.557128726999508
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int:\n    if not (0 <= a_start <= 255 and 0 <= a_end <= 255 and 0 <= b_start <= 255 and 0 <= b_end <= 255):\n        return -1\n    if a_end < a_start or b_end < b_start:\n        return -1\n    \n    max_start = a_start if a_start > b_start else b_start\n    min_end = a_end if a_end < b_end else b_end\n    \n    overlap = min_end - max_start\n    return overlap if overlap > 0 else 0",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c524-9453-7c73-b276-bb47dbd967bd",
+    "turn_id": "01a0c524-9456-7ac1-8832-d1b1aab0de2a",
+    "actual_order": 9,
+    "elapsed_including_cancellation_seconds": 15.557128726999508,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "interval_intersection-16",
+    "arm": "none",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 15.548483061997104
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int:\n    if not (0 <= a_start <= 65535 and 0 <= a_end <= 65535 and 0 <= b_start <= 65535 and 0 <= b_end <= 65535):\n        return -1\n    if a_start > a_end or b_start > b_end:\n        return -1\n    \n    max_start = a_start if a_start > b_start else b_start\n    min_end = a_end if a_end < b_end else b_end\n    \n    overlap = min_end - max_start\n    return overlap if overlap > 0 else 0",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c524-d5ad-7252-98cd-cc074f760be2",
+    "turn_id": "01a0c524-d5b0-7392-98b4-5bea007b56c2",
+    "actual_order": 10,
+    "elapsed_including_cancellation_seconds": 15.548483061997104,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "interval_intersection-16",
+    "arm": "text",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 15.549146194003697
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int:\n    if not (0 <= a_start <= 65535 and 0 <= a_end <= 65535 and 0 <= b_start <= 65535 and 0 <= b_end <= 65535):\n        return -1\n    if a_start > a_end or b_start > b_end:\n        return -1\n    \n    max_start = a_start if a_start > b_start else b_start\n    min_end = a_end if a_end < b_end else b_end\n    \n    overlap = min_end - max_start\n    return overlap if overlap > 0 else 0",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c525-1875-7c53-afa7-dd0c97af1751",
+    "turn_id": "01a0c525-1877-7d81-9b1e-524988144886",
+    "actual_order": 11,
+    "elapsed_including_cancellation_seconds": 15.549146194003697,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "interval_intersection-16",
+    "arm": "vsa",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 16.044745649000106
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int:\n    if not (0 <= a_start <= 65535 and 0 <= a_end <= 65535 and 0 <= b_start <= 65535 and 0 <= b_end <= 65535):\n        return -1\n    if a_start > a_end or b_start > b_end:\n        return -1\n    \n    max_start = a_start if a_start > b_start else b_start\n    min_end = a_end if a_end < b_end else b_end\n    \n    overlap = min_end - max_start\n    return overlap if overlap > 0 else 0",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c525-5ccf-79a0-b710-8f9b3f821ed8",
+    "turn_id": "01a0c525-5cd0-7841-bf11-10e3f063014f",
+    "actual_order": 12,
+    "elapsed_including_cancellation_seconds": 16.044745649000106,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "modular_sequence_order-8",
+    "arm": "none",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 21.566723891999573
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def ring_distance(start: int, end: int, modulus: int) -> int:\n    if not (0 <= start <= 255) or not (0 <= end <= 255) or modulus <= 0 or start >= modulus or end >= modulus:\n        return -1\n    return (end - start + modulus) % modulus if (end - start + modulus) % modulus != (end - start + modulus) else (end - start + modulus) % modulus\n\n# Wait, the prompt says no calls, no loops, no containers, no strings, no shifts, no exponentiation.\n# The modulo operator % is allowed.\n# Let's re-verify the logic.\n# (end - start + modulus) % modulus is the standard way to get forward distance.\n# Since I cannot use any calls, I must ensure the logic is pure.\n\ndef ring_distance(start: int, end: int, modulus: int) -> int:\n    if not (0 <= start <= 255) or not (0 <= end <= 255) or modulus <= 0 or start >= modulus or end >= modulus:\n        return -1\n    diff = end - start\n    if diff >= 0:\n        return diff\n    return diff + modulus",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c525-a47f-7332-a249-35fb73180438",
+    "turn_id": "01a0c525-a481-7733-97f8-33b2bc003724",
+    "actual_order": 13,
+    "elapsed_including_cancellation_seconds": 21.566723891999573,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "modular_sequence_order-8",
+    "arm": "text",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 21.564533910997852
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def ring_distance(start: int, end: int, modulus: int) -> int:\n    if not (0 <= start <= 255) or not (0 <= end <= 255) or modulus <= 0 or start >= modulus or end >= modulus:\n        return -1\n    return (end - start + modulus) % modulus if (end - start + modulus) % modulus != (end - start + modulus) else (end - start + modulus) % modulus\n\n# Wait, the prompt says no calls, no loops, no containers, no strings, no shifts, no exponentiation.\n# The modulo operator % is allowed.\n# Let's re-verify the logic.\n# (end - start + modulus) % modulus is the standard way to get forward distance.\n# Since I cannot use any calls, I must ensure the logic is pure.\n\ndef ring_distance(start: int, end: int, modulus: int) -> int:\n    if not (0 <= start <= 255) or not (0 <= end <= 255) or modulus <= 0 or start >= modulus or end >= modulus:\n        return -1\n    diff = end - start\n    if diff >= 0:\n        return diff\n    return diff + modulus",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c526-01e4-7ec2-a64b-eea319ac3970",
+    "turn_id": "01a0c526-01e7-7283-8929-49685af0a73b",
+    "actual_order": 14,
+    "elapsed_including_cancellation_seconds": 21.564533910997852,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "modular_sequence_order-8",
+    "arm": "vsa",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 19.05655495600513
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def ring_distance(start: int, end: int, modulus: int) -> int:\n    if not (0 <= start <= 255) or not (0 <= end <= 255) or modulus <= 0 or start >= modulus or end >= modulus:\n        return -1\n    return (end - start + modulus) % modulus if (end - start + modulus) % modulus != (end - start + modulus) else (end - start + modulus) % modulus\n\n# Wait, the prompt says no calls, no loops, no containers, no strings, no shifts, no exponentiation.\n# The modulo operator % is allowed.\n# Let's re-verify the logic.\n# (end - start + modulus) % modulus is the standard way to get forward distance.\n# Since I cannot use any calls, I must ensure the logic is pure.\n\ndef ring_distance(start: int, end: int, modulus: int) -> int:\n    if not (0 <= start <= 255) or not (0 <= end <= 255) or modulus <= 0 or start >= modulus or end >= modulus:\n        return -1\n    diff = end - start\n    if diff >= 0:\n        return diff\n    return diff + modulus",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c526-5f2a-72e0-9edf-622b97fcc88b",
+    "turn_id": "01a0c526-5f2c-7553-8523-c5a806d07ed9",
+    "actual_order": 15,
+    "elapsed_including_cancellation_seconds": 19.05655495600513,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "modular_sequence_order-16",
+    "arm": "text",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 11.536371292000695
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def ring_distance(start: int, end: int, modulus: int) -> int:\n    if not (0 <= start <= 65535) or not (0 <= end <= 65535) or not (0 <= modulus <= 65535):\n        return -1\n    if modulus == 0 or start >= modulus or end >= modulus:\n        return -1\n    diff = end - start\n    if diff >= 0:\n        return diff\n    else:\n        return diff + modulus",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c526-b2cc-7503-b351-60b73c97727a",
+    "turn_id": "01a0c526-b2ce-7ba2-86b1-424c2c7e8d4f",
+    "actual_order": 16,
+    "elapsed_including_cancellation_seconds": 11.536371292000695,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "modular_sequence_order-16",
+    "arm": "vsa",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 11.531367989999126
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def ring_distance(start: int, end: int, modulus: int) -> int:\n    if not (0 <= start <= 65535) or not (0 <= end <= 65535) or not (0 <= modulus <= 65535):\n        return -1\n    if modulus == 0 or start >= modulus or end >= modulus:\n        return -1\n    diff = end - start\n    if diff >= 0:\n        return diff\n    else:\n        return diff + modulus",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c526-e91f-7c52-9650-32d847995022",
+    "turn_id": "01a0c526-e921-7942-afb5-22722b45d423",
+    "actual_order": 17,
+    "elapsed_including_cancellation_seconds": 11.531367989999126,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "modular_sequence_order-16",
+    "arm": "none",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 12.033121387001302
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def ring_distance(start: int, end: int, modulus: int) -> int:\n    if not (0 <= start <= 65535) or not (0 <= end <= 65535) or not (0 <= modulus <= 65535):\n        return -1\n    if modulus == 0 or start >= modulus or end >= modulus:\n        return -1\n    diff = end - start\n    if diff >= 0:\n        return diff\n    else:\n        return diff + modulus",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c527-221f-7c92-af57-534370fdabc9",
+    "turn_id": "01a0c527-2221-7de0-95bf-2aa5e01259f6",
+    "actual_order": 18,
+    "elapsed_including_cancellation_seconds": 12.033121387001302,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "alignment-8",
+    "arm": "independent_reference",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+    "tokenizer_sha256": "e271c182ffa63eebd6d0f60a688fb90d3e87a1141c99c4d87a0d4508badfefea",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 110.75026089199673
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def align_up(value: int, alignment: int) -> int:\n    if value < 0 or value > 255 or alignment < 1 or (alignment & (alignment - 1)) != 0:\n        return -1\n    r = (value + alignment - 1) & (alignment - 1)\n    if r > 255:\n        return -1\n    return r",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c527-5cf7-7e52-9b33-c3382bad8551",
+    "turn_id": "01a0c527-5cf9-75a0-bf4e-ba6ac8de21d7",
+    "actual_order": 19,
+    "elapsed_including_cancellation_seconds": 110.75026089199673,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "alignment-16",
+    "arm": "independent_reference",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+    "tokenizer_sha256": "e271c182ffa63eebd6d0f60a688fb90d3e87a1141c99c4d87a0d4508badfefea",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 19.541490511997836
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def align_up(value: int, alignment: int) -> int:\n    if value < 0 or value > 65535 or alignment < 1 or alignment > 65535:\n        return -1\n    if (alignment & (alignment - 1)) != 0:\n        return -1\n    result = (value + alignment - 1) & ~(alignment - 1)\n    if result > 65535:\n        return -1\n    return result",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c529-188c-7583-b206-e47a81708912",
+    "turn_id": "01a0c529-18a1-77a3-8d2e-720ef40b6c28",
+    "actual_order": 20,
+    "elapsed_including_cancellation_seconds": 19.541490511997836,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "interval_intersection-8",
+    "arm": "independent_reference",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+    "tokenizer_sha256": "e271c182ffa63eebd6d0f60a688fb90d3e87a1141c99c4d87a0d4508badfefea",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 32.57035734799865
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int:\n    if a_start < 0 or a_start > 255 or a_end < 0 or a_end > 255 or b_start < 0 or b_start > 255 or b_end < 0 or b_end > 255:\n        return -1\n    if a_end < a_start or b_end < b_start:\n        return -1\n    lo = a_start if a_start > b_start else b_start\n    hi = a_end if a_end < b_end else b_end\n    if hi > lo:\n        return hi - lo\n    return 0",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c529-716a-7071-b399-766dfb640e50",
+    "turn_id": "01a0c529-7176-7c80-b10d-ba663831c589",
+    "actual_order": 21,
+    "elapsed_including_cancellation_seconds": 32.57035734799865,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "interval_intersection-16",
+    "arm": "independent_reference",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+    "tokenizer_sha256": "e271c182ffa63eebd6d0f60a688fb90d3e87a1141c99c4d87a0d4508badfefea",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 34.576224236006965
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int:\n    if a_start < 0 or a_start > 65535 or a_end < 0 or a_end > 65535 or b_start < 0 or b_start > 65535 or b_end < 0 or b_end > 65535:\n        return -1\n    if a_end < a_start or b_end < b_start:\n        return -1\n    lo = a_start if a_start > b_start else b_start\n    hi = a_end if a_end < b_end else b_end\n    if hi > lo:\n        return hi - lo\n    return 0",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c529-fead-7590-a734-23b03de578a7",
+    "turn_id": "01a0c529-feaf-7d21-bb8e-7488375c9129",
+    "actual_order": 22,
+    "elapsed_including_cancellation_seconds": 34.576224236006965,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "modular_sequence_order-8",
+    "arm": "independent_reference",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+    "tokenizer_sha256": "e271c182ffa63eebd6d0f60a688fb90d3e87a1141c99c4d87a0d4508badfefea",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 21.546814212000754
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def ring_distance(start: int, end: int, modulus: int) -> int:\n    if (start < 0 or start > 255 or end < 0 or end > 255 or modulus < 0 or modulus > 255 or modulus == 0 or start >= modulus or end >= modulus):\n        return -1\n    return (end - start) % modulus",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c52a-96ad-7830-aa16-1c1ad277eae8",
+    "turn_id": "01a0c52a-96af-7fe1-929e-c439f365bee7",
+    "actual_order": 23,
+    "elapsed_including_cancellation_seconds": 21.546814212000754,
+    "native_status": "completed",
+    "native_error": null
+  },
+  {
+    "task": "modular_sequence_order-16",
+    "arm": "independent_reference",
+    "seed": 0,
+    "manifest_sha256": "71509ce7acd0e9d84cd67be4be4feaa38f27a5a692aa5ccd948c53fd9636bdb3",
+    "model_sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+    "tokenizer_sha256": "e271c182ffa63eebd6d0f60a688fb90d3e87a1141c99c4d87a0d4508badfefea",
+    "budget": {
+      "attempts": 1,
+      "tools": 0,
+      "max_new_tokens": 512,
+      "context_tokens": 4096,
+      "lesson_bytes": 1400,
+      "wall_seconds": 600
+    },
+    "usage": {
+      "attempts": 1,
+      "tools": 0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "wall_seconds": 22.550930826000695
+    },
+    "retrieval": {
+      "context": "",
+      "lessons": []
+    },
+    "source": "def ring_distance(start: int, end: int, modulus: int) -> int:\n    if (start < 0 or start > 65535 or end < 0 or end > 65535 or modulus < 0 or modulus > 65535 or modulus == 0 or start >= modulus or end >= modulus):\n        return -1\n    return (end - start) % modulus",
+    "status": "completed",
+    "finish_reason": "stop",
+    "session_id": "01a0c52a-fbd5-7a81-9a0e-935c2010af3f",
+    "turn_id": "01a0c52a-fbd8-75c2-bd6b-98e631892a2d",
+    "actual_order": 24,
+    "elapsed_including_cancellation_seconds": 22.550930826000695,
+    "native_status": "completed",
+    "native_error": null
+  }
+]

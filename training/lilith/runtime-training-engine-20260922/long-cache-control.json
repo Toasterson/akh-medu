@@ -1,0 +1,27 @@
+{
+  "schema": "lilith/training-engine-long-cache-control@3",
+  "status": "passed",
+  "prior_attempts": [
+    "monolithic_gpu_kv_oom",
+    "chunk256_gpu_kv_oom"
+  ],
+  "cache_offloading": true,
+  "tokens": 8192,
+  "finite_logits": true,
+  "cache_tensors_checked": 96,
+  "cache_seq_length": 8192,
+  "peak_gpu_bytes": 24244817408,
+  "elapsed_seconds": 357.99796581300325,
+  "contract": {
+    "schema": "lilith/akhrtd-training-engine@1",
+    "context_tokens": 32768,
+    "max_new_tokens": 16384,
+    "thinking": true,
+    "prefill_chunk_tokens": 256,
+    "cache_offloading": true,
+    "cache": "DynamicCache(config), detached KV",
+    "update": "one optimizer step after full eligible bank",
+    "target_module": "model.language_model.layers.47.self_attn.q_proj",
+    "rank": 2
+  }
+}

@@ -1,0 +1,1 @@
+{"deployed_weights_changed":false,"error":"RuntimeError: managed training ended cancelled","mode":"train","private_root_removed":true,"services_stopped":true,"session_id":"01a0ca84-bfb1-7d82-944f-2b94d53b0678","status":"failed","turn_id":"01a0ca84-bfb3-70e1-a68b-04b11c829823"}

@@ -1,0 +1,11 @@
+{
+  "status": "interrupted",
+  "services_stopped": true,
+  "ptah_runtime_available": false,
+  "original_unknown_cancel_requested": true,
+  "original_return_status": "queued",
+  "original_return_reconciled_status": "queued",
+  "original_return_cancel_requested": true,
+  "original_return_after_cancel": "cancelled",
+  "error": "fresh session used the coordinator profile and remained dispatching; stopped before model execution so recovery can use a tool-free reporting-only identity"
+}

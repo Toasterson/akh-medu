@@ -1,0 +1,22 @@
+{
+  "status": "completed",
+  "services_stopped": true,
+  "quality_claim": false,
+  "records": 8,
+  "scores": {
+    "train": {
+      "passed": 3,
+      "evaluated": 4,
+      "completion_budget_exhausted": 0,
+      "total_tasks": 4
+    },
+    "development_holdout": {
+      "passed": 3,
+      "evaluated": 4,
+      "completion_budget_exhausted": 0,
+      "total_tasks": 4
+    }
+  },
+  "total_seconds": 416.08426335900003,
+  "peak_allocated_bytes": 19011284992
+}

@@ -1,0 +1,10 @@
+{
+  "schema": "lilith/runtime-training-private-build@1",
+  "binary_path": "/home/toasty/.local/share/akh-medu/lilith-runtime-training-target/release/akhrtd",
+  "binary_sha256": "c096253e5d2d0674dace3e3690c7c7f53f15c5551189727c8e97aea25cfb0886",
+  "shared_target_akhrtd_sha256": "09a224fa4b07e7f2d5fe907e82c143c60d891be7a99b98a20b2c9c2104240fd1",
+  "features": [
+    "runtime"
+  ],
+  "gpu_used": false
+}

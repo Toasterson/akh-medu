@@ -1,0 +1,11 @@
+{
+  "scripts/session-platform/lilith_coordination.py": "18c3adbb7bf2522c883f3840cd9989e9cb55cbfee4d8fe70300eb96eed360e61",
+  "scripts/session-platform/lilith-review-smoke.py": "f832c3ca34e9f2d0079bfb8904a5249969080f32fd5b812cd6c9c29dfadcd82c",
+  "scripts/session-platform/lilith_verification.py": "51987795845a50d3a15d3dc904bd11906a9df77b753c63205689823690ee10ca",
+  "scripts/session-platform/check-lilith.py": "feddfb567060cc54abe0593b20cc2a2249b25073a8ca34112b99f0ea071e434c",
+  "scripts/session-platform/test_lilith_coordination.py": "52f7da65e811b015e19422765316d21fd1ae3008c471b808a9a62ce5ba049fc2",
+  "scripts/session-platform/test_prepare_lilith.py": "4676b1ea5e2d67a2341d04b55158bdca06166cb1ece48f2389cb363c40c662ad",
+  "scripts/session-platform/test_lilith_review_smoke.py": "fd3906f74411b9170f21feebd14bd021de0c3e5f12496e7d912a450cf4d4718c",
+  "scripts/session-platform/prepare-lilith.py": "5d7fa2e5804ac505b7c5edcc4c33bb580f21dc250ed3d759cceddfcc338390ed",
+  "examples/lilith/COORDINATION.md": "b57efc18ab017e3cc0da22f319df1707636f5bdd441a45aeb7aeadc4720fa276"
+}

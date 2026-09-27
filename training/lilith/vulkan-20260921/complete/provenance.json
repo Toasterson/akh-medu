@@ -1,0 +1,9 @@
+{
+  "base_commit": "329ebff421d2eff75ef12f29001baac20ff01ef3",
+  "sha256": {
+    "src/nlu/vendored/quantized_gemma4.rs": "e09816a7b087b71eefaeff5b8db496d858b564dae1a122bfac478847e7c43ab9",
+    "vendor/candle-core/src/vulkan_backend.rs": "cae7fb73ccc1c2a6074c533a789a4e95a59bc351c2131f892788b07c6a392fd4",
+    "target/release/examples/candle_session_probe": "da5f2ea9cf3e46508081bc7ce226b268b72c1baa1c345496e0942be1da4bbd0c"
+  },
+  "notes": "Local dirty-source build. Model and tokenizer hashes are pinned in startup-20260921 inventory and private runtime config. HIP baseline predates Vulkan-only GELU support; Gemma HIP math unchanged. Performance samples overlap Rust builds and are not a controlled throughput benchmark."
+}

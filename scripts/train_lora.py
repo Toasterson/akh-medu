@@ -6,7 +6,7 @@ each akh-medu agent's personality is encoded in model weights.
 
 Supports two backends:
   --backend mlx     Apple Silicon native (recommended on Mac mini / M-series)
-  --backend llamacpp  llama.cpp finetune (cross-platform, slower)
+  --backend llamacpp  unavailable until checkpoint conversion is implemented
 
 Usage
 -----
@@ -266,67 +266,8 @@ def train_llamacpp(
     resume: bool = False,
     reporter: TrainingRunReporter | None = None,
 ) -> Path:
-    """Train with llama.cpp finetune (cross-platform fallback)."""
-    llamacpp_bin = Path(llamacpp_dir or os.environ.get("LLAMACPP_DIR", "")) / "llama-finetune"
-    if not llamacpp_bin.exists():
-        llamacpp_bin = Path("llama-finetune")
-
-    model_path = _find_gguf_model(cfg.base_model)
-    if model_path is None:
-        print(f"[ERROR] Could not find GGUF model for '{cfg.base_model}'")
-        print("  Set LLAMACPP_MODEL_PATH or place the GGUF in ~/.akh-medu/models/llm/")
-        sys.exit(1)
-
-    adapter_path = adapter_dir / "adapter.bin"
-    cmd = [
-        str(llamacpp_bin),
-        "--model-base", str(model_path),
-        "--train-data", str(train_path),
-        "--lora-out", str(adapter_path),
-        "--lora-r", str(cfg.rank),
-        "--lora-alpha", str(int(cfg.alpha)),
-        "--ctx", str(cfg.max_seq_len),
-        "--batch", str(cfg.batch_size),
-        "--epochs", str(cfg.epochs),
-        "--lr", str(cfg.learning_rate),
-        "--adam-epsf", "1e-8",
-        "--warmup", str(cfg.warmup_steps),
-    ]
-    if resume and adapter_path.exists():
-        cmd += ["--lora-init-scale", "0"]
-
-    print(f"[{agent_id}] Running: {' '.join(cmd)}")
-    process = subprocess.Popen(cmd, start_new_session=True)
-    if reporter is not None:
-        reporter.attach_child_process_group(process.pid)
-    try:
-        returncode = process.wait()
-    except KeyboardInterrupt:
-        if process.poll() is None:
-            if hasattr(os, "killpg"):
-                os.killpg(process.pid, signal.SIGINT)
-            else:
-                process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                if hasattr(os, "killpg"):
-                    os.killpg(process.pid, signal.SIGKILL)
-                else:
-                    process.kill()
-                process.wait()
-        raise
-    finally:
-        if reporter is not None:
-            reporter.detach_child_process_group(process.pid)
-    if returncode != 0:
-        print(f"[ERROR] llama-finetune failed with exit code {returncode}")
-        sys.exit(returncode)
-
-    # llama.cpp outputs .bin; convert to safetensors for uniform loading.
-    safetensors_path = adapter_dir / "adapter.safetensors"
-    _convert_bin_to_safetensors(adapter_path, safetensors_path)
-    return safetensors_path
+    """Fail before launch until a real checkpoint conversion exists."""
+    raise RuntimeError("llama.cpp LoRA training is disabled: .bin to safetensors conversion is not implemented")
 
 
 def _find_gguf_model(model_name: str) -> Path | None:
@@ -342,9 +283,21 @@ def _find_gguf_model(model_name: str) -> Path | None:
 
 
 def _convert_bin_to_safetensors(bin_path: Path, out_path: Path) -> None:
-    """Minimal .bin→.safetensors conversion (placeholder; use convert_lora_to_gguf.py)."""
-    print(f"[WARN] Copying {bin_path.name} as safetensors (no format conversion)")
-    _atomic_install_checkpoint(bin_path, out_path)
+    """Never relabel an opaque binary checkpoint as safetensors."""
+    raise RuntimeError("No validated .bin to safetensors converter is implemented")
+
+
+def _invalidate_registry_metadata(adapter_dir: Path) -> None:
+    """Durably remove certification before replacing the weights it described."""
+    old_meta = adapter_dir / "meta.json"
+    if old_meta.exists():
+        old_meta.rename(adapter_dir / f"previous-meta-{uuid.uuid4().hex}.json")
+        if os.name != "nt":
+            directory_fd = os.open(adapter_dir, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
 
 
 def _atomic_install_checkpoint(source: Path, destination: Path) -> None:
@@ -356,6 +309,9 @@ def _atomic_install_checkpoint(source: Path, destination: Path) -> None:
         shutil.copyfileobj(input_handle, output_handle)
         output_handle.flush()
         os.fsync(output_handle.fileno())
+    # Persist invalidation first: a crash may leave old weights uncertified,
+    # but must never leave new weights certified by metadata for old weights.
+    _invalidate_registry_metadata(destination.parent)
     os.replace(tmp, destination)
     if os.name != "nt":
         directory_fd = os.open(destination.parent, os.O_RDONLY)
@@ -373,7 +329,7 @@ def write_meta(
     adapter_path: Path,
     cfg: LoraConfig,
     train_pairs: int,
-    eval_accuracy: float,
+    eval_accuracy: float | None,
     duration_secs: float,
 ) -> None:
     meta = {
@@ -392,12 +348,19 @@ def write_meta(
             "warmup_steps": cfg.warmup_steps,
         },
         "training_pairs": train_pairs,
-        "eval_accuracy": round(eval_accuracy, 4),
         "training_duration_secs": round(duration_secs, 1),
         "trained_at": int(time.time()),
         "base_model_hash": cfg.base_model,
     }
-    meta_path = adapter_dir / "meta.json"
+    if eval_accuracy is None:
+        meta["evaluation_status"] = "not_run"
+        meta["eligible_for_deployment"] = False
+        # An old metadata file must not certify the newly installed checkpoint.
+        _invalidate_registry_metadata(adapter_dir)
+        meta_path = adapter_dir / "candidate-meta.json"
+    else:
+        meta["eval_accuracy"] = round(eval_accuracy, 4)
+        meta_path = adapter_dir / "meta.json"
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     print(f"[{agent_id}] Wrote metadata to {meta_path}")
@@ -456,8 +419,7 @@ def train_agent(
         duration = time.time() - t0
         reporter.update("evaluating", checkpoint_path=str(adapter_path))
 
-        # Evaluate on the eval set (keyword-overlap proxy;
-        # scripts/benchmark_adapter.py for full eval).
+        # No model inference evaluator is connected here. Preserve unknown accuracy.
         eval_accuracy = _quick_eval(agent_id, eval_path)
 
         write_meta(agent_id, adapter_dir, adapter_path, cfg, train_pairs, eval_accuracy, duration)
@@ -472,7 +434,7 @@ def train_agent(
         )
         print(
             f"[{agent_id}] Done: {duration/60:.1f} min | "
-            f"eval_acc={eval_accuracy:.2%} | "
+            f"evaluation=not_run; deployment blocked | "
             f"adapter={size_mb:.1f} MB"
         )
     except KeyboardInterrupt:
@@ -494,14 +456,11 @@ def train_agent(
         reporter.finish()
 
 
-def _quick_eval(agent_id: str, eval_path: Path) -> float:
-    """Placeholder accuracy: count non-empty responses (real eval in benchmark_adapter.py)."""
+def _quick_eval(agent_id: str, eval_path: Path) -> None:
+    """Return unknown: dataset shape is not model accuracy."""
     pairs = load_jsonl(eval_path)
-    if not pairs:
-        return 0.0
-    # Without inference backend here, return a placeholder.
-    print(f"[{agent_id}] Quick eval: {len(pairs)} pairs (run benchmark_adapter.py for real metrics)")
-    return 0.0
+    print(f"[{agent_id}] Evaluation not run ({len(pairs)} held-out pairs); checkpoint remains a candidate")
+    return None
 
 
 def main() -> None:

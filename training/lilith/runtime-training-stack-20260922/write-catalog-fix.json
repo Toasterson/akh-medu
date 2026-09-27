@@ -1,0 +1,10 @@
+{
+  "file": "/home/toasty/.local/share/akh-medu/lilith-dev-vulkan-20260921/akhsessd.json",
+  "before_sha256": "e54d8bd2362a81747d8a8cf194be267a68164d287e326f29bf75e3341b3aee30",
+  "after_sha256": "ac93426c24c1dc9f8f22f57f7627b21808ca2eede3d56c10d1ee6ff59ecf5bd0",
+  "profiles": [
+    "lilith"
+  ],
+  "change": "write_file exposes expected_revision and documents create versus revision-checked replace",
+  "service_restarted": false
+}

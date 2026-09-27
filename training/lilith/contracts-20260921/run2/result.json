@@ -1,0 +1,57 @@
+{
+  "kind": "local_durable_coordination_integration",
+  "status": "passed",
+  "phases": [
+    {
+      "phase": "stack_ready",
+      "runtime_pid": 271469,
+      "devices": {
+        "lilith": {
+          "kind": "vulkan",
+          "ordinal": 0
+        },
+        "ptah": {
+          "kind": "hip",
+          "ordinal": 0
+        }
+      }
+    },
+    {
+      "phase": "coordination_scope",
+      "session_id": "01a0c4ee-3773-7833-87ad-c0fb9906267e",
+      "turn_id": "01a0c4ee-3776-7c53-9db4-ae44defde492"
+    },
+    {
+      "phase": "lilith-write",
+      "seconds": 135.24113578400284,
+      "output": "Review queued."
+    },
+    {
+      "phase": "artifact_verified",
+      "passed": true,
+      "cases": 2926,
+      "source_sha256": "35c0c9b1fad048dee36690135c587756c82f96250805a369d268baf89e8a2c23",
+      "scope": "Python unsigned-64 range reference fixture; not C overflow, ABI, kernel or native illumos validation",
+      "contract": {
+        "id": "u64-range/1",
+        "artifact": "range_within_u64.py",
+        "specification": "Write range_within_u64(start: int, length: int, limit: int) -> bool. Inputs are integers. Return False if any input is outside unsigned 64-bit range 0..18446744073709551615. Otherwise return whether the half-open range [start, start+length) fits within [0, limit). An empty range at start==limit is valid. Reject start>limit even for an empty range. Use the overflow-safe comparison length <= limit - start after checking start <= limit. Use only integer/bool literals, comparisons, boolean operators, subtraction, if and return.",
+        "verifier_sha256": "e2682f782429123d8c0c0d0436192e7cf06fa1e3d5a210697ccc77b6b06c84c6"
+      }
+    },
+    {
+      "phase": "controller_reopened"
+    },
+    {
+      "phase": "autonomous_delegation_completed",
+      "assignment_id": "e767fed134b49c4c88b8eec1f2bcd58bd8e606da7b4084bf4333c5bf5cdb3855",
+      "reviewer": "ptah-inline-reviewer",
+      "report": "The review for `range_within_u64.py` is complete. Here is the summary of the results:\n\n**Independent Verification Results:**\n*   **Status:** Passed.\n*   **Test Coverage:** The artifact successfully passed 2,926 test cases within the Python fixture scope.\n*   **Scope Note:** This verification confirms the logic against the Python unsigned-64 range reference fixture; it does not constitute C overflow, ABI, kernel, or native illumos validation.\n\n**Reviewer Opinion (Ptah):**\n*   **Verdict:** No defects found.\n*   **Technical Feedback:** The implementation correctly handles the u64 range constraints. Specifically, it properly rejects `start > limit` (including empty ranges) and utilizes the overflow-safe comparison `length <= limit - start` after verifying `start <= limit`. The reviewer noted that while the special case `start == limit and length == 0` is handled, it is logically subsumed by the general check. All specified language constraints (literals, comparisons, boolean operators, subtraction, if/return) were satisfied."
+    },
+    {
+      "phase": "same_process_model_roundtrip_verified",
+      "runtime_pid": 271469
+    }
+  ],
+  "services_stopped": true
+}

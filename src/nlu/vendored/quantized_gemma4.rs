@@ -36,17 +36,18 @@ use candle_nn::Module;
 
 pub const MAX_SEQ_LEN: usize = 131072; // Gemma 4 long-context window.
 
-// --- HIP-device op routing (Phase 45f / ADR 073) ----------------------------
+// --- GPU-device op routing (Phase 45f / ADR 073) ----------------------------
 // candle-nn's `rms_norm` / `softmax_last_dim` / `rope` are custom ops whose GPU path
 // is only compiled when candle-nn is built with its `cuda` feature. We drive candle's
 // cuda slot through `candle-core/hip` (a fork; candle-nn's cuda feature is off), so on
 // a HIP device those custom ops have no `cuda_fwd` and would error. Route to candle-nn's
-// public on-device "slow" decompositions (pure primitive ops, all HIP-parity-gated) when
-// the tensor lives on the GPU; keep the fast custom ops byte-for-byte on CPU. Mirrors
-// `quantized_gemma3`.
+// device-native kernels or public on-device decompositions when the tensor lives
+// on the GPU; keep the fast custom ops byte-for-byte on CPU. Mirrors
+// `quantized_gemma3`. Vulkan also needs explicit routing: these upstream custom
+// ops do not implement `vulkan_fwd`.
 
 /// RMSNorm matching `candle_transformers::quantized_nn::RmsNorm` (weight applied
-/// directly, computed in f32), device-aware: `rms_norm_slow` on HIP, fast op on CPU.
+/// directly, computed in f32), using device-native fused kernels on HIP/Vulkan.
 #[derive(Debug, Clone)]
 struct GemmaRmsNorm {
     weight: Tensor,
@@ -63,6 +64,10 @@ impl GemmaRmsNorm {
 impl Module for GemmaRmsNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let eps = self.eps as f32;
+        #[cfg(feature = "vulkan")]
+        if x.device().is_vulkan() {
+            return candle::vulkan_backend::rms_norm_fused(x, &self.weight, eps);
+        }
         if x.device().is_cuda() {
             // Fused single-kernel RMSNorm on the HIP device (Phase 45h).
             #[cfg(feature = "hip")]
@@ -74,19 +79,19 @@ impl Module for GemmaRmsNorm {
     }
 }
 
-/// Last-dim softmax: generic on-device form on HIP, fast custom op on CPU.
+/// Last-dim softmax: generic on-device form on HIP/Vulkan, fast custom op on CPU.
 /// (45h: fused-softmax built+parity-passed but no decode gain — reverted; see gemma3.)
 fn softmax_last_dim_dev(x: &Tensor) -> Result<Tensor> {
-    if x.device().is_cuda() {
+    if x.device().is_cuda() || x.device().is_vulkan() {
         candle_nn::ops::softmax(x, D::Minus1)
     } else {
         candle_nn::ops::softmax_last_dim(x)
     }
 }
 
-/// Rotary embedding: `rope_slow` on HIP, fast custom op on CPU.
+/// Rotary embedding: `rope_slow` on HIP/Vulkan, fast custom op on CPU.
 fn rope_dev(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-    if x.device().is_cuda() {
+    if x.device().is_cuda() || x.device().is_vulkan() {
         candle_nn::rotary_emb::rope_slow(x, cos, sin)
     } else {
         candle_nn::rotary_emb::rope(x, cos, sin)
@@ -238,10 +243,95 @@ impl RotaryEmbedding {
     }
 }
 
+/// Explicit low-rank update for a query projection; never mutates base weights.
+#[derive(Debug, Clone)]
+struct QueryLora {
+    a: Tensor,
+    b: Tensor,
+    scale: f64,
+}
+
+/// Grow storage geometrically, writing only the new positions between growths.
+/// Prefix views retain capacity strides; attention must respect those layouts.
+fn append_reusable_kv(
+    buffers: &mut Option<(Tensor, Tensor)>,
+    k: &Tensor,
+    v: &Tensor,
+    index_pos: usize,
+) -> Result<(Tensor, Tensor)> {
+    let (batch, heads, count, width) = k.dims4()?;
+    if k.dims() != v.dims() || k.dtype() != DType::F32 || v.dtype() != DType::F32 {
+        candle::bail!("reusable KV requires matching f32 K/V");
+    }
+    let len = index_pos
+        .checked_add(count)
+        .ok_or_else(|| candle::Error::Msg("KV position overflow".into()))?;
+    let capacity = buffers.as_ref().map(|(k, _)| k.dims()[2]).unwrap_or(0);
+    if capacity < len {
+        let capacity = len
+            .max(256)
+            .checked_next_power_of_two()
+            .ok_or_else(|| candle::Error::Msg("KV capacity overflow".into()))?;
+        let shape = (batch, heads, capacity, width);
+        let next_k = Tensor::zeros(shape, DType::F32, k.device())?;
+        let next_v = Tensor::zeros(shape, DType::F32, v.device())?;
+        if index_pos > 0 {
+            let (old_k, old_v) = buffers
+                .as_ref()
+                .ok_or_else(|| candle::Error::Msg("KV continuation without prefix".into()))?;
+            next_k.slice_set(&old_k.narrow(2, 0, index_pos)?.contiguous()?, 2, 0)?;
+            next_v.slice_set(&old_v.narrow(2, 0, index_pos)?.contiguous()?, 2, 0)?;
+        }
+        *buffers = Some((next_k, next_v));
+    }
+    let (kbuf, vbuf) = buffers
+        .as_ref()
+        .ok_or_else(|| candle::Error::Msg("empty reusable KV".into()))?;
+    kbuf.slice_set(&k.contiguous()?, 2, index_pos)?;
+    vbuf.slice_set(&v.contiguous()?, 2, index_pos)?;
+    Ok((kbuf.narrow(2, 0, len)?, vbuf.narrow(2, 0, len)?))
+}
+
+/// Decode each group of query heads against its shared KV head, without copies.
+fn grouped_decode_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
+    let (batch, heads, count, width) = q.dims4()?;
+    let (kb, kv_heads, len, kw) = k.dims4()?;
+    if count != 1
+        || kv_heads == 0
+        || heads % kv_heads != 0
+        || kb != batch
+        || kw != width
+        || v.dims() != [batch, kv_heads, len, width]
+    {
+        candle::bail!("invalid grouped decode geometry");
+    }
+    let q = q.reshape((batch, kv_heads, heads / kv_heads, width))?;
+    let scores = q.matmul(&k.transpose(2, 3)?)?;
+    softmax_last_dim_dev(&scores)?
+        .matmul(v)?
+        .reshape((batch, heads, 1, width))
+}
+
+impl QueryLora {
+    fn apply(&self, input: &Tensor, base: &Tensor) -> Result<Tensor> {
+        let input_dim = self.a.dim(1)?;
+        let delta = input
+            .to_dtype(DType::F32)?
+            .reshape(((), input_dim))?
+            .matmul(&self.a.t()?)?
+            .matmul(&self.b.t()?)?;
+        let delta = (delta * self.scale)?
+            .reshape(base.shape())?
+            .to_dtype(base.dtype())?;
+        base + delta
+    }
+}
+
 #[derive(Debug, Clone)]
 struct LayerWeights {
     // Attention components
     attention_wq: QMatMul,
+    query_lora: Option<QueryLora>,
     attention_wk: QMatMul,
     attention_wv: QMatMul,
     attention_wo: QMatMul,
@@ -387,6 +477,11 @@ impl LayerWeights {
         #[cfg(not(feature = "rocm"))]
         let v = self.attention_wv.forward(x)?;
 
+        let q = match &self.query_lora {
+            Some(adapter) => adapter.apply(x, &q)?,
+            None => q,
+        };
+
         let q = q
             .reshape((b_sz, seq_len, self.n_head, self.head_dim))?
             .transpose(1, 2)?;
@@ -408,7 +503,17 @@ impl LayerWeights {
             .rotary_embedding
             .apply_rotary_emb_qkv(&q, &k, index_pos)?;
 
-        let (k, v) = if k.device().is_cuda() {
+        let reusable =
+            k.device().is_vulkan() && std::env::var("AKH_VULKAN_REUSABLE_KV").as_deref() == Ok("1");
+        let (k, v) = if reusable {
+            if index_pos > 0 && self.kv_cache.as_ref().map(|(k, _)| k.dims()[2]) != Some(index_pos)
+            {
+                candle::bail!("KV continuation does not match the cached prefix");
+            }
+            let prefix = append_reusable_kv(&mut self.kv_buf, &k, &v, index_pos)?;
+            self.kv_cache = Some(prefix.clone());
+            prefix
+        } else if k.device().is_cuda() {
             // Phase 46a: static pre-allocated KV cache (see quantized_gemma3 for detail).
             let len = index_pos + seq_len;
             if len > self.kv_ctx {
@@ -460,7 +565,12 @@ impl LayerWeights {
         let flash = seq_len == 1 && q.device().is_cuda();
         #[cfg(not(feature = "hip"))]
         let flash = false;
-        let attn_output = if flash {
+        let grouped = seq_len == 1
+            && q.device().is_vulkan()
+            && std::env::var("AKH_VULKAN_GROUPED_DECODE").as_deref() == Ok("1");
+        let attn_output = if grouped {
+            grouped_decode_attention(&q, &k, &v)?
+        } else if flash {
             #[cfg(feature = "hip")]
             {
                 // `k`/`v` are the f32 static-KV prefix (already narrowed to `len` and cast
@@ -498,6 +608,84 @@ impl LayerWeights {
                 .map_err(|e| candle_core::Error::Msg(format!("gpu attn wo: {e}")));
         }
         self.attention_wo.forward(&attn_output)
+    }
+}
+
+#[cfg(test)]
+mod reusable_decode_tests {
+    use super::*;
+
+    fn controls(device: &Device) -> Result<()> {
+        for (heads, kv_heads, width, len) in [(16, 8, 256, 773), (16, 1, 512, 773), (6, 2, 17, 259)]
+        {
+            let values = |n| {
+                (0..n)
+                    .map(|i| ((i * 13 % 97) as f32 - 48.) / 97.)
+                    .collect::<Vec<_>>()
+            };
+            let q = Tensor::from_vec(values(2 * heads * width), (2, heads, 1, width), device)?;
+            // A capacity-strided prefix, including a nonzero position offset.
+            let k = Tensor::from_vec(
+                values(2 * kv_heads * (len + 3) * width),
+                (2, kv_heads, len + 3, width),
+                device,
+            )?
+            .narrow(2, 1, len)?;
+            let v = k.affine(0.3, 0.1)?;
+            let repeated_k = candle_transformers::utils::repeat_kv(k.clone(), heads / kv_heads)?;
+            let repeated_v = candle_transformers::utils::repeat_kv(v.clone(), heads / kv_heads)?;
+            let expected = softmax_last_dim_dev(&q.matmul(&repeated_k.transpose(2, 3)?)?)?
+                .matmul(&repeated_v)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let actual = grouped_decode_attention(&q, &k, &v)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            assert_eq!(expected.len(), actual.len());
+            assert!(
+                expected
+                    .iter()
+                    .zip(&actual)
+                    .all(|(a, b)| b.is_finite() && (a - b).abs() < 2e-5)
+            );
+        }
+        let mut buffers = None;
+        let mut all = vec![];
+        for count in [255, 2, 256] {
+            let offset = all.len() / 3;
+            let values: Vec<f32> = (offset * 3..(offset + count) * 3)
+                .map(|i| i as f32)
+                .collect();
+            let k = Tensor::from_vec(values.clone(), (1, 1, count, 3), device)?;
+            let (kp, vp) = append_reusable_kv(&mut buffers, &k, &k.affine(2., 1.)?, offset)?;
+            all.extend(values);
+            assert_eq!(kp.flatten_all()?.to_vec1::<f32>()?, all);
+            assert_eq!(
+                vp.flatten_all()?.to_vec1::<f32>()?,
+                all.iter().map(|v| v * 2. + 1.).collect::<Vec<_>>()
+            );
+        }
+        // Reset starts a fresh logical prefix; no stale positions leak into its view.
+        buffers = None;
+        let k = Tensor::from_vec(vec![7f32; 3], (1, 1, 1, 3), device)?;
+        assert_eq!(
+            append_reusable_kv(&mut buffers, &k, &k, 0)?.0.dims(),
+            &[1, 1, 1, 3]
+        );
+        let mut absent = None;
+        assert!(append_reusable_kv(&mut absent, &k, &k, 1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn grouped_attention_and_cache_growth_cpu() -> Result<()> {
+        controls(&Device::Cpu)
+    }
+
+    #[test]
+    #[ignore = "requires an exclusive Vulkan device"]
+    fn grouped_attention_and_cache_growth_vulkan() -> Result<()> {
+        controls(&Device::new_vulkan(0)?)
     }
 }
 
@@ -616,9 +804,12 @@ impl ModelWeights {
 
         // Optional AMD GPU path (ADR 068): AKH_GPU_MATMUL=1 uploads linear weights to the GPU
         // and runs their GEMMs via rocBLAS; AKH_GPU_QUANT=1 keeps them int4 (fits 12B/27B).
+        // This path is only for CPU-backed tensors. Explicit native devices already
+        // own their weights and kernels; mixing in offload duplicates allocations
+        // and reintroduces host/device transfers (including HIP inside Vulkan).
         #[cfg(feature = "rocm")]
         let gpu_blas: Option<std::sync::Arc<crate::nlu::hip::RocmBlas>> =
-            if std::env::var("AKH_GPU_MATMUL").ok().as_deref() == Some("1") {
+            if device.is_cpu() && std::env::var("AKH_GPU_MATMUL").ok().as_deref() == Some("1") {
                 match crate::nlu::hip::RocmBlas::load() {
                     Ok(b) => {
                         tracing::info!(
@@ -848,6 +1039,7 @@ impl ModelWeights {
 
             layers.push(LayerWeights {
                 attention_wq: QMatMul::from_qtensor(attention_wq)?,
+                query_lora: None,
                 attention_wk: QMatMul::from_qtensor(attention_wk)?,
                 attention_wv: QMatMul::from_qtensor(attention_wv)?,
                 attention_wo: QMatMul::from_qtensor(attention_wo)?,
@@ -900,6 +1092,64 @@ impl ModelWeights {
     /// Embedding length (`= 3840` for Gemma 4 12B). Exposed so callers can build
     /// spliced input-embedding tensors (e.g. audio frames) at the right width.
     /// (akh-medu vendored extension.)
+    /// Install an explicitly validated LoRA update on the last query projection.
+    /// The caller must verify model/adapter provenance before calling. Only these
+    /// two tensors are accepted; all base tensors remain unchanged. Restart
+    /// inference at position zero after activation or removal (caches are cleared).
+    pub fn set_last_query_lora(&mut self, a: &Tensor, b: &Tensor, scale: f64) -> Result<()> {
+        let layer = self
+            .layers
+            .last()
+            .ok_or_else(|| candle::Error::Msg("model has no layers".into()))?;
+        let (rank, input) = a.dims2()?;
+        let (output, b_rank) = b.dims2()?;
+        if rank == 0
+            || rank > 64
+            || rank != b_rank
+            || input != self.embedding_length
+            || output != layer.q_dim
+            || !scale.is_finite()
+            || scale <= 0.0
+        {
+            candle::bail!("invalid last-query LoRA shape or scale");
+        }
+        let checked = |tensor: &Tensor| -> Result<Tensor> {
+            let cpu = tensor.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+            if cpu
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .iter()
+                .any(|x| !x.is_finite())
+            {
+                candle::bail!("non-finite LoRA tensor");
+            }
+            cpu.to_device(layer.attention_norm.weight.device())
+        };
+        let adapter = QueryLora {
+            a: checked(a)?,
+            b: checked(b)?,
+            scale,
+        };
+        self.layers.last_mut().unwrap().query_lora = Some(adapter);
+        self.reset_kv_cache();
+        Ok(())
+    }
+
+    /// Remove the scratch adapter and invalidate all cached prefixes.
+    pub fn clear_query_lora(&mut self) {
+        for layer in &mut self.layers {
+            layer.query_lora = None;
+        }
+        self.reset_kv_cache();
+    }
+
+    pub fn reset_kv_cache(&mut self) {
+        for layer in &mut self.layers {
+            layer.kv_cache = None;
+            layer.kv_buf = None;
+        }
+    }
+
     pub fn embedding_length(&self) -> usize {
         self.embedding_length
     }
@@ -1131,5 +1381,136 @@ mod mask_tests {
                 0, 0, 1, 1, 1, // q=4: keep 2,3,4
             ]
         );
+    }
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod vulkan_op_tests {
+    use super::*;
+
+    fn assert_close(actual: Tensor, expected: Tensor) -> Result<()> {
+        let actual = actual
+            .to_device(&Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let expected = expected.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(actual.len(), expected.len());
+        for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
+            assert!(
+                a.is_finite() && e.is_finite() && (a - e).abs() < 2e-5,
+                "element {index}: Vulkan {a}, CPU {e}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an exclusive Vulkan GPU"]
+    fn gemma4_vulkan_gelu_matches_cpu() -> Result<()> {
+        let device = Device::new_vulkan(0)?;
+        let values: Vec<f32> = (0..1024).map(|i| (i as f32 - 512.0) / 32.0).collect();
+        let x = Tensor::from_vec(values, (32, 32), &Device::Cpu)?;
+        assert_close(x.to_device(&device)?.gelu()?, x.gelu()?)?;
+        // Exercise the same operation through a non-contiguous layout.
+        assert_close(
+            x.to_device(&device)?.transpose(0, 1)?.gelu()?,
+            x.transpose(0, 1)?.gelu()?,
+        )
+    }
+
+    #[test]
+    #[ignore = "requires an exclusive Vulkan GPU"]
+    fn gemma4_vulkan_rms_norm_matches_cpu() -> Result<()> {
+        let device = Device::new_vulkan(0)?;
+        for width in [256, 512] {
+            let values: Vec<f32> = (0..6 * width).map(|i| (i as f32 * 0.13).sin()).collect();
+            let weights: Vec<f32> = (0..width).map(|i| 0.5 + i as f32 / width as f32).collect();
+            let x = Tensor::from_vec(values, (1, 2, 3, width), &Device::Cpu)?;
+            let norm = GemmaRmsNorm {
+                weight: Tensor::from_vec(weights, width, &Device::Cpu)?,
+                eps: 1e-6,
+            };
+            let gpu = GemmaRmsNorm {
+                weight: norm.weight.to_device(&device)?,
+                eps: norm.eps,
+            };
+            assert_close(gpu.forward(&x.to_device(&device)?)?, norm.forward(&x)?)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an exclusive Vulkan GPU"]
+    fn gemma4_vulkan_softmax_matches_cpu() -> Result<()> {
+        let device = Device::new_vulkan(0)?;
+        let x = Tensor::new(
+            &[[0f32, -1., f32::NEG_INFINITY, 3.], [5., 0., 2., -3.]],
+            &Device::Cpu,
+        )?;
+        assert_close(
+            softmax_last_dim_dev(&x.to_device(&device)?)?,
+            softmax_last_dim_dev(&x)?,
+        )
+    }
+
+    #[test]
+    #[ignore = "requires an exclusive Vulkan GPU"]
+    fn gemma4_vulkan_rope_matches_cpu() -> Result<()> {
+        let device = Device::new_vulkan(0)?;
+        let x = Tensor::arange(0f32, 48., &Device::Cpu)?.reshape((1, 2, 3, 8))?;
+        let angles = (Tensor::arange(0f32, 12., &Device::Cpu)? * 0.1)?.reshape((3, 4))?;
+        let (cos, sin) = (angles.cos()?, angles.sin()?);
+        assert_close(
+            rope_dev(
+                &x.to_device(&device)?,
+                &cos.to_device(&device)?,
+                &sin.to_device(&device)?,
+            )?,
+            rope_dev(&x, &cos, &sin)?,
+        )
+    }
+}
+
+#[cfg(test)]
+mod query_lora_tests {
+    use super::*;
+
+    #[test]
+    fn query_lora_adds_scaled_delta_for_each_token_without_mutating_base() -> Result<()> {
+        let dev = Device::Cpu;
+        let adapter = QueryLora {
+            a: Tensor::new(&[[1f32, 0., 0.], [0., 1., 0.]], &dev)?,
+            b: Tensor::new(&[[2f32, 0.], [0., 3.]], &dev)?,
+            scale: 0.5,
+        };
+        let input = Tensor::new(&[[[1f32, 2., 3.], [4., 5., 6.]]], &dev)?;
+        let base = Tensor::new(&[[[5f32, 7.], [8., 9.]]], &dev)?;
+        let actual = adapter
+            .apply(&input, &base)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(actual, vec![6., 10., 12., 16.5]);
+        assert_eq!(base.flatten_all()?.to_vec1::<f32>()?, vec![5., 7., 8., 9.]);
+        Ok(())
+    }
+
+    #[test]
+    fn zero_query_lora_preserves_projection() -> Result<()> {
+        let dev = Device::Cpu;
+        let adapter = QueryLora {
+            a: Tensor::ones((2, 3), DType::F32, &dev)?,
+            b: Tensor::zeros((4, 2), DType::F32, &dev)?,
+            scale: 1.,
+        };
+        let base = Tensor::ones((1, 2, 4), DType::F32, &dev)?;
+        let input = Tensor::ones((1, 2, 3), DType::F32, &dev)?;
+        assert_eq!(
+            adapter
+                .apply(&input, &base)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            vec![1.; 8]
+        );
+        Ok(())
     }
 }

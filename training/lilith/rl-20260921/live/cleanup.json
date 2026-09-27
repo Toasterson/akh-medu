@@ -1,0 +1,23 @@
+{
+  "schema": "lilith/rl-cleanup@1",
+  "time_utc": "2026-09-21T19:56:01.499061+00:00",
+  "collector_exit_code": 0,
+  "cold_reload_exit_code": 0,
+  "owned_pids": [
+    300816,
+    302072
+  ],
+  "owned_processes_exited": true,
+  "gpu_vram_used_after_exit": {
+    "/sys/class/drm/card0/device/mem_info_vram_used": 36159488
+  },
+  "deployed_weights_changed": false,
+  "scratch_candidates": [
+    "run2/sft-adapter",
+    "run2/klpo-adapter"
+  ],
+  "core_bank_updates": 1,
+  "consumed_complete_records": 4,
+  "source_hashes_match_executed_snapshots": true,
+  "quality_gain_demonstrated": false
+}

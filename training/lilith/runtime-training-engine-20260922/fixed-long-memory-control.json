@@ -1,0 +1,28 @@
+{
+  "schema": "lilith/cache-memory@1",
+  "status": "passed",
+  "tokens": 8192,
+  "contract": {
+    "schema": "lilith/akhrtd-training-engine@1",
+    "context_tokens": 32768,
+    "max_new_tokens": 16384,
+    "thinking": true,
+    "prefill_chunk_tokens": 256,
+    "cache_offloading": true,
+    "cache_transfer": "synchronous_caller_stream",
+    "cache": "explicit hybrid layers, detached KV",
+    "update": "one optimizer step after full eligible bank",
+    "target_module": "model.language_model.layers.47.self_attn.q_proj",
+    "rank": 2
+  },
+  "mode": "memory-only chunked forward; canonical sampler/replay remains tokenwise",
+  "engine_sha256": "5c68f6a1d451c87b6d77e3a54c2786305208a35b5b366ad8661a9ca0bbcb73d0",
+  "optimizer_steps": 0,
+  "finite_logits": true,
+  "cache_seq_length": 8192,
+  "detached_tensors": 136,
+  "sliding_stored": 1023,
+  "global_stored": 8192,
+  "peak_gpu_bytes": 24050122240,
+  "elapsed_seconds": 9.774955619999673
+}

@@ -1,0 +1,9 @@
+{
+  "status": "interrupted",
+  "services_stopped": true,
+  "quality_claim": false,
+  "records": 0,
+  "error": "ValueError: installed AutoProcessor rejected official Qwen2VLImageProcessor; failed before model/GPU allocation",
+  "gpu_allocated": false,
+  "process_exited": true
+}

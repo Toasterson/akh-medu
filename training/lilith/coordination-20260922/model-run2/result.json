@@ -1,0 +1,17 @@
+{
+  "status": "interrupted",
+  "model_backed": true,
+  "executor": "lilith_vm_executor:local_executor",
+  "execution_boundary": "ssh_guest",
+  "services_stopped": true,
+  "assignment_status": "reporting",
+  "truth_review": "not_applicable",
+  "error": "Ptah-to-Lilith return did not complete after a same-process HIP-to-Vulkan GPU hang; operator interrupted the runner and all owned daemons stopped",
+  "completed_boundaries": [
+    "lilith_delegation",
+    "khnum_patch_proposal",
+    "illumos_guest_fixed_tests",
+    "ptah_review"
+  ],
+  "incomplete_boundary": "lilith_human_facing_report"
+}

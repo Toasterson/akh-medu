@@ -1,0 +1,29 @@
+{
+  "repo_head": "329ebff421d2eff75ef12f29001baac20ff01ef3",
+  "features": [
+    "session",
+    "executor",
+    "sandbox",
+    "hip",
+    "vulkan"
+  ],
+  "binaries": {
+    "akhsessd": {
+      "sha256": "4c94f0dfff0dc257c8ca8ee6a992d193bf1ad9739568ceb9bb76cd7ca320c5b6",
+      "bytes": 50528280
+    },
+    "akhsbxd": {
+      "sha256": "28645e872f9ac20125af8c6f85eb1cd8533d4883b5b43f97d4281cefc660fdb5",
+      "bytes": 50525600
+    },
+    "akhexecd": {
+      "sha256": "1cde5f97a75e372db0d541eadbd9322e80c58cb9eec7b0815e44f4761d691bf0",
+      "bytes": 50528296
+    },
+    "akhrtd": {
+      "sha256": "7b100748e9fe5f888ee3ff4e603a48de0dd1edcf97d9b2d498e94b06c114a02d",
+      "bytes": 50522256
+    }
+  },
+  "note": "Before Gemma Vulkan op routing fix"
+}

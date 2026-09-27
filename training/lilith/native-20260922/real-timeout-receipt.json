@@ -1,0 +1,35 @@
+{
+  "command": [
+    "python3",
+    "-c",
+    "import time; time.sleep(20)"
+  ],
+  "copy_in": {
+    "content_bytes": 177,
+    "content_sha256": "e12bd4b6df7095c31b0892c2a6ae2dd0d636fdace8d781499f6a1e199f930f67",
+    "snapshot_bytes": 10240,
+    "snapshot_entries": 3,
+    "snapshot_sha256": "f8248fbf8d13fdcd8ad661143312a4ce83af2ca658cd611fd51bddb172f1fb2f"
+  },
+  "duration_ms": 3921,
+  "exit_code": 124,
+  "guest": {
+    "host": "127.0.0.1",
+    "port": 10115,
+    "user": "akh-exec"
+  },
+  "passed": false,
+  "remote_cleanup_succeeded": true,
+  "run_id": "d7ed7cb3c71f4cbf8118ebaca4311db4",
+  "schema": "lilith/native-execution@1",
+  "stderr": "",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_truncated": false,
+  "stdout": "",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stdout_truncated": false,
+  "supervisor_status": "timeout",
+  "target": "check.py",
+  "timed_out": true,
+  "timeout_s": 2
+}

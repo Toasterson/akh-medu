@@ -722,6 +722,8 @@ impl crate::backend::BackendStorage for VulkanStorage {
             "sqrt" => "sqrt(x)",
             "relu" => "max(x,0.0)",
             "silu" => "x/(1.0+exp(-x))",
+            // Candle's Gelu uses the tanh approximation (not GeluErf).
+            "gelu" => "0.5*x*(1.0+tanh(0.7978845608028654*x*(1.0+0.044715*x*x)))",
             "tanh" => "tanh(x)",
             "ceil" => "ceil(x)",
             "floor" => "floor(x)",
@@ -880,7 +882,16 @@ impl crate::backend::BackendStorage for VulkanStorage {
         r.require_f32()?;
         let count = batch * m * n;
         let output = self.device.alloc(count, DType::F32)?;
+        // Resolve batch/row offsets once. The reduction then walks physical
+        // strides, preserving the reference accumulation order and broadcast views.
+        let code = if std::env::var("AKH_VULKAN_MATMUL_STRIDES").as_deref() == Ok("1") {
+            let a_step = l.stride()[l.stride().len() - 1];
+            let b_step = rl.stride()[rl.stride().len() - 2];
+            format!("@group(0) @binding(0) var<storage,read> a:array<f32>; @group(0) @binding(1) var<storage,read> b:array<f32>; @group(0) @binding(2) var<storage,read_write> out:array<f32>; {} {} @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id:vec3<u32>){{let i=dispatch_index(id);if i>={count}u{{return;}} let batch=i/({m}u*{n}u);let row=(i/{n}u)%{m}u;let col=i%{n}u;let a_base=ai((batch*{m}u+row)*{k}u);let b_base=bi(batch*{k}u*{n}u+col);var sum=0.0;for(var j=0u;j<{k}u;j++){{sum+=a[a_base+j*{a_step}u]*b[b_base+j*{b_step}u];}}out[i]=sum;}}",index_fn("ai",l),index_fn("bi",rl))
+        } else {
         let code=format!("@group(0) @binding(0) var<storage,read> a:array<f32>; @group(0) @binding(1) var<storage,read> b:array<f32>; @group(0) @binding(2) var<storage,read_write> out:array<f32>; {} {} @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id:vec3<u32>){{let i=dispatch_index(id);if i>={count}u{{return;}} let batch=i/({m}u*{n}u);let row=(i/{n}u)%{m}u;let col=i%{n}u;var sum=0.0;for(var j=0u;j<{k}u;j++){{sum+=a[ai((batch*{m}u+row)*{k}u+j)]*b[bi((batch*{k}u+j)*{n}u+col)];}}out[i]=sum;}}",index_fn("ai",l),index_fn("bi",rl));
+            code
+        };
         self.device.dispatch(
             code,
             &[&self.buffer, &r.buffer, &output.buffer],
@@ -986,7 +997,16 @@ impl crate::backend::BackendDevice for VulkanDevice {
             ordinal,
             info,
             // Bound application-held specializations, not opaque driver allocations.
-            pipelines: Mutex::new(PipelineCache::new(2048, 16 * 1024 * 1024)),
+            // The entry budget is tunable for model working sets, but both
+            // residency limits remain finite even for an excessive override.
+            pipelines: Mutex::new(PipelineCache::new(
+                std::env::var("AKH_VULKAN_PIPELINE_CACHE_ENTRIES")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(2048)
+                    .clamp(1, 16384),
+                16 * 1024 * 1024,
+            )),
             pending: Mutex::new(Vec::new()),
             submission_batch: if std::env::var("AKH_VULKAN_BATCH_SUBMIT").as_deref() != Ok("0") {
                 64

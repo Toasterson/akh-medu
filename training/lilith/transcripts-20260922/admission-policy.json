@@ -1,0 +1,15 @@
+{
+  "schema": "akh/lilith-transcript-admission-policy@1",
+  "frozen_at": "2026-09-22T00:00:00Z",
+  "deny_session_sha256": [],
+  "deny_family_tags": [
+    "sealed:adam-eval-observe-version/1",
+    "sealed:adam-eval-instrument-order/1",
+    "sealed:kaine-eval-observe-authority/1",
+    "sealed:kaine-eval-instrument-board/1"
+  ],
+  "eval_content_sha256": [],
+  "reward_manifest": "training/lilith/adam-kaine-reward-20260922/manifest.json",
+  "reward_manifest_semantic_sha256": "a491b9bd86fd52b1f4ca5dd756e218bd31e9b6e4ff5baae5c9f7961d917a2734",
+  "note": "The reward manifest froze no held-out transcript session because admitted count was zero. Any future eval sessions require a new protocol version frozen before export."
+}

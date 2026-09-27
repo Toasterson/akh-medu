@@ -1,0 +1,9 @@
+{
+  "exit_code": null,
+  "timeout": true,
+  "kind": "inference_startup_smoke_not_quality_benchmark",
+  "wall_seconds": 120.04554731600001,
+  "max_new_tokens": 16,
+  "model_hint": "gemma4-12b",
+  "binary_build_revision": "unknown; artifact hash recorded in inventory.json"
+}

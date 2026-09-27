@@ -1,0 +1,80 @@
+{
+  "schema": "lilith/mimo-independent-audit@1",
+  "complete": true,
+  "records": 8,
+  "passed": 6,
+  "failed": 2,
+  "checks": [
+    {
+      "task_id": "signed-clamp/2",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "content_sha256": "7ea3116245a5a77d4aeff34a3a922101147c2e41f644e93614f3dab7ef6b0ed4"
+    },
+    {
+      "task_id": "bounded-add/2",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "content_sha256": "2382c6f445e7bbfc67894efc0735f12f175c5a777575debe641f9b217d64e465"
+    },
+    {
+      "task_id": "align-up-power2/2",
+      "passed": false,
+      "category": "division_by_zero",
+      "counterexample": {
+        "inputs": [
+          0,
+          0
+        ],
+        "expected": -1
+      },
+      "content_sha256": "df8de8fd95dd414a22ff7a50cd0a0e0a710c6737e807ad782088eb0160d5e211"
+    },
+    {
+      "task_id": "aligned-offset-valid/2",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "content_sha256": "8d6c7a01b35e3de54439c02e5e2727f4862aab27ecc096840fb5fea5a7a11991"
+    },
+    {
+      "task_id": "signed-field-extract/2",
+      "passed": false,
+      "category": "grammar",
+      "counterexample": null,
+      "content_sha256": "cdf3633791b50077c6767bbfc2d884afe0484d9911960981ef925b1c0eec1ce6"
+    },
+    {
+      "task_id": "field-fits-unsigned/2",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "content_sha256": "814ca53943213ea6dee34c66f3ee1a06de729a2c3453619c559812f52d192853"
+    },
+    {
+      "task_id": "window-end/2",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "content_sha256": "9649d8c9caf82d4a953351e5aa6bf0a044e783b151826fbd7833a80b5ac76f96"
+    },
+    {
+      "task_id": "windows-overlap/2",
+      "passed": true,
+      "category": "passed",
+      "counterexample": null,
+      "content_sha256": "7d39ec6dd241f34b48570353c53c22bae974944293d513642a53b4242738b637"
+    }
+  ],
+  "records_sha256": "dce7734b0f722e2ac4b3717458b5878f6cb63b2bf40610e514997a55b875b787",
+  "protocol_sha256": "226d129ce8b4003a2e2619413a44fb880278c99abd014aac3dd377fc26d4d15e",
+  "verifier_sha256": "ca7d125daf1448b0890b8d6f97f2c85773c1400edd51659769a0578d51c9664c",
+  "interpreter_sha256": "e038d465c0d4d9d04e97b1b01abea0916ad99ab48d2ac86f11f48ac21bf94a0f",
+  "limitations": [
+    "Finite public cases are not proofs.",
+    "MiMo 8192-token BF16 Transformers results are not cap/backend/template comparable to 512-token quantized Gemma/Ptah.",
+    "One seeded sample per task; no promotion claim."
+  ]
+}

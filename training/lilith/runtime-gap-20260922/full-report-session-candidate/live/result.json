@@ -1,0 +1,7 @@
+{
+  "status": "failed",
+  "truth_review": "pending",
+  "services_stopped": true,
+  "error": "TimeoutError: report exceeded 120-second gate",
+  "private_root_removed": true
+}

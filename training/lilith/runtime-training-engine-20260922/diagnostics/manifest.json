@@ -1,0 +1,17 @@
+{
+  "lilith-attention-variants.py": "5e18dd37c0db15673871ceeda6635c26a4e062c5169addb31149267419028834",
+  "lilith-cache-server.py": "0858df08670b5205c25435230eed16c84a422e2e844fc0deeace8249ecdb8f56",
+  "lilith-final-trace.py": "274ba9e61957111a25f0ee7f323234bb4c35d6c88ecbbefee35508a5767351e4",
+  "lilith-fixed-boundary-control.py": "1d120f5a98f342b71047c800f00b021fdf7241451b40bec82710567e717851a5",
+  "lilith-fixed-context-control.py": "9a4edf406fc17cb33bf9eb265cbf963ac6fc6a7c4e39f2922fa1a0ebe5fc9f9d",
+  "lilith-fixed-memory-control.py": "64e59186178cc5e5c53a0933e6f1739648df3d616bf9ec571af680c20b34fffa",
+  "lilith-layer-trace-all.py": "ff165002d0db36f8713f7ca63d0a9fb8e1cb0214680062119cd4045dca93d965",
+  "lilith-layer-trace-mlp.py": "6085f1d10f3fb0fcfa74de4aaa8cf62d092b14ede6a3fc95dcd55599641ae290",
+  "lilith-layer-trace.py": "67ed5e890c9bc5694107eb03ea89c84401ab3728e70b36d76a6f3fe85954a110",
+  "lilith-layer-trace32.py": "7b6bd73799aa2373e56b130bee4ddfcfb20436fa9d4fc4760b61964822595e4c",
+  "lilith-norm-rowwise.py": "354a8ce129db2d053a5ac8f66be947f9bd266fe602677de74fea6a3c9f03a031",
+  "lilith-norm-variant.py": "975f091fab014b665950b4b034355fd03c5e22bffcc00e5faf7c7bd4b62f7426",
+  "lilith-parent-diagnostic.py": "e40f8a6ff24b2b5eade0f7a6c818725e16a0c2c640486efafce6ab63ff4bf053",
+  "lilith-short-control.py": "f5c9c52ee7b9bcd08636c76123390b7c6889e8a3d7c0dc905cf4b7efb202c8aa",
+  "lilith-transfer-variants.py": "8483dad9736ae36a28babec740629a637d7247c50d189f048ff1cb0e1bd21bc0"
+}

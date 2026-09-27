@@ -1,0 +1,4 @@
+{
+  "status": "preflight_failed",
+  "error": "Port bind EADDRINUSE; no services started"
+}

@@ -1,0 +1,74 @@
+{
+  "schema": "lilith/rl-probe@1",
+  "status": "passed",
+  "pid": 300816,
+  "deployed_weights_changed": false,
+  "quality_claim": false,
+  "source_sha256": "ed03a1564914a3bea25229f6865dc09c79298c8b8b75b950a4c06712c541ce56",
+  "task_manifest_sha256": "5039d69b828095516eadd6f814ec92a2b547381b3cf20fafe4e9381748601abf",
+  "phase": "finished",
+  "elapsed_seconds": 402.2636358029995,
+  "memory_control": {
+    "tokens": 384,
+    "scored_positions": 8,
+    "finite_gradients": true,
+    "gradient_norms": {
+      "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": 0.0,
+      "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": 46.53996658325195
+    },
+    "peak_gpu_bytes": 24297685504
+  },
+  "initial_policy": {
+    "model_sha256": "5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "adapter_sha256": "bf79f04d4ee5487d669ef010e0376aafddbcdea831a2192072ea62269a2677c6",
+    "version": "initial-bf79f04d4ee5487d"
+  },
+  "base": {
+    "passed": 1,
+    "completed": 8,
+    "total": 8,
+    "adapter_sha256": "bf79f04d4ee5487d669ef010e0376aafddbcdea831a2192072ea62269a2677c6"
+  },
+  "initial_logprob_drift_chunk8": 0.013481490314006805,
+  "initial_logprob_drift_chunk1": 2.2164314827932685e-07,
+  "sft_update": {
+    "optimizer_steps": 1,
+    "sequence_sum_nll_mean": 43.07304450629145,
+    "supervised_tokens": 135,
+    "supervision": "canonical verified task references, not on-policy solutions"
+  },
+  "sft": {
+    "passed": 1,
+    "completed": 8,
+    "total": 8,
+    "adapter_sha256": "58ac9b3ee7ba088f02a7b0ed928ffcd2087d5e049999649f49c3aef09398eca4",
+    "adapter_file_sha256": "7223f2e5a4f97bbcb17c3d2570ece31ff629ec464cb75119472602d0f7bb4bbe"
+  },
+  "klpo_update": {
+    "optimizer_steps": 1,
+    "status": "updated",
+    "eligible_complete_records": 4,
+    "rewards": [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "loss": 1.3046875016880222,
+    "normalization": "mean complete responses of summed token objective"
+  },
+  "klpo": {
+    "passed": 1,
+    "completed": 8,
+    "total": 8,
+    "adapter_sha256": "dc7dd39fa1eca7a1067aad69050a340e37604d3efe9185ef8f2869bbda53880d",
+    "adapter_file_sha256": "35689119596f37bf920e629dea3d6a2c5601302fbb8fddc941a089efc6c0a95b"
+  },
+  "cold_reload_candidate": "klpo-adapter",
+  "cold_reload_arm": "klpo",
+  "cold_reference_sha256": "f4e6afecbba7cefe2848d7c3590883104992493e2e9911dd50ce011f9703f098",
+  "frozen_tensor_versions_unchanged": true,
+  "peak_gpu_bytes": 24297685504,
+  "final_scoring_chunk": 1
+}

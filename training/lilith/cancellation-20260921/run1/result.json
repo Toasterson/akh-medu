@@ -1,0 +1,6 @@
+{
+  "status": "failed",
+  "kind": "durable_cancellation_api_probe",
+  "error": "{'acknowledged': True, 'cancel_observations': [{'cancel_requested': False, 'session': '01a0c489-9ebe-7f10-9484-6a412210fae1', 'status': 'completed', 'turn': '01a0c489-9ec0-76f2-b2c9-317584cd1169'}], 'cancellation': {'origin': 'controller', 'outcome': 'cancelled', 'reason': 'author scope was cancelled or retired'}, 'error': 'author scope was cancelled or retired', 'evidence': {'cases': 2051, 'passed': True, 'scope': 'integer clamp fixture only; not general code execution or illumos validation', 'source_sha256': 'bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6'}, 'id': 'd68beb3fc8aa4329bcf61bbf25c00e65', 'intent': {'objective': 'Review the integer clamp contract.', 'path': 'clamp_u8.py'}, 'parent': '01a0c489-9ebe-7f10-9484-6a412210fae1', 'parent_turn': '01a0c489-9ec0-76f2-b2c9-317584cd1169', 'reviewer': 'ptah-inline-reviewer', 'schema_version': 1, 'source': 'def clamp_u8(value: int) -> int:\\n    if value < 0:\\n        return 0\\n    if value > 255:\\n        return 255\\n    return value', 'source_sha256': 'bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6', 'status': 'cancelled'}",
+  "services_stopped": true
+}

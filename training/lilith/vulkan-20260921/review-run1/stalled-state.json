@@ -1,0 +1,102 @@
+{
+  "closed_at": null,
+  "core_service": null,
+  "schema_version": 1,
+  "id": "01a0c457-2dfe-7a00-a3e3-17fcccd7caa1",
+  "principal": "operator",
+  "akh": "lilith",
+  "conversation_key": null,
+  "workspace_profile": "local-dev",
+  "workspace": null,
+  "runtime": {
+    "runtime": "akhrtd",
+    "profile": "lilith",
+    "revision": "lilith-local-v1",
+    "kind": "internal",
+    "model": "lilith-gemma4-12b",
+    "execution_mode": "brokered"
+  },
+  "instructions": "You are Lilith, the human interface and coordinator of Akhs. Complete assigned work within its scope, inspect evidence, verify results, and report uncertainty. This is a local development workspace; illumos validation is not available yet.",
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read a UTF-8 file in the assigned workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "read_only": true,
+      "destination": {
+        "kind": "workspace",
+        "operation": "read"
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Write a UTF-8 file in the assigned workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "create": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content",
+          "create"
+        ],
+        "type": "object"
+      },
+      "read_only": false,
+      "destination": {
+        "kind": "workspace",
+        "operation": "write"
+      }
+    }
+  ],
+  "approval_policy": "allow_granted",
+  "generation": 0,
+  "next_sequence": 4,
+  "turns": [
+    {
+      "id": "01a0c457-2e00-79c3-8be1-83f7173f2a06",
+      "request_id": "7194cf9defea48b6b470111df710f609-lilith-write",
+      "input": {
+        "origin": {
+          "kind": "human",
+          "principal": "operator"
+        },
+        "text": "Remember the word cedar. Use write_file to create clamp_u8.py with create=true. Write a Python function clamp_u8(value: int) -> int that returns 0 for integers below 0, 255 for integers above 255, otherwise value. Use only if comparisons and returns, no imports, calls, decorators or loops. Write actual Python, not markdown. Then confirm briefly.",
+        "data": null,
+        "artifacts": []
+      },
+      "status": "queued",
+      "generation": 0,
+      "runtime_job_id": "01a0c457-2e00-79c3-8be1-83f7173f2a06",
+      "cancel_requested": false,
+      "output": null,
+      "error": null,
+      "created_at": 1790000442880
+    }
+  ],
+  "provider_session": null,
+  "controller": null,
+  "created_at": 1790000442878,
+  "last_progress_at": 1790000443728,
+  "dispatch_failures": 5
+}

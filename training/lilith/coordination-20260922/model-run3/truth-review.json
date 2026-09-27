@@ -1,0 +1,153 @@
+{
+  "schema": "lilith/coordination-truth-review@1",
+  "scope": "bounded orchestration smoke; not general repository, runtime, deployment, model-quality, or illumos competence",
+  "assignment_status": "completed",
+  "manual_truth_review": {
+    "passed": true,
+    "finding": "The final report faithfully states the objective, attributes the reviewer opinion, and reports only the recorded SSH guest boundary and passing exit status. It makes no claim that the original fixture changed or that broader validation completed.",
+    "limitations": [
+      "The final prose omits cleanup, timeout, artifact-link, and original-unchanged fields that remain explicit in the capsule and receipt.",
+      "The reporter turn took 452.148 seconds; the compact 735-token prompt completed within the frozen 600-second runtime timeout."
+    ]
+  },
+  "turns": {
+    "lilith": [
+      {
+        "id": "01a0c960-7504-7e12-9ee6-5c3088dc9ac1",
+        "status": "completed",
+        "cancel_requested": false
+      }
+    ],
+    "khnum": [
+      {
+        "id": "01a0c961-c487-7f10-a6a6-e3ea02d29c27",
+        "status": "completed",
+        "cancel_requested": false
+      }
+    ],
+    "ptah": [
+      {
+        "id": "01a0c962-2a1f-7d22-8312-7e9c6828bf63",
+        "status": "completed",
+        "cancel_requested": false
+      }
+    ],
+    "lilith_report": [
+      {
+        "id": "01a0c964-5bb5-7bc0-8d56-2ea8eb6785e7",
+        "status": "completed",
+        "cancel_requested": false
+      }
+    ]
+  },
+  "tools": {
+    "author_client_tool": "request_repository_task accepted exactly once",
+    "specialist_tools": [],
+    "reporter_tools": []
+  },
+  "verification": {
+    "command": [
+      "python3",
+      "-m",
+      "unittest",
+      "-q"
+    ],
+    "passed": true,
+    "exit_code": 0,
+    "timed_out": false,
+    "remote_cleanup_succeeded": true,
+    "execution_boundary": "ssh_guest",
+    "guest": {
+      "host": "127.0.0.1",
+      "port": 10115,
+      "user": "akh-exec"
+    },
+    "one_unittest_method_boundary_assertions": 7
+  },
+  "source": {
+    "original_solution_sha256": "bada276b83bb8f77c36ac612030ff4f7870e470de7b171f460c0daf431f22d33",
+    "frozen_solution_sha256": "bada276b83bb8f77c36ac612030ff4f7870e470de7b171f460c0daf431f22d33",
+    "original_test_sha256": "8aad55f55bf99700cd554691f6cabc42a440ee9f4a1aa7aec574e375cd76e960",
+    "frozen_test_sha256": "8aad55f55bf99700cd554691f6cabc42a440ee9f4a1aa7aec574e375cd76e960",
+    "original_fixture_unchanged": true,
+    "candidate_sha256": "c887cd10140c179a5abbf887d130ec77a4884421d1282e39d4225ea715b99c4f",
+    "verification_candidate_sha256": "c887cd10140c179a5abbf887d130ec77a4884421d1282e39d4225ea715b99c4f",
+    "candidate_patch_sha256": "3e4fca61e87334f2081d41158d8cc8c446f8ef95eef32f362d8410956635ed80"
+  },
+  "independent_diagnostic": {
+    "applies_to_identical_candidate_sha256": "c887cd10140c179a5abbf887d130ec77a4884421d1282e39d4225ea715b99c4f",
+    "cases_passed": 1728,
+    "strict_boolean_return": true,
+    "artifact": "../model-run2/independent-native-oracle/receipt.json",
+    "classification": "separate unscored diagnostic; official VM verifier ran one unittest method with seven boundary assertions"
+  },
+  "runtime_process_boundaries": [
+    {
+      "changed": true,
+      "from": "vulkan",
+      "monotonic_seconds": 22941.763399542,
+      "new_pid": 71280,
+      "old_exit_code": 0,
+      "old_pid": 70606,
+      "owned_turns": [
+        {
+          "session": "01a0c960-7500-7ff3-a222-f88d348a9add",
+          "status": "completed",
+          "turn": "01a0c960-7504-7e12-9ee6-5c3088dc9ac1"
+        },
+        {
+          "session": "01a0c961-c485-79c3-959b-ec655ee20d73",
+          "status": "completed",
+          "turn": "01a0c961-c487-7f10-a6a6-e3ea02d29c27"
+        }
+      ],
+      "schema": "lilith/runtime-boundary@1",
+      "to": "hip"
+    },
+    {
+      "changed": true,
+      "from": "hip",
+      "monotonic_seconds": 23084.467725126,
+      "new_pid": 71789,
+      "old_exit_code": 0,
+      "old_pid": 71280,
+      "owned_turns": [
+        {
+          "session": "01a0c960-7500-7ff3-a222-f88d348a9add",
+          "status": "completed",
+          "turn": "01a0c960-7504-7e12-9ee6-5c3088dc9ac1"
+        },
+        {
+          "session": "01a0c961-c485-79c3-959b-ec655ee20d73",
+          "status": "completed",
+          "turn": "01a0c961-c487-7f10-a6a6-e3ea02d29c27"
+        },
+        {
+          "session": "01a0c962-2a1c-77e1-ac05-cb0205d0dfaa",
+          "status": "completed",
+          "turn": "01a0c962-2a1f-7d22-8312-7e9c6828bf63"
+        }
+      ],
+      "schema": "lilith/runtime-boundary@1",
+      "to": "vulkan"
+    }
+  ],
+  "report": {
+    "prompt_tokens": 735,
+    "token_limit": 768,
+    "output_bytes": 1684,
+    "turn_duration_seconds": 452.147744536
+  },
+  "runtime_log_sha256": {
+    "akhrtd-0-vulkan.log": "c4a91d9751dbfec9bb1d2ad039a119c143509a6dda7aefe719ba47becb537c70",
+    "akhrtd-1-hip.log": "dd3ef450b841b09ba64de021ac438c2c4e9a92df387fc6ccfbe568c1fc9a1792",
+    "akhrtd-2-vulkan.log": "513a2fb06e19fc42fb8501ee157b7a8ce3fe5e567b79d07fb9ad1376656677d1"
+  },
+  "artifacts": {
+    "protocol.json": "8b3d3aeec9dc35ed7428aac35b6a307884e60118c4c7f7e11e5c7fa9f03e4a69",
+    "assignments.json": "6b0554136b2e0556243004d1f035f4e5faeaaef99f49d78b9c54d788d7be8746",
+    "outputs.json": "1fedb9b8e5e5cdf12237434f94bbc07755c374a07ab7ff97618412544d2528dc",
+    "sessions.json": "ef8efe407629db229ac30ef4e307c581a25ca466824891ddb7a074168b885661",
+    "candidate.patch": "3e4fca61e87334f2081d41158d8cc8c446f8ef95eef32f362d8410956635ed80"
+  }
+}

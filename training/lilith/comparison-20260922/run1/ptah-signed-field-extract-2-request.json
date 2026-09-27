@@ -1,0 +1,5 @@
+{
+  "session_id": "01a0c920-4566-7f31-815a-33e7611a2222",
+  "turn_id": "01a0c920-4568-7780-bfdc-137f9bb3eb3f",
+  "prompt": "Input a is an arbitrary integer and b is a field width. Return -1 unless 0 <= a <= 65535 and 1 <= b <= 8. Otherwise interpret the low b bits of a as a signed two-complement integer. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63."
+}
