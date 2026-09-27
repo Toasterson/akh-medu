@@ -1,0 +1,14 @@
+{
+  "document_id": "a03c20a5-3c53-44d5-9b32-6947f0fb9d4e",
+  "slug": "exploration-policy-dream-rsi-2026-09-18-conversation",
+  "chunk_count": 6,
+  "word_count": 518,
+  "ingested_by": "fable-architect-session-2026-09-19",
+  "ingested_at": "2026-09-19",
+  "source_path": "docs/ai/research/2026-09-18-exploration-policy-dream-rsi/transcripts/conversation.md",
+  "related": {
+    "adr_112_r1": "fc3f2fbe-a584-4381-98e0-7ab1332cf842",
+    "adr_112_r2_addendum": "d055e5ba-74c2-48b0-870a-fb363efaee4f",
+    "plan_2026_09_19": "c5e74c51-fbc3-4035-8fca-ef30f78379f3"
+  }
+}

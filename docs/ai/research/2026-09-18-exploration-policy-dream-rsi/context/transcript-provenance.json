@@ -1,0 +1,14 @@
+{
+  "source": "/Users/toasty/.t3/userdata/logs/provider/events.6adfb261-5682-4d80-89fc-4875480d9876.log",
+  "source_kind": "t3 provider event log (NTIVE item/completed events)",
+  "t3_thread_id": "6adfb261-5682-4d80-89fc-4875480d9876",
+  "codex_thread_id": "01a0b490-9a59-7a12-8b46-8090f677ec08",
+  "message_count": 4,
+  "cutoff": "2026-09-18T12:50:58.755Z",
+  "verification": "userMessage and agentMessage items retained from the T3 provider log; duplicated user turn collapsed; commandExecution/search/read/webSearch/reasoning items excluded. Codex rollout located and hashed for cross-reference; its message-item count is recorded above (includes system/developer-injected user-role items).",
+  "harvested_by": "Fable 5.1 architect session 2026-09-19",
+  "harvested_at": "2026-09-19",
+  "codex_session": "/Users/toasty/.codex/sessions/2026/09/18/rollout-2026-09-18T14-49-30-01a0b490-9a59-7a12-8b46-8090f677ec08.jsonl",
+  "codex_session_sha256": "43e1b2c8edbf7c61b6343cb4fa6dbc46f14296a2b34893edf99f9a61529a9bba",
+  "codex_rollout_message_items": 5
+}
