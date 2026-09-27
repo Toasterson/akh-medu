@@ -115,6 +115,19 @@ struct ServerState {
     engine_load_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Likewise for `get_agent` — avoids a wasted concurrent heavy `Agent::resume`.
     agent_load_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Idempotent-reattach cache for execd allocations that have not yet
+    /// succeeded (2026-09-27 incident fix). Keyed by workspace name for the
+    /// primary execd backend, or `<workspace>-<sandbox>` for an
+    /// `[[exec.sandboxes]]` entry. See
+    /// [`akh_medu::backend::execd::PendingAllocations`].
+    #[cfg(feature = "execd-executor")]
+    execd_pending: Arc<akh_medu::backend::execd::PendingAllocations>,
+    /// At most one background retry supervisor per workspace for a failed
+    /// auto-start load (2026-09-27 incident fix): capped exponential backoff
+    /// instead of a bare log-and-forget that left a cold workspace waiting
+    /// on some unrelated caller to happen to retry it. Cleared when the
+    /// supervisor succeeds or is dropped.
+    workspace_load_retries: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Phase 53e: the `/v1` delegation-grant authority, published once the
     /// core API is up. Empty = grants unavailable (`core_api_disabled`).
     #[cfg(feature = "core-api")]
@@ -385,18 +398,28 @@ fn build_local_drop_backend(
 /// Same fail-loud rule as the other executors: an allocation that fails stops
 /// the akh from loading; there is no fallback to local execution. Logs the
 /// binding and its honestly classified confinement once per workspace.
+///
+/// `pending` is consulted before allocating: a still-pending attempt from an
+/// earlier failed call (a slow first image pull outliving
+/// `allocate_timeout`, most commonly) reattaches to the *same* akhsbxd
+/// allocation instead of minting a fresh session id and orphaning another
+/// Kubernetes `Sandbox` — the 2026-09-27 incident (25 orphaned `Sandbox`
+/// resources from 25 retries, each with its own fresh session). See
+/// [`akh_medu::backend::execd::PendingAllocations`] for the full rationale.
 #[cfg(feature = "execd-executor")]
 fn build_execd_backend(
     exec: &akh_medu::akh_config::ExecBackendConfig,
     workspace: &str,
+    pending: &Arc<akh_medu::backend::execd::PendingAllocations>,
 ) -> Result<Arc<dyn akh_medu::backend::Backend>, String> {
     use akh_medu::backend::Backend as _;
-    use akh_medu::backend::execd::ExecdBackend;
+    use akh_medu::backend::execd::{ExecdBackend, ExecdError};
     use miette::Diagnostic as _;
 
-    let cfg = exec
+    let fresh = exec
         .to_execd_config(workspace)
         .expect("Execd variant implies Some");
+    let cfg = pending.config_for(workspace, fresh);
     tracing::info!(
         target: "akh::backend::execd",
         workspace = %workspace,
@@ -406,23 +429,40 @@ fn build_execd_backend(
         session = %cfg.session_id,
         "allocating execd sandbox workspace"
     );
-    let backend = ExecdBackend::connect(cfg).map_err(|e| {
-        let code = e.code().map(|c| format!(" [{c}]")).unwrap_or_default();
-        let help = e.help().map(|h| format!(" help: {h}")).unwrap_or_default();
-        format!(
-            "workspace {workspace}: execd exec backend could not allocate a sandbox \
-             workspace: {e}{code}{help}"
-        )
-    })?;
-    tracing::info!(
-        target: "akh::backend::execd",
-        workspace = %workspace,
-        sandbox = %backend.binding().sandbox_id,
-        confinement_label = %backend.binding().confinement,
-        confinement = ?backend.handshake().confinement,
-        "workspace exec runs in an execd sandbox"
-    );
-    Ok(Arc::new(backend) as Arc<dyn akh_medu::backend::Backend>)
+    match ExecdBackend::connect(cfg.clone()) {
+        Ok(backend) => {
+            pending.clear(workspace);
+            tracing::info!(
+                target: "akh::backend::execd",
+                workspace = %workspace,
+                sandbox = %backend.binding().sandbox_id,
+                confinement_label = %backend.binding().confinement,
+                confinement = ?backend.handshake().confinement,
+                "workspace exec runs in an execd sandbox"
+            );
+            Ok(Arc::new(backend) as Arc<dyn akh_medu::backend::Backend>)
+        }
+        Err(e) => {
+            // A pure client-side validation failure (bad config/credential)
+            // never reached akhsbxd, so there is nothing to remember. Every
+            // other outcome (a busy/timeout, a transport hiccup, a definite
+            // refusal) reuses this session id on the next attempt — whether
+            // that is a caller retrying immediately or the backoff
+            // supervisor spawned on an auto-start failure — instead of
+            // minting and orphaning another allocation.
+            if matches!(e, ExecdError::Config { .. } | ExecdError::Credential { .. }) {
+                pending.clear(workspace);
+            } else {
+                pending.remember(workspace, cfg);
+            }
+            let code = e.code().map(|c| format!(" [{c}]")).unwrap_or_default();
+            let help = e.help().map(|h| format!(" help: {h}")).unwrap_or_default();
+            Err(format!(
+                "workspace {workspace}: execd exec backend could not allocate a sandbox \
+                 workspace: {e}{code}{help}"
+            ))
+        }
+    }
 }
 
 /// Build the `sandbox_exec` tool for a workspace whose `[exec]` configures
@@ -435,15 +475,17 @@ fn build_execd_backend(
 fn build_sandbox_exec_tool(
     exec: &akh_medu::akh_config::ExecBackendConfig,
     workspace: &str,
+    pending: &Arc<akh_medu::backend::execd::PendingAllocations>,
 ) -> Result<Option<akh_medu::agent::tools::SandboxExecTool>, String> {
     use akh_medu::agent::tools::SandboxExecTool;
     use miette::Diagnostic as _;
 
-    let tool = SandboxExecTool::from_execd_config(exec, workspace).map_err(|e| {
-        let code = e.code().map(|c| format!(" [{c}]")).unwrap_or_default();
-        let help = e.help().map(|h| format!(" help: {h}")).unwrap_or_default();
-        format!("workspace {workspace}: invalid [[exec.sandboxes]]: {e}{code}{help}")
-    })?;
+    let tool =
+        SandboxExecTool::from_execd_config(exec, workspace, Arc::clone(pending)).map_err(|e| {
+            let code = e.code().map(|c| format!(" [{c}]")).unwrap_or_default();
+            let help = e.help().map(|h| format!(" help: {h}")).unwrap_or_default();
+            format!("workspace {workspace}: invalid [[exec.sandboxes]]: {e}{code}{help}")
+        })?;
     if let Some(tool) = &tool {
         let sandboxes = tool
             .sandboxes()
@@ -466,6 +508,7 @@ fn build_sandbox_exec_tool(
 fn build_execd_backend(
     _exec: &akh_medu::akh_config::ExecBackendConfig,
     workspace: &str,
+    _pending: &(),
 ) -> Result<Arc<dyn akh_medu::backend::Backend>, String> {
     Err(format!(
         "workspace {workspace}: [exec] kind = \"execd\" but this akhomed was built without \
@@ -681,6 +724,9 @@ impl ServerState {
             hydrated_wakes: Arc::new(Mutex::new(std::collections::HashSet::new())),
             engine_load_locks: RwLock::new(HashMap::new()),
             agent_load_locks: RwLock::new(HashMap::new()),
+            #[cfg(feature = "execd-executor")]
+            execd_pending: Arc::new(akh_medu::backend::execd::PendingAllocations::new()),
+            workspace_load_retries: Arc::new(Mutex::new(std::collections::HashSet::new())),
             #[cfg(feature = "core-api")]
             grant_authority: Arc::default(),
             tool_registries: StdRwLock::new(HashMap::new()),
@@ -3245,13 +3291,19 @@ impl ServerState {
         // anything. The sandboxes themselves allocate lazily on first use, so
         // a down secondary sandbox never blocks the akh from loading.
         #[cfg(feature = "execd-executor")]
-        let sandbox_exec_tool = build_sandbox_exec_tool(&exec_kind, name)?;
+        let sandbox_exec_tool = build_sandbox_exec_tool(&exec_kind, name, &self.execd_pending)?;
+
+        #[cfg(feature = "execd-executor")]
+        let execd_pending = Arc::clone(&self.execd_pending);
+        #[cfg(not(feature = "execd-executor"))]
+        let execd_pending = ();
 
         let mut agent = tokio::task::spawn_blocking({
             let engine = Arc::clone(&engine);
             let akh_config = akh_config.clone();
             let exec_kind = exec_kind.clone();
             let name = name.to_string();
+            let execd_pending = execd_pending.clone();
             move || -> Result<akh_medu::agent::Agent, String> {
                 let config = AgentConfig::default();
 
@@ -3274,7 +3326,7 @@ impl ServerState {
                             ExecToolWiring::None
                         }
                         ExecBackendConfig::Execd { .. } => {
-                            ExecToolWiring::Backend(build_execd_backend(&exec_kind, &name)?)
+                            ExecToolWiring::Backend(build_execd_backend(&exec_kind, &name, &execd_pending)?)
                         }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
                             let rbc = exec_kind
@@ -3328,7 +3380,7 @@ impl ServerState {
                             ExecToolWiring::None
                         }
                         ExecBackendConfig::Execd { .. } => {
-                            ExecToolWiring::Backend(build_execd_backend(&exec_kind, &name)?)
+                            ExecToolWiring::Backend(build_execd_backend(&exec_kind, &name, &execd_pending)?)
                         }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
                             // The build was not compiled with `remote-executor`
@@ -4139,6 +4191,231 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
                 .map_err(|e| format!("invalid hex byte at offset {i}: {e}"))
         })
         .collect()
+}
+
+// ── Auto-start workspace-load retry (2026-09-27 incident fix) ───────────────
+//
+// A workspace whose first load fails (most commonly a slow-starting execd
+// sandbox whose image pull outlives its allocation timeout) used to be
+// logged once by the startup loop and never retried by akhomed itself; only
+// an unrelated later caller — or a whole process restart — would try again.
+// That made the incident worse, not better: every such retry minted a fresh
+// execd allocation session (see `build_execd_backend`), so each one
+// orphaned another Kubernetes `Sandbox` instead of ever succeeding. The
+// supervisor below retries the load itself, in the background, with capped
+// exponential backoff, so the workspace comes up on its own once the slow
+// resource (or transient outage) resolves — without depending on an
+// external retrigger, and without ever running two loads of the same
+// workspace at once.
+
+/// First and largest step of the auto-start workspace-load retry backoff.
+const WORKSPACE_LOAD_RETRY_INITIAL: Duration = Duration::from_secs(30);
+/// Backoff never grows past this.
+const WORKSPACE_LOAD_RETRY_MAX: Duration = Duration::from_secs(15 * 60);
+
+/// The backoff before the `attempt`-th retry (1-based: `1` is the delay
+/// before the *first* retry after the initial failure). Doubles from
+/// [`WORKSPACE_LOAD_RETRY_INITIAL`], capped at [`WORKSPACE_LOAD_RETRY_MAX`]
+/// (30s, 60s, 120s, 240s, 480s, 900s, 900s, …).
+fn workspace_load_backoff(attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(1).min(31);
+    let factor = 1u32.checked_shl(shift).unwrap_or(u32::MAX);
+    WORKSPACE_LOAD_RETRY_INITIAL
+        .checked_mul(factor)
+        .unwrap_or(WORKSPACE_LOAD_RETRY_MAX)
+        .min(WORKSPACE_LOAD_RETRY_MAX)
+}
+
+/// The duration [`spawn_workspace_load_retrier`] actually sleeps before
+/// `attempt`: [`workspace_load_backoff`] in production, scaled down ~1200x
+/// under `#[cfg(test)]` (25ms, 50ms, …, capped at 750ms) so a test can drive
+/// several real retries without waiting on minutes of production backoff.
+/// Logging always reports the true, unscaled [`workspace_load_backoff`], so
+/// this split never shows up outside test runs.
+#[cfg(not(test))]
+fn workspace_load_retry_sleep(attempt: u32) -> Duration {
+    workspace_load_backoff(attempt)
+}
+#[cfg(test)]
+fn workspace_load_retry_sleep(attempt: u32) -> Duration {
+    workspace_load_backoff(attempt) / 1200
+}
+
+/// Start the background OODA daemon for a workspace whose `Agent` already
+/// loaded successfully, and register it in `state.daemons`. Shared by the
+/// immediate auto-start attempt and a successful
+/// [`spawn_workspace_load_retrier`] retry, so both start the daemon
+/// identically.
+async fn start_workspace_daemon(
+    state: &ServerState,
+    ws_name: &str,
+    daemon_config: &akh_medu::agent::DaemonConfig,
+    shared_agent: Arc<StdRwLock<Agent>>,
+) {
+    let engine = match state.get_engine(ws_name).await {
+        Ok(engine) => engine,
+        Err(error) => {
+            // Unreachable in practice (the agent we were just handed shares
+            // its engine, already cached by `get_agent`); fail soft rather
+            // than panic a startup or background-retry task.
+            tracing::error!(
+                workspace = %ws_name,
+                %error,
+                "auto-start: agent loaded but its engine could not be re-fetched"
+            );
+            return;
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let trigger_count = TriggerStore::new(&engine).list().len();
+    let status = Arc::new(tokio::sync::Mutex::new(DaemonStatus {
+        running: true,
+        total_cycles: 0,
+        started_at: now,
+        trigger_count,
+        last_persist_at: None,
+        last_learning_at: None,
+        last_sleep_at: None,
+        last_goal_gen_at: None,
+        active_goals: 0,
+        kg_symbols: 0,
+        kg_triples: 0,
+        knowledge_density: None,
+        last_compaction_at: None,
+    }));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let daemon_status = Arc::clone(&status);
+    let daemon_ws = ws_name.to_string();
+    let dc = daemon_config.clone();
+    // P5 / 53b: per-akh [autonomy] (on by default, budgeted) and the
+    // effective executor placement.
+    let settings = state.daemon_settings(ws_name).await;
+    let pause_handle = DaemonPauseHandle::new();
+    state
+        .daemon_pauses
+        .write()
+        .await
+        .insert(ws_name.to_string(), pause_handle.clone());
+    let task_handle = pause_handle.clone();
+    let pool = state.pg_pool();
+    let global_cfg = state.config.read().await;
+    let seshat_upstream = global_cfg.upstreams.seshat.clone();
+    let heka_url = global_cfg.heka.as_ref().map(|h| h.url.clone());
+    drop(global_cfg);
+    let handle = tokio::task::spawn(async move {
+        run_daemon_task(
+            shared_agent,
+            daemon_status,
+            shutdown_rx,
+            dc,
+            settings,
+            daemon_ws,
+            task_handle,
+            pool,
+            seshat_upstream,
+            heka_url,
+        )
+        .await;
+    });
+    state.daemons.write().await.insert(
+        ws_name.to_string(),
+        WorkspaceDaemon {
+            handle,
+            shutdown_tx,
+            status,
+        },
+    );
+    tracing::info!(workspace = %ws_name, "daemon auto-started");
+}
+
+/// RAII guard for [`spawn_workspace_load_retrier`]'s single-flight slot:
+/// clears `name` from the set on drop (success, panic, or task
+/// cancellation), so a workspace is never left permanently marked as
+/// "retrying" by a supervisor that stopped without saying so.
+struct RetrySupervisorGuard {
+    set: Arc<Mutex<std::collections::HashSet<String>>>,
+    name: String,
+}
+
+impl Drop for RetrySupervisorGuard {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.name);
+    }
+}
+
+/// Retry a failed auto-start workspace load in the background with capped
+/// exponential backoff. Logs once per failed attempt, with the computed
+/// delay before the next one. At most one supervisor runs per workspace at a
+/// time (`state.workspace_load_retries`); a second call for the same
+/// workspace while one is already running is a no-op — `get_agent` itself
+/// also single-flights the slow load path, but this additionally stops a
+/// second supervisor from racing its own independent backoff timer against
+/// the first.
+///
+/// Retries forever (backoff capped at [`WORKSPACE_LOAD_RETRY_MAX`]) rather
+/// than giving up after N attempts: an auto-start workspace is expected to
+/// come up eventually (once a slow image pull finishes, or a transient
+/// outage clears), and every attempt reattaches to the same execd
+/// allocation instead of stacking a new one (see `build_execd_backend`'s
+/// `PendingAllocations` use), so retrying indefinitely is cheap and safe.
+/// Stopping it for good requires the operator to act (reconfigure or
+/// disable the workspace); there is no implicit give-up here.
+fn spawn_workspace_load_retrier(
+    state: Arc<ServerState>,
+    ws_name: String,
+    daemon_config: akh_medu::agent::DaemonConfig,
+) {
+    {
+        let mut active = state
+            .workspace_load_retries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !active.insert(ws_name.clone()) {
+            tracing::debug!(
+                workspace = %ws_name,
+                "a workspace-load retry supervisor is already running; not starting a second one"
+            );
+            return;
+        }
+    }
+    tokio::spawn(async move {
+        let _guard = RetrySupervisorGuard {
+            set: Arc::clone(&state.workspace_load_retries),
+            name: ws_name.clone(),
+        };
+        let mut attempt: u32 = 1;
+        loop {
+            tokio::time::sleep(workspace_load_retry_sleep(attempt)).await;
+            match state.get_agent(&ws_name).await {
+                Ok(shared_agent) => {
+                    start_workspace_daemon(&state, &ws_name, &daemon_config, shared_agent).await;
+                    tracing::info!(
+                        workspace = %ws_name,
+                        attempts = attempt,
+                        "daemon auto-started after retrying the workspace load"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    let next_backoff = workspace_load_backoff(attempt + 1);
+                    tracing::warn!(
+                        workspace = %ws_name,
+                        attempt,
+                        %error,
+                        next_retry_secs = next_backoff.as_secs(),
+                        "auto-start workspace load failed again; retrying with backoff",
+                    );
+                    attempt += 1;
+                }
+            }
+        }
+    });
 }
 
 /// Per-akh settings the background daemon needs from its `akh.toml`.
@@ -5261,76 +5538,31 @@ async fn main() {
             tracing::info!(workspace = %ws_name, "auto-starting daemon");
             match state.get_agent(ws_name).await {
                 Ok(shared_agent) => {
-                    let engine = state.get_engine(ws_name).await.unwrap();
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    let trigger_count = TriggerStore::new(&engine).list().len();
-                    let status = Arc::new(tokio::sync::Mutex::new(DaemonStatus {
-                        running: true,
-                        total_cycles: 0,
-                        started_at: now,
-                        trigger_count,
-                        last_persist_at: None,
-                        last_learning_at: None,
-                        last_sleep_at: None,
-                        last_goal_gen_at: None,
-                        active_goals: 0,
-                        kg_symbols: 0,
-                        kg_triples: 0,
-                        knowledge_density: None,
-                        last_compaction_at: None,
-                    }));
-                    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-                    let daemon_status = Arc::clone(&status);
-                    let daemon_ws = ws_name.clone();
-                    let dc = daemon_config.clone();
-                    // P5 / 53b: per-akh [autonomy] (on by default, budgeted)
-                    // and the effective executor placement.
-                    let settings = state.daemon_settings(ws_name).await;
-                    let pause_handle = DaemonPauseHandle::new();
-                    state
-                        .daemon_pauses
-                        .write()
-                        .await
-                        .insert(ws_name.clone(), pause_handle.clone());
-                    let task_handle = pause_handle.clone();
-                    let pool = state.pg_pool();
-                    let global_cfg = state.config.read().await;
-                    let seshat_upstream = global_cfg.upstreams.seshat.clone();
-                    let heka_url = global_cfg.heka.as_ref().map(|h| h.url.clone());
-                    drop(global_cfg);
-                    let handle = tokio::task::spawn(async move {
-                        run_daemon_task(
-                            shared_agent,
-                            daemon_status,
-                            shutdown_rx,
-                            dc,
-                            settings,
-                            daemon_ws,
-                            task_handle,
-                            pool,
-                            seshat_upstream,
-                            heka_url,
-                        )
-                        .await;
-                    });
-                    state.daemons.write().await.insert(
-                        ws_name.to_string(),
-                        WorkspaceDaemon {
-                            handle,
-                            shutdown_tx,
-                            status,
-                        },
-                    );
-                    tracing::info!(workspace = %ws_name, "daemon auto-started");
+                    start_workspace_daemon(&state, ws_name, &daemon_config, shared_agent).await;
                 }
-                Err(msg) => {
+                Err(error) => {
+                    // 2026-09-27 incident fix: a failed load (most commonly a
+                    // slow-starting execd sandbox outliving its allocation
+                    // timeout) used to be logged once and never retried by
+                    // this loop — only an unrelated later caller (or a whole
+                    // process restart) would try again, and *that* retry
+                    // used to mint a fresh execd session every time,
+                    // orphaning a Kubernetes `Sandbox` per attempt. Retry
+                    // this workspace in the background with capped backoff
+                    // instead; `PendingAllocations` (see `build_execd_backend`)
+                    // makes every one of those retries reattach to the same
+                    // allocation rather than stacking a new one.
+                    let next_backoff = workspace_load_backoff(1);
                     tracing::warn!(
                         workspace = %ws_name,
-                        error = %msg,
-                        "failed to auto-start daemon (workspace may not exist yet)",
+                        %error,
+                        next_retry_secs = next_backoff.as_secs(),
+                        "auto-start workspace load failed; retrying in the background with backoff",
+                    );
+                    spawn_workspace_load_retrier(
+                        Arc::clone(&state),
+                        ws_name.clone(),
+                        daemon_config.clone(),
                     );
                 }
             }
@@ -6958,6 +7190,100 @@ mod control_plane_tests {
             owned(&["a"])
         );
         assert!(resolve_auto_start(None, &[], &[], &[]).is_empty());
+    }
+
+    /// The 2026-09-27 incident fix: a failed auto-start load backs off
+    /// exponentially from 30s, doubling, capped at 15 minutes — never a
+    /// flat ~30s retry (which is what let 25 execd allocations pile up).
+    #[test]
+    fn workspace_load_backoff_doubles_and_caps_at_15_minutes() {
+        assert_eq!(workspace_load_backoff(1), Duration::from_secs(30));
+        assert_eq!(workspace_load_backoff(2), Duration::from_secs(60));
+        assert_eq!(workspace_load_backoff(3), Duration::from_secs(120));
+        assert_eq!(workspace_load_backoff(4), Duration::from_secs(240));
+        assert_eq!(workspace_load_backoff(5), Duration::from_secs(480));
+        // 30 * 2^5 = 960s would exceed the 900s (15 min) cap.
+        assert_eq!(workspace_load_backoff(6), Duration::from_secs(900));
+        assert_eq!(workspace_load_backoff(7), Duration::from_secs(900));
+        assert_eq!(workspace_load_backoff(100), Duration::from_secs(900));
+        // `attempt = 0` is treated the same as `1` (no negative/zero delay).
+        assert_eq!(workspace_load_backoff(0), Duration::from_secs(30));
+    }
+
+    /// Two calls to [`spawn_workspace_load_retrier`] for the same workspace
+    /// run at most one background supervisor: the guard is checked and
+    /// inserted synchronously before either call spawns anything, so the
+    /// second call is a no-op. Uses a workspace that can never load (no
+    /// config, no data dir) so the first supervisor's slot stays taken for
+    /// the life of the test — proving the *second* call really did nothing,
+    /// not merely that it hasn't gotten around to inserting yet.
+    #[tokio::test]
+    async fn spawn_workspace_load_retrier_runs_at_most_one_supervisor_per_workspace() {
+        let (_tmp, state) = temp_state();
+        let state = Arc::new(state);
+        let daemon_config = state.config.read().await.daemon.to_daemon_config();
+
+        spawn_workspace_load_retrier(Arc::clone(&state), "ghost".into(), daemon_config.clone());
+        spawn_workspace_load_retrier(Arc::clone(&state), "ghost".into(), daemon_config.clone());
+
+        let retries = state
+            .workspace_load_retries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            retries.len(),
+            1,
+            "a second call for the same workspace must not start a second supervisor"
+        );
+    }
+
+    /// A workspace that fails to load at auto-start (here: it does not exist
+    /// yet) is retried in the background and comes up on its own once it
+    /// becomes loadable — without any external caller retrying it — and the
+    /// daemon is started exactly once. Uses the test-scaled backoff
+    /// ([`workspace_load_retry_sleep`]) so this does not wait on real
+    /// minutes.
+    #[tokio::test]
+    async fn a_failed_auto_start_load_retries_in_the_background_until_it_succeeds() {
+        let (_tmp, state) = temp_state();
+        let state = Arc::new(state);
+        let daemon_config = state.config.read().await.daemon.to_daemon_config();
+
+        // "delayed" does not exist yet: the first several attempts fail with
+        // "workspace \"delayed\" not found".
+        spawn_workspace_load_retrier(Arc::clone(&state), "delayed".into(), daemon_config.clone());
+
+        // Let a couple of test-scaled retries happen and fail, then create
+        // the workspace so a later retry succeeds.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "delayed" }))
+            .await
+            .expect("create");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while state.daemons.read().await.get("delayed").is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the background retrier never brought the workspace up"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(state.daemons.read().await.len(), 1);
+        // The supervisor's guard cleared itself on success.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while state
+            .workspace_load_retries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains("delayed")
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "retry guard never cleared"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]

@@ -50,6 +50,7 @@
 //! request/response exchange, so the backend uses the blocking `ureq` client
 //! the crate already depends on. There is no async runtime to own.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -103,7 +104,9 @@ pub enum ExecdError {
              loopback hosts (localhost, 127.0.0.1, [::1]) or with \
              `allow_insecure_http = true` for a trusted private link, because the bearer \
              token crosses it in clear text. `profile` and `principal` must be non-empty, \
-             and `poll_wait_ms` must be between 1 and 10000."
+             `poll_wait_ms` must be between 1 and 10000, and `allocate_timeout_secs` (default \
+             120) must be between 1 and 3600 — raise it if the provisioner's first image \
+             pull routinely takes longer than that."
         )
     )]
     Config { reason: String },
@@ -294,6 +297,10 @@ impl ExecdConfig {
     /// Keep retrying failed polls for a minute past the process deadline, so a
     /// short executor or gateway restart does not abandon a running process.
     pub const DEFAULT_POLL_RETRY_BUDGET: Duration = Duration::from_secs(60);
+    /// Longest accepted `allocate_timeout_secs`: an operator raising this to
+    /// tolerate a slow first image pull must still get a bounded wait, not an
+    /// effectively-infinite one that hides a genuinely stuck provisioner.
+    pub const MAX_ALLOCATE_TIMEOUT: Duration = Duration::from_secs(3_600);
 
     /// Settings for one akh workspace, routed through the akhsbxd gateway with
     /// the akhsbxd token. The session id is `akhomed-<workspace>-<uuid v7>`.
@@ -380,6 +387,13 @@ impl ExecdConfig {
         if self.lease_renew_interval.is_zero() {
             return invalid("the lease renewal interval must be positive".into());
         }
+        if self.allocate_timeout.is_zero() || self.allocate_timeout > Self::MAX_ALLOCATE_TIMEOUT {
+            return invalid(format!(
+                "allocate_timeout_secs must be 1..={}, got {}",
+                Self::MAX_ALLOCATE_TIMEOUT.as_secs(),
+                self.allocate_timeout.as_secs()
+            ));
+        }
         Ok(())
     }
 }
@@ -430,6 +444,180 @@ fn read_token(path: &Path) -> ExecdResult<String> {
         });
     }
     Ok(token.to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// Pending allocation reuse (idempotent reattach)
+// ---------------------------------------------------------------------------
+
+/// akhomed's cache of not-yet-successful [`ExecdBackend::connect`] attempts,
+/// keyed by a caller-chosen label (one per exec target: a workspace's
+/// primary execd backend, or one `[[exec.sandboxes]]` entry).
+///
+/// ## The incident this exists to prevent (2026-09-27)
+///
+/// Every call used to start from a freshly minted `session_id`
+/// ([`ExecdConfig::new`]). A slow first image pull (2.5 minutes) outlived the
+/// 120 s default [`ExecdConfig::allocate_timeout`], so `connect` gave up —
+/// and whatever retried the workspace load next (every ~30 s) minted
+/// *another* fresh session id, so akhsbxd provisioned a *second* Kubernetes
+/// `Sandbox`, still pulling the very same image, and so on. 25 orphaned
+/// `Sandbox` resources later, the node was full and nothing could load.
+///
+/// ## Idempotent reattach, not release-then-retry
+///
+/// akhsbxd never reallocates a *released* session id (`"allocation was
+/// released; create a new session to allocate again"`), and provisioning
+/// keeps running on the server after the client's `allocate_timeout` gives
+/// up locally. Releasing on every failed attempt would force a fresh
+/// `Sandbox` — and a fresh cold image pull — on *every* retry, so a
+/// workspace whose image takes longer to pull than one client is willing to
+/// wait could never load, no matter how many times it retried.
+///
+/// So a failed, retryable attempt is remembered instead: the *next* attempt
+/// for the same label reuses the same `session_id` and reattaches to the
+/// same (by now further along, possibly already `Ready`) allocation. The
+/// pending session is released only when a caller explicitly gives up on it
+/// ([`Self::abandon`]) or reconfigures the target underneath it
+/// ([`Self::config_for`]) — never on an ordinary retry.
+///
+/// ## Server-side reaping (deliberately not added here)
+///
+/// akhsbxd's `Allocation::lease_until` is set on creation but is only
+/// enforced once the allocation reaches `"ready"` — a `"creating"` /
+/// `"allocating"` allocation nobody ever asks about again (for example this
+/// process crashing and never restarting) has no automatic reaper today.
+/// The client-side fix above closes the reported incident (every retry that
+/// *does* happen reattaches instead of stacking), so a server-side sweep for
+/// allocations nobody is retrying is left as an explicit follow-up rather
+/// than a rushed change to akhsbxd's allocation state machine.
+#[derive(Default)]
+pub struct PendingAllocations {
+    attempts: Mutex<HashMap<String, ExecdConfig>>,
+}
+
+impl PendingAllocations {
+    /// A fresh, empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The [`ExecdConfig`] to attempt next for `label`: a previously
+    /// remembered attempt's config (same `session_id`) when its
+    /// `sandbox_url`, `profile` and `principal` still match `fresh` —
+    /// otherwise `fresh` itself (minting a new session id), first
+    /// abandoning any stale pending attempt (the caller's configuration
+    /// changed underneath it, e.g. an operator edited `akh.toml`).
+    pub fn config_for(&self, label: &str, fresh: ExecdConfig) -> ExecdConfig {
+        let stale = {
+            let mut attempts = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
+            match attempts.get(label) {
+                Some(pending)
+                    if pending.sandbox_url == fresh.sandbox_url
+                        && pending.profile == fresh.profile
+                        && pending.principal == fresh.principal =>
+                {
+                    return pending.clone();
+                }
+                Some(_) => attempts.remove(label),
+                None => None,
+            }
+        };
+        if let Some(stale) = stale {
+            tracing::info!(
+                target: "akh::backend::execd",
+                label,
+                session = %stale.session_id,
+                "execd target reconfigured; abandoning its stale pending allocation"
+            );
+            release_abandoned_allocation(&stale);
+        }
+        fresh
+    }
+
+    /// Record that `config`'s attempt for `label` failed in a way worth
+    /// retrying: remember it so the next [`Self::config_for`] reattaches
+    /// instead of minting a fresh session.
+    pub fn remember(&self, label: &str, config: ExecdConfig) {
+        self.attempts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(label.to_owned(), config);
+    }
+
+    /// The attempt for `label` succeeded: forget it, so the next
+    /// independent load of this target mints a fresh session. (This one now
+    /// belongs to the live [`ExecdBackend`], which releases it itself on
+    /// drop.)
+    pub fn clear(&self, label: &str) {
+        self.attempts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(label);
+    }
+
+    /// Give up on `label`'s pending allocation for good: forget it and
+    /// best-effort release it at akhsbxd, so its still-provisioning
+    /// Kubernetes `Sandbox` is reaped now rather than left for an operator
+    /// to find.
+    pub fn abandon(&self, label: &str) {
+        let removed = self
+            .attempts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(label);
+        if let Some(config) = removed {
+            release_abandoned_allocation(&config);
+        }
+    }
+}
+
+/// Best-effort release of an allocation identified by `config.session_id`,
+/// for a session this process never successfully connected (so there is no
+/// live [`ExecdBackend`] / lease thread to release it itself). Never fails
+/// loudly: a release that cannot reach akhsbxd just means the allocation
+/// needs an operator's explicit reconcile.
+pub fn release_abandoned_allocation(config: &ExecdConfig) {
+    let url = format!(
+        "{}/v1/allocations/{}/release",
+        config.sandbox_url.trim_end_matches('/'),
+        segment(&config.session_id)
+    );
+    let token = match read_token(&config.sandbox_token_file) {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::warn!(
+                target: "akh::backend::execd",
+                session = %config.session_id,
+                %error,
+                "could not read the sandbox token to release an abandoned allocation"
+            );
+            return;
+        }
+    };
+    let http = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout(LEASE_REQUEST_TIMEOUT)
+        .redirects(0)
+        .build();
+    match http
+        .post(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+    {
+        Ok(_) => tracing::info!(
+            target: "akh::backend::execd",
+            session = %config.session_id,
+            "released an abandoned execd allocation"
+        ),
+        Err(error) => tracing::warn!(
+            target: "akh::backend::execd",
+            session = %config.session_id,
+            %error,
+            "could not release an abandoned execd allocation; an operator may need to \
+             reconcile it at akhsbxd"
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2066,6 +2254,172 @@ mod tests {
                 if code == "not_found" && profile == "mac-local"),
             "{error:?}"
         );
+    }
+
+    /// A provisioner that never becomes ready within `allocate_timeout` (the
+    /// 2026-09-27 incident: a first image pull outliving the 120 s default)
+    /// gives up with a typed `busy` error instead of hanging forever.
+    #[test]
+    fn allocate_gives_up_after_the_timeout_with_a_typed_busy_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, seen) = spawn_mock(Arc::new(|seen: &Seen| {
+            (200, allocation(&seen.body, "allocating", "unobserved"))
+        }));
+        let started = Instant::now();
+        let error = ExecdBackend::connect(config(dir.path(), &url)).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "should give up around the 5s configured timeout, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(&error, ExecdError::Allocate { code, .. } if code == "busy"),
+            "{error:?}"
+        );
+        // Every retry inside one `connect` reused the same session id: the
+        // mock never saw more than one distinct allocation identity.
+        let sessions: std::collections::HashSet<_> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.body["session_id"].clone())
+            .collect();
+        assert_eq!(sessions.len(), 1);
+    }
+
+    /// The core of the 2026-09-27 fix: a [`PendingAllocations`] cache makes a
+    /// retried attempt reattach to the same session instead of minting a
+    /// fresh one, so a slow provisioner is never asked to stand up a second
+    /// (or 25th) `Sandbox` for the same workspace.
+    #[test]
+    fn pending_allocations_reattach_to_the_same_session_across_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, seen) = spawn_mock(Arc::new(|seen: &Seen| {
+            (200, allocation(&seen.body, "allocating", "unobserved"))
+        }));
+        let pending = PendingAllocations::new();
+        let fresh = config(dir.path(), &url);
+        let first = pending.config_for("vesta", fresh.clone());
+        pending.remember("vesta", first.clone());
+        // A completely independent `ExecdConfig::new` call for the same
+        // target still reuses the remembered session id.
+        let second_fresh = config(dir.path(), &url);
+        let second = pending.config_for("vesta", second_fresh.clone());
+        assert_eq!(first.session_id, second.session_id);
+        // The independently minted config (as if a brand-new attempt had
+        // never consulted the cache) got a different session id — proving
+        // `config_for` really did reattach rather than pass it through.
+        assert_ne!(second.session_id, second_fresh.session_id);
+
+        // Actually attempt it twice against the mock: still one identity.
+        let _ = ExecdBackend::connect(first);
+        let _ = ExecdBackend::connect(second);
+        let sessions: std::collections::HashSet<_> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.path == "/v1/allocations")
+            .map(|s| s.body["session_id"].clone())
+            .collect();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "expected exactly one allocated session id, saw {sessions:?}"
+        );
+    }
+
+    /// Once a target's `sandbox_url`/`profile`/`principal` changes (an
+    /// operator edited `akh.toml` while an allocation was still pending),
+    /// `config_for` abandons the stale one — releasing it at akhsbxd — and
+    /// mints a fresh session for the new configuration.
+    #[test]
+    fn pending_allocations_abandon_a_stale_target_on_reconfiguration() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, seen) = spawn_mock(Arc::new(|seen: &Seen| match seen.path.as_str() {
+            path if path.ends_with("/release") => {
+                (200, allocation(&json!({}), "released", "unobserved"))
+            }
+            _ => (200, allocation(&seen.body, "allocating", "unobserved")),
+        }));
+        let pending = PendingAllocations::new();
+        let old = ExecdConfig::new(
+            url.as_str(),
+            token(dir.path(), "sandbox"),
+            "old-profile",
+            "janus",
+            "vesta",
+        );
+        pending.remember("vesta", old.clone());
+
+        let new = ExecdConfig::new(
+            url.as_str(),
+            token(dir.path(), "sandbox"),
+            "new-profile",
+            "janus",
+            "vesta",
+        );
+        let resolved = pending.config_for("vesta", new.clone());
+        assert_eq!(resolved.session_id, new.session_id);
+        assert_eq!(resolved.profile, "new-profile");
+
+        let release_path = format!("/v1/allocations/{}/release", old.session_id);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !seen.lock().unwrap().iter().any(|s| s.path == release_path) {
+            assert!(
+                Instant::now() < deadline,
+                "stale allocation was never released"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// [`PendingAllocations::abandon`] releases the pending session at
+    /// akhsbxd and forgets it, so a later `config_for` mints a fresh one.
+    #[test]
+    fn pending_allocations_abandon_releases_and_forgets() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, seen) = spawn_mock(Arc::new(|seen: &Seen| match seen.path.as_str() {
+            path if path.ends_with("/release") => {
+                (200, allocation(&json!({}), "released", "unobserved"))
+            }
+            _ => (200, allocation(&seen.body, "allocating", "unobserved")),
+        }));
+        let pending = PendingAllocations::new();
+        let cfg = config(dir.path(), &url);
+        pending.remember("vesta", cfg.clone());
+        pending.abandon("vesta");
+
+        let release_path = format!("/v1/allocations/{}/release", cfg.session_id);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !seen.lock().unwrap().iter().any(|s| s.path == release_path) {
+            assert!(
+                Instant::now() < deadline,
+                "abandoned allocation was never released"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Forgotten: the next attempt mints a fresh session.
+        let fresh = pending.config_for("vesta", config(dir.path(), &url));
+        assert_ne!(fresh.session_id, cfg.session_id);
+    }
+
+    /// `allocate_timeout_secs` out of the accepted 1..=3600 range is a typed
+    /// config error, not a silent clamp.
+    #[test]
+    fn allocate_timeout_out_of_range_is_a_config_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let too_long = config(dir.path(), "http://127.0.0.1:9")
+            .with_allocate_timeout(Duration::from_secs(3_601));
+        assert!(matches!(
+            ExecdBackend::connect(too_long),
+            Err(ExecdError::Config { .. })
+        ));
+        let zero =
+            config(dir.path(), "http://127.0.0.1:9").with_allocate_timeout(Duration::from_secs(0));
+        assert!(matches!(
+            ExecdBackend::connect(zero),
+            Err(ExecdError::Config { .. })
+        ));
     }
 
     #[test]

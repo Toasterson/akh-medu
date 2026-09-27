@@ -462,6 +462,7 @@ pub enum ExecBackendConfig {
     /// # executor_token_file = "/run/akh/credentials/akhexecd-token"
     /// # poll_wait_ms = 5000
     /// # allow_insecure_http = false  # plain http only to loopback unless true
+    /// # allocate_timeout_secs = 120  # raise for a slow first image pull
     ///
     /// # Optional: more profiles on the same akhsbxd, reached only through the
     /// # `sandbox_exec` tool (Phase 53g PR 8). The primary stays credential-free.
@@ -497,6 +498,15 @@ pub enum ExecBackendConfig {
         /// never needs it.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         allow_insecure_http: bool,
+        /// How long to keep retrying a `busy` (still-provisioning)
+        /// allocation before giving up, in seconds (default 120). Raise this
+        /// for a Kubernetes provisioner whose first image pull routinely
+        /// takes longer — akhomed's own auto-start retry (with backoff) on a
+        /// failed load means this is "how long one attempt waits before
+        /// backing off", not the akh's only chance to come up. Must be
+        /// 1..=3600; see [`crate::backend::execd::ExecdConfig::MAX_ALLOCATE_TIMEOUT`].
+        #[serde(default = "default_execd_allocate_timeout_secs")]
+        allocate_timeout_secs: u64,
         /// Additional named sandbox profiles on the same akhsbxd, reached through the
         /// `sandbox_exec` tool (Phase 53g PR 8). The primary `profile` keeps serving
         /// shell_exec/file_io/edit/glob/grep.
@@ -821,6 +831,7 @@ impl ExecBackendConfig {
             principal,
             poll_wait_ms,
             allow_insecure_http,
+            allocate_timeout_secs,
             sandboxes: _,
         } = self
         else {
@@ -846,7 +857,8 @@ impl ExecBackendConfig {
             )
             .with_executor(route)
             .with_poll_wait(std::time::Duration::from_millis(*poll_wait_ms))
-            .with_insecure_http(*allow_insecure_http),
+            .with_insecure_http(*allow_insecure_http)
+            .with_allocate_timeout(std::time::Duration::from_secs(*allocate_timeout_secs)),
         )
     }
 
@@ -916,6 +928,12 @@ fn default_remote_port() -> u16 {
 
 fn default_execd_poll_wait_ms() -> u64 {
     5_000
+}
+
+/// Default `allocate_timeout_secs`, matching
+/// [`crate::backend::execd::ExecdConfig::new`]'s own default.
+fn default_execd_allocate_timeout_secs() -> u64 {
+    120
 }
 
 impl Default for ExecBackendConfig {
@@ -1558,6 +1576,7 @@ impl AkhConfig {
                     "principal",
                     "poll_wait_ms",
                     "allow_insecure_http",
+                    "allocate_timeout_secs",
                     "sandboxes",
                 ],
             ),
@@ -3452,6 +3471,32 @@ principal = "janus"
                 .to_execd_config("janus")
                 .is_none()
         );
+    }
+
+    /// `allocate_timeout_secs` defaults to 120 (unchanged parsing for every
+    /// existing `[exec] kind = "execd"` config, ADR 113's backward
+    /// compatibility requirement) and a configured value reaches
+    /// [`crate::backend::execd::ExecdConfig::allocate_timeout`] unchanged.
+    #[test]
+    fn allocate_timeout_secs_defaults_to_120_and_is_configurable() {
+        let raw = r#"
+name = "janus"
+[exec]
+kind = "execd"
+sandbox_url = "https://akhsbxd.lab"
+sandbox_token_file = "/run/akh/credentials/akhsbxd"
+profile = "rust-workspace"
+principal = "janus"
+"#;
+        let cfg: AkhConfig = toml::from_str(raw).unwrap();
+        let execd = cfg.effective_exec(None).to_execd_config("janus").unwrap();
+        assert_eq!(execd.allocate_timeout, std::time::Duration::from_secs(120));
+
+        let raw_with_timeout = format!("{raw}allocate_timeout_secs = 300\n");
+        let cfg: AkhConfig = toml::from_str(&raw_with_timeout).unwrap();
+        assert!(AkhConfig::unknown_keys(&toml::from_str(&raw_with_timeout).unwrap()).is_empty());
+        let execd = cfg.effective_exec(None).to_execd_config("janus").unwrap();
+        assert_eq!(execd.allocate_timeout, std::time::Duration::from_secs(300));
     }
 
     #[test]
