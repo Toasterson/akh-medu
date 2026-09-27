@@ -209,6 +209,14 @@ Each record gets a keep/drop decision with a reason. Nothing enters the CoS corp
     spend limit. The supervisor never adds funds. It reports spend with every run report, and it
     stops pods before the credit runs out.
   - Deleting volumes, or creating resources other than Lilith pods, still needs operator approval.
+  - **Serving on Runpod is for testing only** (operator decision 2026-09-27): ≤ 2 h per session,
+    idle stop after 20 min, ≤ 6 GPU-hours per week, ≤ 25% of the remaining credit per month.
+    After successful H100 tests, long training windows and everyday serving move to the local RTX 3090
+    and RX 7900 XTX once they qualify
+    ([local GPU qualification](../plans/2026-09-27-lilith-local-gpu-qualification.md)). Memory
+    arithmetic: on a 24 GB card, full-depth LoRA needs a 4-bit base (7.8 GB vs 23.8 GB BF16). 16K
+    context fits in about 18 GB; 32K needs activation offload. Chunked CE and chunked global attention
+    (head dim 512) are required on every device.
 - **Provenance.** Pod binaries are built from `origin/main` SHAs (satisfied for the Lilith code
   since #418).
 - **Governance.** One ADR 105 run WI per training run.

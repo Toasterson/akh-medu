@@ -1,0 +1,130 @@
+# Lilith: Runpod serving limited to testing; qualifying the RTX 3090 and RX 7900 XTX for long runs
+
+- **Date:** 2026-09-27
+- **Status:** Proposed (slice C6b, after the H100 smoke C6)
+- **Related:** [ADR 116](../decisions/116-lilith-chief-of-staff-guided-rl.md),
+  [CoS plan](2026-09-27-lilith-chief-of-staff-rl-runpod.md),
+  [exam and evaluation workflow](2026-09-27-lilith-exam-and-evaluation-workflow.md),
+  [hardware plan](2026-09-19-capable-8-12b-akh-hardware-plan.md) §1 and §6, ADR 107 (recompute-backward
+  attention), ADR 109 (Cut CE)
+
+## Operator decision (2026-09-27)
+
+Runpod serving exists for **testing** and is limited. After successful H100 tests, **longer runs move
+to the local GPUs**: the RTX 3090 (planned in the hardware plan; confirm host) and the RX 7900 XTX on
+hephaistos. Serving and training capacity on them must be **quantified**, not assumed.
+
+## 1. Serving policy
+
+| Where | Use | Limit |
+|---|---|---|
+| Runpod `akh-medu-lilith-serve` (H100) | Test sessions: Stage 0 checks, candidate smoke after training, exam live tier | ≤ 2 h per session; idle stop after 20 min; ≤ 6 GPU-hours per week and ≤ 25% of the remaining credit per month. Training has priority on credit |
+| Local 7900 XTX (hephaistos, Vulkan GGUF, proven at 23–26 tok/s) or 3090 | Everyday Chief-of-Staff serving and the C8 canary, once qualified (§4) | Local power only |
+
+## 2. Memory arithmetic (Gemma 4 12B, from the pinned parent's config)
+
+The architecture:
+- 48 layers: 40 sliding-window (1,024) and 8 global.
+- Hidden size 3,840; MLP size 15,360; 16 query heads.
+- Sliding layers: head dim 256, 8 KV heads. Global layers: head dim **512**, 1 KV head, K = V.
+- Vocabulary 262,144; embeddings tied.
+
+Parameters:
+- 10.90 B in the transformer blocks + 1.01 B in the embeddings = **11.91 B**.
+- LoRA rank 16 on every attention and MLP projection: **66 M** parameters, whose fp32 master weights
+  and Adam state take **1.05 GB**.
+
+| Item | Size |
+|---|---|
+| BF16 base (blocks + embeddings) | **23.8 GB**: fills a 24 GB card by itself |
+| 4-bit NF4 blocks + BF16 embeddings (QLoRA) | **7.8 GB** |
+| Checkpointed hidden states (bf16, 48 layers) | 3.0 GB at 8K · 6.0 GB at 16K · 12.1 GB at 32K |
+| MLP working set of the layer being recomputed | 0.8 / 1.5 / 3.0 GB |
+| Full logits in bf16 (262k vocabulary) | 4.3 / 8.6 / **17.2 GB**: chunked cross-entropy is mandatory |
+| Naive attention scores in one global layer (16 heads) | 2.1 / 8.6 / **34.4 GB**: needs chunked, recompute-backward attention |
+
+Consequences:
+- **On a 24 GB card, full-depth LoRA requires a 4-bit (QLoRA) base.**
+  - At 16K context: about 7.8 + 1.05 + 6.0 + 1.5 + ~1.5 (runtime overhead) ≈ **18 GB**, which fits.
+  - At 32K: about **25.5 GB**, which does not fit. It needs the checkpointed activations offloaded to
+    host RAM. hephaistos has 31 GiB of RAM; the 3090 host is to be confirmed.
+- **Two traps apply to every device, the H100 included.**
+  - Head dim 512 in the global layers exceeds FlashAttention-2's limit of 256.
+  - Full logits do not fit at 32K.
+
+  C6 must therefore run with chunked cross-entropy (ADR 109 Cut CE / fused linear CE) and chunked,
+  recompute-backward attention for the global layers (the P6.1b approach, ADR 107). The engine's
+  existing rank-2 seam avoided both only because it trains a single query projection.
+
+## 3. Throughput ceilings (analytic bounds, not forecasts)
+
+A frozen-base LoRA step with activation recompute costs about 6·N FLOPs per token plus the LM head:
+**about 71 GFLOP per training token**.
+
+| Device | Peak basis | Training-token ceiling at 40% MFU | Single-stream decode bound (memory bandwidth ÷ weight bytes) |
+|---|---|---|---|
+| H100 SXM | 989 TFLOPS bf16 dense | ~5,500 tok/s | ~140 tok/s (BF16); far higher batched |
+| RTX 3090 | 71 TFLOPS (hardware plan); 35.6 with fp32 accumulate | ~200–400 tok/s, plus the QLoRA dequantization cost | ~120 tok/s (4-bit) |
+| RX 7900 XTX | ~30 TFLOPS effective (hardware plan estimate, unverified) | ~420 tok/s if kernels deliver; ROCm QLoRA support is itself unproven | ~135 tok/s (Q4 GGUF). **Measured: 23–26 tok/s (Vulkan) and 5.19 tok/s (BF16 HF/ROCm)**, so the runtime, not the card, is the limit today |
+
+Read: local cards are about **14–28× slower per training token** than an H100 and cost electricity
+instead of credit. They suit long, unattended windows. Recipe validation, sweeps and anything
+time-critical stay on the H100.
+
+These are ceilings for designing measurements. The Runpod handoff's rule stands: **do not quote them
+as forecasts**. Only §4 measurements count.
+
+## 4. Qualification protocol (C6b)
+
+**Reference, on the H100 (C6).** A frozen **reference micro-run**:
+- fixed seed, data slice and config: 200 SFT steps plus one preference step at 8K and 16K;
+- record the loss curve, adapter hash, dev-gate scores, peak memory at 8K / 16K / 32K, training
+  tok/s, generation tok/s and wall clock.
+
+**Per local device.** Run the same micro-run under that device's recipe:
+- 3090: CUDA, QLoRA NF4 base, bitsandbytes + PEFT, chunked CE, chunked global attention.
+- 7900 XTX: ROCm 6.x. First check that 4-bit QLoRA works on gfx1100 (bitsandbytes ROCm backend or a
+  torchao equivalent). If it does not, record BF16 + offload as the only fallback and measure its cost.
+
+Measure:
+- peak memory per context length, with ≥ 10% headroom required;
+- training tok/s;
+- generation tok/s (vLLM / llama.cpp on CUDA; the Vulkan GGUF path and HF on ROCm);
+- time per window;
+- the numerical controls: `lilith_training_cache_control.py` equivalents, gradient finite and
+  non-zero, exact cold reload;
+- stability over a ≥ 6 h soak: no GPU resets. A mixed-backend episode reset the 7900 XTX in
+  September, so this is a known risk.
+
+**Quality parity.**
+- Score the locally trained micro-run adapter against the H100 adapter on the same dev families,
+  paired. **TOST equivalence with a margin of 0.03 per family**, predeclared.
+- Also score it **as served** on the target serving backend. A QLoRA/NF4-trained adapter applied to
+  a Q4 GGUF base is a different arithmetic path, so the Vulkan adapter controls from
+  `training/lilith/vulkan-adapter-20260922/` are re-run.
+
+**A device qualifies for long runs when:**
+1. it fits the chosen context with ≥ 10% headroom;
+2. it passes the numerical controls;
+3. it passes the quality-parity TOST;
+4. the 6 h soak has no fault;
+5. the projected wall clock of the run is ≤ the operator's window budget. The projection comes from the
+   **measured** tok/s × the planned tokens.
+
+A device qualifies for serving when it:
+- meets the p95 first-token and report-latency budget from the exam's live tier;
+- passes the adapter-as-served parity check.
+
+**Division of work once qualified:**
+- H100: recipe validation, sweeps, the sealed evaluation of release candidates.
+- Local: long training windows, the C8 canary and everyday serving.
+
+The supervisor still runs every local window under ADR 105: a run WI, an exit condition, and a RESULT
+doc. Local spend is reported as kWh.
+
+## 5. Open inputs
+
+- **Is the RTX 3090 installed, and on which host?** The hardware plan lists it as planned. That
+  host's RAM decides whether 32K via activation offload is possible.
+- **Whether 4-bit QLoRA works on the 7900 XTX (gfx1100).** This decides whether AMD can run
+  full-depth LoRA at all, or only the rank-2 seam and serving.
