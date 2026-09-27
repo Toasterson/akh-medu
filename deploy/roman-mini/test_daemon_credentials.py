@@ -1,4 +1,6 @@
 """Anima token resolution for the Roman core LaunchDaemon (ADR 113, 53f)."""
+import hashlib
+import json
 import os
 from pathlib import Path
 import sys
@@ -88,6 +90,71 @@ class SessionsRoleTests(unittest.TestCase):
             self.assertEqual(captured['env']['ROMAN_ARCHIVE_TOKEN'], 'arch')
             self.assertEqual(captured['env']['ROMAN_ANIMA_TOKEN'], 'anima')
             self.assertTrue(captured['path'].endswith('akhsessd'))
+
+
+class CoreRoleTests(unittest.TestCase):
+    """Role `core`'s binary provenance gate (operator decision 2026-09-27:
+    stable signed `bin/akhomed`, sha256-checked against core-release.json
+    instead of the old filename-only regex)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / 'secrets').mkdir()
+        (self.root / 'config').mkdir()
+        (self.root / 'bin').mkdir()
+        (self.root / 'secrets/ollama-key').write_text('ok\n')
+        (self.root / 'secrets/archive-token').write_text('at\n')
+        (self.root / 'secrets/anima-token').write_text('an\n')
+        for akh in ('janus', 'minerva', 'vesta'):
+            (self.root / f'secrets/board-{akh}.json').write_text('{"bearer_token": "b"}')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def release(self, binary_name, content):
+        path = self.root / 'bin' / binary_name
+        path.write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        (self.root / 'config/core-release.json').write_text(json.dumps({"binary": str(path), "sha256": digest}))
+        return path
+
+    def run_main(self):
+        with unittest.mock.patch.object(dc, 'capture', side_effect=AssertionError('1Password called')), \
+             unittest.mock.patch.object(dc.sys, 'argv', ['x', 'core', str(self.root)]):
+            dc.main()
+
+    def test_matching_sha256_execs_the_stable_path(self):
+        path = self.release('akhomed', b'binary-bytes')
+        captured = {}
+
+        def fake_execve(p, argv, env):
+            captured['path'] = str(p)
+            raise SystemExit(0)
+
+        with unittest.mock.patch.object(dc.os, 'execve', side_effect=fake_execve):
+            with self.assertRaises(SystemExit):
+                self.run_main()
+        self.assertEqual(captured['path'], str(path))
+
+    def test_legacy_versioned_path_is_accepted_for_rollback(self):
+        self.release('akhomed-main-' + 'c' * 12, b'binary-bytes')
+        with unittest.mock.patch.object(dc.os, 'execve', side_effect=lambda *a: (_ for _ in ()).throw(SystemExit(0))):
+            with self.assertRaises(SystemExit):
+                self.run_main()
+
+    def test_sha256_mismatch_refuses_to_start(self):
+        path = self.release('akhomed', b'binary-bytes')
+        path.write_bytes(b'tampered-bytes')  # content changed after core-release.json recorded its sha256
+        with unittest.mock.patch.object(dc.os, 'execve', side_effect=AssertionError('must not exec')):
+            with self.assertRaisesRegex(RuntimeError, 'sha256'):
+                self.run_main()
+
+    def test_unrecognized_filename_is_refused_before_the_sha256_check(self):
+        self.release('akhomed-evil', b'binary-bytes')
+        with unittest.mock.patch.object(dc.os, 'execve', side_effect=AssertionError('must not exec')):
+            with self.assertRaisesRegex(RuntimeError, 'bin/akhomed'):
+                self.run_main()
 
 
 if __name__ == '__main__':

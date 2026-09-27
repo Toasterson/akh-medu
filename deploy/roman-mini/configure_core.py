@@ -8,8 +8,14 @@ turns (GLM-5.3 on Ollama Cloud), full tool registries, per-akh MCP servers,
 reactors, ACP and the additive `/v1` core API.
 
 Refuses unless `--repo` is a clean checkout whose HEAD is an ancestor of
-origin/main (.claude/rules/deploy-from-main.md); the binary is installed as
-`bin/akhomed-main-<sha>` and its provenance recorded in `config/core-release.json`.
+origin/main (.claude/rules/deploy-from-main.md). The core execs a stable path,
+`bin/akhomed`, signed with the identity from `config/codesign.json` (absent:
+ad-hoc, with a warning) so its macOS Local Network TCC approval survives
+future deploys; a versioned copy `bin/akhomed-main-<sha>` is kept alongside it
+for rollback and audit. Provenance (commit, both the unsigned build's and the
+installed signed binary's sha256, the codesign identity/identifier/designated
+requirement) is recorded in `config/core-release.json` and
+`evidence/core-binary.json`.
 
 Renders (existing unrelated keys and secrets are preserved; rerunning is safe):
 - core-config/akh-medu/config.toml         host config (deployed, auto_start, [exec], [acp])
@@ -38,6 +44,7 @@ from pathlib import Path
 import plistlib
 import secrets
 import shutil
+import subprocess
 import sys
 
 try:
@@ -83,6 +90,101 @@ def install_binary(built, target):
     return digest
 
 
+# ── Stable-path code signing (operator decision 2026-09-27) ─────────────────
+#
+# macOS Local Network privacy (TCC) keys its per-binary approval off the
+# installed file's path and code signature together. The old flow installed
+# a fresh `bin/akhomed-main-<sha>` on every deploy, so every deploy was a new
+# TCC identity and the operator had to re-approve it by hand. Signing a
+# *stable* path (`bin/akhomed`) with a *stable* identity keeps the same TCC
+# identity across deploys; the versioned copy stays for rollback and audit,
+# per .claude/rules/deploy-from-main.md ("SHA in its name, tag or evidence
+# record").
+DEFAULT_CODESIGN_IDENTIFIER = "dev.akh-medu.akhomed"
+
+
+def load_codesign_config(root):
+    """Read `config/codesign.json` -> {"identity", "identifier"}, or None.
+
+    Absent file: the caller ad-hoc signs (`codesign --sign -`) and must warn
+    that the Local Network TCC approval will not survive the next deploy.
+    """
+    path = root / "config/codesign.json"
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text())
+    identity = data.get("identity")
+    if not identity:
+        raise fa.RenderError(f"{path} is missing required key 'identity'")
+    return {"identity": identity, "identifier": data.get("identifier", DEFAULT_CODESIGN_IDENTIFIER)}
+
+
+def _codesign(args):
+    result = subprocess.run(["codesign", *args], capture_output=True, text=True)
+    if result.returncode:
+        raise fa.RenderError("codesign " + " ".join(args) + " failed: " + result.stderr.strip())
+    return result
+
+
+def codesign_binary(path, codesign_config):
+    """Sign `path` in place, replacing any existing signature.
+
+    With `codesign_config` (from `config/codesign.json`), signs with the
+    named identity and identifier, no hardened runtime (`--options runtime`
+    is deliberately omitted: it is not needed without notarization, and could
+    break library loading) and no timestamp server (`--timestamp=none`, so
+    signing works offline). With `codesign_config=None`, signs ad-hoc
+    (`--sign -`); the resulting signature carries no persistent identity, so
+    macOS treats it as new on every deploy.
+
+    Returns {"identity", "identifier", "designated_requirement"}; the latter
+    two are None for an ad-hoc signature.
+    """
+    if codesign_config is None:
+        _codesign(["--force", "--sign", "-", str(path)])
+        return {"identity": "-", "identifier": None, "designated_requirement": None}
+    identity, identifier = codesign_config["identity"], codesign_config["identifier"]
+    _codesign(["--force", "--sign", identity, "--identifier", identifier, "--timestamp=none", str(path)])
+    requirement = _codesign(["-dr", "-", str(path)]).stdout.strip().removeprefix("designated => ")
+    return {"identity": identity, "identifier": identifier, "designated_requirement": requirement}
+
+
+def install_core_binary(built, root, provenance, codesign_config, warnings):
+    """Install the core at the stable, signed `bin/akhomed` (the only path the
+    daemon execs) and the versioned `bin/akhomed-main-<sha>` (unsigned, kept
+    for rollback and audit; refuses to replace a different binary under the
+    same SHA name, like `install_binary`).
+
+    The stable path is written by copy-to-temp + codesign + atomic rename, so
+    a crash or a concurrent reader never sees a partially written or
+    unsigned file at `bin/akhomed`, and the running process's inode is never
+    modified in place.
+
+    Returns {"binary", "versioned_binary", "build_sha256", "sha256",
+    "codesign"} for `render()`'s `config/core-release.json` /
+    `evidence/core-binary.json`.
+    """
+    versioned = root / "bin" / provenance.binary_name
+    build_sha256 = install_binary(built, versioned)
+
+    stable = root / "bin" / "akhomed"
+    stable.parent.mkdir(parents=True, exist_ok=True)
+    temp = stable.with_name(f".{stable.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copy2(built, temp)
+        temp.chmod(0o755)
+        codesign_info = codesign_binary(temp, codesign_config)
+        os.replace(temp, stable)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+    if codesign_config is None:
+        warnings.append(f"{stable} is ad-hoc signed (no config/codesign.json); its Local Network "
+                        "TCC approval will not survive the next deploy")
+    return {"binary": str(stable), "versioned_binary": str(versioned), "build_sha256": build_sha256,
+            "sha256": _sha256(stable), "codesign": codesign_info}
+
+
 def install_skillpack(source, root, role):
     """Copy the laya-intervention skillpack into the role's engine skills dir
     (`core-data/akh-medu/workspaces/<role>/kg/skills/`). Activation stays an
@@ -97,8 +199,18 @@ def install_skillpack(source, root, role):
 
 
 def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None,
-           acp_port=fa.ACP_TCP_PORT, live=False):
+           acp_port=fa.ACP_TCP_PORT, live=False, build_sha256=None, versioned_binary=None,
+           codesign=None):
     """Render every full-akh file under `root`. Returns warnings.
+
+    `binary` is the path the core actually execs (`bin/akhomed`, the stable
+    signed path, in production; a test may pass any path directly).
+    `binary_sha256` is that file's own sha256 — `daemon_credentials.py` role
+    `core` checks it before exec. `build_sha256` (defaults to `binary_sha256`
+    when omitted) is the unsigned `target/release` artifact's sha256, kept
+    for reproducible-build provenance. `versioned_binary` and `codesign` are
+    recorded as-is (both may be None, e.g. in tests that render without
+    going through `install_core_binary`).
 
     `live=False` (default) stages the PR 6 Anima source in shadow mode next
     to the observer/laya routes. `live=True` is the PR 6 cutover: the source
@@ -204,8 +316,11 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
         "mode": "akhomed", "endpoint": f"tcp://127.0.0.1:{acp_port}",
         "health_url": f"http://{fa.CORE_LISTEN}/healthz", "binary": str(acp_path)})
 
-    release = {"binary": str(binary), "commit": provenance.commit, "short": provenance.short,
-               "origin_main": provenance.origin_main, "sha256": binary_sha256,
+    release = {"binary": str(binary), "versioned_binary": str(versioned_binary) if versioned_binary else None,
+               "commit": provenance.commit, "short": provenance.short,
+               "origin_main": provenance.origin_main,
+               "build_sha256": build_sha256 if build_sha256 is not None else binary_sha256,
+               "sha256": binary_sha256, "codesign": codesign,
                "build_command": fa.BUILD_COMMAND,
                "acp_binary": str(acp_binary) if acp_binary else None}
     _save_json(config / "core-release.json", release)
@@ -254,16 +369,19 @@ def main():
         raise fa.RenderError(f"{built} not found; run `{fa.BUILD_COMMAND}` in {args.repo}")
     if built.stat().st_mtime < provenance.committed_at:
         raise fa.RenderError(f"{built} is older than commit {provenance.short}; rebuild it from this checkout")
-    binary = root / "bin" / provenance.binary_name
-    digest = install_binary(built, binary)
+    codesign_config = load_codesign_config(root)
+    warnings = []
+    core_install = install_core_binary(built, root, provenance, codesign_config, warnings)
     acp_binary = None
     if (args.binaries.resolve() / "akh-acp").is_file():
         acp_binary = root / "bin" / provenance.acp_binary_name
         install_binary(args.binaries.resolve() / "akh-acp", acp_binary)
-    warnings = render(root, provenance, binary, digest, acp_binary, acp_port=args.acp_port,
-                      live=args.live)
+    warnings += render(root, provenance, Path(core_install["binary"]), core_install["sha256"], acp_binary,
+                       acp_port=args.acp_port, live=args.live, build_sha256=core_install["build_sha256"],
+                       versioned_binary=Path(core_install["versioned_binary"]), codesign=core_install["codesign"])
     print(f"Configured full akh core {provenance.binary_name} ({provenance.commit}); "
           f"merge-base --is-ancestor {provenance.short} origin/main ({provenance.origin_main[:12]}): ok")
+    print("signed bin/akhomed with identity " + str(core_install["codesign"]["identity"]))
     for warning in warnings:
         print("warning:", warning)
     print("roman-anima source: " + ("LIVE (cutover)" if args.live else "shadow"))

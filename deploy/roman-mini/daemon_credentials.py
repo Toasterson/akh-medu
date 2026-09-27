@@ -4,6 +4,7 @@
 Launchd passes ROLE and deployment ROOT. Only these operator-owned references are
 resolved; no agent-supplied command, reference, or environment is accepted.
 """
+import hashlib
 import json
 import os
 import re
@@ -146,13 +147,24 @@ def main():
         # this as an operator decision.
         env['AKH_REACTOR_ENABLE'] = '1'
         # akhomed reads AKH_CORE_CONFIG and friends from the environment (see
-        # configure_core.py), not from a `--config` argument. The binary is the
-        # provenance-named `bin/akhomed-main-<sha>` recorded by configure_core.py
-        # (deploy-from-main rule); refuse anything else.
+        # configure_core.py), not from a `--config` argument. The binary is
+        # `bin/akhomed` (the stable, code-signed path configure_core.py
+        # installs and signs so its macOS Local Network TCC approval survives
+        # a redeploy) or, only for an operator's manual rollback, the
+        # versioned `bin/akhomed-main-<sha>` it keeps alongside it. Either
+        # way the real provenance gate is the sha256 recorded in
+        # core-release.json, not the filename: a filename match with
+        # tampered or stale bytes must still refuse to start.
         release = json.loads((root / 'config/core-release.json').read_text())
         executable = Path(release['binary'])
-        if executable.parent.resolve() != (root / 'bin').resolve() or not re.fullmatch(r'akhomed-main-[0-9a-f]{7,40}', executable.name):
-            raise RuntimeError('core release binary is not bin/akhomed-main-<sha>; rerun configure_core.py')
+        if executable.parent.resolve() != (root / 'bin').resolve() or not (
+                executable.name == 'akhomed' or re.fullmatch(r'akhomed-main-[0-9a-f]{7,40}', executable.name)):
+            raise RuntimeError('core release binary is not bin/akhomed or bin/akhomed-main-<sha>; rerun configure_core.py')
+        digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+        if digest != release.get('sha256'):
+            raise RuntimeError(
+                f'{executable} sha256 does not match config/core-release.json; rerun configure_core.py or '
+                'restore the recorded binary before starting')
         os.execve(executable, [str(executable)], env)
         return
     else:

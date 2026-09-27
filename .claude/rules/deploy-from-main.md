@@ -17,6 +17,15 @@ the `roman-akhs` deployment), hephaistos, archibald and the Talos cluster.
   in its name, tag or evidence record (for example `akhomed-main-<sha>`,
   `:main-<sha>`). Content hashes alone are not provenance; a hash cannot be traced
   back to a commit.
+  - **Stable-named binaries** (for example the Roman core's `bin/akhomed`,
+    installed and code-signed at a fixed path so its macOS Local Network TCC
+    approval survives a redeploy — see `deploy/roman-mini/CUTOVER.md`) carry
+    the SHA in an evidence record instead of the filename: the record names
+    the commit and the installed file's own verified sha256, and the running
+    binary is checked against that sha256 before every start. Tracing such a
+    binary to a commit means reading its evidence record and confirming the
+    sha256 matches — a stable name with no sha256 check next to it is not
+    provenance.
 - **Before restarting anything:** verify the artifact's SHA is an ancestor of
   `origin/main` and quote the check in the deploy report.
 - **Verifying a running deployment:** a service whose binary cannot be traced to a
