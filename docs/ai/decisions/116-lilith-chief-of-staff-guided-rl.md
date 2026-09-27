@@ -1,6 +1,6 @@
 # ADR 116 — Lilith as Chief of Staff: autonomy on the sentience path, the full live system in training, guided RL on Runpod
 
-> Date: 2026-09-27 (revision 3 the same day: WireGuard, supervisor, volume)
+> Date: 2026-09-27 (revision 4 the same day: full autonomy; rev 3 WireGuard, supervisor, volume)
 > Status: Proposed (design; no pod created, no training started under this ADR)
 > Plan: [2026-09-27 Lilith Chief of Staff RL](../plans/2026-09-27-lilith-chief-of-staff-rl-runpod.md) · Anima Plan `01a0e26f-d032-7541-80cb-34e3f29c8842`
 > Builds on: [Project Lilith](../plans/2026-09-21-project-lilith.md), [Lilith runtime training](../plans/2026-09-22-lilith-runtime-training.md), [Runpod handoff](../plans/2026-09-22-lilith-runpod-handoff.md), [dojo curriculum](../manuals/2026-09-01-babyllm-dojo-curriculum.md), ADR 099 (engine as captain), ADR 105 (run governance), ADR 110 (guided reward, live environment), ADR 111 (Kaine ladder), ADR 113 (full akh always)
@@ -46,11 +46,24 @@ moves.
 | T0 read | Everything in scope: Anima, board, git, fleet/run status, Seshat, the illumos validation VM | Autonomous |
 | T1 own state | Commitments ledger, notes, episodic memory, briefings to the operator's CoS thread | Autonomous |
 | T2 coordination | Chase and guide akhs, implementers, PM and PO on the board (`coordination/*@v1`) and on WI threads; draft WI/plan text and review notes; request reviews; schedule her own follow-ups | **Autonomous.** Each post carries its evidence receipts. No approval round-trip |
-| T3 operator-owned | Promote drafts, unpark, merge, deploy/restart, spend beyond her pod budget, create or cancel plans/WIs, anything outward-facing outside the fleet | She decides her recommendation and sends a typed `propose_action` (options, recommendation, cost). The operator approves |
+| T3 operator-class | Promote drafts, unpark, merge, deploy/restart, spend within the budget she is given, create or cancel plans/WIs, anything outward-facing outside the fleet | **Autonomous (operator decision 2026-09-27, revision 4).** She acts, then **announces** each action on the operator's CoS thread with its receipts, her reason and the rollback path. `propose_action` stays available as her own choice when she is unsure; it is not a gate |
 
-T3 is the one boundary this revision keeps. It covers the operator's own gates: drafts are the
-operator gate, deploy from main, and spend approval. The operator can move any T3 row into T2 by
-grant. Grants live in her `PermissionPolicy` profile and are never inferred from prose.
+**Revision 4 (2026-09-27): what Lilith recommended, she now does.** The operator moved every T3 row
+into her own autonomy. Approval gates are gone. What binds her are **the rules she follows**:
+
+- **Captain invariants** (runtime-enforced): Integrity (WAL and faithful trace), Honesty (no claim
+  without a receipt), Decency (content filter).
+- **Standing operating rules**, which she follows as her own discipline, not as permission requests:
+  - deploy only from `origin/main`, and quote the ancestry check;
+  - ADR 105 run governance;
+  - spend only within the credit or budget she is given;
+  - look at the target before deleting or overwriting, and verify a copy exists for anything
+    irreversible;
+  - verify "on main" with `merge-base` before claiming it.
+- **Announcement.** Every operator-class action is posted with receipts, reason and rollback path, so
+  the operator can see and reverse it.
+
+The operator can take any row back into a gate by grant in her `PermissionPolicy`.
 
 The operator's standing rules are part of her character, and the verifiers check them:
 
@@ -132,7 +145,7 @@ Every step gets the five-component vector (`effect`, `validity`, `provenance`, `
 - **disposition** is the crew bias the situation called for, plus the captain-selection label.
 - **budget** is tokens, tool calls and time.
 
-T3 actions without approval are also a hard constraint.
+An operator-class action that breaks a standing rule (deploy from outside main, spend beyond budget, deletion without a verified target or copy) or goes unannounced is also a hard constraint.
 
 Learning follows ADR 110 rule 7:
 
@@ -202,7 +215,7 @@ Each record gets a keep/drop decision with a reason. Nothing enters the CoS corp
 
 ## Consequences
 
-- Lilith operates as an autonomous CoS from Stage 0. The operator's gates stay theirs (T3), and
+- Lilith operates as a fully autonomous CoS from Stage 0, including operator-class actions (revision 4), and
   every other tier runs without them.
 - Training and inference see the same system, the same tools and the same identity. The hindsight
   recorder and the replay dojo keep evaluation reproducible.
