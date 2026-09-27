@@ -36,7 +36,6 @@ their 0600/0700 modes. `SHA256SUMS` sits at the root of the destination, read ba
 | `lilith/parent-gemma4-12b-5926caa4/` | Pinned Gemma 4 12B BF16 parent (weights sha256 `5a84cb31…bff18d`), tokenizer, template, configs | `~/.local/share/akh-medu/lilith-training/parent-5926caa4/` |
 | `lilith/transcripts-20260922/` | **Private** admitted transcript sets and the SFT subset v1 | `…/lilith-training/transcripts-20260922/` |
 | `lilith/local-share/` | Stack templates (`lilith-dev-vulkan-20260921`), reports, coordination/evaluation state, runtime build target, candidate binaries | `~/.local/share/akh-medu/lilith-*` |
-| `lilith/illumos-vm/` | OpenIndiana 2026.04 validation VM (golden + overlays, stopped) | `…/lilith-illumos-20260922/` |
 | `lilith/repo/` | `akh-medu-hephaistos-all.bundle` (every ref), `refs.txt`, and `untracked/` (359 untracked or ignored evidence files: adapters, optimizer states, run logs, ledgers) | `~/ws/agi/akh-medu` |
 | `models/mimo-v2.6-distill-qwen-9b-2367e865/` | MiMo fallback candidate (pinned revision) | `…/models/` |
 | `models/gemma4-12b-gguf/` | Deployed Vulkan GGUF + mmproj | `…/models/llm/` |
@@ -54,6 +53,7 @@ Not copied (inventoried, left on hephaistos):
 | Item | Why left |
 |---|---|
 | ROCm venv (`venv310`, 7 GB) | Not portable to CUDA |
+| OpenIndiana validation VM disks (`lilith-illumos-20260922`, ~31 GB) | Operator decision 2026-09-27: new VMs will be built; the partial copy was removed |
 | Public inference models (`models/llm/{gemma3*,qwen2.5*}`, `~/.akh-medu/models` Hemmingway-1, ollama stores ≈ 106 GB) | Re-downloadable, and not training outputs |
 | The Ptah reference `JonathanColetti/Qwen3.8-27B-Uncensored` | Re-downloaded by revision when needed |
 | `target/` build products (59 GB) | Build output |
