@@ -70,9 +70,9 @@ Nothing was deleted from hephaistos.
 | **C2 Stage 0 on Runpod (frozen)** | C1, C6a | `akh-medu-lilith-serve` (vLLM, pinned parent) started and stopped; the `lilith` akh with `chat_backing="openai"`, her own identity, the full tool registry over the tunnel; session recording; correction tags | ≥5 operator sessions; transcripts and corrections admitted to NFS; baseline notes (missed items, fabrications, autonomy noise); tok/s and spend |
 | **C3 Tracker recorder** | — | Read-only MCP capture every 2 h → NFS `lilith/cos-snapshot@1`; daily gap report | 14 days of snapshots; zero tracker writes (PAT scope audit) |
 | **C4 CoS dojo** | C1, C3 | Replay MCP server (live names and schemas, contract hash); dojo tenancy; `akhrtd`-owned episode runner; the families below; `cos-v1`; time/plan splits; floors frozen | Verifier tests; frozen-Gemma and teacher baselines per family |
-| **C5a Transcript role-fit evaluation** | — | Evaluate the 559 harvested records (12 sessions) plus any operator-named sessions for CoS behaviour, illumos guidance quality, verified outcomes, corrections present, privacy; keep/drop with a reason per record (analysis, findings document) | Findings document; keep set, drop set, reasons; the illumos-guidance share measured, not assumed |
+| **C5a Transcript role-fit evaluation** | — | **In progress 2026-09-27.** The supervisor runs a panel of Fable 5.1, Opus 5.5 and Codex Astra: 6 batches, two independent raters per record, the third rater adjudicates disagreements, and Cohen's kappa is reported. Rubric: `~/lilith-private/c5a/RUBRIC.md` (private). Per-record keep/drop with a reason | Findings document with keep, drop and reasons; agreement statistics; the illumos-guidance share measured |
 | **C5 CoS corpus** | C2, C4, C5a | Admission of kept transcripts + Stage 0 sessions + live work trajectories + verified teacher dojo trajectories; corrected siblings; captain-selection labels; decontamination | Corpus manifest (source, split, weight, provenance); private data on NFS only |
-| **C6a Tunnel and identity** | — | Lilith's ephemeral fleet node (Tailscale userspace-networking with `tag:lilith`, or a WireGuard fallback); ACL to akh runtime services, Anima MCP, board, Seshat, repository, fleet status, the OpenIndiana VM executor; her own PAT and board token as Runpod secrets, revoked at stop | From a test pod: every listed service reachable, nothing else reachable; keys expire on pod stop |
+| **C6a WireGuard tunnel and identity** | — | A pure WireGuard hub on a public fleet host (archibald, or a home-router port-forward) routing only to the akh runtime services, Anima MCP, board, Seshat, the repository, fleet status and the new OpenIndiana VM executor. A per-pod-session peer keypair and /32; a userspace client on the pod (wireproxy/onetun; pods lack `NET_ADMIN`/TUN). Lilith's own PAT and board token as Runpod secrets. The supervisor adds the peer at start and removes it at stop | From a test pod: every listed service reachable, nothing else; the peer removed and keys dead after stop; runbook written |
 | **C6 Runpod CUDA harness** | C0 ✔, C6a | Portable launcher; network volume (new, or reuse `4wgri7h01a` in US-WA-1); main-SHA binaries; pinned CUDA env; cache controls rerun on CUDA; full-depth LoRA SFT + preference; vLLM LoRA hot-load; cold reload; single-executor guard for live siblings | ≤2 GPU-h smoke on 1× H100: controls pass, 32K memory measured, one SFT + one preference step, exact cold reload, one live tunnel episode recorded, spend recorded |
 | **C7 Round-1 guided training (ADR 105 run)** | C4, C5, C6 | Belt-ordered curriculum: voice kata → CoS families → captain selection; live + dojo on-policy rounds; weighted SFT + sibling preference; KLPO ablation; dev selection; sealed eval | Report: updates per arm, hashes, per-family dev/sealed vs frozen parent and teacher, hard-constraint counts, belt exams reached, retention (v2 coding pack, ADAM gates), time, spend |
 | **C8 Canary as the operator's CoS** | C7 | One week as the operator's CoS on the started/stopped pod | Weekly report: missed items, fabrications (target 0), T3 proposals and approvals, T2 noise, corrections per session, illumos guidance outcomes, cost, operator verdict |
@@ -117,39 +117,39 @@ Lilith is reported next to the frozen parent and the teacher.
 
 ## Runpod layout
 
+- **Supervisor.** The architect session (Claude) is Lilith's supervisor. It starts and stops her pods
+  and evaluates training (operator decision 2026-09-27). It follows the [exam and evaluation
+  workflow](2026-09-27-lilith-exam-and-evaluation-workflow.md).
 - **Access.** The agent API key comes from 1Password `Homelab / Runpod API Key`, read at call time
-  through the service-account wrapper and never written to disk. MCP OAuth is unavailable because the
-  operator is remote. The local rule `.claude/rules/runpod-babyllm.md` was amended accordingly.
-- **Existing resources (2026-09-27):**
-  - volume `akh-medu-babyllm-p350m` (`4wgri7h01a`, 300 GB, US-WA-1);
-  - pods `akh-babyllm-release-remediation-20260910` and
-    `akh-babyllm-foundation-train-a100-20260904` (both EXITED).
-- **Volume.** Either reuse `4wgri7h01a` with a `lilith/` tree, or create `akh-medu-lilith-vol`
-  (~150 GB) in a datacenter with H100 stock. Contents: `parent/`, `gguf/`, `data/`,
-  `bin/*-main-<sha>`, `adapters/`, `runs/`. It is filled from NFS by an upload pod, with only these
-  files.
-- **Pods.** Both auto-terminate. Credentials are Lilith's own scoped identity only (ADR 116
-  Decision 3).
-  - `akh-medu-lilith-serve`: 48 GB class, vLLM, started and stopped.
-  - `akh-medu-lilith-train-<run>`: 1× H100 80GB.
-- **Budget.** Prices are rechecked live before each approval. The 2026-09-22 quotes were H100 SXM
-  $3.49/h and A100 SXM $1.59/h. Caps: C6 smoke 2 GPU-h; C7 round 1 24 GPU-h; serving per the
-  operator's monthly cap.
+  and never written to disk. The hosted Runpod MCP uses it through a `headersHelper`.
+- **Budget.** The cap is the account's prepaid credit: $66.73 on 2026-09-27, with an $80 spend limit.
+  The operator tops it up when needed. The supervisor never adds funds, reports spend in every run
+  report, and stops pods before the credit runs out.
+- **Volume.** `akh-medu-lilith-vol` (`c6kdciozex`, 100 GB, **EU-FR-1**, about $7/month) was created
+  2026-09-27. EU-FR-1 had H100 80GB stock and network storage close to the Swiss homelab. Layout:
+  `parent/`, `gguf/`, `env/` (CUDA venv), `data/`, `bin/*-main-<sha>`, `adapters/`, `runs/`. It is
+  filled from NFS by an upload pod, with only these files.
+- **Pods.** `akh-medu-lilith-serve` and `akh-medu-lilith-train-<run>`, both 1× H100 80GB at $3.49/h
+  (2026-09-27). No 48 GB-class GPU was in stock in any EU storage datacenter. Both auto-terminate
+  and carry only Lilith's scoped identity. At today's credit that is about 19 H100-hours in total,
+  so serve sessions and training runs share it.
+- **Other resources.** The BabyLLM volume `4wgri7h01a` (300 GB, US-WA-1, about $21/month) holds
+  P5 checkpoints. Keeping or deleting it is the operator's call.
 
-## Operator decisions still open
+## Operator decisions (2026-09-27, round 3)
 
-1. **Serving start/stop.** Who starts and stops `akh-medu-lilith-serve`, and at what monthly cap?
-   Recommended: an event-driven controller (start on an operator message or a scheduled briefing,
-   stop after 20 min idle), under a monthly cap you set. Until then each start needs your OK.
-2. **T3 widening.** Should any T3 row move to her autonomous T2? Candidates: unparking after she
-   states the gaps, or small spend inside her pod budget.
-3. **Volume.** Reuse `4wgri7h01a` (US-WA-1) or a new Lilith volume where H100s are in stock?
-4. **Tunnel.** Tailscale (tailnet currently logged out on hephaistos and the Mac) or WireGuard to
-   an existing gateway?
-5. **Transcripts.** Which of your Claude Code / Codex sessions may C5a evaluate beyond the
-   harvested 12?
-6. **Lineage.** Crew slot names, belt names (dojo §8). Captain placement for Lilith is now
-   "internalized".
+- Doc gaps: fix them (branch `docs/fix-adam-kaine-doc-gaps`).
+- Supervisor: Claude starts and stops pods and evaluates training.
+- Cap: the account credit.
+- Volume: where H100s are (EU-FR-1).
+- Tunnel: pure WireGuard.
+- Evaluators: Fable 5.1, Opus 5.5 and Astra, coordinated as subagents.
+
+Still open:
+
+- whether to widen T3;
+- whether to keep the BabyLLM volume `4wgri7h01a`;
+- lineage names (dojo §8).
 
 ## Out of scope
 
