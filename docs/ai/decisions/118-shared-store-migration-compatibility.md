@@ -1,4 +1,6 @@
-# ADR 097: Shared-store migrations require fleet compatibility
+# ADR 118: Shared-store migrations require fleet compatibility
+
+> Renumbered from ADR 097 on 2026-09-27 (duplicate number). ADR 097 is evidence-gated completion.
 
 - Status: Accepted
 - Date: 2026-08-24

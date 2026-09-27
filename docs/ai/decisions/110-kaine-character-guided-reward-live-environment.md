@@ -4,7 +4,7 @@
 > Status: Accepted (design; extends Phase 51 P7 — no training starts under this ADR until the P6 window queue and gate are recorded)
 > Phase: 51 P7 extension (plan: `docs/ai/plans/2026-09-14-phase51-p7-kaine-architecture-ladder-and-training-engine.md`, §"ADR 110 extension")
 > Anima: project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, plan `019f90cb-2e66-7f92-ba88-a4060be97c6e`; new WIs P7.10–P7.13 (IDs in the plan); amends P7.3, P7.5–P7.9
-> Related: ADR 088 (action world model, proposed), ADR 096 (step-level rewards, design not built), ADR 099 (engine as captain), ADR 102 (tool-native learning model), ADR 105 (run governance), ADR 106 (engine-in-the-loop training), ADR 111 (Kaine ladder), ADR 109 (engine memory); dojo manual `docs/ai/manuals/2026-09-01-babyllm-dojo-curriculum.md` §2, §5, §6, §10
+> Related: ADR 117 (action world model, proposed), ADR 096 (step-level rewards, design not built), ADR 099 (engine as captain), ADR 102 (tool-native learning model), ADR 105 (run governance), ADR 106 (engine-in-the-loop training), ADR 111 (Kaine ladder), ADR 109 (engine memory); dojo manual `docs/ai/manuals/2026-09-01-babyllm-dojo-curriculum.md` §2, §5, §6, §10
 > Inputs: Bryan Cantrill, *Intelligence is not Enough* (Monktoberfest 2023, `youtube.com/watch?v=bQfJi7rjuEk`); Danny Hatcher, *Perception doesn't happen, we act to perceive* (Gibson / *Activist Affordances*, `youtube.com/watch?v=yFHAGOL6Pk8`); Oxide Computer Company principles and values (`oxide.computer/principles`, read 2026-09-14)
 
 ## Question
@@ -88,7 +88,7 @@ The P6 lane already has the mechanism (ADR 096 design; E3 in `akh_episode_genera
 ## Decision 3 — The environment is the real one, run as a dojo tenancy
 
 There is no environment abstraction in the repo today (inventory 2026-09-14: no `Environment`/`Simulator`/`Rollout` type; the closest
-things are the batch generator `src/bin/akh_episode_generator.rs`, the OODA-side `vsa_rl.rs` cosine reward, and ADR 088/096 as unbuilt
+things are the batch generator `src/bin/akh_episode_generator.rs`, the OODA-side `vsa_rl.rs` cosine reward, and ADR 117/096 as unbuilt
 designs). This ADR defines one, built from what already exists rather than a simulator of it:
 
 **`AkhEnvironment` = Engine + the full `ToolRegistry` + Agent Board + Anima + executor `Backend`, in a sandboxed tenancy.**
@@ -152,7 +152,7 @@ Amendments to existing P7 items (appended to their Anima descriptions):
 - The training signal is auditable end to end: each weight traces to a recorded engine verification or a blinded rubric score, never to
   an opaque judge scalar. A weight of 0 means "this taught nothing", never "this was punished".
 - Runs in the dojo tenancy are still runs: ADR 105 applies (one WI per run, exit condition, board-routed events, no chat wakeups).
-- ADR 088 (action world model) gains its first consumer: the `effect` component is predict-before-execute verified by replay.
+- ADR 117 (action world model) gains its first consumer: the `effect` component is predict-before-execute verified by replay.
 - Phase 50's VM harness becomes the executor backend for shell episodes when it lands; until then `InProcessBackend` bounds what the
   emergent-bug family can express (file/process faults, not hardware).
 

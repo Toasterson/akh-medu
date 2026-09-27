@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install the transcript harvester on this machine (akh-medu ADR 108).
+# Install the transcript harvester on this machine (akh-medu ADR 119).
 #
 #   sh scripts/install-akh-harvest.sh --machine <name> --bundle <certs.tgz> [--binary <path>|--build] [--interval 15m]
 #

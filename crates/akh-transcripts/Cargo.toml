@@ -2,7 +2,7 @@
 name = "akh-transcripts"
 version = "0.1.0"
 edition = "2024"
-description = "Agent-session transcript harvest: verbatim store, derivation, and read surface (ADR 108)"
+description = "Agent-session transcript harvest: verbatim store, derivation, and read surface (ADR 119)"
 license = "GPL-3.0-only"
 repository = "https://github.com/Toasterson/akh-medu"
 

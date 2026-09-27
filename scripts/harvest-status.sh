@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fleet status for the transcript harvest (ADR 108). Read-only; needs the
+# Fleet status for the transcript harvest (ADR 119). Read-only; needs the
 # harvest_read client cert (default: ~/.config/akh-transcripts/certs on
 # hephaistos, or set AKH_TRANSCRIPTS_READ_URL).
 set -eu

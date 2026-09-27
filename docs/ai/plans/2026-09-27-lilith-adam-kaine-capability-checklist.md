@@ -41,7 +41,7 @@
 | 24 | Coordination through Board and Anima dispatch, delegation, Teamwork (slot 8) | Kaine | ADR 110 D3; P7.10, P7.13 | P | none | P7.13 gate not frozen; **no R1 coordination family** |
 | 25 | Guided reward: five-component vector, corrected siblings, no scalar-judge policy gradient; `AkhEnvironment` dojo tenancy; emergent-bug and act-to-perceive families | Kaine (baselined on ADAM) | ADR 110 D2–D4; P7.10–P7.13 | S exits / P family scoring | E3 weighted-loss mechanics only | "Bounded hypotheses" and "board ask" thresholds unset |
 | 26 | Theory-first: `Theory` object, sixth reward component `foresight`, `theory_first` family, interventional prediction, 29f explorer tools | Kaine | ADR 112, P7.14–P7.18 (**branch only**); foresight archive | R / Proposed | none | **ADR 112 not on main, but ADR 114 cites it** |
-| 27 | Action world model (predict before execute) | Both | ADR 088 (action world model) | P (Proposed) | none | Gated on Phase 50 |
+| 27 | Action world model (predict before execute) | Both | ADR 117 (action world model; was 088) | P (Proposed) | none | Gated on Phase 50 |
 | 28 | Curiosity as compression / learning progress | Kaine | Foresight handoff; ADR 005 §2; ADR 112 D3 | R | none | — |
 | 29 | Replay-improved exploration (Dream-RSI) | ADAM harness + Kaine | Dream-RSI analysis; ADR 112 D5 | R | none | — |
 | 30 | Typed decisions, joint scoring of complete actions (Jev, Jevlike) | Both | TypeSafe/Jev README; Jevlike handoff; ADR 112 P7.15 | R | `experiments/typed-decisions/` (**untracked**) | ADR 114 keeps Jev-class models out of the live path |

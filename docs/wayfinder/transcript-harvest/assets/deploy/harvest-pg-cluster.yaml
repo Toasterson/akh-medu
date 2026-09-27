@@ -1,5 +1,5 @@
 ---
-# Dedicated CloudNativePG cluster for the transcript-harvest store (ADR 108).
+# Dedicated CloudNativePG cluster for the transcript-harvest store (ADR 119).
 #
 # Why its own cluster rather than a database in akh-pg, which the store-schema
 # ticket originally chose: NO cluster in the fleet has TimescaleDB. Verified

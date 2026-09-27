@@ -4,7 +4,7 @@
 > Status: Proposed (architect-session; every work item `draft`, HITL, after the P6 window queue and gate — same gate as ADR 110/111)
 > Phase: 51 P7 extension (plan: `docs/ai/plans/2026-09-19-phase51-p7-kaine-theory-first-policy.md`)
 > Anima: project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, plan `01a0a24e-062f-7881-9fd6-1d2017d52b34` (P7); WIs P7.14–P7.18 filed 2026-09-19 (IDs in the plan)
-> Related: ADR 005 §2 (compression-progress curiosity), ADR 033 (counterfactuals), ADR 035 (Dempster–Shafer), ADR 052 (thinking loop), ADR 088 (action world model, predict-before-execute), ADR 104 (copy-faithful decoding), ADR 105 (run governance), ADR 110 (character, guided reward, live environment), ADR 111 (architecture ladder)
+> Related: ADR 005 §2 (compression-progress curiosity), ADR 033 (counterfactuals), ADR 035 (Dempster–Shafer), ADR 052 (thinking loop), ADR 117 (action world model, predict-before-execute), ADR 104 (copy-faithful decoding), ADR 105 (run governance), ADR 110 (character, guided reward, live environment), ADR 111 (architecture ladder)
 > Evidence: T3/Codex thread `6adfb261-5682-4d80-89fc-4875480d9876` (2026-09-18, exploration policy + Dream-RSI, not archived; findings folded into the starting facts and D5); papers sourced through `paper-search` on 2026-09-19 (§"What the literature establishes"); five Codex-Astra research harvests of 2026-09-16 under `docs/ai/research/2026-09-16-*` and the measured `experiments/typed-decisions/` artifact; code map in §"Starting facts"
 
 ## Question
@@ -74,7 +74,7 @@ Sources were fetched in full text where open access allowed; the Felin and Holwe
 | Hypothesis forking/merging | `src/infer/superposition.rs`; Phase 29f explorer surface | unexposed |
 | Epistemic modality (Knows / Believes / ConsidersPossible) | `src/agent/epistemic.rs` | live |
 | Directed curiosity (information-gap, ZPD) | `src/agent/curiosity.rs`, `DerivationKind::DirectedCuriosity` | live (Phase 11j) |
-| Action world model, predicted KG delta, DS branches, intrinsic-cost guard | ADR 088 | proposed, gated on Phase 50 |
+| Action world model, predicted KG delta, DS branches, intrinsic-cost guard | ADR 117 | proposed, gated on Phase 50 |
 | Decide step | `src/agent/ooda.rs` `Decision { chosen_tool, tool_input, predicted_outcome_vec }`, `DecideMode::{VsaNative, LlmDriven}` (`vsa_decide.rs`: VSA ranking + UCB1/MCTS fallback) | live |
 | Planner / values / active inference | `mcts.rs` (`MctsPlanner` over `CausalManager`), `state_value.rs` (`ValueFunction`), `active_inference.rs` (`Policy { actions, efe }`, EFE softmax) | live |
 | Halting controller | 41e VOC two-regime rule; WI-399/400 (B3) | live / draft |
@@ -99,7 +99,7 @@ Add `Theory` to the agent module (`src/agent/theory.rs`), built from existing se
 - `support`: the Dempster–Shafer mass over the claims; **the data–belief asymmetry is the interval** `Pl(H) − Bel(H)`. A
   Wright-style theory is low `Bel`, high `Pl`: the data argue against it, nothing excludes it. A theory whose `Pl` has collapsed
   is dead, whatever the conviction.
-- `experiment`: a candidate action (from `applicable_actions` + ADR 088 branches) whose predicted divergent fluents
+- `experiment`: a candidate action (from `applicable_actions` + ADR 117 branches) whose predicted divergent fluents
   (`counterfactual_query`) separate the theory from the null. Selection rule: the cheapest necessary condition whose outcome
   most reduces the interval (expected information gain over the live hypotheses; Murphy's EIG in DS terms).
 - `revision`: the TMS retraction / assertion that the observed outcome forces (reuses the E4 exact-owned revision curriculum).
@@ -112,7 +112,7 @@ explainable through `akh acp explain`). Weights never hold theories; the engine 
 The Astra typed-decision evidence fixes the division of labour:
 
 1. **Enumerate (engine).** The legal candidate set is *complete actions*: tool + arguments from the `ToolContractSnapshot`,
-   ADR 088 outcome branches, and the theory's candidate experiments. Never independent fields scored separately.
+   ADR 117 outcome branches, and the theory's candidate experiments. Never independent fields scored separately.
 2. **Choose (model, engine-ranked).** Constrained generation over the enumerated set stays the primary chooser. Engine rankers
    (`VsaNative` + MCTS, EFE, VOC) supply ordering and pruning. A typed-decision head is a **shadow path only** (P7.15), promoted
    to a live path solely if it beats constrained generation on a sealed frozen-ADAM panel with no generation regression.
@@ -120,7 +120,7 @@ The Astra typed-decision evidence fixes the division of labour:
 4. **Verify (engine).** Completion is gated by the host verifier: engine replay, `verify_prediction`, receipts, `PermissionPolicy`
    and backend `Posture` — never by a learned confidence. Calibration numbers are per schema and do not travel.
 
-**Foresight sits between 2 and 3.** Every mutating action carries a `predicted_delta` (KG-level, ADR 088) before execution;
+**Foresight sits between 2 and 3.** Every mutating action carries a `predicted_delta` (KG-level, ADR 117) before execution;
 `PredictionTracker` records the match after execution at training *and* inference time.
 
 ### D3 — Reward vector: add `foresight`; keep learning progress out of the reward
@@ -160,7 +160,7 @@ and algorithm tasks whose branches can be restored and objectively verified.
 
 `AkhEnvironment` (P7.10) = real `Engine` + full `ToolRegistry` + Agent Board + Anima + executor `Backend`, sandboxed dojo
 tenancy, per-step JSONL recorder. Producers inside it: `akh_episode_generator` (frozen contracts, sentinels, E1–E4), the
-ADR 088 world model for `predicted_delta`, `Theory` objects (D1), the replay corpus (D5). Trainer: `train_knowledge
+ADR 117 world model for `predicted_delta`, `Theory` objects (D1), the replay corpus (D5). Trainer: `train_knowledge
 --record-weights use` with sidecar v1 (P7.11) extended to v1.1 by `foresight`. Gates: knowledge, tools, copy, the P7.13
 environment gate, plus a new **interventional-prediction axis** (held-out `predicted_delta` accuracy on unseen interventions,
 Murphy's metric) recorded as a P7.13 row.
@@ -170,7 +170,7 @@ Murphy's metric) recorded as a P7.13 row.
 The same code path serves: `backend = "grug"` loads only a certified `active-model.json` into `GrugChatBackend`; constrained
 decoding; the live `ToolContractSnapshot` is compared to the trained one every turn and drift is journaled. Predict-before-
 execute runs under `AKH_ACTION_WORLD_MODEL`; `PredictionTracker` foresight accuracy is emitted as telemetry so deployment
-tuples feed the next window (the ADR 088 flywheel). Theory-first behaviour at inference needs the Phase 29f explorer exposed
+tuples feed the next window (the ADR 117 flywheel). Theory-first behaviour at inference needs the Phase 29f explorer exposed
 as tools (`hypothesis_fork`, `hypothesis_merge`, `hypothesis_confidence`, `theory_propose`, `experiment_select`) and those
 tools present in the frozen contract so train and inference see one surface (P7.17). Known gap, kept: contract drift is
 journaled, not closed, until a remediation window re-certifies against the live contract.

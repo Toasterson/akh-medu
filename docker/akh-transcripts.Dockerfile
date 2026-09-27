@@ -1,4 +1,4 @@
-# akh-transcripts — agent-session transcript harvest (ADR 108, plan
+# akh-transcripts — agent-session transcript harvest (ADR 119, plan
 # docs/ai/plans/2026-09-19-transcript-harvest.md)
 #
 # One image, three binaries built from `crates/akh-transcripts`:

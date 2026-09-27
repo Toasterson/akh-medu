@@ -1,9 +1,9 @@
 # Handoff — roll the transcript harvester out to every machine, and monitor it
 
 **For:** the agent that can reach the whole fleet (tailnet + LAN + illumos hosts).
-**From:** the session that built and deployed ADR 108 on 2026-09-19/20.
+**From:** the session that built and deployed ADR 119 on 2026-09-19/20.
 **Read first:** `docs/ops/transcript-harvest.md` (runbook — auth, roles, certs,
-quirks), `docs/ai/plans/2026-09-19-transcript-harvest.md`, ADR 108.
+quirks), `docs/ai/plans/2026-09-19-transcript-harvest.md`, ADR 119.
 
 ## What exists and is verified (as of 2026-09-20 19:06 UTC)
 
