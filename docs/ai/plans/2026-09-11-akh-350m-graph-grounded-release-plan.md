@@ -1,5 +1,7 @@
 # Akh release one: grounded reasoning, Dojo, persistent learning and action
 
+> **Status (2026-09-27): later release target, not the current gate.** R1 (350M–1.1B, twelve episode families) is the release the ADAM line aims at *after* the current gate. The current gate is the P5/P6 `small_8k` (33.4M) release gate: the unchanged 1,272-case tool sentinels plus the 8×100 knowledge sentinels, worked by the [P6 plan](2026-09-13-phase51-p6-local-training-neurosymbolic.md) (predecessors: [P5 plan](2026-09-07-phase51-p5-effective-context-copy-decoding.md), [8k-lane RESULT](../../../training/results/tool-native-8k-lane-20260911-RESULT.md)). P6 archived the R1 designs as recovered evidence; [P7](2026-09-14-phase51-p7-kaine-architecture-ladder-and-training-engine.md) is gated on the P6 window queue and gate finishing. This plan is neither current nor superseded: its targets and families stay valid for the later release, and nothing here runs before the P6 gate is decided.
+
 Date: 2026-09-11. Updated with the user's Dojo, emotional-intelligence, Portuguese-basics and unfamiliar-homelab requirements. Status: integrated proposal; no new training or deployment launched. Deployment target: Apple Silicon Mac mini with 16 GB unified memory; exact chip and macOS version remain to be recorded on that machine. The filename retains the original 350M reference for stable links; the candidate range is now 350M–1.1B.
 
 ## Objective and requirements
@@ -41,7 +43,7 @@ Model size, corpus proportions and quantization are experiment variables. Functi
 | Production graph tools | Memory write/recall, graph query/mutation, reasoning, schema discovery and tool discovery exist | Integration must measure entity identity, revision, evidence attribution and actual subsequent use. |
 | Tool-call runtime | Catalog retrieval and repair exist; new local required-argument fix is commit `659101db17a613e2768091f7cca79cd6fef78fb3` | Fix passed 290 library tests, one ignored; no model evaluation or remote deployment yet. Repair effectiveness must be reported separately from raw model competence. |
 
-Sources: [ADR 092](../decisions/092-high-grug-v1-reasoning-register.md), [ADR 093](../decisions/093-dual-process-trace-handoff.md), [350M results](../../../training/results/p350m-RESULT.md), [350M model card](../../../training/hf/grug-rule-350m-README.md), [current run analysis](../../../runs/babyllm-recovery-20260909/release-v3-failure-analysis.md).
+Sources: [ADR 092](../decisions/092-high-grug-v1-reasoning-register.md), [ADR 093](../decisions/093-dual-process-trace-handoff.md), [350M results](../../../training/results/p350m-RESULT.md), [350M model card](../../../training/hf/grug-rule-350m-README.md), current run analysis `runs/babyllm-recovery-20260909/release-v3-failure-analysis.md` (**missing**, noted 2026-09-27: `runs/` is not tracked and the file is in no commit and no local checkout searched; its case-level findings are summarized in the [8k-lane RESULT](../../../training/results/tool-native-8k-lane-20260911-RESULT.md)).
 
 The old results show a failure to generalize depth under the tested curriculum. They do not prove that no larger model or different curriculum can generalize. Test controlled iteration and composition explicitly.
 
@@ -168,13 +170,15 @@ Use the [existing manual](../manuals/2026-09-01-babyllm-dojo-curriculum.md) as t
 
 Bring in all six extended consultation forms: Establish the Working Agreement; Observe and Inquire; Hold Competing Explanations; Make a Small Intervention; Read the Response and Repair; Return Ownership and Learning. Their common loop is observation, provisional explanations, a proportionate move, feedback and revision. A process-consultation exercise and an infrastructure diagnosis both test whether new evidence changes the next action, while retaining their distinct social and technical scorers.
 
-| Belt | Memory-to-action exercise | Transfer evidence |
+**Memory-to-action exam content per dojo belt.** Belt identity and order are defined once, in [dojo manual §5](../manuals/2026-09-01-babyllm-dojo-curriculum.md#5-belts-graded-curriculum-with-promotion-gates) (canonical since 2026-09-27). Each row below is the memory-to-action exercise R1 adds to that belt's exam; it does not redefine the belt. A belt is passed only when both the dojo §5 gate and this row's transfer evidence hold.
+
+| Dojo belt (§5 definition) | Memory-to-action exam content | Transfer evidence |
 |---|---|---|
-| White | Practice a single grounded form: retrieve a fact or command contract, apply one move and check its immediate effect. | Same function under different phrasing, names and values. |
-| Yellow | Vary language, resource names, context budget and command output while retaining the practiced function. | Cross-language and unfamiliar-surface success without exact-template copying. |
-| Green | Spar with misleading first hypotheses, failed commands, pressure to act, limited context and participant corrections. | Evidence-backed repair; no repeating a broken action behind an apology. |
-| Brown | Select and compose forms, retrieval, reasoning and Unix operations; recognize when no intervention is needed. | Complete unfamiliar episodes, including command discovery and cold graph recall. |
-| Black | Extract a conditional, evidenced lesson from an episode and transmit it to a new learner. | A held-out student experiment improves learning or transfer, rather than merely producing convincing commentary. |
+| White (single voice, clean form) | Practice a single grounded form: retrieve a fact or command contract, apply one move and check its immediate effect. | Same function under different phrasing, names and values. |
+| Yellow (forms under variation) | Vary language, resource names, context budget and command output while retaining the practiced function. | Cross-language and unfamiliar-surface success without exact-template copying. |
+| Green (sparring) | Spar with misleading first hypotheses, failed commands, pressure to act, limited context and participant corrections. | Evidence-backed repair; no repeating a broken action behind an apology. |
+| Brown (captaining) | Select and compose forms, retrieval, reasoning and Unix operations; recognize when no intervention is needed. | Complete unfamiliar episodes, including command discovery and cold graph recall. |
+| Black (transmission) | Extract a conditional, evidenced lesson from an episode and transmit it to a new learner. | A held-out student experiment improves learning or transfer, rather than merely producing convincing commentary. |
 
 The existing eight voice slots remain distinct from the six Ennead agents; unnamed/private lineage content is not invented. Preserve the engine-side communication-strategy and adapter selector required by [ADR 099](../decisions/099-agentic-communicative-intelligence.md). The organ still chooses task queries and tools from runtime-visible evidence. A model-selected communication/adapter arm is a separately labeled Brown-belt experiment with explicit access to the state needed for selection, not a silent replacement of that design.
 
@@ -191,6 +195,8 @@ Emotional intelligence is observable adaptation to the person and situation: und
 Use deterministic action/authority receipts plus rotating, blinded judges for inquiry relevance, supported interpretation, fit of intervention, correction uptake and ownership. Include independent cases and review disagreement. Synthetic reactions remain simulation evidence. Practical success and social success are scored separately, then together: a technically correct fix can still disregard the working agreement, and warm words can accompany a failed repair. Exercise these forms beyond incidents in ordinary planning, teaching and consultation so they generalize across domains.
 
 Portuguese has a modest R1 target: understand a simple goal or alert, distinguish negation and conditions, ask a useful clarification, accept a correction, retrieve/store a basic fact and preserve command names, paths, numbers and flags. Cover PT-BR first as in the [acquisition plan](2026-09-10-portuguese-language-stage.md), with PT-PT basics labeled separately; report comprehension and generation independently. Fluent long-form output and specialized Portuguese reasoning are optional. Prepare a bounded source sample and natural task episodes, audit accents/token efficiency and retain English/German/French skills. Dojo/consultation proceeds in the supported languages even if the broader Portuguese stage is delayed.
+
+**Portuguese basics threshold (Proposed 2026-09-27, freeze before evaluation):** PT-BR basics per family ≥ 0.85 × the same model's EN score on the same family; PT-PT reported separately without a gate. The ADR 102 certifier language list (today `en`/`de`/`fr` only) must add `pt` before PT can be certified. Details: [Portuguese plan](2026-09-10-portuguese-language-stage.md#proposed-basics-threshold-proposed-2026-09-27-freeze-before-evaluation).
 
 ## Execution order and decision points
 

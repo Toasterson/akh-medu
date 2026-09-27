@@ -880,7 +880,7 @@ impl rmcp::handler::server::ServerHandler for TranscriptsMcpServer {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 description: Some(
                     "Read-only surface over harvested Claude Code / Codex / OpenCode agent \
-                     session transcripts (ADR 108)."
+                     session transcripts (ADR 119)."
                         .to_string(),
                 ),
                 icons: None,

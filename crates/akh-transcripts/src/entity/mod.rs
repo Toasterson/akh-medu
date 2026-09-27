@@ -1,4 +1,4 @@
-//! SeaORM entities for the `harvest-pg` store (ADR 108).
+//! SeaORM entities for the `harvest-pg` store (ADR 119).
 //!
 //! Vocabulary per `docs/wayfinder/transcript-harvest/CONTEXT.md`. Table names
 //! are flat and prefixed `th_` (transcript-harvest), matching the project's

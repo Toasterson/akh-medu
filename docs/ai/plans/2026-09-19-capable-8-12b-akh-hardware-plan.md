@@ -14,7 +14,8 @@ machine-checkable exit condition) and [ADR 106](../decisions/106-local-burn-meta
 BabyLLM lineage: `small_8k` (33.4M) → 350M → a planned ≈1.1B rung. *Kaine* is the next lineage above ADAM's top rung,
 whose size ADR 111 leaves as an output of the 350M and 1.1B measurements. In this document "full-Adam" always means the
 Adam *optimizer* state (16 bytes/param); the ADAM *lineage* is written in capitals. "A real ADAM training run" in the
-operator's framing is a run on that ladder, not an optimizer choice.
+operator's framing is a run on that ladder, not an optimizer choice. *(2026-09-27: the inherited 8–12B workhorse is
+now named **Lilith**, not Kaine; see the naming note under "Parallel track" and [Project Lilith](2026-09-21-project-lilith.md).)*
 
 ## The question
 
@@ -290,6 +291,11 @@ would buy — it is a rented multi-GPU job by construction. So there are exactly
 These are different artifacts with different provenance. Whichever is chosen, the name should mean one thing; this plan
 recommends reading 2 as the *first* Kaine trial and keeping 1 as the sovereign target it is measured against, and asks
 that the operator record that choice in ADR 111 rather than letting the name drift.
+
+> **Naming resolved (note added 2026-09-27).** Per [Project Lilith](2026-09-21-project-lilith.md), **"Lilith"** names the
+> inherited Gemma track (reading 2 above), and **"Kaine"** keeps its sovereign [ADR 111](../decisions/111-kaine-architecture-ladder.md)
+> meaning (reading 1). Where this plan says "Kaine" for the inherited workhorse, read "Lilith". The recommendation above is
+> kept as the historical proposal.
 
 ## 6. Hardware recommendation
 

@@ -5,7 +5,7 @@
   `ready`/`working`).
 - **ADR:** [ADR 112](../decisions/112-kaine-theory-first-policy-training-inference-environments.md); builds on
   [ADR 110](../decisions/110-kaine-character-guided-reward-live-environment.md) (reward vector, live environment),
-  [ADR 111](../decisions/111-kaine-architecture-ladder.md) (backbone untouched), [ADR 088](../decisions/088-akh-action-world-model.md)
+  [ADR 111](../decisions/111-kaine-architecture-ladder.md) (backbone untouched), [ADR 117](../decisions/117-akh-action-world-model.md)
   (predict-before-execute), [ADR 005 §2](../decisions/005-bootstrapping-research.md) (compression-progress curiosity),
   [ADR 105](../decisions/105-autonomous-run-governance.md) (runs).
 - **Anima:** project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, plan `01a0a24e-062f-7881-9fd6-1d2017d52b34` (P7).
@@ -61,6 +61,6 @@ on unseen interventions); "axis pending" until P7.16 lands.
 - **ADR 005 §2** already maps compression progress to `curiosity_bonus` in OODA utility; ADR 112 D3 keeps that as a
   selection signal and explicitly does not promote it to a training reward. KG-coverage delta is a proxy, not the compressor's
   learning progress; the held-out generalization check from the foresight harvest guards against memorization.
-- **ADR 088** is the home of `predicted_delta`; until the world model lands, `CausalManager::predict_effects` supplies the
+- **ADR 117** is the home of `predicted_delta`; until the world model lands, `CausalManager::predict_effects` supplies the
   prediction and `verify_prediction` the check, exactly as E3 does today.
 - **Phase 29f** hypothesis explorer: the tool surface is closed by P7.17; the stateful ACP surface still needs its own design.
