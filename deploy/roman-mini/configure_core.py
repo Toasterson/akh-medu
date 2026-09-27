@@ -22,7 +22,10 @@ Renders (existing unrelated keys and secrets are preserved; rerunning is safe):
 - config/t3-acp.json                        T3 transport -> akhomed ACP (t3_entrypoint.py)
 - launchd/dev.roman-akhs.core.plist         execs through daemon_credentials.py core
 - skills/{astra-escalation,mergiraf}/       Janus's worker skillpacks (53g PR 7)
-- secrets/sessions-janus-delegation.key     akhsessd client token for Janus's delegation
+- secrets/sessions-janus-delegation.key     akhsessd client token for Janus's delegation (local
+                                            akhsessd; not created when config/janus-delegation.json
+                                            switches Janus onto the cluster akhsessd, PR 7 cluster
+                                            variant)
 - skills/vesta-remediation/                  Vesta's sandbox procedures (53g PR 8)
 Never reads a provider key; token files are only concatenated into the ACP
 shared-secret file, never printed.
@@ -137,7 +140,14 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
     projects = list(json.loads(registry.read_text()).get("projects", {})) if registry.exists() else []
     if not projects:
         warnings.append("config/janus-escalation.json lists no projects; Janus's escalation tools stay disabled")
-    _ensure_key(root / fa.DELEGATION_TOKEN)
+    # config/janus-delegation.json (PR 7 cluster variant, operator decision
+    # 2026-09-27 option a): switches Janus onto the cluster akh-platform
+    # akhsessd instead of the Mac's local one. Its token is the cluster's own
+    # issued secret for the janus-delegation principal, so it must already
+    # exist; only the local-akhsessd path gets a freshly generated one here.
+    cluster = fa.janus_delegation_switch(root)
+    if cluster is None:
+        _ensure_key(root / fa.DELEGATION_TOKEN)
 
     for role in fa.ROLES:
         path = root / f"core-config/akh-medu/workspaces/{role}.toml"
@@ -152,7 +162,7 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
         warnings.extend(server_warnings)
         delegation = None
         if role in fa.DELEGATING_ROLES:
-            delegation, delegation_warnings = fa.render_delegation(session, root, projects, role)
+            delegation, delegation_warnings = fa.render_delegation(session, root, projects, role, cluster=cluster)
             warnings.extend(delegation_warnings)
         # 53g PR 8: after the operator writes config/vesta-sandbox.json, Vesta's
         # [exec] targets her akhsbxd sandboxes and her policy prompt is the

@@ -682,6 +682,148 @@ core; remove them (and restart) afterwards. Call
   in Janus's `[provider]` lexicon. A follow-up should surface Codex's
   structured error code as the fault code in `akh-runtime`.
 
+### PR 7 cluster variant: Janus's workers on the cluster akhsessd
+
+Operator decision 2026-09-27 (option a): Codex runtime conformance can only be
+certified on Linux, so Janus's escalation and merge-repair workers run on the
+**cluster** akh-platform akhsessd instead of the steps above's local one. The
+cluster side is already live (talos #44, `clusters/archibald/akh-platform/fleet.json`
+key `janus`): public URL `https://anima.wegmueller.it/akh` (publicly trusted
+TLS), client principal `janus-delegation` (role `client`, akhs `[janus]`, its
+token already on the Mac at `secrets/sessions-janus-delegation.key`, 0600), and
+four worker workspace profiles — `janus-worker-akh-medu`, `janus-worker-anima`,
+`janus-worker-reddwarf`, `janus-worker-board` — each binding runtime profile
+`astra-impl-4` (the certified gpt-6-astra Codex runtime) and granting **only**
+workspace tools and read-only Anima tools (no cognitive/core tools, so no
+callback into Janus's Mac core is needed). Steps 2 and 3 of the plain PR 7
+above (`config/runtime.json`'s `codex-astra` runtime, and `config/sessions.json`'s
+worker workspaces/grants) are **not needed** for these four projects: the
+cluster's akhsessd config is authoritative for them and is not rendered from
+this repo.
+
+**Switch file: `config/janus-delegation.json`.** Written by the operator on
+the Mac; `configure_core.py` (`full_akh.render_delegation` via
+`full_akh.janus_delegation_switch`) renders `[delegation.native]` against it
+instead of the local akhsessd path when it is present, and requires no local
+`sessions.json` worker profile for the projects it lists. Absent, Janus
+renders exactly as the plain PR 7 above. A malformed file (bad JSON, unknown
+keys, a non-absolute or missing `token_file`, an empty `runtime_profile`, or
+an empty/non-string `projects` map) fails the whole render closed instead of
+half-switching Janus between the two akhsessd instances.
+
+```json
+{
+  "sessions_url": "https://anima.wegmueller.it/akh",
+  "token_file": "<ROOT>/secrets/sessions-janus-delegation.key",
+  "runtime_profile": "astra-impl-4",
+  "projects": {
+    "akh-medu": "janus-worker-akh-medu",
+    "anima": "janus-worker-anima",
+    "reddwarf": "janus-worker-reddwarf",
+    "board": "janus-worker-board"
+  }
+}
+```
+
+Only projects listed both here and as keys of `config/janus-escalation.json`
+are registered for delegation; a project registered in one but not the other
+is reported as a `warning:` line (never silently dropped or silently widened).
+`token_file` must already exist (0600) with the cluster-issued token for the
+`janus-delegation` principal — this repo never generates or reads it, only
+checks it is there; `_ensure_key` (which would otherwise create a random local
+token at that same path) is skipped whenever the switch file is present.
+
+**Mac steps.**
+
+1. Confirm `secrets/sessions-janus-delegation.key` already holds the real
+   cluster token (0600) — the same file location `configure_core.py` would
+   otherwise generate a local one at; do not overwrite it.
+2. Write `config/janus-delegation.json` with the schema above (adjust
+   `projects` to whichever of the four cluster profiles apply).
+3. Render the core exactly as PR 7 step 4 above:
+   ```sh
+   /opt/homebrew/bin/python3 deploy/roman-mini/configure_core.py --root "$ROOT" \
+     --binaries "$REPO/target/release" --repo "$REPO"
+   ```
+   Read every `warning:` line, exactly as the plain PR 7 path. Janus's
+   rendered `[delegation.native]` now has `url =
+   "https://anima.wegmueller.it/akh"`, `token_file` pointing at the existing
+   cluster token, and each `[delegation.native.profiles.<project>]` binding
+   `runtime_profile = "astra-impl-4"`.
+4. Restart and boot out the broker exactly as PR 7 steps 5 and 6 above (no
+   change: the switch only affects Janus's rendered config, not the launchd
+   units or the local akhsessd/akhrtd/akhsbxd/akhexecd services, which keep
+   running for Minerva's and Vesta's own needs and any project **not** on the
+   cluster's four worker profiles).
+
+**Verification (adapted from PR 7's dry-run list above).** Same
+`POST /v1/tools/call` dry-run procedure (operator key, temporary `escalate`/
+`escalation_status` grant on the `operator` principal), with these
+differences:
+
+1. **One incident, one session — on the cluster.** After escalating a
+   harmless dry incident for a cluster-registered project (e.g. `anima`), the
+   new session appears on the **cluster** akhsessd (`GET
+   https://anima.wegmueller.it/akh/v1/sessions?compact=true` with the
+   `janus-delegation` token), not on `127.0.0.1:18431`. `GET
+   /v1/sessions/<id>` on the cluster shows `runtime.profile ==
+   "astra-impl-4"`; a session bound to any other runtime fails the incident
+   closed (`akh::delegation::native::rejected` /
+   `EscalationError::RuntimeMismatch`, per `src/agent/delegation/escalation.rs`).
+2. **Status and report.** `escalation_status` still shows `running` then
+   `succeeded` with the worker's `akh-result`; the worker has no
+   `memory_write` or Board tool on this profile, so its report is its final
+   answer (and, when the job names a `report_thread`, an `anima__post_message`
+   update on the Anima thread) — the astra-escalation and mergiraf skillpacks
+   already read this conditionally (see below), and Janus never expects a
+   `memory_write` record for these incidents.
+3. **A project not on the switch.** Escalating for a project the switch file
+   does not list (but `config/janus-escalation.json` does) is refused the
+   same way as an unregistered project always is (`akh::delegation::rejected`
+   / `EscalationError::UnknownProject`); check the render's `warning:` line
+   named it.
+4. The daily-limit, duplicate-key and restart-reconciliation checks (PR 7's
+   items 2, 3 and 6 above) behave identically — they are the escalation
+   broker's own ledger logic, unaffected by which akhsessd the session runs on.
+
+**Rust findings (workspace_profile, core_principal, no code change needed).**
+`[delegation.native] workspace_profile` (top-level, rendered as `role` i.e.
+`"janus"`, unchanged from the plain PR 7 path) only names the session for the
+generic `delegate` tool (`DelegationManager::native_target`,
+`src/agent/delegation/mod.rs`); that tool stays off regardless
+(`[delegation] enabled = false`, gated in `DelegationManager::enqueue`), and
+the escalation broker never reads it — it always resolves the *per-project*
+`profiles.<project>.workspace_profile` instead
+(`NativeDelegationConfig::project_profile`,
+`EscalationBroker::profile`/`admit_and_dispatch` in `escalation.rs`). It does
+not need to exist on the cluster akhsessd. `core_principal` (`"sessions"`,
+unchanged) is the `/v1` principal allowed to *present* a delegation grant back
+to Janus's own core (`grants.rs`'s `service_principal` check); every
+escalation still mints one of these grants through Janus's own core
+(`EscalationBroker::find_or_create_session` → `issuer.issue`) and sends it as
+`NewSession.grant`, but a cluster worker with only workspace + read-only Anima
+tools never calls back into Janus's `/v1` core to redeem it (per
+`akh-session-types::NewSession`, the field is accepted or ignored by an
+akhsessd that predates it, and this cluster's own `session_grants.tools`
+already carries the worker's actual access) — so the grant is issued,
+never presented, and expires unused. No Rust change is needed for either
+field. Also verified with no code change: `NativeSessionClient` (`ureq`,
+`Cargo.lock` pulls in `rustls` + `webpki-roots`, default features) accepts an
+`https://` non-loopback `url` exactly like `http://127.0.0.1:...` — nothing in
+`native_session.rs` or `types.rs` restricts the scheme or requires a loopback
+host.
+
+**Skillpack/addenda text.** `skills/astra-escalation/procedures.md` and
+`skills/mergiraf/procedures.md`'s "Report" sections were made
+tool-availability-conditional (not templated per target) so the same file
+briefs both a local worker (with `memory_write` and a Board tool) and a
+cluster worker (without them): "If `memory_write` is among your tools, record
+the outcome there... Without it, your final answer is the record, plus an
+`anima__post_message` update... When the job names a `report_thread` **and**
+a Board tool is among your tools, post there... Without a Board tool, skip
+this step." `roles/addenda/janus.md` needed no change: its Board mentions are
+Janus's own tools (`mcp__board__board_agents` etc.), not the worker's.
+
 
 ## PR 5: observer monitoring becomes an akheventd monitor source (D2)
 
