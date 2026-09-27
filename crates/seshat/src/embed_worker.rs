@@ -117,7 +117,9 @@ pub async fn embed_pending_batch(
             let mut guard = embedder
                 .lock()
                 .map_err(|e| crate::SeshatError::Embedding(format!("embedder lock: {e}")))?;
-            guard.embed_batch(&text_refs).map_err(crate::SeshatError::from)
+            guard
+                .embed_batch(&text_refs)
+                .map_err(crate::SeshatError::from)
         },
     )
     .await

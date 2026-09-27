@@ -74,7 +74,6 @@ impl BudgetFiller {
         self.used
     }
 
-
     /// Admit a text item, guaranteeing forward progress: if nothing has been
     /// admitted yet and this item alone exceeds the remaining budget, it is
     /// admitted **truncated head-and-tail** with an explicit elision marker
@@ -108,7 +107,10 @@ impl BudgetFiller {
 pub enum Admitted {
     Whole(String),
     /// Emitted with `…[N bytes elided]…` in the middle; `omitted` is N.
-    Truncated { text: String, omitted: usize },
+    Truncated {
+        text: String,
+        omitted: usize,
+    },
     Refused,
 }
 
@@ -120,11 +122,23 @@ pub fn head_and_tail(text: &str, keep: usize) -> (String, usize) {
     }
     let half = keep / 2;
     let mut head_end = half.min(text.len());
-    while !text.is_char_boundary(head_end) { head_end -= 1; }
+    while !text.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
     let mut tail_start = text.len().saturating_sub(half);
-    while !text.is_char_boundary(tail_start) { tail_start += 1; }
+    while !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
     let omitted = tail_start.saturating_sub(head_end);
-    (format!("{}…[{} bytes elided]…{}", &text[..head_end], omitted, &text[tail_start..]), omitted)
+    (
+        format!(
+            "{}…[{} bytes elided]…{}",
+            &text[..head_end],
+            omitted,
+            &text[tail_start..]
+        ),
+        omitted,
+    )
 }
 
 #[cfg(test)]

@@ -280,7 +280,12 @@ impl Summary {
     pub fn log_line(&self) -> String {
         format!(
             "harvest complete: streams={} records_read={} inserted={} deduped={} quarantined={} failed_streams={}",
-            self.streams, self.records_read, self.inserted, self.deduped, self.quarantined, self.failed_streams
+            self.streams,
+            self.records_read,
+            self.inserted,
+            self.deduped,
+            self.quarantined,
+            self.failed_streams
         )
     }
 }
@@ -336,12 +341,12 @@ fn load_watermarks(
 ) -> HarvestResult<BTreeMap<String, StreamWatermark>> {
     let path = watermark_path(state_dir, source);
     match std::fs::read_to_string(&path) {
-        Ok(contents) => serde_json::from_str(&contents).map_err(|source| {
-            HarvestError::WatermarkParse {
+        Ok(contents) => {
+            serde_json::from_str(&contents).map_err(|source| HarvestError::WatermarkParse {
                 path: path.display().to_string(),
                 source,
-            }
-        }),
+            })
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
         Err(source) => Err(HarvestError::WatermarkRead {
             path: path.display().to_string(),
@@ -360,12 +365,11 @@ fn save_watermarks(
 ) -> HarvestResult<()> {
     let path = watermark_path(state_dir, source);
     let tmp_path = state_dir.join(format!("{}.json.tmp", source.as_str()));
-    let json = serde_json::to_string_pretty(watermarks).map_err(|e| {
-        HarvestError::WatermarkWrite {
+    let json =
+        serde_json::to_string_pretty(watermarks).map_err(|e| HarvestError::WatermarkWrite {
             path: path.display().to_string(),
             source: std::io::Error::other(e),
-        }
-    })?;
+        })?;
     std::fs::write(&tmp_path, json).map_err(|source| HarvestError::WatermarkWrite {
         path: tmp_path.display().to_string(),
         source,
@@ -729,7 +733,11 @@ pub async fn run(cfg: &HarvestConfig, opts: &RunOptions) -> HarvestResult<Summar
         // The under-discovery alarm the runbook and source-file-lifecycle.md
         // both call out by name: a harvester silently seeing fewer streams
         // than it should looks exactly like a healthy, quiet one.
-        tracing::info!(source = source.as_str(), streams = streams.len(), "discovered streams");
+        tracing::info!(
+            source = source.as_str(),
+            streams = streams.len(),
+            "discovered streams"
+        );
 
         let watermarks_before = load_watermarks(&cfg.state_dir, source)?;
         let mut watermarks = watermarks_before.clone();
@@ -773,7 +781,9 @@ pub async fn run(cfg: &HarvestConfig, opts: &RunOptions) -> HarvestResult<Summar
             let mut quarantined_here = 0usize;
             for (record, observed) in records.iter().zip(resolved.iter()) {
                 match observed {
-                    ObservedAt::Own(ts) => to_insert.push(to_active_model(record, *ts, false, harvested_at)),
+                    ObservedAt::Own(ts) => {
+                        to_insert.push(to_active_model(record, *ts, false, harvested_at))
+                    }
                     ObservedAt::ForwardFilled(ts) => {
                         to_insert.push(to_active_model(record, *ts, true, harvested_at))
                     }
@@ -791,10 +801,7 @@ pub async fn run(cfg: &HarvestConfig, opts: &RunOptions) -> HarvestResult<Summar
             }
             summary.quarantined += quarantined_here;
 
-            let last_seq = records
-                .last()
-                .map(|r| r.key.seq)
-                .unwrap_or(resume.last_seq);
+            let last_seq = records.last().map(|r| r.key.seq).unwrap_or(resume.last_seq);
 
             if opts.dry_run {
                 tracing::info!(
@@ -809,7 +816,9 @@ pub async fn run(cfg: &HarvestConfig, opts: &RunOptions) -> HarvestResult<Summar
                 continue;
             }
 
-            let db = db.as_ref().expect("connected whenever opts.dry_run is false");
+            let db = db
+                .as_ref()
+                .expect("connected whenever opts.dry_run is false");
             match insert_batches(db, to_insert).await {
                 Ok((inserted, attempted)) => {
                     let deduped = attempted - inserted;
@@ -1079,9 +1088,13 @@ mod tests {
 
     #[test]
     fn extracts_epoch_millis_from_time_created() {
-        let record = opencode_record(serde_json::json!({ "time": { "created": 1_772_000_000_000i64 } }));
+        let record =
+            opencode_record(serde_json::json!({ "time": { "created": 1_772_000_000_000i64 } }));
         let extracted = extract_opencode_timestamp(&record).unwrap();
-        assert_eq!(extracted, Utc.timestamp_millis_opt(1_772_000_000_000).unwrap());
+        assert_eq!(
+            extracted,
+            Utc.timestamp_millis_opt(1_772_000_000_000).unwrap()
+        );
     }
 
     #[test]
@@ -1094,7 +1107,10 @@ mod tests {
     #[test]
     fn extracts_created_at_as_lowest_priority_fallback() {
         let record = opencode_record(serde_json::json!({ "created_at": "2026-07-05T11:08:16Z" }));
-        assert_eq!(extract_opencode_timestamp(&record).unwrap(), ts("2026-07-05T11:08:16Z"));
+        assert_eq!(
+            extract_opencode_timestamp(&record).unwrap(),
+            ts("2026-07-05T11:08:16Z")
+        );
     }
 
     #[test]
@@ -1103,7 +1119,10 @@ mod tests {
             "time": { "created": "2026-01-01T00:00:00Z", "updated": "2026-02-02T00:00:00Z" },
             "timestamp": "2026-03-03T00:00:00Z",
         }));
-        assert_eq!(extract_opencode_timestamp(&record).unwrap(), ts("2026-01-01T00:00:00Z"));
+        assert_eq!(
+            extract_opencode_timestamp(&record).unwrap(),
+            ts("2026-01-01T00:00:00Z")
+        );
     }
 
     /// Measured against the live `opencode.db` (2026-09-20): `session.*` and
@@ -1120,7 +1139,10 @@ mod tests {
             },
         }));
         let extracted = extract_opencode_timestamp(&record).unwrap();
-        assert_eq!(extracted, Utc.timestamp_millis_opt(1_787_065_786_856).unwrap());
+        assert_eq!(
+            extracted,
+            Utc.timestamp_millis_opt(1_787_065_786_856).unwrap()
+        );
     }
 
     /// Measured shape of `message.part.updated`: `time` is a bare
@@ -1133,7 +1155,10 @@ mod tests {
             "time": 1_787_065_787_335i64,
         }));
         let extracted = extract_opencode_timestamp(&record).unwrap();
-        assert_eq!(extracted, Utc.timestamp_millis_opt(1_787_065_787_335).unwrap());
+        assert_eq!(
+            extracted,
+            Utc.timestamp_millis_opt(1_787_065_787_335).unwrap()
+        );
     }
 
     #[test]
@@ -1144,7 +1169,8 @@ mod tests {
 
     #[test]
     fn fill_opencode_timestamps_never_overwrites_an_existing_timestamp() {
-        let mut record = opencode_record(serde_json::json!({ "timestamp": "2026-01-01T00:00:00Z" }));
+        let mut record =
+            opencode_record(serde_json::json!({ "timestamp": "2026-01-01T00:00:00Z" }));
         record.timestamp = Some(ts("2025-01-01T00:00:00Z"));
         let mut records = [record];
         fill_opencode_timestamps(&mut records);
@@ -1158,7 +1184,13 @@ mod tests {
         let seed = ts("2026-07-05T11:00:00Z");
         let records = [record(10, None), record(11, None)];
         let (resolved, last) = resolve_observed_at(&records, Some(seed));
-        assert_eq!(resolved, vec![ObservedAt::ForwardFilled(seed), ObservedAt::ForwardFilled(seed)]);
+        assert_eq!(
+            resolved,
+            vec![
+                ObservedAt::ForwardFilled(seed),
+                ObservedAt::ForwardFilled(seed)
+            ]
+        );
         assert_eq!(last, Some(seed));
     }
 
@@ -1168,7 +1200,10 @@ mod tests {
         let own = ts("2026-07-05T11:00:00Z");
         let records = [record(10, Some(own)), record(11, None)];
         let (resolved, last) = resolve_observed_at(&records, Some(seed));
-        assert_eq!(resolved, vec![ObservedAt::Own(own), ObservedAt::ForwardFilled(own)]);
+        assert_eq!(
+            resolved,
+            vec![ObservedAt::Own(own), ObservedAt::ForwardFilled(own)]
+        );
         assert_eq!(last, Some(own));
     }
 
@@ -1338,6 +1373,9 @@ mod tests {
     fn default_state_dir_falls_back_to_dot_local_state_under_home() {
         let home = PathBuf::from("/home/example");
         let result = default_state_dir_with_xdg(&home, None);
-        assert_eq!(result, PathBuf::from("/home/example/.local/state/akh-transcripts"));
+        assert_eq!(
+            result,
+            PathBuf::from("/home/example/.local/state/akh-transcripts")
+        );
     }
 }

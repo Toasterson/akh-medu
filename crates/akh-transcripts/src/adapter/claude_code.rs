@@ -21,8 +21,8 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use super::scan::{self, seq_lines};
 use super::StreamRef;
+use super::scan::{self, seq_lines};
 use crate::error::{TranscriptError, TranscriptResult};
 use crate::model::{RecordKey, RecordOrigin, Source, StreamKind, VerbatimRecord};
 
@@ -231,7 +231,11 @@ mod tests {
         );
 
         let streams = discover(root).unwrap();
-        assert_eq!(streams.len(), 4, "expected all four nested streams: {streams:?}");
+        assert_eq!(
+            streams.len(),
+            4,
+            "expected all four nested streams: {streams:?}"
+        );
 
         let main = streams
             .iter()
@@ -275,7 +279,10 @@ mod tests {
             .join("workflows")
             .join("wf_abc")
             .join("journal.jsonl");
-        write(&path, "{\"type\":\"started\",\"key\":\"v2:x\",\"agentId\":\"a1\"}\n");
+        write(
+            &path,
+            "{\"type\":\"started\",\"key\":\"v2:x\",\"agentId\":\"a1\"}\n",
+        );
 
         let streams = discover(root).unwrap();
         assert_eq!(streams.len(), 1);

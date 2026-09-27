@@ -31,9 +31,8 @@ use crate::normalize::{SecretAction, SecretFlag};
 /// checked."
 static AWS_ACCESS_KEY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"AKIA[0-9A-Z]{16}").expect("static aws_access_key pattern"));
-static GITHUB_PAT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"gh[posru]_[A-Za-z0-9]{30,}").expect("static github_pat pattern")
-});
+static GITHUB_PAT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"gh[posru]_[A-Za-z0-9]{30,}").expect("static github_pat pattern"));
 static ANTHROPIC_KEY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"sk-ant-[A-Za-z0-9_\-]{20,}").expect("static anthropic_key pattern")
 });
@@ -48,9 +47,8 @@ static JWT: LazyLock<Regex> = LazyLock::new(|| {
 static PRIVATE_KEY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----").expect("static private_key pattern")
 });
-static BEARER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Bearer\s+[A-Za-z0-9._\-]{20,}").expect("static bearer pattern")
-});
+static BEARER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Bearer\s+[A-Za-z0-9._\-]{20,}").expect("static bearer pattern"));
 static PG_URL_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"postgres(?:ql)?://[^:/\s]+:[^@\s]{3,}@").expect("static pg_url_password pattern")
 });

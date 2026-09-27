@@ -6,7 +6,9 @@ use serde_json::Value;
 
 use crate::model::{EventKind, RecordKey, VerbatimRecord};
 
-use super::{finish_single, json_type_name, record_type_of, DerivationError, NormalizedEvent, Outcome};
+use super::{
+    DerivationError, NormalizedEvent, Outcome, finish_single, json_type_name, record_type_of,
+};
 
 pub(super) fn normalize(record: &VerbatimRecord, observed_at: DateTime<Utc>) -> Outcome {
     let record_type = record_type_of(record);
@@ -20,7 +22,10 @@ pub(super) fn normalize(record: &VerbatimRecord, observed_at: DateTime<Utc>) -> 
         "attachment" => normalize_attachment(record, doc, observed_at),
         "system" => normalize_system(record, doc, observed_at),
         "ai-title" => {
-            let text = doc.get("aiTitle").and_then(Value::as_str).map(str::to_string);
+            let text = doc
+                .get("aiTitle")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             normalize_session_meta(record, doc, observed_at, "ai-title", text)
         }
         "mode" => {
@@ -50,7 +55,10 @@ pub(super) fn normalize(record: &VerbatimRecord, observed_at: DateTime<Utc>) -> 
 /// link comes from `started`/`result` lifecycle records, not from this flag.
 fn apply_context_fields(event: &mut NormalizedEvent, doc: &Value) {
     let cwd = doc.get("cwd").and_then(Value::as_str).map(str::to_string);
-    event.branch = doc.get("gitBranch").and_then(Value::as_str).map(str::to_string);
+    event.branch = doc
+        .get("gitBranch")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     event.repo = cwd.as_deref().map(strip_worktree_suffix);
     event.workspace = cwd;
 }
@@ -134,12 +142,19 @@ fn normalize_user_blocks(
     Outcome::Events(events)
 }
 
-fn normalize_user_block(key: RecordKey, observed_at: DateTime<Utc>, block: &Value) -> NormalizedEvent {
+fn normalize_user_block(
+    key: RecordKey,
+    observed_at: DateTime<Utc>,
+    block: &Value,
+) -> NormalizedEvent {
     let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
     match block_type {
         "text" => {
             let mut ev = NormalizedEvent::new(key, observed_at, EventKind::Prompt);
-            ev.text = block.get("text").and_then(Value::as_str).map(str::to_string);
+            ev.text = block
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             ev
         }
         "tool_result" => {
@@ -167,7 +182,11 @@ fn normalize_user_block(key: RecordKey, observed_at: DateTime<Utc>, block: &Valu
     }
 }
 
-fn normalize_assistant(record: &VerbatimRecord, doc: &Value, observed_at: DateTime<Utc>) -> Outcome {
+fn normalize_assistant(
+    record: &VerbatimRecord,
+    doc: &Value,
+    observed_at: DateTime<Utc>,
+) -> Outcome {
     let key = record.key.clone();
     let message = match doc.get("message") {
         Some(m) => m,
@@ -223,7 +242,12 @@ fn normalize_assistant_blocks(
     }
     let mut events: Vec<NormalizedEvent> = blocks
         .iter()
-        .map(|block| with_context(normalize_assistant_block(key.clone(), observed_at, block), doc))
+        .map(|block| {
+            with_context(
+                normalize_assistant_block(key.clone(), observed_at, block),
+                doc,
+            )
+        })
         .collect();
     if events.len() == 1 {
         return finish_single(events.pop().expect("checked len == 1"));
@@ -243,7 +267,10 @@ fn normalize_assistant_block(
     match block_type {
         "text" => {
             let mut ev = NormalizedEvent::new(key, observed_at, EventKind::Reply);
-            ev.text = block.get("text").and_then(Value::as_str).map(str::to_string);
+            ev.text = block
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             ev
         }
         "thinking" => {
@@ -252,12 +279,19 @@ fn normalize_assistant_block(
             // blocks are an empty string plus an opaque `signature`. Emit
             // `text: None` rather than `Some("")` — a marker, not a body.
             let raw = block.get("thinking").and_then(Value::as_str).unwrap_or("");
-            ev.text = if raw.is_empty() { None } else { Some(raw.to_string()) };
+            ev.text = if raw.is_empty() {
+                None
+            } else {
+                Some(raw.to_string())
+            };
             ev
         }
         "tool_use" => {
             let mut ev = NormalizedEvent::new(key, observed_at, EventKind::ToolCall);
-            ev.tool_name = block.get("name").and_then(Value::as_str).map(str::to_string);
+            ev.tool_name = block
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             ev.tool_call_id = block.get("id").and_then(Value::as_str).map(str::to_string);
             ev.text = block.get("input").map(|v| v.to_string());
             ev
@@ -287,7 +321,11 @@ fn normalize_assistant_block(
     }
 }
 
-fn normalize_attachment(record: &VerbatimRecord, doc: &Value, observed_at: DateTime<Utc>) -> Outcome {
+fn normalize_attachment(
+    record: &VerbatimRecord,
+    doc: &Value,
+    observed_at: DateTime<Utc>,
+) -> Outcome {
     let mut ev = NormalizedEvent::new(record.key.clone(), observed_at, EventKind::Context);
     match doc.get("content") {
         Some(Value::String(s)) => ev.text = Some(s.clone()),
@@ -348,7 +386,10 @@ fn normalize_lifecycle(
 ) -> Outcome {
     let mut ev = NormalizedEvent::new(record.key.clone(), observed_at, EventKind::Lifecycle);
     ev.subkind = Some(subkind.to_string());
-    ev.agent_id = doc.get("agentId").and_then(Value::as_str).map(str::to_string);
+    ev.agent_id = doc
+        .get("agentId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     if is_result {
         ev.text = doc.get("result").map(|v| match v {
             Value::String(s) => s.clone(),

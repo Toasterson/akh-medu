@@ -1275,10 +1275,12 @@ impl EscalationService {
         };
         match self.client.prepare_repository(session_id, &request) {
             Ok(_receipt) => Ok(()),
-            Err(error) if error.is_conflict() => Err(EscalationError::RepositoryBootstrapConflict {
-                session_id: session_id.to_owned(),
-                project: record.project.clone(),
-            }),
+            Err(error) if error.is_conflict() => {
+                Err(EscalationError::RepositoryBootstrapConflict {
+                    session_id: session_id.to_owned(),
+                    project: record.project.clone(),
+                })
+            }
             Err(error) => Err(error.into()),
         }
     }
@@ -1361,7 +1363,8 @@ impl EscalationService {
             IncidentState::Failed
                 if provider_blocked
                     || record.last_error.as_ref().is_some_and(|f| {
-                        f.code.ends_with("runtime_mismatch") || f.code.ends_with("bootstrap_conflict")
+                        f.code.ends_with("runtime_mismatch")
+                            || f.code.ends_with("bootstrap_conflict")
                     }) =>
             {
                 NextOwner::Operator

@@ -35,9 +35,10 @@ pub struct FileId {
 #[cfg(unix)]
 pub(crate) fn file_id(path: &Path) -> Option<FileId> {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path)
-        .ok()
-        .map(|m| FileId { dev: m.dev(), ino: m.ino() })
+    std::fs::metadata(path).ok().map(|m| FileId {
+        dev: m.dev(),
+        ino: m.ino(),
+    })
 }
 
 #[cfg(not(unix))]
@@ -270,7 +271,10 @@ mod tests {
     fn own_timestamp_is_used_verbatim() {
         let ts = chrono::Utc.with_ymd_and_hms(2026, 7, 5, 11, 8, 16).unwrap();
         let records = [record(0, Some(ts))];
-        assert_eq!(forward_fill_observed_at(&records), vec![ObservedAt::Own(ts)]);
+        assert_eq!(
+            forward_fill_observed_at(&records),
+            vec![ObservedAt::Own(ts)]
+        );
     }
 
     #[test]

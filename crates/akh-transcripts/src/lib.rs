@@ -25,10 +25,10 @@ pub mod pool;
 pub mod chunk;
 
 pub mod auth;
+pub mod derive;
 pub mod mcp;
 pub mod normalize;
 pub mod redact;
 pub mod render;
-pub mod derive;
 
 pub use error::{TranscriptError, TranscriptResult};

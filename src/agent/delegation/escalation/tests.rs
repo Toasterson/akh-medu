@@ -322,7 +322,10 @@ fn native_config(runtime_profile: Option<&str>) -> NativeDelegationConfig {
 
 /// [`native_config`] with `akh-medu`'s profile declaring `repository`
 /// (53g PR bootstrap fix).
-fn native_config_with_repository(runtime_profile: Option<&str>, repository: &str) -> NativeDelegationConfig {
+fn native_config_with_repository(
+    runtime_profile: Option<&str>,
+    repository: &str,
+) -> NativeDelegationConfig {
     let mut config = native_config(runtime_profile);
     config
         .profiles

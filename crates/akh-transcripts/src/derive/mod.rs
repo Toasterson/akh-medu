@@ -244,7 +244,10 @@ impl SingletonGuard {
                 format!("SELECT pg_try_advisory_lock({SINGLETON_LOCK_KEY}) AS acquired"),
             ))
             .await
-            .map_err(|source| TranscriptError::AdvisoryLock { action: "re-assert", source })?;
+            .map_err(|source| TranscriptError::AdvisoryLock {
+                action: "re-assert",
+                source,
+            })?;
         Ok(row
             .map(|r| r.try_get::<bool>("", "acquired").unwrap_or(false))
             .unwrap_or(false))

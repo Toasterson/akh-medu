@@ -83,18 +83,42 @@ fn chunk_one_turn(turn: &[NormalizedEvent], target_chars: usize) -> Vec<Chunk> {
             // This single event's own text needs splitting regardless of
             // buffer state — flush whatever is pending first, then emit one
             // chunk per piece, all attributed to this event's seq.
-            flush(&mut chunks, source, &session_id, &stream_id, &mut buf, &mut seq_from, &mut seq_to);
+            flush(
+                &mut chunks,
+                source,
+                &session_id,
+                &stream_id,
+                &mut buf,
+                &mut seq_from,
+                &mut seq_to,
+            );
             for piece in split_at_boundary(text, target_chars) {
                 buf.push_str(&piece);
                 seq_from = Some(event.key.seq);
                 seq_to = Some(event.key.seq);
-                flush(&mut chunks, source, &session_id, &stream_id, &mut buf, &mut seq_from, &mut seq_to);
+                flush(
+                    &mut chunks,
+                    source,
+                    &session_id,
+                    &stream_id,
+                    &mut buf,
+                    &mut seq_from,
+                    &mut seq_to,
+                );
             }
             continue;
         }
 
         if !buf.is_empty() && buf.len() + 1 + text.len() > target_chars {
-            flush(&mut chunks, source, &session_id, &stream_id, &mut buf, &mut seq_from, &mut seq_to);
+            flush(
+                &mut chunks,
+                source,
+                &session_id,
+                &stream_id,
+                &mut buf,
+                &mut seq_from,
+                &mut seq_to,
+            );
         }
         if !buf.is_empty() {
             buf.push('\n');
@@ -103,7 +127,15 @@ fn chunk_one_turn(turn: &[NormalizedEvent], target_chars: usize) -> Vec<Chunk> {
         seq_from.get_or_insert(event.key.seq);
         seq_to = Some(event.key.seq);
     }
-    flush(&mut chunks, source, &session_id, &stream_id, &mut buf, &mut seq_from, &mut seq_to);
+    flush(
+        &mut chunks,
+        source,
+        &session_id,
+        &stream_id,
+        &mut buf,
+        &mut seq_from,
+        &mut seq_to,
+    );
     chunks
 }
 
@@ -177,7 +209,9 @@ fn split_at_boundary(text: &str, cap: usize) -> Vec<String> {
             break;
         }
         let limit = clamp_to_char_boundary(rest, cap).max(1);
-        let cut = find_boundary(&rest[..limit]).filter(|&c| c > 0).unwrap_or(limit);
+        let cut = find_boundary(&rest[..limit])
+            .filter(|&c| c > 0)
+            .unwrap_or(limit);
         let (piece, remainder) = rest.split_at(cut);
         pieces.push(piece.trim_end().to_string());
         rest = remainder.trim_start();
@@ -268,9 +302,16 @@ mod tests {
         let long_text = sentence.repeat(50); // well over 1500 chars
         let events = vec![prose(1, EventKind::Reply, &long_text)];
         let chunks = chunk_turns(&events, 1500);
-        assert!(chunks.len() > 1, "expected the long turn to split into multiple chunks");
+        assert!(
+            chunks.len() > 1,
+            "expected the long turn to split into multiple chunks"
+        );
         for chunk in &chunks {
-            assert!(chunk.text.len() <= 1500, "chunk exceeded the 1500-char cap: {}", chunk.text.len());
+            assert!(
+                chunk.text.len() <= 1500,
+                "chunk exceeded the 1500-char cap: {}",
+                chunk.text.len()
+            );
             let trimmed = chunk.text.trim();
             assert!(
                 trimmed.ends_with('.') || chunk == chunks.last().unwrap(),

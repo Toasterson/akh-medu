@@ -7,7 +7,9 @@ use serde_json::Value;
 
 use crate::model::{EventKind, RecordKey, VerbatimRecord};
 
-use super::{finish_single, json_type_name, record_type_of, DerivationError, NormalizedEvent, Outcome};
+use super::{
+    DerivationError, NormalizedEvent, Outcome, finish_single, json_type_name, record_type_of,
+};
 
 pub(super) fn normalize(record: &VerbatimRecord, observed_at: DateTime<Utc>) -> Outcome {
     let Some(doc) = record.payload.as_ref() else {
@@ -47,7 +49,11 @@ pub(super) fn normalize(record: &VerbatimRecord, observed_at: DateTime<Utc>) -> 
     }
 }
 
-fn normalize_response_item(record: &VerbatimRecord, doc: &Value, observed_at: DateTime<Utc>) -> Outcome {
+fn normalize_response_item(
+    record: &VerbatimRecord,
+    doc: &Value,
+    observed_at: DateTime<Utc>,
+) -> Outcome {
     let key = record.key.clone();
     let payload = match doc.get("payload") {
         Some(p) => p,
@@ -94,7 +100,10 @@ fn normalize_response_item(record: &VerbatimRecord, doc: &Value, observed_at: Da
         }
         "custom_tool_call" | "function_call" => {
             let mut ev = NormalizedEvent::new(key, observed_at, EventKind::ToolCall);
-            ev.tool_name = payload.get("name").and_then(Value::as_str).map(str::to_string);
+            ev.tool_name = payload
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             ev.tool_call_id = payload
                 .get("call_id")
                 .and_then(Value::as_str)
@@ -144,7 +153,11 @@ fn normalize_response_item(record: &VerbatimRecord, doc: &Value, observed_at: Da
     }
 }
 
-fn normalize_message_payload(key: RecordKey, payload: &Value, observed_at: DateTime<Utc>) -> Outcome {
+fn normalize_message_payload(
+    key: RecordKey,
+    payload: &Value,
+    observed_at: DateTime<Utc>,
+) -> Outcome {
     let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
     let kind = match role {
         "user" => EventKind::Prompt,
@@ -153,7 +166,7 @@ fn normalize_message_payload(key: RecordKey, payload: &Value, observed_at: DateT
         _ => {
             return Outcome::Undetermined {
                 record_type: format!("response_item:message:role={role}"),
-            }
+            };
         }
     };
     let mut ev = NormalizedEvent::new(key, observed_at, kind);
@@ -195,13 +208,17 @@ fn normalize_message_payload(key: RecordKey, payload: &Value, observed_at: DateT
 /// lacks. Everything else — including `token_count`, the single largest
 /// record type in the whole corpus — is noise: a UI/telemetry narration of
 /// turns `response_item` already carries canonically.
-fn normalize_event_msg(record: &VerbatimRecord, doc: &Value, observed_at: DateTime<Utc>) -> Outcome {
+fn normalize_event_msg(
+    record: &VerbatimRecord,
+    doc: &Value,
+    observed_at: DateTime<Utc>,
+) -> Outcome {
     let payload = match doc.get("payload") {
         Some(p) => p,
         None => {
             return Outcome::Noise {
                 reason: "event_msg without a payload".to_string(),
-            }
+            };
         }
     };
     let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
@@ -234,7 +251,11 @@ fn normalize_lifecycle(
     finish_single(ev)
 }
 
-fn normalize_session_meta(record: &VerbatimRecord, doc: &Value, observed_at: DateTime<Utc>) -> Outcome {
+fn normalize_session_meta(
+    record: &VerbatimRecord,
+    doc: &Value,
+    observed_at: DateTime<Utc>,
+) -> Outcome {
     let mut ev = NormalizedEvent::new(record.key.clone(), observed_at, EventKind::SessionMeta);
     // No specific field is named for Codex's top-level `session_meta` in the
     // mapping table; the whole record is retained as text.
@@ -242,7 +263,11 @@ fn normalize_session_meta(record: &VerbatimRecord, doc: &Value, observed_at: Dat
     finish_single(ev)
 }
 
-fn normalize_telemetry(record: &VerbatimRecord, doc: &Value, observed_at: DateTime<Utc>) -> Outcome {
+fn normalize_telemetry(
+    record: &VerbatimRecord,
+    doc: &Value,
+    observed_at: DateTime<Utc>,
+) -> Outcome {
     let mut ev = NormalizedEvent::new(record.key.clone(), observed_at, EventKind::Telemetry);
     ev.text = Some(doc.to_string());
     finish_single(ev)

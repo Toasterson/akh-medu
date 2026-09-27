@@ -64,8 +64,14 @@ async fn second_run_over_unchanged_input_inserts_nothing() {
     let opts = RunOptions::default();
 
     let first = run(&cfg, &opts).await.expect("first run");
-    assert_eq!(first.failed_streams, 0, "fixture must read cleanly: {first:?}");
-    assert_eq!(first.inserted, 2, "both fixture records should insert on a fresh run: {first:?}");
+    assert_eq!(
+        first.failed_streams, 0,
+        "fixture must read cleanly: {first:?}"
+    );
+    assert_eq!(
+        first.inserted, 2,
+        "both fixture records should insert on a fresh run: {first:?}"
+    );
     assert_eq!(first.quarantined, 0);
 
     let second = run(&cfg, &opts).await.expect("second run");
@@ -78,10 +84,15 @@ async fn second_run_over_unchanged_input_inserts_nothing() {
     // Delete watermark state and re-run: a full re-scan collides into
     // ON CONFLICT DO NOTHING rather than duplicating rows.
     std::fs::remove_dir_all(state_dir.path()).expect("remove state dir");
-    let third = run(&cfg, &opts).await.expect("third run after watermark loss");
+    let third = run(&cfg, &opts)
+        .await
+        .expect("third run after watermark loss");
     assert_eq!(
         third.inserted, 0,
         "losing the watermark must re-scan harmlessly, not duplicate rows: {third:?}"
     );
-    assert_eq!(third.deduped, 2, "the full re-read should dedupe both rows: {third:?}");
+    assert_eq!(
+        third.deduped, 2,
+        "the full re-read should dedupe both rows: {third:?}"
+    );
 }
