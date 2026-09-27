@@ -15,9 +15,11 @@ Kubernetes or a rejected push is the answer, not an obstacle to route around.
   available; `kubectl` has no cluster here.
 - **Ops sandbox** (`sandbox_exec` with `sandbox = "ops"`): runs as the
   Kubernetes ServiceAccount `vesta`. `kubectl` talks to the cluster in-cluster
-  (no kubeconfig, no context flag). It also holds the deploy key that can push
-  only to `vesta/*` branches. Use it for live reads, live mutations and
-  publishing, nothing else.
+  (no kubeconfig, no context flag). It also holds the talos deploy key, which
+  can push to `main` and to `vesta/*` branches (operator decision 2026-09-27).
+  The remote refuses force pushes and deletion of `main` (ruleset
+  `protect-main`) and of `vesta/*`. Use the sandbox for live reads, live
+  mutations and publishing, nothing else.
 - Both sandboxes are ephemeral. A restart of the akh allocates fresh ones, and
   unpublished commits are lost. Publish finished work promptly.
 
@@ -75,8 +77,13 @@ inspect the live state before retrying. Preserve intentional alert silences.
 
 ## Publishing a GitOps fix
 
-1. In the GitOps workspace: commit on a topic branch in `talos/`. Record the
-   base (`git rev-parse origin/main`) and the tree (`git rev-parse HEAD^{tree}`).
+Choose the target first. Push a validated, narrow fix to `main` (Flux applies
+it). Push to a `vesta/<topic>` branch when the change needs review, touches
+shared platform configuration, or you are not certain of it.
+
+1. In the GitOps workspace: commit on a topic branch in `talos/`, rebased on
+   the current `origin/main`. Record the base (`git rev-parse origin/main`)
+   and the tree (`git rev-parse HEAD^{tree}`).
    Produce the patch with `git format-patch --stdout <base>..HEAD`.
 2. In the ops sandbox (`sandbox_exec`, `ops`, the patch as `stdin`):
    `test -d talos || git clone -q /seed/talos talos` then
@@ -85,17 +92,19 @@ inspect the live state before retrying. Preserve intentional alert silences.
    `main` in the GitOps workspace first.
 3. Check that `git rev-parse HEAD^{tree}` equals the recorded tree. Publish
    nothing that differs.
-4. `git push --dry-run git@github.com:toasterson/talos.git HEAD:refs/heads/vesta/<topic>`,
-   then the same without `--dry-run`. Never `--force`, never another branch
-   namespace; the remote rejects both.
-5. Confirm with `git ls-remote git@github.com:toasterson/talos.git refs/heads/vesta/<topic>`
-   that the remote branch is at your commit, and record branch, commit and
-   tree in memory.
+4. `git push --dry-run git@github.com:toasterson/talos.git HEAD:refs/heads/<target>`
+   (`main` or `vesta/<topic>`), then the same without `--dry-run`. Never
+   `--force`. If `main` moved and the push is rejected as non-fast-forward,
+   go back to step 1 and rebase; never overwrite someone else's commits.
+5. Confirm with `git ls-remote git@github.com:toasterson/talos.git refs/heads/<target>`
+   that the remote ref is at your commit, and record target, commit and tree
+   in memory.
 
-A pushed `vesta/*` branch is not a merged change and not a deployed fix. Hand
-the branch and commit to review through Board or Anima, then verify CI, the
-merge, the Flux reconciliation and the live recovery independently. Never
-claim host or cluster remediation from a local edit.
+A push to `main` is a change, not a fixed incident: verify the Flux
+reconciliation (`kubectl -n flux-system get kustomization`) and the live
+recovery independently, and report the commit to the status thread. A pushed
+`vesta/*` branch is not a merged change; hand it to review through Board or
+Anima. Never claim host or cluster remediation from a local edit.
 
 ## Coordination
 

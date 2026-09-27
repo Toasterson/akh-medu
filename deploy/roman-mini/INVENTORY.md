@@ -1346,7 +1346,7 @@ switch) and re-renders.
 | `gitops_exec` (`docker exec` into `roman-vesta-gitops`) | `shell_exec` / `file_io` / `edit` / `glob` / `grep` in akhsbxd profile `vesta-gitops` (`[exec] kind = "execd"`) | the pod: no ServiceAccount token, no key in the executor container, Cilium egress DNS + github.com:22 only |
 | `homelab_inspect` (host kubectl, cluster-admin) | `sandbox_exec` `ops`: `kubectl get/describe/logs` | ClusterRole `vesta-inspect` |
 | `homelab_write` (host kubectl, cluster-admin) | `sandbox_exec` `ops`: `kubectl apply/patch/delete/scale/rollout restart/cordon/uncordon` | ClusterRole `vesta-write` + ValidatingAdmissionPolicies `vesta-*` |
-| `gitops_publish` (host git push, unrestricted identity) | `git format-patch` in `vesta-gitops`, `git am` + tree check + non-force `git push` to `vesta/<topic>` in `ops` | deploy key + GitHub rulesets (only `refs/heads/vesta/**`, no force) |
+| `gitops_publish` (host git push, unrestricted identity) | `git format-patch` in `vesta-gitops`, `git am` + tree check + non-force `git push` to `vesta/<topic>` in `ops` | deploy key (may push `main` and `vesta/**`, operator decision 2026-09-27) + GitHub rulesets `protect-main` / `vesta-branches` (no force push or deletion, no bypass) |
 
 Rendering (`full_akh.py`, `configure_core.py`):
 
