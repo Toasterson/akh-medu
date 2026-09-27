@@ -1,6 +1,6 @@
 # Runbook — transcript harvest (`harvest-pg`, `akh-harvest`, `akh-derive`, `akh-transcripts-mcp`)
 
-Design: [ADR 108](../ai/decisions/108-agent-session-transcript-harvest.md) ·
+Design: [ADR 119](../ai/decisions/119-agent-session-transcript-harvest.md) ·
 [plan](../ai/plans/2026-09-19-transcript-harvest.md) ·
 [map](../wayfinder/transcript-harvest/map.md). Everything below was verified live
 on 2026-09-19 unless marked otherwise.

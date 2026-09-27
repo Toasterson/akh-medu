@@ -131,7 +131,7 @@ sokard image reference.
 {{- end }}
 
 {{/*
-transcripts component labels (akh-transcripts: harvest/derive/mcp, ADR 108).
+transcripts component labels (akh-transcripts: harvest/derive/mcp, ADR 119).
 Unlike akhomed/seshd/sokard, "transcripts" is two sibling Deployments
 (akh-derive, akh-transcripts-mcp) sharing one image, so these take a dict
 argument rather than the bare root context: (dict "root" . "role" "derive")

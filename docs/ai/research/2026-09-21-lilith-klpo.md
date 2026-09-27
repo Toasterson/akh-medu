@@ -1,5 +1,7 @@
 # KLPO decision for the Lilith run
 
+> **Note (2026-09-27):** [ADR 116](../decisions/116-lilith-chief-of-staff-guided-rl.md) Decision 4 puts Lilith's training on the [ADR 110](../decisions/110-kaine-character-guided-reward-live-environment.md) guided reward (every step scored, corrected siblings, weights in [0,1]). The terminal-reward KLPO arm described below is kept **only as a verifier-only ablation arm**; it is not the Lilith training objective.
+
 On 2026-09-21 the user supplied [Yifan Zhang's KLPO post](https://x.com/yifanzhang_/status/2101832813293003160), then authorized recording the assessment and running the next slices. KLPO is an experimental training option; the post's broad Q* claim is not an established project result.
 
 ## Evidence and fit

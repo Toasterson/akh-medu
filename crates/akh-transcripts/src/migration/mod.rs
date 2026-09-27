@@ -1,4 +1,4 @@
-//! Database migrations for the `harvest-pg` transcript store (ADR 108).
+//! Database migrations for the `harvest-pg` transcript store (ADR 119).
 //!
 //! Built with the SeaORM schema builder, raw SQL reserved for what SeaORM
 //! cannot express: `CREATE EXTENSION`, TimescaleDB's `create_hypertable` and

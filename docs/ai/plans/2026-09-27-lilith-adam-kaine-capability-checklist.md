@@ -6,8 +6,8 @@
   This lists every capability the docs define, where it is written, and how well: **S** = specified
   (definition + exam or threshold), **P** = partially specified (named, but no threshold or an open
   question), **R** = research only.
-- **Method:** a source inventory of `origin/main` on 2026-09-27, plus ADR 112 and P7.14–P7.18 from
-  branch `docs/adr-112-kaine-theory-first` (pushed to origin 2026-09-27, not on main). The family
+- **Method:** a source inventory of `origin/main` on 2026-09-27, plus ADR 112 and P7.14–P7.18 (on main since PR #419;
+  the checklist first cited branch `docs/adr-112-kaine-theory-first`). The family
   grouping is editorial; the capabilities are the documents' own.
 - **Related:** [ADR 116](../decisions/116-lilith-chief-of-staff-guided-rl.md), [Lilith CoS plan](2026-09-27-lilith-chief-of-staff-rl-runpod.md), [Project Lilith capability ledger](2026-09-21-project-lilith.md#capability-transfer-ledger)
 
@@ -40,8 +40,8 @@
 | 23 | Emotional intelligence and repair (paired needs; a correction changes the next action) | Both | R1; homelab "operator correction"; ADR 099 | S (R1: 85% per family) | none | No blinded rubric artifact |
 | 24 | Coordination through Board and Anima dispatch, delegation, Teamwork (slot 8) | Kaine | ADR 110 D3; P7.10, P7.13 | P | none | P7.13 gate not frozen; **no R1 coordination family** |
 | 25 | Guided reward: five-component vector, corrected siblings, no scalar-judge policy gradient; `AkhEnvironment` dojo tenancy; emergent-bug and act-to-perceive families | Kaine (baselined on ADAM) | ADR 110 D2–D4; P7.10–P7.13 | S exits / P family scoring | E3 weighted-loss mechanics only | "Bounded hypotheses" and "board ask" thresholds unset |
-| 26 | Theory-first: `Theory` object, sixth reward component `foresight`, `theory_first` family, interventional prediction, 29f explorer tools | Kaine | ADR 112, P7.14–P7.18 (**branch only**); foresight archive | R / Proposed | none | **ADR 112 not on main, but ADR 114 cites it** |
-| 27 | Action world model (predict before execute) | Both | ADR 088 (action world model) | P (Proposed) | none | Gated on Phase 50 |
+| 26 | Theory-first: `Theory` object, sixth reward component `foresight`, `theory_first` family, interventional prediction, 29f explorer tools | Kaine | ADR 112, P7.14–P7.18 (on main, PR #419); foresight archive | R / Proposed | none | Fixed 2026-09-27: ADR 112 is on main |
+| 27 | Action world model (predict before execute) | Both | ADR 117 (action world model; was 088) | P (Proposed) | none | Gated on Phase 50 |
 | 28 | Curiosity as compression / learning progress | Kaine | Foresight handoff; ADR 005 §2; ADR 112 D3 | R | none | — |
 | 29 | Replay-improved exploration (Dream-RSI) | ADAM harness + Kaine | Dream-RSI analysis; ADR 112 D5 | R | none | — |
 | 30 | Typed decisions, joint scoring of complete actions (Jev, Jevlike) | Both | TypeSafe/Jev README; Jevlike handoff; ADR 112 P7.15 | R | `experiments/typed-decisions/` (**untracked**) | ADR 114 keeps Jev-class models out of the live path |
@@ -51,38 +51,58 @@
 
 ## 2. Missing, under-specified, or conflicting (please check)
 
-1. **Design docs not on main.** ADR 112 and P7.14–P7.18 are on a branch only (pushed 2026-09-27),
-   and ADR 114 on main cites them. Duplicate ADR numbers exist: 088, 097 and 108 are each used twice.
-2. **Which ADAM target is current.** R1 (350M–1.1B, 12 families) is neither marked current nor
-   superseded. P6 narrowed the target to the `small_8k` release gate.
+Doc-gap pass 2026-09-27 (branch `docs/fix-adam-kaine-doc-gaps`): items marked **Fixed** changed only
+documents; items marked **→ Lilith exam design (supervisor)** need numeric exam design and stay open.
+
+1. **Design docs not on main.** ~~ADR 112 and P7.14–P7.18 are on a branch only~~ — **Fixed 2026-09-27
+   (commit `034fff4c`)**: they reached main through PR #419 (`fd711f92`); the merge of
+   `origin/docs/adr-112-kaine-theory-first` brought no tree change and only records the branch as integrated.
+   No number collision for 112. Duplicate ADR numbers 088, 097, 108 — **Fixed 2026-09-27 (commit
+   `7ddf0f04`)**: the later-dated ADR of each pair is renumbered: action world model 088 → **117**,
+   shared-store migration compatibility 097 → **118**, transcript harvest 108 → **119**; references updated.
+2. **Which ADAM target is current.** **Fixed 2026-09-27 (commit `b0959628`)**: the R1 plan carries a status
+   line (later release target; the current gate is the P5/P6 `small_8k` release gate) and marks the missing
+   `release-v3-failure-analysis.md` as missing.
 3. **No dojo retention gate.** Dojo §10.5 requires one, but ADR 102 certifies only knowledge and
-   tools. P7.12 uses "≤3-case regression on 1,272" as a proxy.
+   tools. P7.12 uses "≤3-case regression on 1,272" as a proxy. **Open → Lilith exam design (supervisor).**
 4. **No numeric thresholds** for kata, belts, consultation, the environment gate, disposition credit,
-   or the emergent-bug and act-to-perceive families.
-5. **Two belt definitions:** dojo §5 by form and voice; R1 by memory-to-action exercises.
-6. **Reward conflicts:**
-   - ADR 096 uses negative redundancy and an RL advantage, while ADR 110 allows weights in [0,1] only.
-   - Dojo §4/§7 have judge-graded "sparring RL", while ADR 110 rule 7 forbids a scalar-judge
-     gradient.
-   - The Lilith KLPO arm uses terminal reward, while ADR 110 rule 1 says every step is scored. ADR
-     116 keeps KLPO as an ablation only.
-7. **Courage placement** is inconsistent: ADR 110 puts it in slot 1 (+ slot 4), while ADR 112 D4
-   puts it in slot 4 (Rebel).
-8. **"Maat"** appears in dojo §10.2 next to Caregiver but in no crew table.
+   or the emergent-bug and act-to-perceive families. **Open → Lilith exam design (supervisor).**
+5. **Two belt definitions.** **Fixed 2026-09-27 (commit `b0959628`)**: dojo §5 is canonical for belt identity
+   and order (note in the manual, commit `2474e08f`); the R1 table is now the memory-to-action exam content
+   per dojo belt, one row per §5 belt. Belt gate numbers stay open with item 4.
+6. **Reward conflicts.** **Fixed 2026-09-27 (commit `2474e08f`)**:
+   - ADR 096 carries "superseded in part by ADR 110"; Decision 3 (scalar advantage) and the negative
+     redundancy clause of Decision 4 are marked in place.
+   - Dojo §4/§5/§7 sparring now follows ADR 110 rule 7 (weighted SFT on corrected siblings +
+     sibling-contrast preference; judges score social effect only, blinded).
+   - The KLPO research note states that ADR 116 keeps KLPO as a verifier-only ablation arm.
+7. **Courage placement.** **Fixed 2026-09-27 (commit `2474e08f`)**: ADR 112 D4 now labels Courage as slot 1
+   Creator (supporting slot 4 Candor), matching ADR 110 Decision 1.
+8. **"Maat".** **Fixed 2026-09-27 (commit `2474e08f`)**: dojo §10.2 defines Maat at first use as the captain's
+   field (the three Oxide principles as captain invariants, ADR 110 D1), not a voice.
 9. **Coordination is thin in ADAM/Kaine.** There is no R1 family and no exam, only ADR 110 and
-   P7.13. Lilith's primary role therefore needs its own exams (ADR 116 families).
-10. **illumos is absent from every ADAM/Kaine source.** The homelab exam targets GNU/BSD. Lilith's
-    illumos guidance role has no inherited exam; ADR 116 adds `illumos-guidance` and the Project
-    Lilith illumos pack.
-11. **Portuguese** is a measured target with no threshold, and the certifier rejects it.
-12. **Kaine naming** is ambiguous in the hardware plan; the Lilith plan resolves it.
-13. **P6.5 outcomes unrecorded:** E1-control, E2–E4, window 2.
+   P7.13. Lilith's primary role therefore needs its own exams (ADR 116 families). **Open → Lilith exam
+   design (supervisor)** (coordination exam).
+10. **illumos is absent from every ADAM/Kaine source.** **Fixed 2026-09-27 (commit `b0959628`)** as a
+    definition: the homelab exam has an "illumos variant" section (SMF, IPS, zones, ZFS, RBAC/`pfexec`,
+    illumos userland and man pages; same thresholds as GNU/BSD, frozen before evaluation). The
+    `illumos-guidance` family itself stays with ADR 116.
+11. **Portuguese.** **Fixed 2026-09-27 (commit `b0959628`)** as a proposal: PT-BR basics per family ≥ 0.85 ×
+    the same model's EN score, PT-PT reported without a gate ("Proposed 2026-09-27, freeze before
+    evaluation"), in the Portuguese plan and R1. The certifier still rejects `pt`; the ADR 102 language list
+    must add it before PT can be certified (doc note only; no code changed).
+12. **Kaine naming.** **Fixed 2026-09-27 (commit `b0959628`)**: the hardware plan notes that "Lilith" names the
+    inherited Gemma track and "Kaine" keeps its ADR 111 meaning.
+13. **P6.5 outcomes unrecorded.** **Fixed 2026-09-27 (commit `b0959628`)** as a record: no results exist in
+    the repo, any branch, the local `runs/` trees or the Anima threads; the P6 plan lists E1-control,
+    window 2, E2, E3 and E4 as "Outcome not recorded as of 2026-09-27". The results themselves are still
+    missing.
 14. **Operator-owned open questions:**
     - voice names (dojo §8 Q1);
     - belt count and names (Q2);
     - scenario authorship and judges (Q3);
     - where High Grug meets the kata (Q4);
-    - the Portuguese threshold.
+    - the Portuguese threshold (now a proposal to confirm or change; item 11).
 
 ## 3. Lineage-bound capabilities (Gemma needs a behavioural-equivalent exam)
 

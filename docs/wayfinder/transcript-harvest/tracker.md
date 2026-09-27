@@ -32,7 +32,7 @@ human-supplied Anima PAT and is now a migration task rather than a blocker.
 
 The map reached its destination as a design. Handed off as:
 
-- **[ADR 108](../../ai/decisions/108-agent-session-transcript-harvest.md)** — the decisions and what measurement overturned
+- **[ADR 119](../../ai/decisions/119-agent-session-transcript-harvest.md)** — the decisions and what measurement overturned
 - **[Implementation plan](../../ai/plans/2026-09-19-transcript-harvest.md)** — seven increments, each independently testable
 - **[CONTEXT.md](CONTEXT.md)** — the glossary
 - Reproducible prototypes in `assets/scripts/`

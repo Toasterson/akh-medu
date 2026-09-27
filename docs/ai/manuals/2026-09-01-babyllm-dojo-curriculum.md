@@ -152,10 +152,19 @@ frontier teachers, aggressively filtered), multilingual by construction.
 
 ## 4. Sparring: the adversary catalog
 
-Sparring is **training signal** (preference/RL rounds), not only evaluation.
+Sparring is **training signal**, not only evaluation.
 Each adversary is a generator persona that pressures specific kata; graded by
 a **rotation of judges** (reuse the Phase 50 rotation-judge machinery — no
 single reward model to overfit).
+
+> **Amended 2026-09-27 per [ADR 110](../decisions/110-kaine-character-guided-reward-live-environment.md)
+> Decision 2, rules 6–7.** The earlier "preference/RL rounds" wording is
+> withdrawn. A sparring round trains by **weighted SFT on corrected siblings**
+> (the failed move at weight 0, the corrected move at its earned weight in
+> [0,1]) plus **sibling-contrast preference pairs** (same situation, corrected
+> vs raw). There is no scalar-judge policy gradient. Judges score **only the
+> social effect** of a communicative move, **blinded** to voice (§10.5);
+> effects of actions are scored by the environment, never by a judge.
 
 | Adversary | Pressure applied | Kata under test |
 |-----------|------------------|-----------------|
@@ -171,7 +180,15 @@ pressure is not yet a form.
 
 ## 5. Belts: graded curriculum with promotion gates
 
-Five belts. Each = a training stage (SFT on forms → sparring RL → gate).
+Five belts. Each = a training stage (SFT on forms → sparring rounds per §4,
+i.e. weighted sibling SFT + sibling-contrast preference, no scalar-judge RL →
+gate).
+
+> **Canonical belt definition (2026-09-27).** This section defines belt
+> identity and order (White → Yellow → Green → Brown → Black). The
+> [R1 plan](../plans/2026-09-11-akh-350m-graph-grounded-release-plan.md) belt
+> table is the memory-to-action exam content per belt listed here, not a
+> second belt definition.
 Promotion gates combine deterministic verification where possible with the
 judge rotation. **Rank is trained into the self-model**: the BabyLLM knows
 its belt, which is calibrated humility as identity rather than disclaimer.
@@ -212,8 +229,10 @@ four-field, always:
 
 ## 7. Provider-run mapping (practical)
 
-- **Stages:** per-belt SFT corpus → sparring preference/RL rounds → eval gate;
-  belts are checkpoints. Burn for training per the Grug-Brain verdict; Candle
+- **Stages:** per-belt SFT corpus → sparring rounds → eval gate; belts are
+  checkpoints. Sparring rounds follow ADR 110 rule 7 (amended 2026-09-27):
+  weighted SFT on corrected siblings plus sibling-contrast preference pairs;
+  judges score social effect only, blinded; no scalar-judge RL. Burn for training per the Grug-Brain verdict; Candle
   for frozen deployment.
 - **Budgets:** BabyLM-style word budgets per belt (10M–100M words total is
   the reference envelope); kata corpora are small and variation-rich by
@@ -332,7 +351,12 @@ grading; English names are identifiers for authors, not phrase matchers.
 | **Return Ownership and Learning** | Help participants understand and steer the next step themselves; stop or witness when help is sufficient. | Independent continuation; request for a practical deliverable; useful dissent; functioning process. | Creating dependency; forcing a lesson; withholding explicitly delegated practical help. | Participants retain direction and can use the result; the agent completes its agreed contribution and avoids unnecessary intervention. |
 
 Use the existing voices and captain placement (§2/§9). These are skills for
-the whole crew; they are not exclusive to the Caregiver or Maat. White/Yellow
+the whole crew; they are not exclusive to the Caregiver voice or to Maat.
+(*Maat* is the Egyptian principle of truth, balance and right order; here it
+names the captain's field, the three Oxide principles Integrity, Honesty and
+Decency held as captain invariants, not a voice, per
+[ADR 110](../decisions/110-kaine-character-guided-reward-live-environment.md)
+Decision 1.) White/Yellow
 practice individual forms and language variation; Green practices corrections
 across turns; Brown selects and combines forms, including choosing no
 intervention. Black transmits a concise evidence-based account of what worked

@@ -1,5 +1,5 @@
 //! `akh-derive` — singleton derivation worker for the agent-session
-//! transcript harvest (ADR 108).
+//! transcript harvest (ADR 119).
 //!
 //! `--migrate` runs pending migrations (advisory-locked, via
 //! [`akh_transcripts::pool::run_migrations_locked`]) and exits 0 — the Helm

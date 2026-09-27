@@ -1,7 +1,7 @@
 # Plan — Agent Session Transcript Harvest
 
 - **Date:** 2026-09-19
-- **ADR:** [108](../decisions/108-agent-session-transcript-harvest.md)
+- **ADR:** [119](../decisions/119-agent-session-transcript-harvest.md)
 - **Map:** [docs/wayfinder/transcript-harvest/](../../wayfinder/transcript-harvest/map.md) — every decision below links to the ticket carrying its reasoning and rejected alternatives
 - **Status (2026-09-20):** increments 0–6 built and verified live; 7 done on hephaistos, in-cluster rollout live (chart 0.1.18, image `d72262cacdc2`, talos `fc92a9d`) — **destination reached**
 

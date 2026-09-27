@@ -1,7 +1,7 @@
 ---
 label: wayfinder:map
 created: 2026-09-19
-status: complete — handed off to ADR 108 + plan
+status: complete — handed off to ADR 119 + plan
 tracker: local-markdown (Anima unreachable — see tickets/tracker-restoration.md)
 ---
 

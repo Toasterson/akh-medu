@@ -1,5 +1,5 @@
 //! Connection-pool construction and migration runner for the `harvest-pg`
-//! store (ADR 108).
+//! store (ADR 119).
 //!
 //! Kept deliberately small: `connect` takes a bare URL rather than a config
 //! struct, because config precedence (env var vs. flag vs. file, and how each

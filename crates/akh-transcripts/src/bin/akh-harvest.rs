@@ -1,5 +1,5 @@
 //! `akh-harvest` — the transcript harvester binary (increment 3 of
-//! `docs/ai/plans/2026-09-19-transcript-harvest.md`, ADR 108).
+//! `docs/ai/plans/2026-09-19-transcript-harvest.md`, ADR 119).
 //!
 //! An idempotent one-shot CLI, driven by a platform timer
 //! (`docs/wayfinder/transcript-harvest/tickets/process-model.md`): discover
@@ -37,9 +37,9 @@ use clap::{Parser, ValueEnum};
 use akh_transcripts::harvest::{HarvestConfig, RunOptions, run};
 use akh_transcripts::model::Source;
 
-/// Agent-session transcript harvester (ADR 108).
+/// Agent-session transcript harvester (ADR 119).
 #[derive(Debug, Parser)]
-#[command(name = "akh-harvest", about = "Agent-session transcript harvester (ADR 108)")]
+#[command(name = "akh-harvest", about = "Agent-session transcript harvester (ADR 119)")]
 struct Cli {
     /// Run once and exit. This is the only mode this binary has ever had —
     /// the flag exists because the systemd unit already passes it and a

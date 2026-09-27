@@ -1,4 +1,4 @@
-//! Agent-session transcript harvest (ADR 108).
+//! Agent-session transcript harvest (ADR 119).
 //!
 //! Design: `docs/wayfinder/transcript-harvest/` (map, tickets, `CONTEXT.md`
 //! glossary). Plan: `docs/ai/plans/2026-09-19-transcript-harvest.md`.

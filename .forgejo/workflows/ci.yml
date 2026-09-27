@@ -439,7 +439,7 @@ jobs:
               ;;
           esac
 
-  # Agent-session transcript harvest image (ADR 108, plan
+  # Agent-session transcript harvest image (ADR 119, plan
   # docs/ai/plans/2026-09-19-transcript-harvest.md) — same shape as the
   # seshd/sokard jobs: SHORT_SHA tag always pushed (the flux HelmRelease
   # pins it), branch tag on main/develop.

@@ -1,4 +1,6 @@
-# ADR 088: The Akh Action World Model — predict-before-execute as capability *and* safety
+# ADR 117: The Akh Action World Model — predict-before-execute as capability *and* safety
+
+> Renumbered from ADR 088 on 2026-09-27 (duplicate number). ADR 088 is the High-Grug boundary format.
 
 - Status: **Proposed** (draft 2026-07-08; gated on Phase 50 harness landing)
 - Phase: successor to Phase 50; builds on Phases 15/16/17, 41e, 48a

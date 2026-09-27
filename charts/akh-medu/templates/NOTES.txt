@@ -1,7 +1,7 @@
 akh-medu ({{ .Chart.Name }}-{{ .Chart.Version }}, app {{ .Chart.AppVersion }}) has been installed/upgraded in {{ .Release.Namespace }}.
 {{- if .Values.transcripts.enabled }}
 
-── transcripts (agent-session transcript harvest, ADR 108) ──────────────────
+── transcripts (agent-session transcript harvest, ADR 119) ──────────────────
 
 The migrate initContainer on {{ include "akh-medu.fullname" . }}-transcripts-derive
 runs migrations authenticated as the database OWNER (harvest), using the

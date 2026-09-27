@@ -3,7 +3,7 @@
 - **Status:** Active (2026-09-13)
 - **ADR:** [ADR 106](../decisions/106-local-burn-metal-lane-and-engine-in-the-loop-training.md); governance [ADR 105](../decisions/105-autonomous-run-governance.md)
 - **Anima:** project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, plan `019f90cb-2e66-7f92-ba88-a4060be97c6e`; work items listed below are driven from the architect session — never by runners. Mechanism until Anima WI `01a09ac8-36a0-73d0-bb42-ec15c18dd0c3` (`scheduler_excluded` flag) lands: `kind=spike`, `source=architect-session`, phases only `draft`/`testing`/`done`/`parked`, never `ready`/`working` (those two are the scheduler's dispatch set — Anima `list_dispatchable`).
-- **Predecessors:** [P5 plan](2026-09-07-phase51-p5-effective-context-copy-decoding.md) (closed, not certified), [8k-lane RESULT](../../training/results/tool-native-8k-lane-20260911-RESULT.md), [session post-mortem](../2026-09-13-phase51-codex-session-postmortem.md), archived R1 designs ([research program](2026-09-12-akh-capability-and-model-size-research-program.md), [R0 contract](2026-09-12-akh-R0-episode-contract.md)) and their recovered evidence ([local MLX inventory](../../training/results/akh-r1-local-mlx-inventory-20260913-RESULT.md)).
+- **Predecessors:** [P5 plan](2026-09-07-phase51-p5-effective-context-copy-decoding.md) (closed, not certified), [8k-lane RESULT](../../../training/results/tool-native-8k-lane-20260911-RESULT.md), [session post-mortem](../2026-09-13-phase51-codex-session-postmortem.md), archived R1 designs ([research program](2026-09-12-akh-capability-and-model-size-research-program.md), [R0 contract](2026-09-12-akh-R0-episode-contract.md)) and their recovered evidence ([local MLX inventory](../../../training/results/akh-r1-local-mlx-inventory-20260913-RESULT.md)).
 
 ## Goal
 
@@ -59,6 +59,18 @@ Each experiment trains the same checkpoint with and without the treatment, score
   - **E3** (runnable since 2026-09-14): `akh_episode_generator --e3-episodes 350` → 1,050 two-step engine episodes (acquire/revise/repair; every 4th carries a causally false step) = 2,100 records per arm, per-step reward from `predict_effects` → `verify_prediction` (614 × 0.0 / 1,486 × 1.0); treatment sidecar carries `weight = reward`, control `None`; `train_knowledge --record-weights use` scales the per-record loss with an unweighted denominator (`fc51e8b2`, `d532a5b8`). Mixtures `runs/p6-4/window-e3-{treatment,control}` (2,100 each, 4.57 %).
   - **E4** `--e4-revision --e4-count 2000` → `knowledge_revise` family (memory_write tool), 2,000 treatment (stale owned edge retracted via `Engine::retract_owned_rule_snapshot` before the correction) + 2,000 append-only controls (`p6-5-e4-revision-20260914`); trainer sidecars `knowledge_revise_{treatment,control}/` (`9b22f68e`); mixtures `runs/p6-4/window-e4-{treatment,control}` (2,000 each). Sidecar prompts differ between arms by design (the request lists the completed arguments).
   - Sequence on the single GPU (`scripts/p6/window_queue.sh runs/p6-4/queue-20260914.txt`, launched 2026-09-14): window 1 (E1 treatment) → E1 control → E2 projection → E2 raw-events → E4 treatment → E4 control → E3 treatment (`--record-weights use`) → E3 control, each ≈17.5 h + ≈1 h gate; a failed window stops the queue.
+- **Outcome record (audit 2026-09-27).** Searched: `training/results/` on `origin/main` and every local/remote branch and t3 checkpoint ref (`git log --all`), the local `runs/` trees in the main checkout and the t3 worktrees, `docs/ai/`, and the Anima threads of P6.4 (`01a09a61-f4d2`) and P6.5 (`01a09ac7-f938`). The only recorded window result is window 1 (E1 treatment, `training/results/p6-4-window-1-RESULT.md`, gate FAILED 1255/1272). The last Anima posts (2026-09-15 09:31Z, P6.4 thread) put the queue at: E1-control running, then window 2 → E2 projection → E2 raw-events → E4 pair → E3 pair. No gate numbers, RESULT doc or thread post exists for any of them. No numbers are inferred here.
+
+  | Run | Corpus / mixture (recorded) | Outcome |
+  |---|---|---|
+  | E1 treatment (= window 1) | `runs/p6-4/window-1/siblings` | FAILED 1255/1272 (`p6-4-window-1-RESULT.md`) |
+  | E1 control | `p6-5-e1-control-20260914`, `runs/p6-4/window-e1-control/siblings` | **Outcome not recorded as of 2026-09-27** (last seen running, Anima P6.4 thread 2026-09-15) |
+  | Window 2 (sentinel-shaped siblings) | `training/episodes/p6-4-window2-20260915`, `runs/p6-4/window-2/siblings` (2,273 records, `70d82c86`) | **Outcome not recorded as of 2026-09-27** |
+  | E2 projection / raw-events | `p6-5-e2-{projection,raw-events}-20260914` | **Outcome not recorded as of 2026-09-27** |
+  | E3 treatment / control | `p6-5-e3-multistep-20260914`, `runs/p6-4/window-e3-{treatment,control}` | **Outcome not recorded as of 2026-09-27** |
+  | E4 treatment / control | `p6-5-e4-revision-20260914`, `runs/p6-4/window-e4-{treatment,control}` | **Outcome not recorded as of 2026-09-27** |
+
+  Whoever holds the `runs/p6-4/<window>/gate/` evidence writes the RESULT docs; until then P6.5's exit condition ("each experiment has a RESULT doc with control vs treatment numbers") is unmet.
 - **E5 (later) engine-generated curriculum breadth.** Replace the authored 24-episode oracle with engine-generated families across command grammars; measure held-out family transfer. Runs only after E1–E3 have controls recorded.
 
 ## Budget and gates
