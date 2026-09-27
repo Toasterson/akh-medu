@@ -512,14 +512,21 @@ pub fn capture_snapshot_at_fence(
         })
         .collect();
 
-    // Sleep metrics (time series).
-    let sleep_rows: Vec<sleep_metric::Model> = agent
+    // Sleep metrics (time series). The table is keyed by (akh, cycle), but
+    // several sleeps can land in one OODA cycle when the daemon sleeps and no
+    // OODA cycle has run in between, so keep one row per cycle (the latest):
+    // duplicate keys failed the whole snapshot (UNIQUE constraint, 2026-09-25).
+    let latest_per_cycle: std::collections::BTreeMap<u64, _> = agent
         .sleep_cycle
         .metrics_history
         .iter()
+        .map(|(cycle, m)| (*cycle, m))
+        .collect();
+    let sleep_rows: Vec<sleep_metric::Model> = latest_per_cycle
+        .into_iter()
         .map(|(cycle, m)| sleep_metric::Model {
             akh_id,
-            cycle: *cycle as i64,
+            cycle: cycle as i64,
             episodes_replayed: m.episodes_replayed as i32,
             duplicates_merged: m.duplicates_merged as i32,
             orphans_pruned: m.orphans_pruned as i32,
@@ -557,6 +564,10 @@ pub fn capture_snapshot_at_fence(
         agent.cycle_count,
     );
     let reactor_metadata = capture_reactor_metadata(engine)?;
+    let budget_ledger = capture_budget_ledger(engine);
+    let last_run = capture_last_run_log(engine);
+    let provider_gate = capture_provider_gate(engine);
+    let incidents = capture_incident_ledger(engine);
     let extra = serde_json::json!({
         "provenance_snapshot_version": PROVENANCE_SNAPSHOT_VERSION,
         "audience": agent.audience,
@@ -567,6 +578,16 @@ pub fn capture_snapshot_at_fence(
         "reactor": {
             "version": REACTOR_SNAPSHOT_VERSION,
             "metadata": reactor_metadata,
+        },
+        "autonomy": {
+            "budget_ledger": budget_ledger,
+            "last_run": last_run,
+        },
+        "provider": {
+            "gate": provider_gate,
+        },
+        "delegation": {
+            "incidents": incidents,
         },
     });
 
@@ -966,6 +987,10 @@ pub async fn wake(
         }
         restore_extra(&store, state.extra.as_ref());
         restore_reactor_metadata(&store, state.extra.as_ref())?;
+        restore_budget_ledger(&store, state.extra.as_ref());
+        restore_last_run_log(&store, state.extra.as_ref());
+        restore_provider_gate(&store, state.extra.as_ref());
+        restore_incident_ledger(&store, state.extra.as_ref());
     }
 
     // 4. Open the engine over the reconstructed redb (registry + allocator come
@@ -1897,6 +1922,239 @@ fn restore_extra(store: &TieredStore, extra: Option<&serde_json::Value>) {
     }) {
         let index = crate::agent::contact_memory::PersonMemoryIndex::from_portable(portable);
         put_bincode(store, b"agent:person_memory", &index);
+    }
+}
+
+/// Capture the autonomy budget ledger (`autonomy:budget:v1`, Phase 53b) so
+/// a relocated or re-woken akh keeps today's spend instead of starting the
+/// day with a fresh budget. `None` when the akh has no ledger yet; an
+/// unreadable ledger is logged and left out (the daemon resets a bad ledger
+/// the same way, which grants at most one extra day of budget).
+fn capture_budget_ledger(engine: &Engine) -> Option<crate::agent::autonomy::BudgetLedger> {
+    use crate::agent::autonomy::{BUDGET_LEDGER_KEY, BudgetLedger};
+    match engine.store().get_meta(BUDGET_LEDGER_KEY) {
+        Ok(Some(bytes)) => match serde_json::from_slice::<BudgetLedger>(&bytes) {
+            Ok(ledger) => Some(ledger),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "snapshot: autonomy budget ledger is corrupt; not captured"
+                );
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "snapshot: autonomy budget ledger unreadable; not captured"
+            );
+            None
+        }
+    }
+}
+
+/// Restore the autonomy budget ledger captured by [`capture_budget_ledger`].
+/// An older snapshot without one leaves the store untouched; a malformed one
+/// is logged and skipped rather than failing the wake.
+fn restore_budget_ledger(store: &TieredStore, extra: Option<&serde_json::Value>) {
+    use crate::agent::autonomy::{BUDGET_LEDGER_KEY, BudgetLedger};
+    let Some(value) = extra
+        .and_then(|extra| extra.get("autonomy"))
+        .and_then(|autonomy| autonomy.get("budget_ledger"))
+        .filter(|value| !value.is_null())
+    else {
+        return;
+    };
+    let ledger = match serde_json::from_value::<BudgetLedger>(value.clone()) {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "wake: autonomy budget ledger in the snapshot is malformed; today's budget starts empty"
+            );
+            return;
+        }
+    };
+    let bytes = match serde_json::to_vec(&ledger) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(error = %error, "wake: autonomy budget ledger could not be encoded");
+            return;
+        }
+    };
+    if let Err(error) = store.put_meta(BUDGET_LEDGER_KEY, &bytes) {
+        tracing::warn!(error = %error, "wake: autonomy budget ledger not restored");
+    }
+}
+
+/// Capture the daemon last-run log (`daemon:last_run:v1`) so a relocated or
+/// re-woken akh resumes its long-period tasks (the daily librarian) instead
+/// of pushing each one a full period out. `None` when the akh has no log yet;
+/// an unreadable log is logged and left out (each long-period task then
+/// waits one period after the wake, never runs early).
+fn capture_last_run_log(engine: &Engine) -> Option<crate::agent::autonomy::LastRunLog> {
+    use crate::agent::autonomy::{LAST_RUN_LOG_KEY, LastRunLog};
+    match engine.store().get_meta(LAST_RUN_LOG_KEY) {
+        Ok(Some(bytes)) => match serde_json::from_slice::<LastRunLog>(&bytes) {
+            Ok(log) => Some(log),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "snapshot: daemon last-run log is corrupt; not captured"
+                );
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "snapshot: daemon last-run log unreadable; not captured"
+            );
+            None
+        }
+    }
+}
+
+/// Restore the daemon last-run log captured by [`capture_last_run_log`]. An
+/// older snapshot without one leaves the store untouched; a malformed one is
+/// logged and skipped rather than failing the wake.
+fn restore_last_run_log(store: &TieredStore, extra: Option<&serde_json::Value>) {
+    use crate::agent::autonomy::{LAST_RUN_LOG_KEY, LastRunLog};
+    let Some(value) = extra
+        .and_then(|extra| extra.get("autonomy"))
+        .and_then(|autonomy| autonomy.get("last_run"))
+        .filter(|value| !value.is_null())
+    else {
+        return;
+    };
+    let log = match serde_json::from_value::<LastRunLog>(value.clone()) {
+        Ok(log) => log,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "wake: daemon last-run log in the snapshot is malformed; long-period tasks wait one period"
+            );
+            return;
+        }
+    };
+    let bytes = match serde_json::to_vec(&log) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(error = %error, "wake: daemon last-run log could not be encoded");
+            return;
+        }
+    };
+    if let Err(error) = store.put_meta(LAST_RUN_LOG_KEY, &bytes) {
+        tracing::warn!(error = %error, "wake: daemon last-run log not restored");
+    }
+}
+
+/// Capture the provider gate (`provider:gate:v1`, Phase 53g PR 4) so a
+/// relocated or re-woken akh keeps backing off a rate-limited, exhausted or
+/// credential-rejecting provider. `None` when the akh has no gate record; an
+/// unreadable one is logged and left out (the gate then starts open, which
+/// costs at most one failed model call per occurrence).
+fn capture_provider_gate(
+    engine: &Engine,
+) -> Option<crate::agent::provider_failure::ProviderGateState> {
+    match crate::agent::provider_failure::load_persisted(engine) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "snapshot: provider gate unreadable or corrupt; not captured"
+            );
+            None
+        }
+    }
+}
+
+/// Restore the provider gate captured by [`capture_provider_gate`]. An older
+/// snapshot without one leaves the store untouched; a malformed one is
+/// logged and skipped rather than failing the wake.
+fn restore_provider_gate(store: &TieredStore, extra: Option<&serde_json::Value>) {
+    use crate::agent::provider_failure::{PROVIDER_GATE_KEY, ProviderGateState};
+    let Some(value) = extra
+        .and_then(|extra| extra.get("provider"))
+        .and_then(|provider| provider.get("gate"))
+        .filter(|value| !value.is_null())
+    else {
+        return;
+    };
+    let state = match serde_json::from_value::<ProviderGateState>(value.clone()) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "wake: provider gate in the snapshot is malformed; the gate starts open"
+            );
+            return;
+        }
+    };
+    let bytes = match serde_json::to_vec(&state) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(error = %error, "wake: provider gate could not be encoded");
+            return;
+        }
+    };
+    if let Err(error) = store.put_meta(PROVIDER_GATE_KEY, &bytes) {
+        tracing::warn!(error = %error, "wake: provider gate not restored");
+    }
+}
+
+/// Capture the delegation incident ledger (`delegation:incidents:v1`, Phase
+/// 53g PR 7) so a relocated or re-woken akh keeps deduplicating escalations,
+/// its daily limit and its link to the worker sessions it started. `None`
+/// when the akh has no ledger; an unreadable one is logged and left out.
+fn capture_incident_ledger(
+    engine: &Engine,
+) -> Option<crate::agent::delegation::ledger::LedgerState> {
+    match crate::agent::delegation::ledger::load_persisted(engine) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "snapshot: incident ledger unreadable or corrupt; not captured"
+            );
+            None
+        }
+    }
+}
+
+/// Restore the incident ledger captured by [`capture_incident_ledger`]. An
+/// older snapshot without one leaves the store untouched; a malformed one is
+/// logged and skipped rather than failing the wake.
+fn restore_incident_ledger(store: &TieredStore, extra: Option<&serde_json::Value>) {
+    use crate::agent::delegation::ledger::{INCIDENT_LEDGER_KEY, LedgerState};
+    let Some(value) = extra
+        .and_then(|extra| extra.get("delegation"))
+        .and_then(|delegation| delegation.get("incidents"))
+        .filter(|value| !value.is_null())
+    else {
+        return;
+    };
+    let state = match serde_json::from_value::<LedgerState>(value.clone()) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "wake: incident ledger in the snapshot is malformed; not restored"
+            );
+            return;
+        }
+    };
+    let bytes = match serde_json::to_vec(&state) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(error = %error, "wake: incident ledger could not be encoded");
+            return;
+        }
+    };
+    if let Err(error) = store.put_meta(INCIDENT_LEDGER_KEY, &bytes) {
+        tracing::warn!(error = %error, "wake: incident ledger not restored");
     }
 }
 
@@ -3469,8 +3727,13 @@ fn apply_mutation_with_future(
         "retract" => {
             let triple = payload_triple_ids(&m.payload)?;
             validate_replay_symbols_registered(engine, triple, "retract")?;
+            // Legacy single-edge record: its writer (pre-`retract_batch`
+            // `remove_triple`) logged only the primary edge and relied on
+            // replay re-deriving the unconditional object-symbol cascade.
+            // Replay must reproduce that writer's semantics, so this is the
+            // one place that keeps `RetractionScope::Symbol`.
             engine
-                .remove_triple(triple.0, triple.1, triple.2)
+                .retract_object_symbol(triple.0, triple.1, triple.2)
                 .map_err(|error| SnapshotError::Engine(error.to_string()))?;
             Ok(true)
         }
@@ -4243,6 +4506,239 @@ mod tests {
     }
 
     #[test]
+    fn budget_ledger_roundtrips_through_snapshot_extra() {
+        use crate::agent::autonomy::{BUDGET_LEDGER_KEY, BudgetLedger, UtcDay};
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..EngineConfig::default()
+        })
+        .unwrap();
+        assert_eq!(capture_budget_ledger(&engine), None, "no ledger yet");
+        let ledger = BudgetLedger {
+            day: UtcDay::from_unix_secs(1_790_251_200),
+            tokens_used: 12_345,
+            turns_used: 7,
+        };
+        engine
+            .store()
+            .put_meta(BUDGET_LEDGER_KEY, &serde_json::to_vec(&ledger).unwrap())
+            .unwrap();
+        let captured = capture_budget_ledger(&engine).expect("captured");
+        assert_eq!(captured, ledger);
+
+        let extra = serde_json::json!({ "autonomy": { "budget_ledger": captured } });
+        let restored_dir = tempfile::tempdir().unwrap();
+        let store = TieredStore::with_persistence(restored_dir.path(), "snapshot-ledger").unwrap();
+        restore_budget_ledger(&store, Some(&extra));
+        let bytes = store
+            .get_meta(BUDGET_LEDGER_KEY)
+            .unwrap()
+            .expect("restored");
+        assert_eq!(
+            serde_json::from_slice::<BudgetLedger>(&bytes).unwrap(),
+            ledger
+        );
+
+        // Older snapshots (no envelope, or a null ledger) leave the store alone;
+        // a malformed ledger is skipped, not fatal.
+        restore_budget_ledger(&store, Some(&serde_json::json!({})));
+        restore_budget_ledger(
+            &store,
+            Some(&serde_json::json!({ "autonomy": { "budget_ledger": null } })),
+        );
+        restore_budget_ledger(
+            &store,
+            Some(&serde_json::json!({ "autonomy": { "budget_ledger": "bogus" } })),
+        );
+        let bytes = store.get_meta(BUDGET_LEDGER_KEY).unwrap().expect("kept");
+        assert_eq!(
+            serde_json::from_slice::<BudgetLedger>(&bytes).unwrap(),
+            ledger
+        );
+    }
+
+    #[test]
+    fn provider_gate_roundtrips_through_snapshot_extra() {
+        use crate::agent::autonomy::UnixSecs;
+        use crate::agent::provider_failure::{
+            CooldownLadder, CoolingCause, PROVIDER_GATE_KEY, ProviderFailureClass, ProviderGate,
+            ProviderGateState,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(
+            Engine::new(EngineConfig {
+                data_dir: Some(dir.path().to_path_buf()),
+                ..EngineConfig::default()
+            })
+            .unwrap(),
+        );
+        assert_eq!(capture_provider_gate(&engine), None, "no gate yet");
+        let now = UnixSecs::from_secs(1_790_251_200);
+        let gate = ProviderGate::open(&engine, CooldownLadder::default()).unwrap();
+        gate.record_failure(ProviderFailureClass::Quota, now)
+            .unwrap();
+        let captured = capture_provider_gate(&engine).expect("captured");
+        assert!(matches!(
+            captured,
+            ProviderGateState::Cooling {
+                cause: CoolingCause::Quota,
+                step: 0,
+                ..
+            }
+        ));
+
+        let extra = serde_json::json!({ "provider": { "gate": captured } });
+        let restored_dir = tempfile::tempdir().unwrap();
+        let store =
+            TieredStore::with_persistence(restored_dir.path(), "snapshot-provider-gate").unwrap();
+        restore_provider_gate(&store, Some(&extra));
+        let bytes = store
+            .get_meta(PROVIDER_GATE_KEY)
+            .unwrap()
+            .expect("restored");
+        assert_eq!(
+            serde_json::from_slice::<ProviderGateState>(&bytes).unwrap(),
+            captured
+        );
+
+        // Older snapshots (no envelope, or a null gate) leave the store alone;
+        // a malformed gate is skipped, not fatal.
+        restore_provider_gate(&store, Some(&serde_json::json!({})));
+        restore_provider_gate(
+            &store,
+            Some(&serde_json::json!({ "provider": { "gate": null } })),
+        );
+        restore_provider_gate(
+            &store,
+            Some(&serde_json::json!({ "provider": { "gate": "bogus" } })),
+        );
+        let bytes = store.get_meta(PROVIDER_GATE_KEY).unwrap().expect("kept");
+        assert_eq!(
+            serde_json::from_slice::<ProviderGateState>(&bytes).unwrap(),
+            captured
+        );
+    }
+
+    #[test]
+    fn incident_ledger_roundtrips_through_snapshot_extra() {
+        use crate::agent::autonomy::UnixSecs;
+        use crate::agent::delegation::ledger::{
+            INCIDENT_LEDGER_KEY, IncidentKey, IncidentKind, IncidentLedger, LedgerState,
+            NewIncident, request_id_for,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(
+            Engine::new(EngineConfig {
+                data_dir: Some(dir.path().to_path_buf()),
+                ..EngineConfig::default()
+            })
+            .unwrap(),
+        );
+        assert_eq!(capture_incident_ledger(&engine), None, "no ledger yet");
+        let ledger = IncidentLedger::open(&engine).unwrap();
+        let key = IncidentKey::parse("WI-403-owner").unwrap();
+        ledger
+            .admit(
+                NewIncident {
+                    request_id: request_id_for("janus", IncidentKind::Escalation, &key),
+                    key: key.clone(),
+                    kind: IncidentKind::Escalation,
+                    project: "akh-medu".into(),
+                    workspace_profile: "janus-worker-akh-medu".into(),
+                    job: serde_json::json!({"summary": "x"}),
+                },
+                4,
+                UnixSecs::from_secs(1_790_251_200),
+            )
+            .unwrap();
+        let captured = capture_incident_ledger(&engine).expect("captured");
+        assert!(captured.records.contains_key("WI-403-owner"));
+
+        let extra = serde_json::json!({ "delegation": { "incidents": captured } });
+        let restored_dir = tempfile::tempdir().unwrap();
+        let store =
+            TieredStore::with_persistence(restored_dir.path(), "snapshot-incident-ledger").unwrap();
+        restore_incident_ledger(&store, Some(&extra));
+        let bytes = store
+            .get_meta(INCIDENT_LEDGER_KEY)
+            .unwrap()
+            .expect("restored");
+        assert_eq!(
+            serde_json::from_slice::<LedgerState>(&bytes).unwrap(),
+            captured
+        );
+
+        // Older snapshots leave the store alone; a malformed ledger is skipped.
+        restore_incident_ledger(&store, Some(&serde_json::json!({})));
+        restore_incident_ledger(
+            &store,
+            Some(&serde_json::json!({ "delegation": { "incidents": null } })),
+        );
+        restore_incident_ledger(
+            &store,
+            Some(&serde_json::json!({ "delegation": { "incidents": { "records": 3 } } })),
+        );
+        let bytes = store.get_meta(INCIDENT_LEDGER_KEY).unwrap().expect("kept");
+        assert_eq!(
+            serde_json::from_slice::<LedgerState>(&bytes).unwrap(),
+            captured
+        );
+    }
+
+    #[test]
+    fn last_run_log_roundtrips_through_snapshot_extra() {
+        use crate::agent::autonomy::{
+            DaemonTask, LAST_RUN_LOG_KEY, LastRun, LastRunCause, LastRunLog, LastRunStore, UnixSecs,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(
+            Engine::new(EngineConfig {
+                data_dir: Some(dir.path().to_path_buf()),
+                ..EngineConfig::default()
+            })
+            .unwrap(),
+        );
+        assert_eq!(capture_last_run_log(&engine), None, "no log yet");
+        let ran = LastRun {
+            at: UnixSecs::from_secs(1_790_251_200),
+            cause: LastRunCause::Ran,
+        };
+        LastRunStore::open(&engine)
+            .unwrap()
+            .record(DaemonTask::Librarian, ran)
+            .unwrap();
+        let captured = capture_last_run_log(&engine).expect("captured");
+        assert_eq!(captured.get(DaemonTask::Librarian), Some(ran));
+
+        let extra = serde_json::json!({ "autonomy": { "last_run": captured } });
+        let restored_dir = tempfile::tempdir().unwrap();
+        let store =
+            TieredStore::with_persistence(restored_dir.path(), "snapshot-last-run").unwrap();
+        restore_last_run_log(&store, Some(&extra));
+        let bytes = store.get_meta(LAST_RUN_LOG_KEY).unwrap().expect("restored");
+        let restored: LastRunLog = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored, captured);
+
+        // Older snapshots (no envelope, or a null log) leave the store alone;
+        // a malformed log is skipped, not fatal.
+        restore_last_run_log(&store, Some(&serde_json::json!({})));
+        restore_last_run_log(
+            &store,
+            Some(&serde_json::json!({ "autonomy": { "last_run": null } })),
+        );
+        restore_last_run_log(
+            &store,
+            Some(&serde_json::json!({ "autonomy": { "last_run": "bogus" } })),
+        );
+        let bytes = store.get_meta(LAST_RUN_LOG_KEY).unwrap().expect("kept");
+        assert_eq!(
+            serde_json::from_slice::<LastRunLog>(&bytes).unwrap(),
+            captured
+        );
+    }
+
+    #[test]
     fn reactor_metadata_restore_rejects_keys_outside_allow_list() {
         let tmp = tempfile::tempdir().unwrap();
         let store = TieredStore::with_persistence(tmp.path(), "symbols").unwrap();
@@ -4336,6 +4832,8 @@ mod tests {
                 agent_id: None,
                 allow_tools: false,
                 require_mutation: false,
+                exit_condition: String::new(),
+                report_thread: None,
             },
             0,
         )

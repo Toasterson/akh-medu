@@ -850,7 +850,9 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::agent::tool_manifest::{Capability, DangerInfo, DangerLevel, ToolSource};
+    use crate::agent::tool_manifest::{
+        Capability, DangerInfo, DangerLevel, ToolEffect, ToolSource,
+    };
 
     #[test]
     fn truncate_summary_handles_multibyte_at_boundary() {
@@ -891,6 +893,7 @@ mod tests {
                     description: "w".into(),
                     parameters: vec![],
                     danger: DangerInfo {
+                        effect: ToolEffect::Mutating,
                         level: DangerLevel::Dangerous,
                         capabilities: HashSet::from([Capability::WriteFilesystem]),
                         description: "w".into(),
@@ -957,6 +960,7 @@ mod tests {
                 description: "A test tool".into(),
                 parameters: vec![],
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Safe,
                     capabilities: HashSet::from([Capability::ReadKg]),
                     description: "Safe test tool".into(),

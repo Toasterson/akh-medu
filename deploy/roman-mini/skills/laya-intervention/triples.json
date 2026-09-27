@@ -1,0 +1,20 @@
+[
+  {"subject": "intervention_outcome", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "intervention_next_event", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+
+  {"subject": "fix_applied", "predicate": "is-a", "object": "intervention_outcome_value", "confidence": 1.0},
+  {"subject": "human_required", "predicate": "is-a", "object": "intervention_outcome_value", "confidence": 1.0},
+  {"subject": "waiting", "predicate": "is-a", "object": "intervention_outcome_value", "confidence": 1.0},
+  {"subject": "blocked", "predicate": "is-a", "object": "intervention_outcome_value", "confidence": 1.0},
+
+  {"subject": "human_reply", "predicate": "is-a", "object": "intervention_next_event_value", "confidence": 1.0},
+  {"subject": "dependency_changed", "predicate": "is-a", "object": "intervention_next_event_value", "confidence": 1.0},
+  {"subject": "lane_recovered", "predicate": "is-a", "object": "intervention_next_event_value", "confidence": 1.0},
+  {"subject": "ci_completed", "predicate": "is-a", "object": "intervention_next_event_value", "confidence": 1.0},
+  {"subject": "review_completed", "predicate": "is-a", "object": "intervention_next_event_value", "confidence": 1.0},
+  {"subject": "work_item_changed", "predicate": "is-a", "object": "intervention_next_event_value", "confidence": 1.0},
+  {"subject": "none", "predicate": "is-a", "object": "intervention_next_event_value", "confidence": 1.0},
+
+  {"subject": "human_required", "predicate": "requires", "object": "human_reply", "confidence": 1.0},
+  {"subject": "waiting", "predicate": "requires", "object": "named_next_event", "confidence": 1.0}
+]

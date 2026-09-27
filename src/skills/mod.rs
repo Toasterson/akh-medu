@@ -16,6 +16,7 @@ pub mod curriculum;
 pub mod discover;
 pub mod graph;
 pub mod manager;
+pub mod procedures;
 pub mod quality;
 pub mod refine;
 pub mod share;

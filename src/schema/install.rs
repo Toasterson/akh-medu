@@ -17,11 +17,11 @@ use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::symbol::SymbolId;
 
-use super::compile::{CompiledSchemaPack, PRED_IS_A, RELATION_MARKER, TYPE_MARKER};
+use super::compile::{CompiledSchemaPack, PRED_ALIAS_OF, PRED_IS_A, RELATION_MARKER, TYPE_MARKER};
 use super::{SchemaError, SchemaResult};
 
 /// Marker predicate: `(mt-symbol, akh:schema-installed, name@version)`.
-const INSTALLED_PREDICATE: &str = "akh:schema-installed";
+pub(crate) const INSTALLED_PREDICATE: &str = "akh:schema-installed";
 
 /// The deterministic label for a workspace's effective-schema import context
 /// — the target of every `ctx:specializes` activation edge installed for
@@ -105,7 +105,11 @@ pub fn install_pack(engine: &Engine, pack: &CompiledSchemaPack) -> SchemaResult<
     let mut applied = 0usize;
     for pt in &pack.triples {
         // Seed convention: `(r, is-a, relation)` mints the subject as a Relation.
-        let subject = if pt.predicate == PRED_IS_A && pt.object == RELATION_MARKER {
+        // Phase 53j: an alias (`(alias, onto:alias-of, r)`) is a predicate
+        // spelling too, so it is minted as a Relation as well.
+        let subject = if (pt.predicate == PRED_IS_A && pt.object == RELATION_MARKER)
+            || pt.predicate == PRED_ALIAS_OF
+        {
             engine.resolve_or_create_relation(&pt.subject)
         } else {
             engine.resolve_or_create_entity(&pt.subject)

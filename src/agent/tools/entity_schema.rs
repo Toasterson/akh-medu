@@ -32,7 +32,7 @@
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use crate::schema::compile::PRED_IS_A;
@@ -190,6 +190,7 @@ impl Tool for EntitySchemaTool {
                 "Entity name or ID to inspect.",
             )],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::ReadKg]),
                 description: "Read-only entity schema inspection — no side effects.".into(),
@@ -275,6 +276,7 @@ impl Tool for EntityTypesTool {
             description: "List every distinct entity type (is-a objects) with counts.".into(),
             parameters: vec![],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::ReadKg]),
                 description: "Read-only entity type census — no side effects.".into(),
@@ -428,6 +430,7 @@ impl Tool for EntityTypeFilterTool {
                 ToolParamSchema::optional("page_size", "Page size (default: 50, max 500)."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::ReadKg]),
                 description: "Read-only paginated entity type filter — no side effects.".into(),

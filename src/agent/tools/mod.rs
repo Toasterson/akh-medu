@@ -16,6 +16,7 @@ pub mod diagnostics;
 pub mod doc_gen;
 pub mod edit;
 pub mod entity_schema;
+pub mod escalation;
 pub mod file_io;
 pub mod gap_analysis;
 pub mod glob;
@@ -24,14 +25,25 @@ pub mod http_fetch;
 pub mod infer_rules;
 pub mod inference_config;
 pub mod kg_delete;
+pub mod kg_merge_predicates;
 pub mod kg_mutate;
 pub mod kg_query;
 pub mod mcp;
+pub mod mcp_config;
+// Static per-akh MCP servers (Phase 53i) proxy through
+// `crate::upstream_client::UpstreamMcpClient`, which is `daemon`-gated.
+#[cfg(feature = "daemon")]
+pub mod mcp_static;
 pub mod memory_recall;
 pub mod memory_write;
+pub mod monitoring_snapshot;
 pub mod openclaw_discover;
 pub mod pattern_mine;
 pub mod reason;
+// Additional named execd sandboxes (Phase 53g PR 8) allocate through
+// `crate::backend::execd::ExecdBackend`, which is `execd-executor`-gated.
+#[cfg(feature = "execd-executor")]
+pub mod sandbox_exec;
 pub mod shell_exec;
 pub mod similarity_search;
 pub mod skill_author;
@@ -53,7 +65,7 @@ pub mod trigger_manage;
 
 pub use agent_management::{AgentListTool, AgentMessageTool, AgentRetireTool, AgentSpawnTool};
 pub use audit_log::AuditLogTool;
-pub use code_gen::CodeGenTool;
+pub use code_gen::{CodeGenTool, RustFormatter};
 pub use code_ingest::CodeIngestTool;
 pub use code_predicates::CodePredicates;
 pub use compile_feedback::CompileFeedbackTool;
@@ -65,6 +77,9 @@ pub use diagnostics::DiagnosticsTool;
 pub use doc_gen::DocGenTool;
 pub use edit::EditTool;
 pub use entity_schema::{EntitySchemaTool, EntityTypeFilterTool, EntityTypesTool};
+pub use escalation::{
+    DispatchMergeRepairTool, EscalateTool, EscalationStatusTool, escalation_tools,
+};
 pub use file_io::FileIoTool;
 pub use gap_analysis::GapAnalysisTool;
 pub use glob::GlobTool;
@@ -73,16 +88,31 @@ pub use http_fetch::HttpFetchTool;
 pub use infer_rules::InferRulesTool;
 pub use inference_config::InferenceConfigTool;
 pub use kg_delete::KgDeleteTool;
+pub use kg_merge_predicates::KgMergePredicatesTool;
 pub use kg_mutate::KgMutateTool;
 pub use kg_query::KgQueryTool;
-pub use mcp::{McpCallTool, McpClient, McpDiscoverTool, McpError, McpServerConfig};
+pub use mcp::{
+    McpCallTool, McpClient, McpDiscoverTool, McpError, McpServerConfig, McpToolDescriptor,
+};
+pub use mcp_config::{
+    McpAuthError, McpRemoteToolName, McpServerAuth, McpServerConfigProblem, McpServerName,
+    McpServerSpec, McpServersConfigError,
+};
+#[cfg(feature = "daemon")]
+pub use mcp_static::{
+    McpAttachReport, McpRetryPolicy, McpServerAttachOutcome, RegistryChangedHook, StaticMcpError,
+    attach_static_mcp_servers,
+};
 pub use memory_recall::MemoryRecallTool;
 pub use memory_write::MemoryWriteTool;
+pub use monitoring_snapshot::{MonitoringConfig, MonitoringSnapshotTool};
 pub use openclaw_discover::OpenClawDiscoverTool;
 pub use pattern_mine::PatternMineTool;
 #[cfg(feature = "daemon")]
 pub use reactor_manage::ReactorManageTool;
 pub use reason::ReasonTool;
+#[cfg(feature = "execd-executor")]
+pub use sandbox_exec::{SandboxConnector, SandboxEntry, SandboxExecError, SandboxExecTool};
 pub use shell_exec::ShellExecTool;
 pub use similarity_search::SimilaritySearchTool;
 pub use skill_author::SkillAuthorTool;

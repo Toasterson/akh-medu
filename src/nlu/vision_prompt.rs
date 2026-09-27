@@ -54,9 +54,8 @@ pub fn expand_single_image(
         return Err(refuse(false));
     };
     let at = *at;
-    let bracketed = at > 0
-        && tokens[at - 1] == specials.start
-        && tokens.get(at + 1) == Some(&specials.end);
+    let bracketed =
+        at > 0 && tokens[at - 1] == specials.start && tokens.get(at + 1) == Some(&specials.end);
     if !bracketed {
         return Err(refuse(false));
     }
@@ -128,7 +127,11 @@ mod tests {
         let error = expand_single_image(&[10, 11], SPECIALS, grid).unwrap_err();
         assert!(matches!(
             error,
-            NluError::ImagePlaceholder { found: 0, bracketed: false, grid_tokens: 1 }
+            NluError::ImagePlaceholder {
+                found: 0,
+                bracketed: false,
+                grid_tokens: 1
+            }
         ));
     }
 
@@ -144,14 +147,21 @@ mod tests {
     fn an_unbracketed_placeholder_is_refused() {
         let grid = ImageGrid { rows: 1, cols: 1 };
         for tokens in [
-            vec![901, 902],      // no start
-            vec![900, 901],      // no end
-            vec![901],           // bare
+            vec![901, 902],         // no start
+            vec![900, 901],         // no end
+            vec![901],              // bare
             vec![900, 5, 901, 902], // start not adjacent
         ] {
             let error = expand_single_image(&tokens, SPECIALS, grid).unwrap_err();
             assert!(
-                matches!(error, NluError::ImagePlaceholder { found: 1, bracketed: false, .. }),
+                matches!(
+                    error,
+                    NluError::ImagePlaceholder {
+                        found: 1,
+                        bracketed: false,
+                        ..
+                    }
+                ),
                 "{tokens:?}"
             );
         }

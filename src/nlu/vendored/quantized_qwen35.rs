@@ -326,11 +326,7 @@ impl PartialRope {
         // it needs no split. Refuse only a genuine image layout on an artifact
         // that cannot describe one, which is the case that would silently place
         // image tokens as text.
-        if self.sections.is_empty()
-            && positions
-                .iter()
-                .any(|[t, h, w]| t != h || h != w)
-        {
+        if self.sections.is_empty() && positions.iter().any(|[t, h, w]| t != h || h != w) {
             candle_core::bail!(
                 "this artifact declares no usable rope dimension sections, so image \
                  positions cannot be threaded; text positions would silently mis-place them"
@@ -614,7 +610,12 @@ impl KvPages {
     }
 
     /// Resident code bytes against the f32 they replace.
-    fn stored_and_uncompressed_bytes(&self, heads: usize, dim: usize, batch: usize) -> (usize, usize) {
+    fn stored_and_uncompressed_bytes(
+        &self,
+        heads: usize,
+        dim: usize,
+        batch: usize,
+    ) -> (usize, usize) {
         let vectors = batch * heads * self.positions;
         let code_bytes = match self.layout {
             CodeLayout::Byte => vectors * dim * self.code_element_bytes,
@@ -664,10 +665,7 @@ impl KvPages {
     }
 
     /// Append freshly quantized pages to whatever is already held.
-    fn extend(
-        existing: &mut Option<Tensor>,
-        addition: Tensor,
-    ) -> Result<()> {
+    fn extend(existing: &mut Option<Tensor>, addition: Tensor) -> Result<()> {
         *existing = Some(match existing.take() {
             None => addition,
             Some(held) => Tensor::cat(&[&held, &addition], 2)?.contiguous()?,
@@ -801,7 +799,12 @@ impl KvPages {
     }
 
     /// The stored keys and values, reconstructed.
-    fn decode_pair(&self, batch: usize, heads: usize, dim: usize) -> Result<Option<(Tensor, Tensor)>> {
+    fn decode_pair(
+        &self,
+        batch: usize,
+        heads: usize,
+        dim: usize,
+    ) -> Result<Option<(Tensor, Tensor)>> {
         let (Some(kc), Some(kn), Some(vc), Some(vn)) = (
             self.key_codes.as_ref(),
             self.key_norms.as_ref(),
@@ -1007,9 +1010,12 @@ impl FullAttention {
                     KvPages::extend(&mut pages.value_norms, value_norms)?;
                     pages.positions += overflow;
                 }
-                let recent_key = key.narrow(2, overflow, positions - overflow)?.contiguous()?;
-                let recent_value =
-                    value.narrow(2, overflow, positions - overflow)?.contiguous()?;
+                let recent_key = key
+                    .narrow(2, overflow, positions - overflow)?
+                    .contiguous()?;
+                let recent_value = value
+                    .narrow(2, overflow, positions - overflow)?
+                    .contiguous()?;
                 let full = match pages.decode_pair(batch, heads, dim)? {
                     Some((old_key, old_value)) => (
                         Tensor::cat(&[&old_key.to_dtype(key.dtype())?, &recent_key], 2)?,
@@ -1289,7 +1295,9 @@ impl Layer {
     ) -> Result<Tensor> {
         let residual = x;
         let normalized = self.input_norm.forward(x)?;
-        let mixed = self.mixer.forward(state, &normalized, mask, index_pos, rope)?;
+        let mixed = self
+            .mixer
+            .forward(state, &normalized, mask, index_pos, rope)?;
         let x = (residual + mixed)?;
         let mlp = self.mlp.forward(&self.post_attention_norm.forward(&x)?)?;
         x + mlp
@@ -2288,9 +2296,7 @@ impl InferenceSession {
             Some(rows) => {
                 let (_, rows_len, _) = rows.dims3()?;
                 if rows_len != seq_len {
-                    candle_core::bail!(
-                        "{rows_len} supplied embedding rows for {seq_len} tokens"
-                    )
+                    candle_core::bail!("{rows_len} supplied embedding rows for {seq_len} tokens")
                 }
                 rows.clone()
             }
@@ -2438,7 +2444,6 @@ impl InferenceSession {
         self.decode_step_with_hidden(tokens, index_pos)
     }
 }
-
 
 /// Deliberately tiny, complete Qwen3.5 artifacts for CPU tests in this and
 /// dependent crates. Mixer and MLP matrices are zero, so every post-block
@@ -2674,7 +2679,6 @@ pub mod test_fixture {
         gguf_file::write(&mut writer, &metadata_refs, &tensor_refs).unwrap();
         writer.into_inner()
     }
-
 }
 
 #[cfg(test)]
@@ -2702,8 +2706,7 @@ pub(crate) mod tests {
         let mut norms: Vec<f32> = Vec::new();
         let mut host = Vec::new();
         for slot in 0..heads {
-            let mut store =
-                crate::nlu::turbo_quant::KvPageStore::with_quantizer(quantizer.clone());
+            let mut store = crate::nlu::turbo_quant::KvPageStore::with_quantizer(quantizer.clone());
             for position in 0..positions {
                 let row: Vec<f32> = (0..dim)
                     .map(|d| ((slot * 31 + position * 7 + d) % 53) as f32 / 26.0 - 1.0)
@@ -2817,8 +2820,7 @@ pub(crate) mod tests {
         let tensor = Tensor::from_vec(values, (1, heads, positions, dim), &device).unwrap();
 
         let measure = |bits: u8| {
-            let mut pages =
-                KvPages::new(KvQuantization { bits, recent: 2 }, dim, &device).unwrap();
+            let mut pages = KvPages::new(KvQuantization { bits, recent: 2 }, dim, &device).unwrap();
             // Switch measurement on directly; the env flag is read once per
             // process and a test cannot rely on winning that race.
             pages.fidelity = Some(KvPageFidelity::default());
@@ -2904,11 +2906,17 @@ pub(crate) mod tests {
         );
 
         // Wrong count is a refusal, not a silent truncation.
-        assert!(rope.apply(&x, RopePositions::PerToken(&image[..2])).is_err());
+        assert!(
+            rope.apply(&x, RopePositions::PerToken(&image[..2]))
+                .is_err()
+        );
 
         // And an artifact with no declared split refuses image positions rather
         // than quietly placing them as text.
-        let unsplit = PartialRope { sections: Vec::new(), ..rope.clone() };
+        let unsplit = PartialRope {
+            sections: Vec::new(),
+            ..rope.clone()
+        };
         assert!(unsplit.apply(&x, RopePositions::PerToken(&image)).is_err());
         assert!(unsplit.apply(&x, RopePositions::Contiguous(start)).is_ok());
     }
@@ -2917,7 +2925,8 @@ pub(crate) mod tests {
     fn grouped_attention_is_the_same_arithmetic_as_materializing_the_repeat() {
         use candle_transformers::utils::repeat_kv;
         let device = Device::Cpu;
-        let (batch, kv_heads, ratio, seq, positions, dim) = (1usize, 3usize, 4usize, 5usize, 7usize, 8usize);
+        let (batch, kv_heads, ratio, seq, positions, dim) =
+            (1usize, 3usize, 4usize, 5usize, 7usize, 8usize);
         let heads = kv_heads * ratio;
 
         // Distinct values everywhere, so a head-ordering error cannot cancel.
@@ -2968,7 +2977,9 @@ pub(crate) mod tests {
 
         // And the value matmul, which reuses the same grouping.
         let probabilities = softmax_last_dim(&reference_scores).unwrap();
-        let reference_attended = probabilities.matmul(&wide_value.contiguous().unwrap()).unwrap();
+        let reference_attended = probabilities
+            .matmul(&wide_value.contiguous().unwrap())
+            .unwrap();
         let grouped_attended = probabilities
             .reshape((batch, kv_heads, ratio * seq, positions))
             .unwrap()
@@ -2977,8 +2988,16 @@ pub(crate) mod tests {
             .reshape((batch, heads, seq, dim))
             .unwrap();
         assert_eq!(
-            reference_attended.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
-            grouped_attended.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            reference_attended
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            grouped_attended
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
             "grouped attention output must match head for head"
         );
 
@@ -3094,12 +3113,20 @@ pub(crate) mod tests {
         // from the same rule, so the test is not the implementation restated.
         let image = mrope_pair_positions(&sections, 32, 3, 5, 9);
         let expected = [
-            3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3,
-            5, 9, 3, 5,
+            3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5, 9, 3, 5,
+            9, 3, 5,
         ];
         assert_eq!(image, expected.to_vec());
-        assert_eq!(image.iter().filter(|p| **p == 3).count(), 11, "temporal pairs");
-        assert_eq!(image.iter().filter(|p| **p == 5).count(), 11, "height pairs");
+        assert_eq!(
+            image.iter().filter(|p| **p == 3).count(),
+            11,
+            "temporal pairs"
+        );
+        assert_eq!(
+            image.iter().filter(|p| **p == 5).count(),
+            11,
+            "height pairs"
+        );
         assert_eq!(image.iter().filter(|p| **p == 9).count(), 10, "width pairs");
         // The Qwen2-VL block layout is exactly what this must not be.
         assert_ne!(&image[..11], &[3usize; 11]);
@@ -3108,13 +3135,19 @@ pub(crate) mod tests {
     #[test]
     fn mrope_falls_back_to_the_temporal_index_beyond_the_declared_sections() {
         // A height section of one covers only pair 1; no width section at all.
-        assert_eq!(mrope_pair_positions(&[2, 1], 5, 1, 2, 3), vec![1, 2, 1, 1, 1]);
+        assert_eq!(
+            mrope_pair_positions(&[2, 1], 5, 1, 2, 3),
+            vec![1, 2, 1, 1, 1]
+        );
         // A model with none declared is all text.
         assert_eq!(mrope_pair_positions(&[], 3, 4, 5, 6), vec![4, 4, 4]);
         // A temporal-only split never reaches for height or width.
         assert_eq!(mrope_pair_positions(&[9], 2, 1, 2, 3), vec![1, 1]);
         // Interleaving never runs past the rotary width.
-        assert_eq!(mrope_pair_positions(&[11, 11, 10], 4, 1, 2, 3), vec![1, 2, 3, 1]);
+        assert_eq!(
+            mrope_pair_positions(&[11, 11, 10], 4, 1, 2, 3),
+            vec![1, 2, 3, 1]
+        );
     }
 
     static Q8_ROUTE_ENV: Mutex<()> = Mutex::new(());
@@ -3449,7 +3482,13 @@ pub(crate) mod tests {
             )
             .unwrap();
             hidden = layer
-                .forward(&mut layer.mixer.empty_state(), &hidden, Some(&mask), 0, None)
+                .forward(
+                    &mut layer.mixer.empty_state(),
+                    &hidden,
+                    Some(&mask),
+                    0,
+                    None,
+                )
                 .unwrap();
         }
         let norm = RmsNorm::from_qtensor(
@@ -3585,11 +3624,15 @@ pub(crate) mod tests {
 
     #[test]
     fn decode_after_an_image_continues_from_the_rope_cursor_not_the_cache_length() {
-        use crate::nlu::vision_positions::{position_triples, ImageGrid, PromptPiece};
+        use crate::nlu::vision_positions::{ImageGrid, PromptPiece, position_triples};
         let bytes = tiny_gguf();
         let device = Device::Cpu;
         let grid = ImageGrid { rows: 2, cols: 3 };
-        let pieces = [PromptPiece::Text(2), PromptPiece::Image(grid), PromptPiece::Text(1)];
+        let pieces = [
+            PromptPiece::Text(2),
+            PromptPiece::Image(grid),
+            PromptPiece::Text(1),
+        ];
         let positions = position_triples(&pieces);
         let total = positions.len();
         // text(2) -> cursor 2; the image spans max(2, 3) = 3 -> cursor 5; text(1)
@@ -3600,7 +3643,12 @@ pub(crate) mod tests {
 
         let mut model = load_tiny_model(&bytes);
         assert_eq!(model.rope_cursor(), None, "no image forwarded yet");
-        let tokens = Tensor::from_vec((0..total as u32).map(|i| i % 4).collect::<Vec<_>>(), (1, total), &device).unwrap();
+        let tokens = Tensor::from_vec(
+            (0..total as u32).map(|i| i % 4).collect::<Vec<_>>(),
+            (1, total),
+            &device,
+        )
+        .unwrap();
         let rows = model.embed_tokens(&tokens).unwrap();
         model.prefill_embedded(&tokens, &rows, &positions).unwrap();
         assert_eq!(model.rope_cursor(), Some(expected_cursor));
@@ -3619,7 +3667,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_text_and_image_prompt_runs_end_to_end_with_grid_derived_positions() {
-        use crate::nlu::vision_positions::{position_triples, ImageGrid, PromptPiece};
+        use crate::nlu::vision_positions::{ImageGrid, PromptPiece, position_triples};
         let bytes = tiny_gguf();
         let device = Device::Cpu;
 
@@ -3671,7 +3719,10 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(logits.dims()[0], 1);
         let values: Vec<f32> = logits.flatten_all().unwrap().to_vec1().unwrap();
-        assert!(values.iter().all(|v| v.is_finite()), "logits must be finite");
+        assert!(
+            values.iter().all(|v| v.is_finite()),
+            "logits must be finite"
+        );
 
         // This fixture's mixer weights are zero, so every path through it
         // produces zero logits. Assert that rather than work around it: the
@@ -3733,7 +3784,11 @@ pub(crate) mod tests {
         assert!(third.prefill_embedded(&tokens, &short, &positions).is_err());
         // As is a triple count that disagrees.
         let mut fourth = load_tiny_model(&bytes);
-        assert!(fourth.prefill_embedded(&tokens, &rows, &positions[..2]).is_err());
+        assert!(
+            fourth
+                .prefill_embedded(&tokens, &rows, &positions[..2])
+                .is_err()
+        );
 
         // Splicing different rows must change the answer, or the supplied
         // embeddings are being ignored and images would silently do nothing.
@@ -3746,7 +3801,10 @@ pub(crate) mod tests {
             .unwrap()
             .to_vec1()
             .unwrap();
-        assert_ne!(reference, spliced, "supplied embeddings must reach the stack");
+        assert_ne!(
+            reference, spliced,
+            "supplied embeddings must reach the stack"
+        );
     }
 
     #[test]

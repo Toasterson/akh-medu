@@ -58,6 +58,7 @@ pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result
                 .unwrap_or_else(|| "/unused".into()),
             allow_insecure_http: endpoint.allow_insecure_http,
             request_timeout_secs: None,
+            anonymous: false,
         }
         .validate()?;
         if endpoint
@@ -134,7 +135,7 @@ pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result
         }
     }
     if profile.kind != RuntimeKind::Internal
-        || profile.execution_mode != ExecutionMode::Brokered
+        || profile.execution_mode() != ExecutionMode::Brokered
         || profile.timeout_secs == 0
         || max_iterations == 0
         || max_iterations > 256
@@ -1169,7 +1170,7 @@ mod tests {
             revision: profile.revision.clone(),
             kind: profile.kind,
             model: Some(native.model.clone()),
-            execution_mode: profile.execution_mode,
+            execution_mode: profile.execution_mode(),
         };
         if cfg!(feature = "hip") {
             validate(profile, &request).unwrap();

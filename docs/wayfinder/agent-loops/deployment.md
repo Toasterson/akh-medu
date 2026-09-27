@@ -1,5 +1,13 @@
 # Deploying the session platform
 
+> **Superseded in part (Phase 53h, [ADR 113](../../ai/decisions/113-full-akh-always.md)):**
+> the "cognitive core" below is no longer a stripped `core-server` process. Every
+> deployed akhomed is fully featured (daemon loop, in-process turn, full tool
+> registry, ACP); the service split described in this document contains
+> execution and native runtimes only, not cognition. See the note on
+> `docker/core-service.Dockerfile` below and `docs/ai/architecture.md`'s
+> Deployment Topology section for the current shape.
+
 The topology separates the cognitive core, central sessions, runtime workers,
 sandbox allocation, workspace execution and event ingress. Runtime machines can
 be different from the workspace hosts. Each service owns its own state directory;
@@ -15,6 +23,12 @@ architecture natively through buildx. This Dockerfile does not install provider
 binaries, login credentials or editors. Add the selected pinned upstream tools
 in the corresponding image pipeline. The core uses `docker/core-service.Dockerfile`, which builds with
 `--no-default-features --features core-server`.
+
+> **Superseded (Phase 53h):** the `core-server` feature is gone. As of 53h,
+> `docker/core-service.Dockerfile` is rebuilt (not deleted) to build
+> `--features server` — the same full akhomed image as every other deployment
+> target, not a stripped one. `/v1` (`core-api`) is additive on that image and
+> only comes up when `AKH_CORE_CONFIG` is set at runtime.
 
 `docker/session-workspace.Dockerfile` copies the executor and service helper into
 a selected unmodified upstream workspace image. The images must match CPU and

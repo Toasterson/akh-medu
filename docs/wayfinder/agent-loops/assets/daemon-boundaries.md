@@ -32,6 +32,20 @@ outside this document.
 
 ## 1. Owners and dependencies
 
+> **Superseded in part (Phase 53h, [ADR 113](../../../ai/decisions/113-full-akh-always.md)):**
+> the table below still describes the pre-Phase-53 design, where cognition was
+> planned to move out of `akhomed` and admission/automation were planned to live
+> in `akhsessd`/`akheventd`. ADR 113 reversed that for the akh's own turn:
+> `akhomed` now also owns its resident daemon loops, its own in-process turn
+> (psyche, communicative intelligence, thinking, context strategies), the full
+> tool registry, ACP, and admission of external stimuli into its own
+> trigger/reactor system. `akhsessd` now only brokers native-runtime sessions for
+> delegations (Codex/Claude/OpenCode workers the akh delegates to), not
+> automation or admission for the akh itself. `akheventd` is a thin ingress
+> adapter that forwards typed events into `akhomed`'s reactor
+> (`POST /v1/akhs/{akh}/events`), rather than owning automation definitions and
+> run admission. The rows below are kept for the historical design rationale.
+
 | Process | Owns | Boundary |
 | --- | --- | --- |
 | `akhomed` | Akh configuration/persona, durable knowledge and memory, symbolic services, residency/WAL/snapshots, native cognitive tools | Does not host GUI transports, provider processes, external input polling or wall-clock session automation after migration. Internal storage maintenance stays here. |

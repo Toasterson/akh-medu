@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::source::{PackScope, SchemaPackSource, parse_source};
+use super::source::{Cardinality, PackScope, SchemaPackSource, parse_source};
 use super::{SchemaError, SchemaResult};
 
 // ---------------------------------------------------------------------------
@@ -37,6 +37,45 @@ pub const ARITY_2: &str = "onto:arity/2";
 pub const PRED_ARG1_TYPE: &str = "onto:arg1type";
 /// `(r, onto:arg2type, T)` — required object type (matches `ArityPredicates`).
 pub const PRED_ARG2_TYPE: &str = "onto:arg2type";
+
+/// `(r, onto:cardinality, onto:cardinality/…)` — declared cardinality of a
+/// relation (Phase 53j). Absent means multi-valued.
+pub const PRED_CARDINALITY: &str = "onto:cardinality";
+/// Cardinality value: one live object per subject, newest supersedes.
+pub const CARDINALITY_SINGLE_VALUED: &str = "onto:cardinality/single-valued";
+/// Cardinality value: single-valued, and superseded values are history
+/// (they stopped holding when the successor was asserted).
+pub const CARDINALITY_SINGLE_VALUED_TEMPORAL: &str = "onto:cardinality/single-valued-temporal";
+/// `(alias, onto:alias-of, r)` — `alias` is another spelling of relation `r`
+/// (Phase 53j; the same edge ADR 081 promotion records for aliased
+/// frontier terms).
+pub const PRED_ALIAS_OF: &str = "onto:alias-of";
+/// Cardinality value: explicitly multi-valued. Written only for an explicit
+/// `"cardinality": "multi"` (absence stays triple-free); it lets an akh's own
+/// pack override a built-in default pack's single-valued declaration.
+pub const CARDINALITY_MULTI: &str = "onto:cardinality/multi";
+
+// Built-in default tier (Phase 53 follow-up, `super::builtin`). A default
+// pack compiled into the binary (the fleet memory pack) installs its
+// declarations under these predicates instead of `is-a relation` /
+// `onto:cardinality` / `onto:alias-of`. The KG stores one edge per
+// `(subject, predicate, object)` whatever the compartment, so a default
+// declaration written with the pack predicates would merge into an akh
+// pack's identical edge and could never be told apart (or retired without
+// removing the akh pack's edge). Distinct predicates keep the two tiers
+// separate: every read in `super::cardinality` consults an akh pack's
+// declaration first and falls back to the default tier.
+
+/// `(r, onto:default-relation, relation)` — `r` is a relation declared by a
+/// built-in default pack.
+pub const PRED_DEFAULT_RELATION: &str = "onto:default-relation";
+/// `(r, onto:default-cardinality, onto:cardinality/…)` — default-tier
+/// cardinality; any `onto:cardinality` edge on `r` takes precedence.
+pub const PRED_DEFAULT_CARDINALITY: &str = "onto:default-cardinality";
+/// `(alias, onto:default-alias-of, r)` — default-tier alias; an akh pack's
+/// `onto:alias-of` edge, or an akh pack declaring `alias` as a relation,
+/// takes precedence.
+pub const PRED_DEFAULT_ALIAS_OF: &str = "onto:default-alias-of";
 
 /// Current blob format version. Bump on any incompatible change to
 /// [`CompiledSchemaPack`]'s layout.
@@ -173,6 +212,32 @@ fn lower(source: &SchemaPackSource, source_text: &str) -> CompiledSchemaPack {
         }
         if let Some(ref t2) = r.arg2_type {
             triples.push(PortableTriple::new(&r.name, PRED_ARG2_TYPE, t2));
+        }
+        // Phase 53j: cardinality + aliases. An absent cardinality is
+        // multi-valued and lowers to nothing, so packs without these fields
+        // compile to the exact same triples (and the same checksums) as
+        // before. An explicit `multi` is a declaration (it overrides a
+        // built-in default pack).
+        match (r.cardinality, r.temporal) {
+            (None, _) => {}
+            (Some(Cardinality::Multi), _) => triples.push(PortableTriple::new(
+                &r.name,
+                PRED_CARDINALITY,
+                CARDINALITY_MULTI,
+            )),
+            (Some(Cardinality::SingleValued), false) => triples.push(PortableTriple::new(
+                &r.name,
+                PRED_CARDINALITY,
+                CARDINALITY_SINGLE_VALUED,
+            )),
+            (Some(Cardinality::SingleValued), true) => triples.push(PortableTriple::new(
+                &r.name,
+                PRED_CARDINALITY,
+                CARDINALITY_SINGLE_VALUED_TEMPORAL,
+            )),
+        }
+        for alias in &r.aliases {
+            triples.push(PortableTriple::new(alias, PRED_ALIAS_OF, &r.name));
         }
     }
 
@@ -361,6 +426,60 @@ mod tests {
         assert!(has("worksFor", PRED_ARITY, ARITY_2));
         assert!(has("worksFor", PRED_ARG1_TYPE, "Person"));
         assert!(has("worksFor", PRED_ARG2_TYPE, "Organization"));
+    }
+
+    #[test]
+    fn cardinality_and_aliases_lower_to_native_triples() {
+        let pack = compile(
+            r#"{"pack": {"name": "card", "version": "1"},
+                "relations": [
+                  {"name": "next_check", "cardinality": "single_valued", "temporal": true,
+                   "aliases": ["next-check"]},
+                  {"name": "owner", "cardinality": "single_valued"},
+                  {"name": "tag"}]}"#,
+        )
+        .unwrap();
+        let has = |s: &str, p: &str, o: &str| {
+            pack.triples
+                .iter()
+                .any(|t| t.subject == s && t.predicate == p && t.object == o)
+        };
+        assert!(has(
+            "next_check",
+            PRED_CARDINALITY,
+            CARDINALITY_SINGLE_VALUED_TEMPORAL
+        ));
+        assert!(has("owner", PRED_CARDINALITY, CARDINALITY_SINGLE_VALUED));
+        assert!(has("next-check", PRED_ALIAS_OF, "next_check"));
+        assert!(
+            !pack
+                .triples
+                .iter()
+                .any(|t| t.subject == "tag" && t.predicate == PRED_CARDINALITY)
+        );
+    }
+
+    #[test]
+    fn explicit_multi_is_a_declaration_and_absence_is_not() {
+        let explicit = compile(
+            r#"{"pack": {"name": "card", "version": "1"},
+                "relations": [{"name": "status", "cardinality": "multi"}]}"#,
+        )
+        .unwrap();
+        assert!(explicit.triples.iter().any(|t| t.subject == "status"
+            && t.predicate == PRED_CARDINALITY
+            && t.object == CARDINALITY_MULTI));
+        let silent = compile(
+            r#"{"pack": {"name": "card", "version": "1"},
+                "relations": [{"name": "status"}]}"#,
+        )
+        .unwrap();
+        assert!(
+            silent
+                .triples
+                .iter()
+                .all(|t| t.predicate != PRED_CARDINALITY)
+        );
     }
 
     #[test]

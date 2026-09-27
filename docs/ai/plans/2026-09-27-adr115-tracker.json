@@ -1,0 +1,141 @@
+{
+  "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+  "plan_id": "01a0e25c-390c-7c61-ab5e-0fd7b910ad1f",
+  "workflow_id": "10000000-0000-0000-0000-000000000001",
+  "adr_document_id": "01a0e25c-3924-7271-8a23-be604ed5702a",
+  "plan_document_id": "01a0e25c-393b-76e1-a65e-2174f7abb29c",
+  "items": [
+    {
+      "key": "A0",
+      "title": "Versioned execution contracts and native illumos feasibility harness",
+      "deps": [],
+      "scope": "Own crates/akh-session-types and an isolated qualification harness. Define operation, target, generation, environment-lock, result/error and receipt contracts. Qualify pinned TypeScript checker/transpiler with curated declarations, JS engine (QuickJS candidate), WASM component runtime, ZIP reader and Rust/TypeScript grammar execution on oibuild. Establish enforceable shell-free native descendants; record any required ports.",
+      "accept": "Deliver actual probe/harness code, version locks and native evidence, not only a recommendation. Tests must exercise async host calls, interruption, binary/UTF-8 IO, component imports and interpreter recovery. Record exact source SHA, host/toolchain and exit codes. If any fixed requirement is infeasible, retain a typed blocker; do not weaken it. Do not expose probe stubs as production APIs.",
+      "id": "01a0e25d-8308-7453-a7b8-4829025e925d",
+      "code": "WI-502"
+    },
+    {
+      "key": "A1",
+      "title": "akhpack v1 format, verified ZIP reader/writer and packed VFS",
+      "deps": [
+        "A0"
+      ],
+      "scope": "Own proposed crates/akhpack and crates/akh-vfs, with adapters to crates/akh-session-services/src/workspace.rs and src/fs. Specify canonical manifest/inventory and path rules, concrete resource limits, exact dependency digests, signature/trust policy and byte-oriented mount APIs. Implement reproducible package production, verification and immutable packed reads with separate writable overlays.",
+      "accept": "Read the same packed fixture on macOS and native illumos without an extracted package tree. Test traversal, duplicate/case/Unicode collisions, symlinks, forged headers/digests, overlapping entries, ZIP bombs, limits and undeclared payloads. Hash verification precedes activation; installing never runs code or grants authority. Preserve descriptor-relative confinement and revision checks.",
+      "id": "01a0e25d-835a-7530-8d64-882d1ec22277",
+      "code": "WI-503"
+    },
+    {
+      "key": "A2",
+      "title": "No-any TypeScript admission and bounded executor REPL workers",
+      "deps": [
+        "A0"
+      ],
+      "scope": "Own proposed crates/akh-repl and isolated worker integration in akhexecd. Supply curated noLib declarations, strict checking plus semantic rejection of explicit/inferred/transitive any, checked cell compilation, typed host-call interface, bounded streams and output, CPU/memory deadlines and cancellation. No Node/DOM/std/os/process/eval/function-constructor bypass.",
+      "accept": "Negative tests cover deep/generic/imported any, unchecked JS, suppression directives, assertion laundering and unchecked decode boundaries. Positive tests cover narrowed unknown and intent-specific generics. Prove cancellation of JS/WASM/native parsing work and worker crash containment. Types never substitute for runtime capability checks. Native oibuild worker and checker tests are required.",
+      "id": "01a0e25d-83b3-7681-984c-6a5c6381a591",
+      "code": "WI-504"
+    },
+    {
+      "key": "A3",
+      "title": "On-demand package activation, WIT bridge and generated typed imports",
+      "deps": [
+        "A1",
+        "A2"
+      ],
+      "scope": "Own package activation, REPL module loading and src/agent/wasm_runtime.rs / wit interfaces. Implement exact-digest resolve/verify/activate, contract-derived TS declarations and runtime codecs, verified WIT exports/imports, bounded discovery and selected documentation. Update the next cell's type environment atomically while running cells retain their lock.",
+      "accept": "Install and invoke a real WASM parser from a packed akhpack on illumos. Test WIT mismatch, unauthorized host imports, forged declarations, cycles, interrupted/concurrent installs and failed activation. Old lock stays usable on failure. No package catalog flood in model context, no native/engine bytecode distribution and no capability escalation by installation.",
+      "id": "01a0e25d-83fc-7513-8434-a1b4452d9b19",
+      "code": "WI-505"
+    },
+    {
+      "key": "A4",
+      "title": "Persistent sandbox environments, explicit switching and receipt recovery",
+      "deps": [
+        "A1",
+        "A2"
+      ],
+      "scope": "Own executor/sandbox/shared session types and caller integration. Bind each cell/effect to principal, environment, sandbox, host, generation and package lock; provide explicit switching and schema-versioned durable values. Separate live heap from durable data and execution evidence. Add bounded incremental output cursors and explicit artifact transfer.",
+      "accept": "Prove A\u2192B\u2192A retains state without grant/secret leakage; an in-flight operation never changes target. Restart restores durable data/definitions, invalidates live handles and does not replay effects. Test stale generations, concurrent writes, schema migration/rollback, effect-completed-before-response crashes and unknown outcomes. Preserve ADR 113 akhomed authority for full Akh turns.",
+      "id": "01a0e25d-844d-78f1-88a6-9d914a4e8037",
+      "code": "WI-506"
+    },
+    {
+      "key": "A5",
+      "title": "Sandbox-local Shen Rust/TypeScript syntax editing and revision transactions",
+      "deps": [
+        "A1",
+        "A4"
+      ],
+      "scope": "Own crates/shend, sandbox worker and VFS edit adapter. Add Rust/TypeScript syntax snapshots, typed node queries and source edits, preview, expected-revision commit, reparse and diagnostics. Preserve CST trivia/untouched bytes; expose semantic-refactor capability only where resolution coverage is proven. Maintain central code KG as derived read model.",
+      "accept": "Edit a Rust function and a typed parser/handler, preserving comments and unrelated source. Test stale node/parser/content revisions, competing writers, incomplete rename resolution, syntax failures and crashes across multi-file publication. VFS snapshots may publish atomically; do not claim cross-file host rename atomicity. Unsupported languages receive explicit document operations, never shell fallback.",
+      "id": "01a0e25d-8495-7a80-918f-6bd15ae97066",
+      "code": "WI-507"
+    },
+    {
+      "key": "A6",
+      "title": "Opaque credential capabilities, bounded inference and Akh-admitted reactions",
+      "deps": [
+        "A3",
+        "A4"
+      ],
+      "scope": "Own host capability broker, inference client and akhomed trigger/reactor integration; akheventd remains thin ingress under ADR 113. Implement opaque credential handles, scoped sinks and protected transforms, typed inference requests/results/budgets, pinned handler registrations, event deduplication/backpressure and receipt recovery. Reuse ADR 114 Structural/Shadow decision seam.",
+      "accept": "Synthetic credential tests cover printing/interpolation/JSON/errors/artifacts/guest memory, redirects, cross-host reuse and echoing endpoints. No plaintext credential enters arbitrary TS/WASM. Prove duplicate/recursive event and exhausted-budget behavior. Learned classifier outputs remain shadow data and cannot select live actions until separately qualified; use structural decisions for live trigger acceptance. Include real-model inference smoke evidence separately from quality or dispatch-readiness claims.",
+      "id": "01a0e25d-84df-7083-b27d-a55f14922728",
+      "code": "WI-508"
+    },
+    {
+      "key": "A7",
+      "title": "Typed repository, diagnostics/build and host-control operations without shells",
+      "deps": [
+        "A0",
+        "A4",
+        "A5"
+      ],
+      "scope": "Own repository bootstrap/publication/snapshot services, typed diagnostics/build adapters and host controls. Replace shell use cases with intent-specific operations through akhsbxd/akhexecd for every caller. No arbitrary command, executable path, argv, hooks or scripts. Fixed native adapters must constrain their descendants; source AST edits alone do not establish build compatibility.",
+      "accept": "Prove representative source\u2192edit\u2192diagnostics/test and repository workflows on oibuild without any shell descendant of the system under test. Test Git hooks/aliases, shell-spawning build scripts, provider helpers and unauthorized host operations. Unsupported toolchains fail visibly, not through fallback. Use isolated test fixtures; no production deployment or main-gate bypass.",
+      "id": "01a0e25d-8519-76d2-86ee-21c205e84c16",
+      "code": "WI-509"
+    },
+    {
+      "key": "A8",
+      "title": "Remove all shell/argv surfaces and migrate full Akh and delegated providers",
+      "deps": [
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+        "A7"
+      ],
+      "scope": "Own executor/broker, src/agent shell tools, src/backend, provider adapters/helper launchers and test fixtures. Inventory and remove command strings, generic argv, remote-shell routes, provider built-ins and MCP tools that reintroduce arbitrary shell execution. Replace tests with purpose-built native helpers. Retain full Akh cognition, loops and full capability registry per ADR 113.",
+      "accept": "Attempt legacy operations through every registered caller/transport and prove no process is created. A hidden endpoint or provider-local bypass fails conformance. Full Akh and supported native providers use the typed environment; incompatible adapters are explicitly unsupported. No reduced Akh profile, disabling cognition, silent capability deletion or compatibility flag restoring shell execution. Run regression and concurrent admission tests.",
+      "id": "01a0e25d-855c-79e1-ad0b-40bc8c6e7b54",
+      "code": "WI-510"
+    },
+    {
+      "key": "A9",
+      "title": "Integrated oibuild release gate and reproducible end-to-end evidence",
+      "deps": [
+        "A8"
+      ],
+      "scope": "Own integration fixtures and native evidence harness. Execute the plan's complete scenario: packed install, typed parser/filter/state, Rust/TS edit/diagnostics, opaque credential fixture, structural live event + shadow inference, sandbox/host switching, restart reconciliation and legacy-shell rejection. Cover full Akh and delegated supported providers.",
+      "accept": "Deliver harness code plus exact-candidate native illumos results and focused negative/recovery matrix. Report archive/lock digests, source SHA, host/toolchain, receipts, bounded output, process-tree observations and remaining limits. No Linux-only or hello-world substitute, no learned routing activation, no duplicate effects. This gate is test evidence; production deployment remains separately authorized and main-only with embedded short SHA.",
+      "id": "01a0e25d-85d7-7123-a277-6c4e04731f7a",
+      "code": "WI-511"
+    }
+  ],
+  "external_dependencies": {
+    "work_item_id": "01a0e1fa-b8e3-7171-a81c-948a66a1110a",
+    "code": "WI-500",
+    "depends_on": [
+      "A1",
+      "A2",
+      "A3"
+    ],
+    "additional_prerequisite": {
+      "id": "01a0d46a-0381-7290-9b73-6fd5b365f6a7",
+      "code": "WI-483",
+      "slice": "53e"
+    }
+  }
+}

@@ -32,6 +32,7 @@ fn create(s: &Sessions, p: &Principal) -> SessionRecord {
             akh: "thoth".into(),
             workspace_profile: "rust".into(),
             conversation_key: Some("topic".into()),
+            grant: None,
         },
     )
     .unwrap()
@@ -699,6 +700,7 @@ fn conversation_rebind_waits_for_retirement_and_cleanup_and_preserves_replay() {
         akh: "thoth".into(),
         workspace_profile: "rust".into(),
         conversation_key: Some("topic".into()),
+        grant: None,
     };
     s.retire(
         &p,
@@ -764,6 +766,7 @@ fn concurrent_find_or_create_has_one_session_and_durable_dedupe() {
                             akh: "thoth".into(),
                             workspace_profile: "rust".into(),
                             conversation_key: Some("same".into()),
+                            grant: None,
                         },
                     )
                     .unwrap()
@@ -789,6 +792,7 @@ fn concurrent_find_or_create_has_one_session_and_durable_dedupe() {
                 akh: "thoth".into(),
                 workspace_profile: "rust".into(),
                 conversation_key: Some("same".into()),
+                grant: None,
             },
         )
         .unwrap();
@@ -800,7 +804,8 @@ fn concurrent_find_or_create_has_one_session_and_durable_dedupe() {
                 request_id: "create-0".into(),
                 akh: "thoth".into(),
                 workspace_profile: "rust".into(),
-                conversation_key: None
+                conversation_key: None,
+                grant: None,
             }
         )
         .is_err()
@@ -1321,6 +1326,7 @@ async fn slow_cognitive_service_does_not_hold_another_sessions_dispatch() {
                 akh: "slow".into(),
                 workspace_profile: "rust".into(),
                 conversation_key: None,
+                grant: None,
             },
         )
         .unwrap();
@@ -1666,6 +1672,7 @@ fn coordination_workspace_narrows_tools_without_changing_akh_identity() {
                 akh: "thoth".into(),
                 workspace_profile: "coordination".into(),
                 conversation_key: None,
+                grant: None,
             },
         )
         .unwrap();
@@ -1774,6 +1781,7 @@ async fn archived_cleanup_cannot_occupy_all_dispatch_workers() {
                     akh: "thoth".into(),
                     workspace_profile: "rust".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -1981,4 +1989,358 @@ async fn mcp_lost_response_is_a_tool_failure_not_a_quarantine_and_cannot_be_repl
     );
     assert_eq!(effects.load(Ordering::SeqCst), 2);
     server.abort();
+}
+
+#[tokio::test]
+async fn recovery_treats_a_collected_read_receipt_as_not_applied() {
+    use akh_session_services::{
+        broker::{Broker, ToolRecord},
+        store::key,
+    };
+    use axum::{Json, Router, http::StatusCode};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // akhexecd after its 24 h read-receipt GC: every receipt lookup is 404.
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let seen = lookups.clone();
+    let executor = Router::new().fallback(move || {
+        let seen = seen.clone();
+        async move {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (
+                StatusCode::NOT_FOUND,
+                Json(Fault::missing("operation not found")),
+            )
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, executor).await.unwrap();
+    });
+    let (dir, old, owner) = setup();
+    let token = dir.path().join("executor-token");
+    std::fs::write(&token, "private-executor-test-credential-0001").unwrap();
+    let mut config = (*old.config).clone();
+    config.endpoints.insert(
+        "executor-1".into(),
+        serde_json::from_value(json!({"url":format!("http://{address}"),"token_file":token}))
+            .unwrap(),
+    );
+    let sessions = Sessions::new(old.store.clone(), Arc::new(config));
+    let session = create(&sessions, &owner);
+    binding(&sessions, &session.id);
+    submit(&sessions, &owner, &session.id, "first");
+    let request = sessions.next_job(&session.id).unwrap().unwrap();
+    let put = |id: &str, operation: &str| {
+        let record = ToolRecord {
+            call: ToolCall {
+                session_id: session.id.clone(),
+                turn_id: request.turn_id.clone(),
+                id: id.into(),
+                generation: request.generation,
+                name: operation.into(),
+                arguments: json!({"path": "proof"}),
+            },
+            operation_id: format!("op-{id}"),
+            destination: ToolDestination::Workspace {
+                operation: operation.into(),
+            },
+            // Sent, then the broker lost the reply: the outcome is unresolved.
+            sent: true,
+            result: None,
+            unknown: true,
+        };
+        sessions
+            .store
+            .transaction(|tx| tx.put(&key("tool", &[&session.id, &request.turn_id, id]), &record))
+            .unwrap();
+    };
+    let job = || RuntimeJob {
+        request: request.clone(),
+        status: TurnStatus::Completed,
+        provider_session: None,
+        output: Some("done".into()),
+        error: None,
+        events: vec![],
+    };
+    let broker = Broker::new(sessions.clone()).unwrap();
+
+    // Every collectable read-only verb settles as not applied.
+    for operation in ["read", "list", "search", "stat", "exec_poll"] {
+        put(operation, operation);
+    }
+    let settled = broker.settle(job()).await.unwrap();
+    assert_eq!(settled.status, TurnStatus::Completed);
+    assert!(settled.error.is_none());
+    let records = broker
+        .records(&owner, &session.id, None, 200)
+        .unwrap()
+        .records;
+    assert_eq!(records.len(), 5);
+    for record in &records {
+        assert!(!record.unknown, "{}", record.call.id);
+        let result = record.result.as_ref().unwrap();
+        assert!(!result.success);
+        let data = result.data.as_ref().unwrap();
+        assert_eq!(data["code"], "read_receipt_collected");
+        assert_eq!(data["outcome"], "not_applied");
+        assert_eq!(data["retryable"], true);
+    }
+    assert_eq!(lookups.load(Ordering::SeqCst), 5);
+
+    // A mutation's (or a kept git_snapshot's) missing receipt stays fatal.
+    for operation in ["write", "git_snapshot", "exec_start"] {
+        put(operation, operation);
+        let error = broker.settle(job()).await.unwrap_err();
+        assert_eq!(error.code, "not_found", "{operation}");
+        let record: ToolRecord = sessions
+            .store
+            .get(&key("tool", &[&session.id, &request.turn_id, operation]))
+            .unwrap()
+            .unwrap();
+        assert!(record.unknown && record.result.is_none(), "{operation}");
+        sessions
+            .store
+            .transaction(|tx| tx.delete(&key("tool", &[&session.id, &request.turn_id, operation])))
+            .unwrap();
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_delegation_grant_stays_private_and_rides_every_cognitive_call() {
+    use akh_session_services::broker::Broker;
+    use axum::{Json, Router, routing::post};
+    use std::os::unix::fs::MetadataExt;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<CognitiveToolCall>::new()));
+    let record = seen.clone();
+    let core = Router::new().route(
+        "/v1/tools/call",
+        post(move |Json(call): Json<CognitiveToolCall>| {
+            let record = record.clone();
+            async move {
+                let receipt = call.request_id.clone();
+                record.lock().unwrap().push(call);
+                Json(ToolResult {
+                    success: true,
+                    text: "ok".into(),
+                    data: None,
+                    receipt: Some(receipt),
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, core).await.unwrap();
+    });
+    let (dir, old, p) = setup();
+    let token = dir.path().join("core-token");
+    std::fs::write(&token, "private-core-test-credential-0001").unwrap();
+    let mut config = (*old.config).clone();
+    config.endpoints.insert(
+        "core".into(),
+        serde_json::from_value(json!({"url":format!("http://{address}"),"token_file":token}))
+            .unwrap(),
+    );
+    config.akhs.get_mut("thoth").unwrap().tools = vec![ToolSpec {
+        name: "kg_query".into(),
+        description: "Query the akh".into(),
+        input_schema: json!({"type":"object"}),
+        read_only: true,
+        destination: ToolDestination::Cognitive {
+            service: "core".into(),
+            tool: "kg_query".into(),
+        },
+    }];
+    config.validate().unwrap();
+    let s = Sessions::new(old.store.clone(), Arc::new(config));
+
+    let secret = "delegation-grant-secret-value-0123456789";
+    let request = NewSession {
+        request_id: "delegated".into(),
+        akh: "thoth".into(),
+        workspace_profile: "rust".into(),
+        conversation_key: None,
+        grant: Some(GrantToken::new(secret)),
+    };
+    let session = s.create(&p, &request).unwrap();
+    // An exact replay returns the same session; another grant under the same
+    // request id is a conflict, not a silent swap.
+    assert_eq!(s.create(&p, &request).unwrap().id, session.id);
+    let swapped = NewSession {
+        grant: Some(GrantToken::new("another-grant-secret-value-0123456789")),
+        ..request.clone()
+    };
+    assert_eq!(s.create(&p, &swapped).unwrap_err().code, "conflict");
+
+    // The secret lives only in an owner-only private slot.
+    let everything =
+        serde_json::to_string(&s.store.scan::<serde_json::Value>("").unwrap()).unwrap();
+    assert!(
+        !everything.contains(secret),
+        "grant secret reached the store"
+    );
+    assert!(!serde_json::to_string(&session).unwrap().contains(secret));
+    let slots: Vec<_> = std::fs::read_dir(dir.path().join("session-delegation-grants"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(slots.len(), 1);
+    assert_eq!(std::fs::metadata(&slots[0]).unwrap().mode() & 0o077, 0);
+
+    submit(&s, &p, &session.id, "turn");
+    binding(&s, &session.id);
+    let job = s.next_job(&session.id).unwrap().unwrap();
+    let runtime = Principal {
+        id: "runtime-1".into(),
+        roles: vec!["runtime".into()],
+        ..p.clone()
+    };
+    let broker = Broker::new(s.clone()).unwrap();
+    let reply = broker
+        .tool(
+            &runtime,
+            ToolCall {
+                id: "query".into(),
+                session_id: session.id.clone(),
+                turn_id: job.turn_id.clone(),
+                generation: job.generation,
+                name: "kg_query".into(),
+                arguments: json!({"symbol": "cedar"}),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(reply.result.unwrap().success);
+    let calls = seen.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].grant, Some(GrantToken::new(secret)));
+    assert_eq!(calls[0].session_id, session.id);
+    assert_eq!(calls[0].akh, "thoth");
+
+    // A session without a grant keeps the pre-53e wire payload.
+    let plain = create(&s, &p);
+    submit(&s, &p, &plain.id, "plain-turn");
+    binding(&s, &plain.id);
+    let job = s.next_job(&plain.id).unwrap().unwrap();
+    broker
+        .tool(
+            &runtime,
+            ToolCall {
+                id: "plain-query".into(),
+                session_id: plain.id.clone(),
+                turn_id: job.turn_id.clone(),
+                generation: job.generation,
+                name: "kg_query".into(),
+                arguments: json!({}),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().unwrap()[1].grant, None);
+    server.abort();
+}
+
+/// 53g PR 7: a worker workspace profile runs the akh's delegated sessions on a
+/// native runtime under neutral instructions, while the akh's own profile
+/// keeps its runtime, and the create is recoverable by its request id.
+#[test]
+fn worker_profile_overrides_runtime_and_instructions_and_create_is_found_by_request_id() {
+    let (_dir, old, owner) = setup();
+    let mut config = (*old.config).clone();
+    let profile = config.akhs.get_mut("thoth").unwrap();
+    profile.workspace_profiles.push("worker".into());
+    profile.session_grants.insert(
+        "worker".into(),
+        serde_json::from_value(json!({
+            "tools": [],
+            "runtime": {"runtime":"runtime-1","profile":"codex-worker","revision":"1","kind":"codex","model":"gpt-6-astra","execution_mode":"brokered"},
+            "instructions": "Follow the procedure in the first input."
+        }))
+        .unwrap(),
+    );
+    config.validate().unwrap();
+    let sessions = Sessions::new(old.store.clone(), Arc::new(config.clone()));
+    let own = create(&sessions, &owner);
+    assert_eq!(own.runtime.profile, "claude");
+    assert_eq!(own.instructions, "Be useful");
+    let request = NewSession {
+        request_id: "incident-request".into(),
+        akh: "thoth".into(),
+        workspace_profile: "worker".into(),
+        conversation_key: None,
+        grant: Some(GrantToken::new("first-grant-secret-0123456789")),
+    };
+    let worker = sessions.create(&owner, &request).unwrap();
+    assert_eq!(worker.akh, "thoth");
+    assert_eq!(worker.runtime.profile, "codex-worker");
+    assert_eq!(worker.runtime.kind, RuntimeKind::Codex);
+    assert_eq!(
+        worker.instructions,
+        "Follow the procedure in the first input."
+    );
+
+    // After a restart the client no longer holds the first grant secret: a
+    // replay with a fresh grant is refused, the lookup finds the session.
+    let replay = NewSession {
+        grant: Some(GrantToken::new("second-grant-secret-0123456789")),
+        ..request.clone()
+    };
+    assert_eq!(
+        sessions.create(&owner, &replay).unwrap_err().code,
+        "conflict"
+    );
+    let found = sessions
+        .created_by_request(&owner, "incident-request")
+        .unwrap();
+    assert_eq!(found.id, worker.id);
+    assert_eq!(
+        sessions
+            .created_by_request(&owner, "never-sent")
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+    // The lookup is scoped to the principal that created the session.
+    let mut stranger = owner.clone();
+    stranger.id = "stranger".into();
+    assert_eq!(
+        sessions
+            .created_by_request(&stranger, "incident-request")
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+
+    // An override needs a named runtime and non-empty instructions, and a
+    // colocated override is refused when deployed like any other binding.
+    let grants = config
+        .akhs
+        .get_mut("thoth")
+        .unwrap()
+        .session_grants
+        .get_mut("worker")
+        .unwrap();
+    grants.instructions = Some("  ".into());
+    assert!(config.validate().is_err());
+    let grants = config
+        .akhs
+        .get_mut("thoth")
+        .unwrap()
+        .session_grants
+        .get_mut("worker")
+        .unwrap();
+    grants.instructions = None;
+    grants.runtime.as_mut().unwrap().execution_mode = ExecutionMode::Colocated;
+    let fault = config
+        .validate_deployment(DeploymentMode::Deployed)
+        .unwrap_err();
+    assert!(
+        fault
+            .message
+            .contains("akhs.thoth.session_grants.worker.runtime"),
+        "{fault}"
+    );
 }

@@ -70,9 +70,14 @@ require separately generated service credentials for protected operations.
 ## Installation and awakening
 
 `prepare.py` renders the four service configurations. `configure_core.py` renders
-the dedicated core, isolated XDG directories and a versioned binary path. Neither
-script starts launchd or invokes a model. The launchd definitions live under the
-deployment root until installed into `/Library/LaunchDaemons`.
+the core: since Phase 53 (ADR 113) that is one **full akh** akhomed hosting
+janus, minerva and vesta with their daemon loops, in-process turns (GLM-5.3 on
+Ollama Cloud), full tool registries, per-akh MCP servers (`[[mcp.servers]]`,
+tools named `mcp__<server>__<tool>`), reactors, ACP and the additive `/v1` core
+API. Neither script starts launchd or invokes a model. The launchd definitions
+live under the deployment root until installed into `/Library/LaunchDaemons`.
+The operator runbook for moving the live deployment onto the full akh is
+[CUTOVER.md](CUTOVER.md).
 
 `awakening.json` defines Roman archetypes. The offline `roman_awaken` example runs
 the actual `ritual_of_awakening`, publishes a fenced SeaORM snapshot, then recovers
@@ -80,11 +85,22 @@ the awakened psyche into a different cache. It refuses to replace an existing
 durable identity. The ritual may choose a Latin self-name different from the
 archetype; the service IDs remain janus/minerva/vesta.
 
-Build the core and helper with:
+Build only from a clean checkout of `origin/main`
+(`.claude/rules/deploy-from-main.md`); the stripped `core-server` profile was
+deleted in Phase 53h and `server` is the one akhomed profile:
 
 ```sh
-cargo build --locked --release --no-default-features --features core-server --bin akhomed --example roman_awaken
+git fetch origin && git switch --detach origin/main && git status --porcelain  # must be empty
+cargo build --release --locked --features server --bin akhomed --example roman_awaken
+cargo build --release --locked -p akh-session-services --features client --bin akh-acp
+python3 deploy/roman-mini/configure_core.py --root "$ROOT" --binaries target/release --repo .
 ```
+
+`configure_core.py` refuses unless the checkout is clean and `HEAD` is an
+ancestor of `origin/main`, installs `bin/akhomed-main-<sha>` (and
+`bin/akh-acp-main-<sha>`), and records the commit in `config/core-release.json`.
+The core plist execs through `daemon_credentials.py core`, which resolves the
+Ollama and MCP credentials into the environment and execs that binary.
 
 The helper takes `DATABASE_URL INPUT_JSON WORK_DIRECTORY`. Its work directory
 holds the initial/recovered caches and ritual evidence. No provider credentials
@@ -213,23 +229,14 @@ the exact request hash and retired through the session API; failed evidence is
 retained. The renderer now uses the required `sandboxes` alias and runtime
 callback principal.
 
-### Autonomous activity in T3
+### Autonomous activity in T3 (retired)
 
-`configure_t3.py` also installs three activity ACP providers and a
-`t3-activity` LaunchAgent. Its supported T3 auth CLI issues a short-lived token
-held only in memory; HTTP orchestration creates the **Roman autonomous activity**
-project and one thread per role. Private SQLite records submitted session IDs,
-and deterministic command IDs make retries idempotent. It never edits T3 tables.
-The ACP viewer reads only sessions owned by that role's scoped T3 principal,
-streams reasoning and tool receipt events, and reports terminal outcomes. Watching
-or cancelling a feed does not start, repeat, or cancel the bot's actual job.
-Messages typed into an activity thread are forwarded to that bot as scoped user
-turns. Durable request IDs prevent duplicate admission after response loss. The
-initial acknowledgment confirms delivery, not memory storage; the bot must record
-the correction and its tool receipt provides proof. Watching alone starts no work.
-Use the original role providers for longer direct conversations. Historical attempts and
-errors remain visible. Model credentials and project filesystem access are never
-provided to these viewers.
+`t3_activity.py`, its three `roman-activity-<role>` ACP providers and the
+`t3-activity` LaunchAgent are retired (2026-09-25, ADR 113 / Phase 53g step 2
+PR 1 — see `docs/ai/plans/2026-09-25-phase53g-roman-glue-conversion.md`). Once
+T3 speaks ACP directly to akhomed (the `roman-<role>` providers above) there is
+no separate "activity" transport to shim. See `INVENTORY.md` for the retired
+entry and the Mac-side removal steps.
 
 ### Vesta GitOps sandbox and homelab diagnostics
 

@@ -3,21 +3,23 @@
 
 Anima is accessed only through its MCP API. SQLite stores observations and an
 immutable outbox; accepted events are replayed with the same identity on retry.
-The read-only MCP surface exposes monitoring state, never host files or secrets.
+
+Phase 53g PR 5: health and alert monitoring moved into akheventd's
+`roman-alerts` monitor source, and the `monitoring_snapshot` MCP server became
+akhomed's native tool. The watchdog reads monitoring from akheventd
+(`GET /v1/monitors/roman-alerts`), and each tick exports this observer's own
+status keys to `state/observer-status.json` for that tool. PR 6 retires the
+rest (Anima scan, laya queue, watchdog).
 """
-import base64
 from datetime import datetime, timezone
 import fcntl
 import hashlib
-import hmac
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import sqlite3
-import ssl
 import subprocess
 import sys
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -27,20 +29,21 @@ from provider_failure import classify_provider_error
 ROLES = ('janus', 'minerva', 'vesta')
 INTERVALS = {'janus': 1800, 'minerva': 3600, 'vesta': 3600}
 CHANGE_INTERVALS = {'janus': 900, 'minerva': 1800}
+EVENTS_URL = 'http://127.0.0.1:18435'
+MONITOR_SOURCE = 'roman-alerts'
+# A monitor reading older than this means akheventd's poller stalled: unknown.
+MONITOR_STALE_SECONDS = 300
+# The observer-owned keys akhomed's `monitoring_snapshot` tool still returns
+# (read from STATUS_EXPORT until PR 6 moves their producers into akheventd).
+STATUS_EXPORT = 'state/observer-status.json'
+STATUS_EXPORT_KEYS = ('anima_status','coverage','heartbeat','workflow_counts','role_activity','workflow_failure',
+                      'provider_availability','ingress_status','delivery_watch_status','board_watchdog_status','laya_status')
 
 def encoded(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'))
 
 def stable_item(item):
     return {key:item[key] for key in ('id','code','title','status','current_phase','priority','project_id','plan_id','parked','parked_reason','hold_reason') if key in item}
-
-def monitoring_signature(state):
-    if state is None:return None
-    grafana=state.get('grafana',{})
-    return {'local_services':state.get('local_services'),'grafana_available':grafana.get('available'),
-            'alerts':[{'fingerprint':a.get('fingerprint'),'labels':a.get('labels'),
-                       'status':{k:a.get('status',{}).get(k) for k in ('state','silencedBy','inhibitedBy')}} for a in grafana.get('alerts',[])],
-            'victoriametrics':state.get('victoriametrics')}
 
 def fetch(url, headers=None, data=None, timeout=15, context=None):
     request = urllib.request.Request(url, headers=headers or {}, data=None if data is None else json.dumps(data).encode())
@@ -72,8 +75,8 @@ class Observer:
         ''')
         self.event_token = (self.root / 'secrets/observer.key').read_text().strip()
         self.anima_headers = None
-        self.grafana_headers = None
-        self.grafana_context = None
+        from laya_controller import enabled
+        self.event_only = enabled(root)
 
     def get(self, key, default=None):
         row = self.db.execute('select value from state where key=?', (key,)).fetchone()
@@ -128,7 +131,7 @@ class Observer:
         if state.get('busy') or state.get('pending') or int(time.time())-state.get('last_finished',0)<rest:return False
         for raw, in self.db.execute('select event from outbox where accepted=0'):
             typ=json.loads(raw)['type']
-            if typ in ('schedule.'+role,'anima.'+role+'.changed') or (role=='vesta' and typ=='monitoring.changed'):return False
+            if typ in ('schedule.'+role,'anima.'+role+'.changed','laya.'+role+'.intervention') or (role=='vesta' and typ=='monitoring.changed'):return False
         return True
 
     def provider_blocked(self,role):
@@ -167,7 +170,12 @@ class Observer:
         submitted=0
         for ident, raw in self.db.execute('select id,event from outbox where accepted=0 order by rowid'):
             event=json.loads(raw);kind=event['type']
-            role=next((r for r in ROLES if kind in ('schedule.'+r,'anima.'+r+'.changed') or (r=='vesta' and kind=='monitoring.changed')),None)
+            if self.event_only and kind.startswith('schedule.'):
+                # Stop replaying old scheduled occurrences. Already admitted
+                # server deliveries retain their ownership and finish normally.
+                with self.db:self.db.execute('update outbox set accepted=2 where id=?', (ident,))
+                continue
+            role=next((r for r in ROLES if kind in ('schedule.'+r,'anima.'+r+'.changed','laya.'+r+'.intervention') or (r=='vesta' and kind=='monitoring.changed')),None)
             if role and self.provider_blocked(role):continue
             if submitted>=32:break
             submitted+=1
@@ -179,6 +187,7 @@ class Observer:
                 self.db.execute('update outbox set accepted=1 where id=?', (ident,))
                 for delivery in result['deliveries']:
                     self.db.execute('insert or ignore into deliveries values (?,?,?)',(delivery,'pending',None))
+                self.put('event_deliveries:'+ident, result['deliveries'])
 
     def watch_deliveries(self):
         token=(self.root/'secrets/operator.key').read_text().strip()
@@ -196,8 +205,18 @@ class Observer:
                         'status':status,'error':turn.get('error'),'output':turn.get('output'),
                         'created_at':turn.get('created_at'),
                         'finished_at':self.get('terminal_seen',{}).get(turn['id'],session['last_progress_at']//1000)}
+            elif delivery.get('event_admission'):
+                # Phase 53d/53f: an akh-targeted route hands the event to the akh's
+                # own reactor. akhomed owns the resulting turn (budget, ADR 105
+                # exit condition and trip-wire), so admission is this delivery's
+                # successful end; there is no akhsessd session to follow.
+                admitted=delivery['event_admission'];status='admitted'
+                detail={'akh':(delivery.get('target') or {}).get('akh'),'event_key':admitted.get('event_key'),
+                        'schedules_woken':admitted.get('schedules_woken'),'duplicate':admitted.get('duplicate')}
             elif delivery['terminal']:
-                status='superseded' if (delivery.get('error') or {}).get('code')=='superseded' else 'rejected';detail={'error':delivery.get('error'),'automation':delivery['automation']}
+                status='superseded' if (delivery.get('error') or {}).get('code')=='superseded' else 'rejected'
+                detail={'error':delivery.get('error'),'automation':delivery.get('automation'),
+                        'akh':(delivery.get('target') or {}).get('akh')}
             else:continue
             with self.db:
                 self.db.execute('update deliveries set state=?,detail=? where id=?',(status,encoded(detail),ident))
@@ -233,8 +252,14 @@ class Observer:
             if baseline and previous != item and (previous is not None or notify_new):
                 change = {'kind':kind,'project_id':project,'id':item['id'],
                           'previous':previous,'current':item}
-                for role in ('janus','minerva'):
-                    self.db.execute('insert or replace into pending values (?,?,?)', (role,ident,encoded(change)))
+                if self.event_only:
+                    from laya_controller import Queue
+                    queue = Queue(self.root)
+                    try: queue.observe(change)
+                    finally: queue.close()
+                else:
+                    for role in ('janus','minerva'):
+                        self.db.execute('insert or replace into pending values (?,?,?)', (role,ident,encoded(change)))
             self.put(ident, item)
         # Missing rows are never interpreted as deletions: MCP work-item lists
         # may be capped below the requested page size and expose no cursor.
@@ -309,6 +334,17 @@ class Observer:
                 self.put('project_offset',(offset+i+1)%len(projects))
         with self.db:
             self.put('anima_status',{'ok':True,'at':now,'projects':len(projects)})
+            if self.event_only:
+                # Preserve queued changes while transferring to the decision
+                # queue. Its idempotent upsert makes interruption replay-safe.
+                from laya_controller import Queue
+                queue = Queue(self.root)
+                try:
+                    for entity,value in self.db.execute('select entity,value from pending').fetchall():
+                        queue.observe(json.loads(value))
+                        self.db.execute('delete from pending where entity=?', (entity,))
+                finally: queue.close()
+                return
             for role in ('janus','minerva'):
                 if now-self.get('last_change:'+role,0)<CHANGE_INTERVALS[role] or not self.role_ready(role):continue
                 rows=self.db.execute('select entity,value from pending where role=? order by rowid limit 40',(role,)).fetchall()
@@ -318,47 +354,8 @@ class Observer:
                 for key,_ in rows:self.db.execute('delete from pending where role=? and entity=?',(role,key))
                 self.put('last_change:'+role,now)
 
-    def monitoring(self):
-        now=int(time.time()); health={}
-        for name,port in [('core',18430),('sessions',18431),('runtime',18432),('runtime-minerva',18442),('runtime-vesta',18443),('events',18435)]:
-            try:fetch(f'http://127.0.0.1:{port}/healthz',timeout=4);health[name]='up'
-            except Exception:health[name]='unavailable'
-        try:
-            if self.grafana_headers is None:
-                secret=json.loads(capture(['/opt/homebrew/bin/kubectl','-n','observability','get','secret','grafana-admin','-o','json']))['data']
-                pair=base64.b64decode(secret['admin-user'])+b':'+base64.b64decode(secret['admin-password'])
-                self.grafana_headers={'Authorization':'Basic '+base64.b64encode(pair).decode()}
-            if self.grafana_context is None:
-                ca=capture(['/opt/homebrew/bin/kubectl','-n','default','get','secret','pki-ca-secret','-o',r'jsonpath={.data.tls\.crt}'])
-                self.grafana_context=ssl.create_default_context()
-                self.grafana_context.load_verify_locations(cadata=base64.b64decode(ca).decode())
-            alerts=fetch('https://grafana.lab.home/api/alertmanager/grafana/api/v2/alerts',self.grafana_headers,timeout=5,context=self.grafana_context)
-            alerts=[{'fingerprint':a.get('fingerprint'),'labels':a.get('labels'),
-                     'annotations':a.get('annotations'),'status':a.get('status'),'startsAt':a.get('startsAt')} for a in alerts]
-            alerts.sort(key=lambda a:a.get('fingerprint') or encoded(a))
-            grafana={'available':True,'alerts':alerts}
-        except Exception:
-            self.grafana_headers=None;self.grafana_context=None
-            grafana={'available':False,'error':'Grafana alert feed unavailable; alert state unknown, not zero'}
-        try:
-            metrics=fetch('http://127.0.0.1:18440/api/v1/query?query=ALERTS%7Balertstate%3D%22firing%22%7D',timeout=5)
-            if metrics.get('status')!='success':raise RuntimeError('metrics query failed')
-            metrics={'available':True,'firing':sorted([v['metric'] for v in metrics['data']['result']],key=encoded)}
-        except Exception:metrics={'available':False,'error':'VictoriaMetrics unavailable'}
-        state={'local_services':health,'grafana':grafana,'victoriametrics':metrics}
-        previous=self.get('monitoring')
-        with self.db:
-            self.put('monitoring',state); self.put('monitoring_at',now)
-            if monitoring_signature(previous)!=monitoring_signature(state):
-                pending=self.get('monitoring_pending')
-                self.put('monitoring_pending',{'previous':pending['previous'] if pending else previous,'current':state})
-            pending=self.get('monitoring_pending')
-            if pending and self.role_ready('vesta'):
-                if monitoring_signature(pending['previous'])!=monitoring_signature(pending['current']):
-                    self.event('roman-alerts','monitoring.changed',pending)
-                self.put('monitoring_pending',None)
-
     def schedules(self):
+        if self.event_only: return
         now=int(time.time())
         with self.db:
             for role,interval in INTERVALS.items():
@@ -368,20 +365,53 @@ class Observer:
                     'instruction':'Perform a bounded review of current evidence and commitments. Make useful authorized progress; if nothing changed, record a quiet check without messaging teammates.'},f'schedule:{role}:{slot}')
                 self.put('schedule:'+role,slot)
 
+    def monitor_signal(self):
+        """Watchdog view of akheventd's `roman-alerts` monitor (Phase 53g PR 5).
+
+        Only availability is compared, never text: health endpoint states,
+        feed availability (`available`/`unknown`; `not_configured` is None)
+        and whether akheventd answered with a fresh reading at all.
+        """
+        try:
+            reading=fetch(EVENTS_URL+'/v1/monitors/'+MONITOR_SOURCE,{'Authorization':'Bearer '+self.event_token},timeout=5)
+            fresh=time.time()-reading['observed_at_ms']/1000<MONITOR_STALE_SECONDS
+            feeds=reading['feeds']
+        except Exception:
+            fresh=False
+        if not fresh:
+            return {'monitor_available':False,'local_services':None,'grafana_available':None,'metrics_available':None}
+        available=lambda state:None if state=='not_configured' else state=='available'
+        return {'monitor_available':True,'local_services':feeds.get('health'),
+                'grafana_available':available(feeds.get('alertmanager')),
+                'metrics_available':available(feeds.get('prometheus'))}
+
+    def export_status(self):
+        """Atomically export the observer-owned status keys (mode 0600)."""
+        marks=','.join('?'*len(STATUS_EXPORT_KEYS))
+        state={k:json.loads(v) for k,v in self.db.execute('select key,value from state where key in ('+marks+')',STATUS_EXPORT_KEYS)}
+        path=self.root/STATUS_EXPORT;temp=path.with_name('.'+path.name+'.tmp')
+        fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+        with os.fdopen(fd,'w') as file:
+            os.fchmod(file.fileno(),0o600)
+            file.write(encoded({'exported_at':int(time.time()),'state':state}))
+        os.replace(temp,path)
+
     def notify_watchdog(self):
-        monitor=self.get('monitoring',{})
         failure=self.get('workflow_failure')
-        signal={'local_services':monitor.get('local_services'),
-                'grafana_available':monitor.get('grafana',{}).get('available'),
-                'metrics_available':monitor.get('victoriametrics',{}).get('available'),
-                'anima_available':self.get('anima_status',{}).get('ok'),
+        signal=self.monitor_signal()
+        signal.update({'anima_available':self.get('anima_status',{}).get('ok'),
                 'activity_available':self.get('role_activity',{}).get('ok'),
                 'latest_workflow_failure':failure,
-                'provider_availability':{r:s for r,s in self.get('provider_availability',{}).items() if s.get('failure_class')}}
+                'provider_availability':{r:s for r,s in self.get('provider_availability',{}).items() if s.get('failure_class')}})
+        if self.event_only:
+            laya = self.get('laya_status', {})
+            signal['laya_controller_available'] = bool(laya.get('ok')) and time.time()-laya.get('at', 0) < 180
+            signal['laya_attention'] = laya.get('attention', [])
         if signal!=self.get('watchdog_signal'):
             notice=self.get('watchdog_notice')
             if notice is None:
-                degraded=any(v!='up' for v in (signal['local_services'] or {}).values()) or any(signal[k] is False for k in ('grafana_available','metrics_available','anima_available','activity_available')) or failure is not None or bool(signal['provider_availability'])
+                degraded=any(v!='up' for v in (signal['local_services'] or {}).values()) or any(signal[k] is False for k in ('monitor_available','grafana_available','metrics_available','anima_available','activity_available')) or failure is not None or bool(signal['provider_availability'])
+                degraded = degraded or signal.get('laya_controller_available') is False or bool(signal.get('laya_attention'))
                 notice={'message_type':'coordination/status@v1','payload':{'state':'blocked' if degraded else 'complete',
                         'detail':'Deterministic Roman watchdog evidence (does not imply model task completion): '+encoded(signal)},
                         'summary':'Roman workflow and monitoring availability changed',
@@ -405,7 +435,6 @@ class Observer:
             with self.db:self.put('delivery_watch_status',{'ok':True,'at':int(time.time())})
         except Exception as error:
             with self.db:self.put('delivery_watch_status',{'ok':False,'at':int(time.time()),'error':type(error).__name__})
-        self.monitoring()
         try:self.scan_anima()
         except Exception as error:
             self.anima_headers=None
@@ -421,42 +450,14 @@ class Observer:
             except Exception as error:
                 with self.db:self.put(name+'_status',{'ok':False,'at':int(time.time()),'error':type(error).__name__})
         with self.db:self.put('heartbeat',int(time.time()))
+        try:self.export_status()
+        except Exception as error:print('Observer status export deferred: '+type(error).__name__,flush=True)
 
-
-def serve(root):
-    token=(root/'secrets/observer-tool.key').read_text().strip()
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self,*args):pass
-        def reply(self,status,obj=None):
-            raw=json.dumps(obj).encode() if obj is not None else b''
-            self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
-        def do_GET(self):
-            if self.path=='/healthz':self.reply(200,{'status':'listening'})
-            else:self.reply(404,{})
-        def do_POST(self):
-            if self.path!='/mcp':return self.reply(404,{})
-            if not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+token):return self.reply(401,{})
-            try:
-                n=int(self.headers.get('Content-Length','0'))
-                if not 0<n<=65536:return self.reply(413,{})
-                q=json.loads(self.rfile.read(n));method=q.get('method');ident=q.get('id')
-                if method=='notifications/initialized':return self.reply(202)
-                if method=='initialize':result={'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'roman-observer','version':'1'}}
-                elif method=='tools/list':result={'tools':[{'name':'monitoring_snapshot','description':'Read latest alert, daemon-health, Anima-observer and coverage evidence, including observation times. Unavailable feeds mean unknown state. No filesystem access.','inputSchema':{'type':'object','properties':{},'additionalProperties':False},'annotations':{'readOnlyHint':True}}]}
-                elif method=='tools/call' and q['params']['name']=='monitoring_snapshot' and q['params'].get('arguments',{})=={}:
-                    c=sqlite3.connect('file:'+str(root/'state/observer.sqlite3')+'?mode=ro',uri=True)
-                    data={k:json.loads(v) for k,v in c.execute("select key,value from state where key in ('monitoring','monitoring_at','anima_status','coverage','heartbeat','workflow_counts','role_activity','workflow_failure','provider_availability','ingress_status','delivery_watch_status','board_watchdog_status')")};c.close()
-                    data['read_at']=int(time.time());data['read_at_utc']=datetime.now(timezone.utc).isoformat();result={'content':[{'type':'text','text':json.dumps(data)}]}
-                else:return self.reply(200,{'jsonrpc':'2.0','id':ident,'error':{'code':-32601,'message':'Unsupported read-only observer request'}})
-                self.reply(200,{'jsonrpc':'2.0','id':ident,'result':result})
-            except Exception:self.reply(500,{'error':'observer request failed'})
-    ThreadingHTTPServer(('127.0.0.1',18436),Handler).serve_forever()
 
 if __name__=='__main__':
     root=Path(sys.argv[1]);lock=(root/'state/observer.lock').open('a')
     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     observer=Observer(root)
-    threading.Thread(target=serve,args=(root,),daemon=True).start()
     while True:
         started=time.monotonic()
         try:observer.tick()

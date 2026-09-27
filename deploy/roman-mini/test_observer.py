@@ -46,7 +46,7 @@ class DurableEvents(unittest.TestCase):
         with self.o.db:self.o.observe_entities('work_item','project',[dict(item,current_phase='review')])
         self.assertEqual(self.o.db.execute('select count(*) from pending').fetchone()[0],2)
     def test_watchdog_still_runs_when_event_ingress_is_down(self):
-        with patch.object(self.o,'refresh_activity'), patch.object(self.o,'monitoring'), patch.object(self.o,'scan_anima'), patch.object(self.o,'schedules'), patch.object(self.o,'flush',side_effect=ConnectionError()), patch.object(self.o,'watch_deliveries'), patch.object(self.o,'notify_watchdog') as notify:
+        with patch.object(self.o,'refresh_activity'), patch.object(self.o,'scan_anima'), patch.object(self.o,'schedules'), patch.object(self.o,'flush',side_effect=ConnectionError()), patch.object(self.o,'watch_deliveries'), patch.object(self.o,'notify_watchdog') as notify:
             self.o.tick()
         notify.assert_called_once()
         self.assertFalse(self.o.get('ingress_status')['ok'])
@@ -81,13 +81,79 @@ class DurableEvents(unittest.TestCase):
             self.o.observe_entities('work_item','p',[{'id':'one','current_phase':'working','updated_at':'new','elapsed':90}])
         self.assertEqual(self.o.db.execute('select count(*) from pending').fetchone()[0],0)
 
-    def test_alert_annotation_changes_are_not_incident_transitions(self):
-        a={'grafana':{'available':True,'alerts':[{'fingerprint':'one','status':{'state':'active'},'annotations':{'description':'85%'}}]}}
-        b=json.loads(json.dumps(a));b['grafana']['alerts'][0]['annotations']['description']='86%'
-        self.assertEqual(m.monitoring_signature(a),m.monitoring_signature(b))
-        b['grafana']['alerts'][0]['status']['state']='suppressed'
-        self.assertNotEqual(m.monitoring_signature(a),m.monitoring_signature(b))
+    def reading(self,**feeds):
+        base={'health':{'core':'up','events':'up'},'alertmanager':'available','prometheus':'available'}
+        base.update(feeds)
+        return {'source':'roman-alerts','observed_at_ms':int(m.time.time()*1000),'feeds':base,'snapshot':{}}
 
+    def watchdog(self,reading):
+        (self.root/'secrets/board-watchdog.json').write_text(json.dumps({'bearer_token':'board-token'}))
+        with self.o.db:
+            self.o.put('anima_status',{'ok':True});self.o.put('role_activity',{'ok':True,'roles':{}})
+        posted=[]
+        def send(url,headers,data=None,timeout=15):
+            if url.endswith('/v1/monitors/roman-alerts'):
+                self.assertEqual(headers,{'Authorization':'Bearer fixture-token'})
+                if isinstance(reading,Exception):raise reading
+                return reading
+            posted.append(data);return {}
+        with patch.object(m,'fetch',side_effect=send):self.o.notify_watchdog()
+        return posted
+
+    def test_watchdog_reads_monitoring_from_akheventd(self):
+        posted=self.watchdog(self.reading())
+        self.assertEqual(posted[0]['payload']['state'],'complete')
+        signal=self.o.get('watchdog_signal')
+        self.assertEqual((signal['monitor_available'],signal['grafana_available'],signal['metrics_available']),(True,True,True))
+        self.assertEqual(signal['local_services'],{'core':'up','events':'up'})
+        # The same availability posts nothing new.
+        self.assertEqual(self.watchdog(self.reading()),[])
+        # An unknown alert feed is degraded, never "zero alerts".
+        posted=self.watchdog(self.reading(alertmanager='unknown'))
+        self.assertEqual(posted[0]['payload']['state'],'blocked')
+        self.assertFalse(self.o.get('watchdog_signal')['grafana_available'])
+
+    def test_unreachable_or_stale_monitor_is_degraded(self):
+        posted=self.watchdog(ConnectionError())
+        self.assertEqual(posted[0]['payload']['state'],'blocked')
+        self.assertFalse(self.o.get('watchdog_signal')['monitor_available'])
+        stale=self.reading();stale['observed_at_ms']-=(m.MONITOR_STALE_SECONDS+1)*1000
+        with self.o.db:self.o.put('watchdog_signal',None)
+        posted=self.watchdog(stale)
+        self.assertFalse(self.o.get('watchdog_signal')['monitor_available'])
+        self.assertIsNone(self.o.get('watchdog_signal')['local_services'])
+
+    def test_status_export_carries_the_old_tool_keys_privately(self):
+        with self.o.db:
+            self.o.put('coverage',{'p':{'observed':1}});self.o.put('workflow_failure',None)
+            self.o.put('heartbeat',5);self.o.put('unrelated',1)
+        self.o.export_status()
+        path=self.root/m.STATUS_EXPORT
+        self.assertEqual(path.stat().st_mode&0o777,0o600)
+        export=json.loads(path.read_text())
+        self.assertEqual(export['state']['coverage'],{'p':{'observed':1}})
+        self.assertIn('workflow_failure',export['state'])
+        self.assertNotIn('unrelated',export['state'])
+        self.assertTrue(set(export['state'])<=set(m.STATUS_EXPORT_KEYS))
+
+    def test_monitoring_and_its_mcp_server_are_gone(self):
+        for name in ('monitoring','serve','monitoring_signature'):
+            self.assertFalse(hasattr(m.Observer,name) or hasattr(m,name),name)
+        self.assertNotIn('kubectl',Path(m.__file__).read_text())
+
+    def test_akh_admission_is_a_successful_end_and_no_subscriber_alerts(self):
+        with self.o.db:
+            self.o.db.execute("insert into deliveries values ('d-ok','pending',null)")
+            self.o.db.execute("insert into deliveries values ('d-none','pending',null)")
+        target={'kind':'akh','endpoint':'core','akh':'minerva'}
+        replies={'http://127.0.0.1:18435/v1/deliveries/d-ok':{'terminal':True,'automation':'','target':target,'admission':None,
+                    'event_admission':{'event_key':'roman-inbox-minerva/djehuty.inbox#1','schedules_woken':['roman-minerva-djehuty.inbox'],'duplicate':False}},
+                 'http://127.0.0.1:18435/v1/deliveries/d-none':{'terminal':True,'automation':'','target':target,'admission':None,
+                    'error':{'code':'no_subscriber','message':'nothing subscribes'}}}
+        with patch.object(m,'fetch',side_effect=lambda url,headers,data=None:replies[url]):self.o.watch_deliveries()
+        states=dict(self.o.db.execute('select id,state from deliveries'))
+        self.assertEqual(states,{'d-ok':'admitted','d-none':'rejected'})
+        self.assertEqual(self.o.get('workflow_failure')['akh'],'minerva')
     def test_unrouted_event_is_retained_for_operator_repair(self):
         with self.o.db:self.o.event('roman-clock','schedule.janus',{})
         with patch.object(m,'fetch',return_value={'deliveries':[]}):

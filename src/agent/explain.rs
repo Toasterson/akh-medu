@@ -1207,6 +1207,35 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 source.get()
             )
         }
+        DerivationKind::DelegatedCall {
+            principal,
+            grant_id,
+            tool,
+            session_id,
+            ..
+        } => match grant_id {
+            Some(grant) => format!(
+                "delegated call: {principal} via {tool} under grant {grant} (session {session_id})"
+            ),
+            None => format!("delegated call: {principal} via {tool} (session {session_id})"),
+        },
+        DerivationKind::MemoryHygiene {
+            action,
+            successor,
+            valid_until,
+            ..
+        } => match valid_until {
+            Some(until) => format!(
+                "memory hygiene ({}): superseded by symbol {} at {until}",
+                action.as_str(),
+                successor.get()
+            ),
+            None => format!(
+                "memory hygiene ({}): replaced by symbol {}",
+                action.as_str(),
+                successor.get()
+            ),
+        },
     }
 }
 

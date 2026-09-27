@@ -4,7 +4,7 @@ use opentelemetry::{KeyValue, trace::TracerProvider as _};
 use opentelemetry_otlp::{Protocol, WithExportConfig};
 use opentelemetry_sdk::{Resource, runtime::Tokio};
 use std::time::Instant;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{Layer, filter, layer::SubscriberExt, util::SubscriberInitExt};
 
 pub struct Telemetry {
     traces: Option<opentelemetry_sdk::trace::TracerProvider>,
@@ -34,9 +34,11 @@ impl Drop for Telemetry {
 pub fn init(service: &str, instance: &str) -> Result<Telemetry, Box<dyn std::error::Error>> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info,opentelemetry=warn,hyper=warn,reqwest=warn".into());
-    let base = tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
+    let base = tracing_subscriber::registry().with(filter).with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_filter(filter::filter_fn(|meta| !is_stream_delta(meta))),
+    );
     if std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_none() {
         base.try_init()?;
         return Ok(Telemetry {
@@ -143,7 +145,23 @@ impl Drop for Operation {
     }
 }
 
-pub fn delta(kind: &'static str, text: &str) {
+/// Per-token stream deltas go to OTLP only. On stderr they flood the service
+/// log (one line per provider chunk: 2.9M lines in a few days on the Mac
+/// runtimes) without adding anything the OTLP logs and the
+/// `akh.runtime.delta.bytes` counter don't already carry.
+fn is_stream_delta(meta: &tracing::Metadata<'_>) -> bool {
+    meta.is_event() && meta.fields().field("delta.kind").is_some()
+}
+
+/// One forwarded stream chunk. With paragraph streaming (see
+/// `crate::streaming`) a chunk carries `coalesced` provider deltas; in token
+/// mode `coalesced` is 1 and `flush` is `"passthrough"`.
+///
+/// Metrics: `akh.runtime.delta.bytes` counts every forwarded byte exactly
+/// (chunking never changes the total), `akh.runtime.delta.chunks` counts
+/// forwarded chunks and `akh.runtime.delta.coalesced` counts the provider
+/// deltas they carry, so `chunks / coalesced` is the event-count reduction.
+pub fn delta(kind: &'static str, text: &str, coalesced: usize, flush: &'static str) {
     // Opt-in content is capped per event. Tool arguments, credentials and raw
     // provider bodies are never exported here.
     let content = if std::env::var("AKH_OTEL_CAPTURE_CONTENT").as_deref() == Ok("true") {
@@ -155,13 +173,25 @@ pub fn delta(kind: &'static str, text: &str) {
         event.name = "runtime.delta",
         delta.kind = kind,
         delta.bytes = text.len(),
+        delta.coalesced = coalesced,
+        delta.flush = flush,
         delta.content = content,
         "runtime stream delta"
     );
-    opentelemetry::global::meter("akh.runtime")
+    let meter = opentelemetry::global::meter("akh.runtime");
+    let labels = [KeyValue::new("kind", kind)];
+    meter
         .u64_counter("akh.runtime.delta.bytes")
         .build()
-        .add(text.len() as u64, &[KeyValue::new("kind", kind)]);
+        .add(text.len() as u64, &labels);
+    meter
+        .u64_counter("akh.runtime.delta.coalesced")
+        .build()
+        .add(coalesced as u64, &labels);
+    meter.u64_counter("akh.runtime.delta.chunks").build().add(
+        1,
+        &[KeyValue::new("kind", kind), KeyValue::new("flush", flush)],
+    );
 }
 
 pub fn usage(value: &serde_json::Value) {

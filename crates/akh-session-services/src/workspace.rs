@@ -226,6 +226,52 @@ impl Workspace {
         Ok(())
     }
 
+    /// Describe one entry without following a final symlink. A missing entry,
+    /// or a path through a missing directory, is `exists: false`, not an error.
+    /// Intermediate symlinks are still rejected, as in every other verb.
+    pub fn stat(&self, path: &str) -> Result<crate::types::WorkspaceStat> {
+        use crate::types::{WorkspaceEntryKind, WorkspaceStat};
+        let (dir, name) = match parts(path)?.pop() {
+            None => (self.root.try_clone().map_err(io_error)?, None),
+            Some(_) => match self.parent(path) {
+                Ok((dir, name)) => (dir, Some(name)),
+                Err(fault) if fault.code == "not_found" => return Ok(WorkspaceStat::MISSING),
+                Err(fault) => return Err(fault),
+            },
+        };
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let rc = match &name {
+            Some(name) => unsafe {
+                libc::fstatat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            },
+            None => unsafe { libc::fstat(dir.as_raw_fd(), stat.as_mut_ptr()) },
+        };
+        if rc < 0 {
+            let error = std::io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ENOENT) | Some(libc::ENOTDIR) => Ok(WorkspaceStat::MISSING),
+                _ => Err(io_error(error)),
+            };
+        }
+        let stat = unsafe { stat.assume_init() };
+        let kind = match stat.st_mode & libc::S_IFMT {
+            libc::S_IFREG => WorkspaceEntryKind::File,
+            libc::S_IFDIR => WorkspaceEntryKind::Directory,
+            libc::S_IFLNK => WorkspaceEntryKind::Symlink,
+            _ => WorkspaceEntryKind::Other,
+        };
+        Ok(WorkspaceStat {
+            exists: true,
+            kind: Some(kind),
+            size: (kind == WorkspaceEntryKind::File).then_some(stat.st_size as u64),
+        })
+    }
+
     pub fn list(&self, path: &str) -> Result<Vec<String>> {
         let dir = self.directory(path)?;
         let fd = unsafe { libc::dup(dir.as_raw_fd()) };
@@ -263,6 +309,35 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stat_reports_kind_and_size_without_following_symlinks() {
+        use crate::types::{WorkspaceEntryKind, WorkspaceStat};
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"0123456789").unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        ws.mkdir("src").unwrap();
+        ws.write("src/file", b"four", None, true).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), dir.path().join("link")).unwrap();
+        let file = ws.stat("src/file").unwrap();
+        assert_eq!(file.kind, Some(WorkspaceEntryKind::File));
+        assert_eq!(file.size, Some(4));
+        assert_eq!(
+            ws.stat("src").unwrap().kind,
+            Some(WorkspaceEntryKind::Directory)
+        );
+        assert_eq!(
+            ws.stat(".").unwrap().kind,
+            Some(WorkspaceEntryKind::Directory)
+        );
+        // The symlink is described, never followed to the outside file's size.
+        let link = ws.stat("link").unwrap();
+        assert!(link.is_symlink());
+        assert_eq!(link.size, None);
+        assert_eq!(ws.stat("absent").unwrap(), WorkspaceStat::MISSING);
+        assert_eq!(ws.stat("absent/deeper").unwrap(), WorkspaceStat::MISSING);
+        assert!(ws.stat("../escape").is_err());
+    }
     #[test]
     fn revision_checks_and_atomic_create_preserve_an_editors_changes() {
         let dir = tempfile::tempdir().unwrap();

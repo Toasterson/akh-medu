@@ -32,15 +32,29 @@
 //! | `(r, is-a, relation)` | `r` is a relation (seed convention — minted as `SymbolKind::Relation`) |
 //! | `(r, onto:arity, onto:arity/2)` | declared arity (binary only today) |
 //! | `(r, onto:arg1type, T)` / `(r, onto:arg2type, T)` | argument type shapes (reuses `ArityPredicates` labels) |
+//! | `(r, onto:cardinality, onto:cardinality/single-valued[-temporal])` | `r` holds one live object per subject (Phase 53j, [`cardinality`]) |
+//! | `(alias, onto:alias-of, r)` | `alias` is another spelling of `r`; writes are stored under `r` (Phase 53j) |
+//! | `(r, onto:cardinality, onto:cardinality/multi)` | explicit multi-valued: overrides a built-in default (Phase 53 follow-up) |
+//! | `(r, onto:default-relation, relation)`, `(r, onto:default-cardinality, …)`, `(alias, onto:default-alias-of, r)` | the same declarations from a built-in default pack ([`builtin`]); an installed pack's declaration of `r` wins |
+//!
+//! Phase 53j adds memory hygiene on top of these declarations: structural
+//! predicate keys ([`canonical`]) and the bounded self-repair pass
+//! ([`hygiene`]) the daemon runs on every sleep tick. [`builtin`] ships the
+//! fleet memory pack in the binary so every akh gets those declarations by
+//! default (`[memory] default_pack`).
 //!
 //! References: ADR 081 (`docs/ai/decisions/081-akh-memory-schema-typing.md`),
 //! plan (`docs/ai/plans/2026-06-30-akh-memory-schema.md`), Anima project
 //! `019d9844-ce74-7993-a9f0-c953b8f04a4e`.
 
+pub mod builtin;
+pub mod canonical;
+pub mod cardinality;
 pub mod compile;
 pub mod conflict;
 pub mod coverage;
 pub mod digest;
+pub mod hygiene;
 pub mod install;
 pub mod project;
 #[cfg(feature = "postgres")]
@@ -51,6 +65,14 @@ pub mod source;
 use miette::Diagnostic;
 use thiserror::Error;
 
+pub use builtin::{
+    BuiltinPack, BuiltinPackOutcome, DefaultPackPolicy, PackVersion, ensure_builtin_pack,
+    ensure_builtin_packs,
+};
+pub use canonical::{CanonicalChoice, FamilyVerdict, PredicateFamily, PredicateKey, collisions};
+pub use cardinality::{
+    DeclarationTier, PredicateCardinality, declared_alias_target, declared_cardinality,
+};
 pub use compile::{
     CompiledSchemaPack, PortableTriple, RegistryRow, SchemaRegistry, check_admission, compile,
 };
@@ -63,6 +85,11 @@ pub use coverage::{
     coverage_report, coverage_report_top_n,
 };
 pub use digest::{PropertyDigest, RelationDigest, SchemaDigest, digest};
+pub use hygiene::{
+    DEFAULT_HYGIENE_BATCH, DEFAULT_MERGE_LIMIT, HygieneOptions, HygieneReport, MergeOutcome,
+    MergeReport, MergeRequest, MergeSelection, MutationBudget, execute_merge, merge_collisions,
+    merge_declared_aliases, merge_predicates, run_hygiene,
+};
 pub use install::{InstallReport, activate_pack, install_pack};
 pub use project::{
     MANIFEST_COMPARTMENT, PRED_PROJECTION_ASSERTED, ProjectionDiff, ProjectionReport, TypeOutcome,
@@ -75,7 +102,7 @@ pub use shape::{
     EffectiveProperty, EffectivePropertySet, ShapeViolation, check_value_shape,
     effective_properties, effective_properties_of_type, is_installed_type, type_chain,
 };
-pub use source::{PackScope, SchemaPackSource, ValueType, parse_source};
+pub use source::{Cardinality, PackScope, SchemaPackSource, ValueType, parse_source};
 
 /// Errors from schema-pack parsing, compilation, and installation.
 #[derive(Debug, Error, Diagnostic)]
@@ -287,6 +314,87 @@ pub enum SchemaError {
         type_name: String,
         chain: Vec<String>,
     },
+
+    #[error("relation \"{relation}\" is `temporal` but not `single_valued`")]
+    #[diagnostic(
+        code(akh::schema::temporal_requires_single_valued),
+        help(
+            "`temporal = true` says a superseded value is history that stopped holding when its \
+             successor arrived, which only means something for a single-valued relation. Either \
+             add `\"cardinality\": \"single_valued\"` to \"{relation}\" or drop `temporal`."
+        )
+    )]
+    TemporalRequiresSingleValued { relation: String },
+
+    #[error("alias \"{alias}\" of relation \"{relation}\" is itself a declared relation")]
+    #[diagnostic(
+        code(akh::schema::alias_is_relation),
+        help(
+            "An alias is another spelling that is rewritten onto its canonical relation. Remove \
+             \"{alias}\" from either the `relations` list or the `aliases` of \"{relation}\"."
+        )
+    )]
+    AliasIsRelation { alias: String, relation: String },
+
+    #[error("alias \"{alias}\" is declared by both \"{first}\" and \"{second}\"")]
+    #[diagnostic(
+        code(akh::schema::duplicate_alias),
+        help(
+            "Each alias maps to exactly one canonical relation. Keep \"{alias}\" under the \
+             relation it really means and remove it from the other."
+        )
+    )]
+    DuplicateAlias {
+        alias: String,
+        first: String,
+        second: String,
+    },
+
+    #[error("invalid schema pack version \"{version}\"")]
+    #[diagnostic(
+        code(akh::schema::invalid_pack_version),
+        help(
+            "A pack version that is compared (built-in packs) is dot-separated unsigned \
+             integers such as `1.0.0`, with no pre-release or build suffix. Fix `pack.version` \
+             in the pack source."
+        )
+    )]
+    InvalidPackVersion { version: String },
+
+    #[error("schema pack \"{pack}\" cannot be a built-in default pack: {detail}")]
+    #[diagnostic(
+        code(akh::schema::not_default_tier),
+        help(
+            "A built-in pack (compiled into the binary, `src/schema/builtin.rs`) may declare \
+             relations with `cardinality`, `temporal` and `aliases` only. Types, properties, \
+             argument types and `assumes` belong in a registry pack admitted with \
+             `akh schema admit`."
+        )
+    )]
+    NotDefaultTier { pack: String, detail: String },
+
+    #[error("predicate merge failed: {message}")]
+    #[diagnostic(
+        code(akh::schema::merge),
+        help(
+            "Check that every alias and the canonical predicate name existing relation symbols \
+             (labels or numeric ids) and that the canonical predicate is not one of the aliases. \
+             Nothing was rewritten for the failing alias; triples moved before the failure keep \
+             their `memory_hygiene` provenance, and re-running the merge is idempotent."
+        )
+    )]
+    Merge { message: String },
+
+    #[error("memory hygiene failed: {message}")]
+    #[diagnostic(
+        code(akh::schema::hygiene),
+        help(
+            "An engine write failed during the hygiene pass (the engine may be quiesced for a \
+             sleep/relocation handoff, or a store write failed). Every step is idempotent, so the \
+             next sleep tick (or `akh schema hygiene`) resumes where this one stopped."
+        )
+    )]
+    Hygiene { message: String },
 
     #[error("schema introspection failed: {message}")]
     #[diagnostic(

@@ -170,6 +170,49 @@ impl Client {
         path: &str,
         body: Option<Value>,
     ) -> Result<(T, HeaderMap)> {
+        self.send(service, method, path, body, None).await
+    }
+    /// POST to a configured endpoint as a different principal than the
+    /// endpoint's own credential (for example an akheventd route whose akh
+    /// target names its own core token file). The token never enters a record.
+    pub async fn post_with_token_file<T: DeserializeOwned>(
+        &self,
+        service: &str,
+        path: &str,
+        body: &impl Serialize,
+        token_file: &std::path::Path,
+    ) -> Result<T> {
+        let body = serde_json::to_value(body).map_err(|e| Fault::invalid(e.to_string()))?;
+        let token = crate::config::read_token(token_file)?;
+        self.send(
+            service,
+            reqwest::Method::POST,
+            path,
+            Some(body),
+            Some(token),
+        )
+        .await
+        .map(|(value, _)| value)
+    }
+    /// A request to a configured endpoint carrying the endpoint's own
+    /// credential (none for an `anonymous` endpoint). The caller sends it and
+    /// interprets the raw response, e.g. a health probe that needs the status
+    /// code and timing rather than a decoded body.
+    pub fn request(
+        &self,
+        service: &str,
+        method: reqwest::Method,
+        path: &str,
+    ) -> Result<reqwest::RequestBuilder> {
+        self.builder(service, method, path, None)
+    }
+    fn builder(
+        &self,
+        service: &str,
+        method: reqwest::Method,
+        path: &str,
+        bearer: Option<String>,
+    ) -> Result<reqwest::RequestBuilder> {
         let endpoint = self.config.endpoint(service)?;
         let route = endpoint.route(path);
         let route = if route.contains("{sandbox}") {
@@ -182,12 +225,29 @@ impl Client {
         } else {
             route
         };
-        let mut request = self
+        let request = self
             .clients
             .get(service)
             .ok_or_else(|| Fault::invalid("service has no configured HTTP client"))?
-            .request(method, route)
-            .bearer_auth(endpoint.token()?);
+            .request(method, route);
+        let bearer = match bearer {
+            Some(token) => Some(token),
+            None => endpoint.bearer()?,
+        };
+        Ok(match bearer {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        })
+    }
+    async fn send<T: DeserializeOwned>(
+        &self,
+        service: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        bearer: Option<String>,
+    ) -> Result<(T, HeaderMap)> {
+        let mut request = self.builder(service, method, path, bearer)?;
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -214,6 +274,7 @@ impl Client {
             let code = match status.as_u16() {
                 404 => "not_found",
                 409 => "conflict",
+                422 => "invalid_request",
                 401 => "unauthorized",
                 403 => "forbidden",
                 429 => "busy",

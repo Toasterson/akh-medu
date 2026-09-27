@@ -3,7 +3,11 @@ use crate::{
     config::{Config, Principal, RuntimeProfile},
     http::Client,
     store::{Store, Transaction, key},
-    types::*,
+    streaming::{DeltaStream, EventSink, Outgoing, SystemClock},
+    types::{
+        streaming::{DeltaKind, ParagraphCoalescer},
+        *,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -65,7 +69,12 @@ pub fn validate_conformance(profile: &RuntimeProfile) -> Result<()> {
             "native aliases are implemented only by the Claude bridge",
         ));
     }
-    if profile.execution_mode != ExecutionMode::Brokered || profile.kind == RuntimeKind::Internal {
+    if profile.kind == RuntimeKind::OpenCode {
+        akh_runtime::opencode::validate_profile(profile)
+            .map_err(|e| crate::runtime_profile::opencode_fault(&e))?;
+    }
+    if profile.execution_mode() != ExecutionMode::Brokered || profile.kind == RuntimeKind::Internal
+    {
         return Ok(());
     }
     let path = profile.conformance_file.as_ref().ok_or_else(|| {
@@ -90,6 +99,13 @@ pub fn validate_conformance(profile: &RuntimeProfile) -> Result<()> {
         "cancel_teardown",
         "workspace_semantics",
     ];
+    // OpenCode has no structural "native tools off" switch; its denial is a
+    // permission policy, so evidence must also show the model's tool catalog
+    // held only the Akh MCP tools (docs/ai/research/2026-09-25-opencode-runtime-integration.md).
+    let kind_required: &[&str] = match profile.kind {
+        RuntimeKind::OpenCode => &["native_tools_hidden"],
+        RuntimeKind::Internal | RuntimeKind::Codex | RuntimeKind::Claude => &[],
+    };
     let mut artifacts = std::collections::BTreeMap::new();
     if let Some(scope) = &profile.isolation {
         for path in &scope.validation_artifacts {
@@ -128,7 +144,10 @@ pub fn validate_conformance(profile: &RuntimeProfile) -> Result<()> {
                 .transpose()?
         || evidence.provider_version.is_empty()
         || evidence.evidence.is_empty()
-        || required.iter().any(|name| !evidence.checks.contains(*name))
+        || required
+            .iter()
+            .chain(kind_required)
+            .any(|name| !evidence.checks.contains(*name))
     {
         return Err(Fault::new(
             "conformance_required",
@@ -380,7 +399,7 @@ impl Runtime {
             .clone();
         if profile.revision != request.binding.revision
             || profile.kind != request.binding.kind
-            || profile.execution_mode != request.binding.execution_mode
+            || profile.execution_mode() != request.binding.execution_mode
         {
             return Err(Fault::conflict(
                 "installed runtime profile differs from session binding",
@@ -404,11 +423,27 @@ impl Runtime {
         if !active.is_empty() {
             return Err(Fault::new("busy", "runtime capacity is occupied"));
         }
+        // Configuration load already refused this; re-check at admission so an
+        // environment flip or a hot-swapped profile can never slip through.
+        if self.config.deployment_mode()?.is_deployed() {
+            let subject = format!("runtimes.{}", request.binding.profile);
+            match profile.execution_mode_setting() {
+                None => return Err(crate::config::execution_mode_required(&subject)),
+                Some(ExecutionMode::Colocated) => {
+                    return Err(crate::config::colocated_forbidden(&subject));
+                }
+                Some(ExecutionMode::Brokered) => {}
+            }
+        }
         let profile_lease = crate::runtime_profile::acquire(&profile)?;
         validate_conformance(&profile)?;
         if profile.kind == RuntimeKind::Internal {
             crate::internal::validate(&profile, &request)?;
         }
+        // Refuse admission, before anything durable, if the stream settings
+        // are unusable (configuration load already validated them).
+        let coalescer = ParagraphCoalescer::new(self.config.streaming)
+            .map_err(crate::config::streaming_fault)?;
         let job = RuntimeJob {
             provider_session: request.provider_session.clone(),
             request: request.clone(),
@@ -438,7 +473,16 @@ impl Runtime {
                 handle,
                 cancel: cancel.clone(),
                 native_tools: HashMap::new(),
+                stream: DeltaStream::new(
+                    coalescer,
+                    JobEventLog {
+                        service: service.clone(),
+                        job_id: request.id.clone(),
+                    },
+                    Arc::new(SystemClock),
+                ),
             };
+            host.stream.start_ticker(span.clone());
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if profile.kind == RuntimeKind::Internal {
                     crate::internal::run_loop(
@@ -459,6 +503,18 @@ impl Runtime {
                     "runtime worker panicked; outcome requires reconciliation",
                 ))
             });
+            // The turn is over: release buffered text before the result is
+            // saved, so the event log is complete when the job turns terminal.
+            // A failed final append is the same durable-log failure a token
+            // stream would have reported from `Host::event`.
+            let result = match (result, host.stream.finish()) {
+                (result, Ok(())) => result,
+                (Ok(_), Err(error)) => Err(Fault::new("unknown_outcome", error)),
+                (Err(error), Err(flush)) => {
+                    tracing::error!(error = %flush, "final stream flush failed after a failed turn");
+                    Err(error)
+                }
+            };
             if result.is_ok() {
                 operation.success();
             } else {
@@ -618,7 +674,72 @@ struct RemoteHost {
     handle: tokio::runtime::Handle,
     cancel: Arc<AtomicBool>,
     native_tools: HashMap<String, (tracing::Span, crate::telemetry::Operation)>,
+    /// Paragraph coalescing in front of telemetry and the job event log.
+    stream: DeltaStream<JobEventLog>,
 }
+
+/// The durable, ordered runtime event log of one job, read by akhsessd.
+struct JobEventLog {
+    service: Runtime,
+    job_id: String,
+}
+impl EventSink for JobEventLog {
+    fn append(&mut self, item: Outgoing) -> std::result::Result<(), String> {
+        if let Outgoing::Chunk(chunk) = &item {
+            crate::telemetry::delta(
+                chunk.kind.as_str(),
+                &chunk.text,
+                chunk.deltas,
+                chunk.reason.as_str(),
+            );
+        }
+        let event = item.into_event();
+        self.service
+            .store
+            .transaction(|tx| {
+                // A job is only ever Running while its own worker can still
+                // call back here, so this always finds it in `job/` — but it
+                // is routed through the same fallback as every other by-id
+                // read so this call site never needs to change if that ever
+                // stops being true.
+                let (mut job, slot) = load_job(tx, &self.job_id)?
+                    .ok_or_else(|| Fault::missing("runtime job not found"))?;
+                if let RuntimeEvent::Bound {
+                    provider_session, ..
+                } = &event
+                {
+                    if job
+                        .provider_session
+                        .as_ref()
+                        .is_some_and(|s| s != provider_session)
+                    {
+                        return Err(Fault::conflict("provider continuation changed"));
+                    }
+                    job.provider_session = Some(provider_session.clone());
+                }
+                if job.events.len() >= 100_000 {
+                    return Err(Fault::new("capacity", "runtime event limit exceeded"));
+                }
+                let bytes_key = key("runtime_event_bytes", &[&self.job_id]);
+                let old_bytes = tx.get::<usize>(&bytes_key)?.unwrap_or_else(|| {
+                    serde_json::to_vec(&job.events)
+                        .map(|b| b.len())
+                        .unwrap_or(4 * 1024 * 1024)
+                });
+                let event_bytes = serde_json::to_vec(&event)
+                    .map_err(|_| Fault::invalid("cannot encode runtime event"))?
+                    .len();
+                if old_bytes + event_bytes > 4 * 1024 * 1024 {
+                    return Err(Fault::new("capacity", "runtime event byte budget exceeded"));
+                }
+                tx.put(&bytes_key, &(old_bytes + event_bytes))?;
+                job.events.push(event);
+                save_job(tx, &job, slot)
+            })
+            .map_err(|e| e.to_string())
+    }
+}
+
 impl RemoteHost {
     fn call(&self, id: &str, name: &str, arguments: Value) -> ToolCall {
         ToolCall {
@@ -682,9 +803,20 @@ impl RemoteHost {
 }
 impl akh_runtime::Host for RemoteHost {
     fn usage(&mut self, usage: &Value) {
+        // Usage is reported after the text it accounts for. A failed flush is
+        // sticky and surfaces at the provider's next host call.
+        if let Err(error) = self.stream.barrier() {
+            tracing::warn!(error, "stream flush before usage failed");
+        }
         crate::telemetry::usage(usage);
     }
     fn event(&mut self, event: RuntimeEvent) -> std::result::Result<(), String> {
+        if DeltaKind::of(&event).is_some() {
+            // Coalesced; telemetry runs per released chunk in `JobEventLog`.
+            return self.stream.event(event);
+        }
+        // Buffered text goes out before this event's own telemetry and record.
+        self.stream.barrier()?;
         match &event {
             RuntimeEvent::Bound {
                 provider_session,
@@ -692,8 +824,6 @@ impl akh_runtime::Host for RemoteHost {
             } => {
                 tracing::info!(event.name="runtime.bound", provider.session_id=%provider_session, model=?model, "provider session bound")
             }
-            RuntimeEvent::Text { text } => crate::telemetry::delta("text", text),
-            RuntimeEvent::Reasoning { text } => crate::telemetry::delta("reasoning", text),
             RuntimeEvent::ToolStarted { id, name } => {
                 let span = tracing::info_span!("runtime.tool", tool.id=%id, tool.name=%name, otel.status_code=tracing::field::Empty);
                 span.in_scope(|| {
@@ -714,50 +844,9 @@ impl akh_runtime::Host for RemoteHost {
                     drop(operation);
                 }
             }
+            RuntimeEvent::Text { .. } | RuntimeEvent::Reasoning { .. } => {}
         }
-        self.service
-            .store
-            .transaction(|tx| {
-                // A job is only ever Running while its own worker can still
-                // call back here, so this always finds it in `job/` — but it
-                // is routed through the same fallback as every other by-id
-                // read so this call site never needs to change if that ever
-                // stops being true.
-                let (mut job, slot) = load_job(tx, &self.request.id)?
-                    .ok_or_else(|| Fault::missing("runtime job not found"))?;
-                if let RuntimeEvent::Bound {
-                    provider_session, ..
-                } = &event
-                {
-                    if job
-                        .provider_session
-                        .as_ref()
-                        .is_some_and(|s| s != provider_session)
-                    {
-                        return Err(Fault::conflict("provider continuation changed"));
-                    }
-                    job.provider_session = Some(provider_session.clone());
-                }
-                if job.events.len() >= 100_000 {
-                    return Err(Fault::new("capacity", "runtime event limit exceeded"));
-                }
-                let bytes_key = key("runtime_event_bytes", &[&self.request.id]);
-                let old_bytes = tx.get::<usize>(&bytes_key)?.unwrap_or_else(|| {
-                    serde_json::to_vec(&job.events)
-                        .map(|b| b.len())
-                        .unwrap_or(4 * 1024 * 1024)
-                });
-                let event_bytes = serde_json::to_vec(&event)
-                    .map_err(|_| Fault::invalid("cannot encode runtime event"))?
-                    .len();
-                if old_bytes + event_bytes > 4 * 1024 * 1024 {
-                    return Err(Fault::new("capacity", "runtime event byte budget exceeded"));
-                }
-                tx.put(&bytes_key, &(old_bytes + event_bytes))?;
-                job.events.push(event);
-                save_job(tx, &job, slot)
-            })
-            .map_err(|e| e.to_string())
+        self.stream.event(event)
     }
     fn tool(
         &mut self,
@@ -786,6 +875,7 @@ impl akh_runtime::Host for RemoteHost {
         name: &str,
         arguments: &Value,
     ) -> std::result::Result<bool, String> {
+        self.stream.barrier()?;
         let span = tracing::info_span!("runtime.approval", tool.id = id, tool.name = name);
         let _entered = span.enter();
         let mut operation = crate::telemetry::Operation::new("approval_wait");
@@ -801,6 +891,7 @@ impl akh_runtime::Host for RemoteHost {
             .is_some_and(|r| r["approved"] == true))
     }
     fn question(&mut self, id: &str, questions: &Value) -> std::result::Result<Value, String> {
+        self.stream.barrier()?;
         let span = tracing::info_span!("runtime.question", question.id = id);
         let _entered = span.enter();
         let mut operation = crate::telemetry::Operation::new("question_wait");
@@ -818,6 +909,7 @@ impl akh_runtime::Host for RemoteHost {
         vector: &[u8],
         limit: usize,
     ) -> std::result::Result<Option<Vec<neural_spans::SpanHit>>, String> {
+        self.stream.barrier()?;
         let request = neural_spans::RecallRequest {
             call: self.call(id, neural_spans::RecallRequest::CALL_NAME, json!({})),
             space: space.clone(),
@@ -834,6 +926,7 @@ impl akh_runtime::Host for RemoteHost {
         id: &str,
         captures: &[neural_spans::SpanCapture],
     ) -> std::result::Result<bool, String> {
+        self.stream.barrier()?;
         let delivery = neural_spans::SpanDelivery {
             call: self.call(id, neural_spans::SpanDelivery::CALL_NAME, json!({})),
             captures: captures.to_vec(),
@@ -848,6 +941,7 @@ impl akh_runtime::Host for RemoteHost {
         window_tokens: usize,
         reserved_output_tokens: usize,
     ) -> std::result::Result<Option<akh_session_types::AssembledContext>, String> {
+        self.stream.barrier()?;
         let request = akh_session_types::RuntimeContextRequest {
             call: self.call(
                 &self.request.turn_id,
@@ -873,6 +967,69 @@ impl akh_runtime::Host for RemoteHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brokered_opencode_conformance_also_requires_hidden_native_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("opencode");
+        std::fs::write(&binary, "#!/bin/sh\n").unwrap();
+        let evidence_file = dir.path().join("conformance.json");
+        let profile = |kind: &str| -> RuntimeProfile {
+            serde_json::from_value(json!({"revision":"1","kind":kind,"working_dir":dir.path(),
+                "binary":binary,"execution_mode":"brokered","conformance_file":evidence_file,
+                "isolation":{"directory":dir.path().join("profile")}}))
+            .unwrap()
+        };
+        let write = |profile: &RuntimeProfile, extra: &[&str]| {
+            let checks: BTreeSet<String> = [
+                "native_write_denied_before_effect",
+                "native_exec_denied_before_effect",
+                "hooks_disabled",
+                "supplied_tool_succeeds",
+                "exact_resume",
+                "cancel_teardown",
+                "workspace_semantics",
+            ]
+            .iter()
+            .chain(extra)
+            .map(|c| (*c).to_owned())
+            .collect();
+            let evidence = Conformance {
+                profile_revision: "1".into(),
+                profile_sha256: profile_digest(profile).unwrap(),
+                provider_sha256: file_digest(&binary).unwrap(),
+                bridge_sha256: None,
+                platform: std::env::consts::OS.into(),
+                provider_version: "opencode 1.18.32".into(),
+                sdk_version: None,
+                checks,
+                evidence: vec!["fixture".into()],
+                artifact_sha256: Default::default(),
+            };
+            std::fs::write(&evidence_file, serde_json::to_vec(&evidence).unwrap()).unwrap();
+        };
+        let opencode = profile("opencode");
+        write(&opencode, &[]);
+        assert_eq!(
+            validate_conformance(&opencode).unwrap_err().code,
+            "conformance_required"
+        );
+        write(&opencode, &["native_tools_hidden"]);
+        validate_conformance(&opencode).unwrap();
+        // The additional check is OpenCode's alone.
+        let codex = profile("codex");
+        write(&codex, &[]);
+        validate_conformance(&codex).unwrap();
+        // Profile diagnostics surface through `akh-runtime-profile verify` too.
+        let mut ambient = profile("opencode");
+        ambient
+            .environment
+            .insert("OPENCODE_CONFIG_DIR".into(), "/etc/opencode".into());
+        assert_eq!(
+            validate_conformance(&ambient).unwrap_err().code,
+            "akh::runtime::opencode::brokered_environment"
+        );
+    }
 
     #[test]
     fn cancelled_unsubmitted_dispatch_cannot_run_later() {

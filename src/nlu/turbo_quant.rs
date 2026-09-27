@@ -122,7 +122,11 @@ impl TurboQuant {
 
     /// Rotate, then store the nearest centroid index per coordinate.
     pub fn quantize(&self, values: &[f32]) -> QuantizedVector {
-        assert_eq!(values.len(), self.dim, "vector does not match this codebook");
+        assert_eq!(
+            values.len(),
+            self.dim,
+            "vector does not match this codebook"
+        );
         let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
         if norm == 0.0 {
             return QuantizedVector {
@@ -617,7 +621,9 @@ mod tests {
     fn page_store_evicts_from_the_front() {
         let dim = 64usize;
         let mut store = KvPageStore::new(dim, 3, 5);
-        let rows: Vec<f32> = (0..4).flat_map(|r| unit_vector(dim, 700 + r as u64)).collect();
+        let rows: Vec<f32> = (0..4)
+            .flat_map(|r| unit_vector(dim, 700 + r as u64))
+            .collect();
         store.push_rows(&rows).unwrap();
         let before = store.decode();
 

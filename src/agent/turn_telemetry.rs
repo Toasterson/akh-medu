@@ -605,7 +605,10 @@ mod tests {
                         m.note_content_delta();
                         m.set_tokens(10 + seq as u64, 5 + seq as u64);
                     }
-                    m.log("test-model", "completed");
+                    m.log(
+                        "test-model",
+                        crate::agent::llm_metrics::RequestOutcome::Completed,
+                    );
                 }
             }
             telemetry.finish("sekhmet", TurnStopReason::EndTurn);

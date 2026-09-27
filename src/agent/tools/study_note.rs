@@ -22,7 +22,7 @@ use serde_json::Value;
 use crate::agent::error::{AgentError, AgentResult};
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use crate::library::catalog::slugify;
@@ -334,6 +334,7 @@ impl Tool for StudyNoteCatalogTool {
                 ),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::MemoryAccess]),
                 description: "Read-only, bounded access to the akh's own study-note catalog."
@@ -402,6 +403,7 @@ impl Tool for StudyNoteListTool {
                 ),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::MemoryAccess]),
                 description: "Read-only, bounded metadata access to the akh's own study-note catalog."
@@ -446,6 +448,7 @@ impl Tool for StudyNoteReadTool {
                 note_id_schema(),
             )],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::MemoryAccess]),
                 description: "Read-only identity-based access to one study note.".into(),
@@ -779,6 +782,7 @@ impl Tool for StudyNoteAppendTool {
                 ),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([
                     Capability::WriteFilesystem,
@@ -901,6 +905,7 @@ impl Tool for StudyNoteReviseTool {
                 ),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([
                     Capability::WriteFilesystem,

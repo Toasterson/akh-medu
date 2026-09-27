@@ -242,6 +242,7 @@ dependencies = [
  "harness-core",
  "hnsw_rs",
  "hound",
+ "httpdate",
  "icalendar",
  "image",
  "imap",
@@ -304,10 +305,12 @@ version = "0.1.0"
 dependencies = [
  "akh-session-types",
  "libc",
+ "miette 7.6.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -337,6 +340,7 @@ dependencies = [
  "async-stream",
  "axum 0.8.8",
  "base64 0.22.1",
+ "blake3",
  "chrono",
  "clap",
  "futures-util",
@@ -345,6 +349,7 @@ dependencies = [
  "jsonschema",
  "lapin",
  "libc",
+ "miette 7.6.0",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-proto",
@@ -359,6 +364,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "thiserror 2.0.18",
  "tikv-jemallocator",
  "tokio",
  "tokio-executor-trait",
@@ -377,6 +383,7 @@ dependencies = [
 name = "akh-session-types"
 version = "0.1.0"
 dependencies = [
+ "miette 7.6.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -1,0 +1,9 @@
+{
+  "id": "mergiraf",
+  "name": "Merge-conflict repair worker (mergiraf)",
+  "version": "1.0.0",
+  "description": "Procedure for a contained native worker that an akh dispatched through `dispatch_merge_repair` to resolve one PR merge conflict at exact heads with mergiraf. Encodes decision D4: fast-forward the existing PR source branch only, never merge, never force-push. Replaces POLICY in deploy/roman-mini/mergiraf_worker.py (53g PR 7).",
+  "domains": ["delegation", "git", "merge-conflict", "mergiraf"],
+  "weight_size_bytes": 0,
+  "procedures_file": "procedures.md"
+}

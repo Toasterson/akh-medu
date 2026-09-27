@@ -30,6 +30,12 @@ traces this prototype into `akhrtd` workers, `akhsessd` session ownership,
 `akhomed` cognitive services, `akhsbxd` provisioning and `akhexecd` execution,
 alongside `akheventd` ingress and automation triggers. It is a local design
 proposal; the current implementation still runs through the existing daemon.
+**Superseded in part** by [ADR 113](ai/decisions/113-full-akh-always.md) (Phase
+53h): `akhomed` is always the fully featured akh (daemon loop, in-process turn,
+full tool registry, ACP — one `server` build profile, `core-api`/`/v1` additive
+on top; see `docs/ops/akhomed-feature-profiles.md`), and `akhsessd`/`akheventd`
+contain only native-runtime delegation and event ingress, not the akh's own
+automation or admission.
 
 The [2026-09-11 deployment plan](wayfinder/agent-loops/assets/k8s-acp-t3-deployment.md)
 traces these adapters into Kubernetes, ACP over WebSocket, upstream T3 Code and

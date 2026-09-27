@@ -115,6 +115,45 @@ struct ServerState {
     engine_load_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Likewise for `get_agent` — avoids a wasted concurrent heavy `Agent::resume`.
     agent_load_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Phase 53e: the `/v1` delegation-grant authority, published once the
+    /// core API is up. Empty = grants unavailable (`core_api_disabled`).
+    #[cfg(feature = "core-api")]
+    grant_authority: akh_medu::core_service::GrantAuthoritySlot,
+    /// Each resident Agent's live tool registry (weak handles), captured
+    /// when the Agent is created, so `/v1` calls and grant minting never wait on the Agent's
+    /// std `RwLock` (an OODA cycle or turn can hold it for a long time).
+    /// An Agent's registry `Arc` is fixed for its lifetime and registration
+    /// (53i lazy MCP tools, `sync_live_tools`) mutates it in place, so the
+    /// cached handle always sees the current tool set. Entries are keyed by
+    /// workspace and tied to the Agent instance they came from, so a
+    /// replaced or evicted Agent never serves a stale registry.
+    tool_registries: StdRwLock<HashMap<String, ResidentTools>>,
+}
+
+/// A resident Agent's tool registry, tied to the Agent instance it belongs to.
+///
+/// Both handles are weak: the cache never keeps an evicted Agent's registry
+/// (and the tools and engine handles it owns) alive, so eviction, sleep and
+/// relocation need no extra clean-up. The Agent holds the strong registry
+/// `Arc`, so the upgrade succeeds for exactly as long as that Agent lives.
+struct ResidentTools {
+    agent: std::sync::Weak<StdRwLock<Agent>>,
+    registry: std::sync::Weak<akh_medu::agent::tool::ToolRegistry>,
+}
+
+impl ResidentTools {
+    /// The registry, if `agent` is the (live) Agent it was captured from.
+    fn for_agent(
+        &self,
+        agent: &Arc<StdRwLock<Agent>>,
+    ) -> Option<Arc<akh_medu::agent::tool::ToolRegistry>> {
+        // The weak handle pins the allocation, so a new Agent can never reuse
+        // this address while the entry exists: pointer equality is identity.
+        if !std::ptr::eq(self.agent.as_ptr(), Arc::as_ptr(agent)) {
+            return None;
+        }
+        self.registry.upgrade()
+    }
 }
 
 /// Fetch (creating if needed) the per-workspace load lock from `locks`.
@@ -224,6 +263,67 @@ struct SnapshotTicker {
     handle: tokio::task::JoinHandle<()>,
 }
 
+/// Register the escalation tools (`escalate`, `dispatch_merge_repair`,
+/// `escalation_status`; Phase 53g PR 7) for an akh whose
+/// `[delegation.native.escalation]` enables them, and reconcile the incident
+/// ledger in the background (adopting sessions a create made before a
+/// restart, settling turns that ended while the akh was down).
+///
+/// A misconfiguration is logged with its diagnostic and leaves the tools
+/// unregistered: the akh still starts, and a call to a missing tool fails
+/// visibly instead of delegating uncontained.
+#[cfg(all(feature = "delegation", feature = "core-api"))]
+fn register_escalation_tools(
+    agent: &akh_medu::agent::Agent,
+    name: &str,
+    engine: &Arc<akh_medu::engine::Engine>,
+    native: &akh_medu::agent::delegation::NativeDelegationConfig,
+    lexicon: &akh_medu::agent::provider_failure::ProviderErrorLexicon,
+    issuer: Arc<dyn akh_medu::agent::delegation::DelegationGrantIssuer>,
+) {
+    use akh_medu::agent::delegation::escalation::EscalationService;
+    use akh_medu::agent::delegation::ledger::IncidentLedger;
+    let service = IncidentLedger::open(engine)
+        .map_err(akh_medu::agent::delegation::escalation::EscalationError::from)
+        .and_then(|ledger| {
+            EscalationService::from_config(name, native, lexicon.clone(), issuer, ledger)
+        });
+    let service = match service {
+        Ok(service) => Arc::new(service),
+        Err(error) => {
+            tracing::error!(
+                target: "akh::delegation",
+                workspace = %name,
+                error = ?miette::Report::new(error),
+                "escalation tools not registered"
+            );
+            return;
+        }
+    };
+    for tool in akh_medu::agent::tools::escalation_tools(&service) {
+        agent.register_tool(tool);
+    }
+    tracing::info!(
+        target: "akh::delegation",
+        workspace = %name,
+        projects = ?service.projects(),
+        durable = service.ledger().is_durable(),
+        "escalation tools registered"
+    );
+    let workspace = name.to_string();
+    drop(tokio::task::spawn_blocking(move || {
+        let report = service.reconcile();
+        if report.examined > 0 {
+            tracing::info!(
+                target: "akh::delegation",
+                workspace = %workspace,
+                ?report,
+                "incident ledger reconciled"
+            );
+        }
+    }));
+}
+
 /// Capture + persist one snapshot of `name`'s agent (Phase 38c).
 /// Build the privilege-dropping executor for a workspace whose `[exec]` selects
 /// `kind = "local-drop"` (Phase 48b / ADR 082).
@@ -277,6 +377,113 @@ fn build_local_drop_backend(
     );
 
     Ok(Arc::new(backend) as Arc<dyn akh_medu::backend::Backend>)
+}
+
+/// Allocate an akhsbxd/akhexecd sandbox workspace for a workspace whose
+/// `[exec]` selects `kind = "execd"` (Phase 53c / ADR 113 decision 3).
+///
+/// Same fail-loud rule as the other executors: an allocation that fails stops
+/// the akh from loading; there is no fallback to local execution. Logs the
+/// binding and its honestly classified confinement once per workspace.
+#[cfg(feature = "execd-executor")]
+fn build_execd_backend(
+    exec: &akh_medu::akh_config::ExecBackendConfig,
+    workspace: &str,
+) -> Result<Arc<dyn akh_medu::backend::Backend>, String> {
+    use akh_medu::backend::Backend as _;
+    use akh_medu::backend::execd::ExecdBackend;
+    use miette::Diagnostic as _;
+
+    let cfg = exec
+        .to_execd_config(workspace)
+        .expect("Execd variant implies Some");
+    tracing::info!(
+        target: "akh::backend::execd",
+        workspace = %workspace,
+        sandbox_url = %cfg.sandbox_url,
+        profile = %cfg.profile,
+        principal = %cfg.principal,
+        session = %cfg.session_id,
+        "allocating execd sandbox workspace"
+    );
+    let backend = ExecdBackend::connect(cfg).map_err(|e| {
+        let code = e.code().map(|c| format!(" [{c}]")).unwrap_or_default();
+        let help = e.help().map(|h| format!(" help: {h}")).unwrap_or_default();
+        format!(
+            "workspace {workspace}: execd exec backend could not allocate a sandbox \
+             workspace: {e}{code}{help}"
+        )
+    })?;
+    tracing::info!(
+        target: "akh::backend::execd",
+        workspace = %workspace,
+        sandbox = %backend.binding().sandbox_id,
+        confinement_label = %backend.binding().confinement,
+        confinement = ?backend.handshake().confinement,
+        "workspace exec runs in an execd sandbox"
+    );
+    Ok(Arc::new(backend) as Arc<dyn akh_medu::backend::Backend>)
+}
+
+/// Build the `sandbox_exec` tool for a workspace whose `[exec]` configures
+/// `[[exec.sandboxes]]` (Phase 53g PR 8). `Ok(None)` when there are none.
+///
+/// Validation failures fail the workspace load, like `build_execd_backend`.
+/// Nothing is allocated here: each sandbox allocates on its first
+/// `sandbox_exec` call.
+#[cfg(feature = "execd-executor")]
+fn build_sandbox_exec_tool(
+    exec: &akh_medu::akh_config::ExecBackendConfig,
+    workspace: &str,
+) -> Result<Option<akh_medu::agent::tools::SandboxExecTool>, String> {
+    use akh_medu::agent::tools::SandboxExecTool;
+    use miette::Diagnostic as _;
+
+    let tool = SandboxExecTool::from_execd_config(exec, workspace).map_err(|e| {
+        let code = e.code().map(|c| format!(" [{c}]")).unwrap_or_default();
+        let help = e.help().map(|h| format!(" help: {h}")).unwrap_or_default();
+        format!("workspace {workspace}: invalid [[exec.sandboxes]]: {e}{code}{help}")
+    })?;
+    if let Some(tool) = &tool {
+        let sandboxes = tool
+            .sandboxes()
+            .iter()
+            .map(|entry| format!("{}={}", entry.name(), entry.profile()))
+            .collect::<Vec<_>>()
+            .join(",");
+        tracing::info!(
+            target: "akh::backend::execd",
+            workspace = %workspace,
+            sandboxes = %sandboxes,
+            "sandbox_exec registered for additional execd sandboxes (allocated on first use)"
+        );
+    }
+    Ok(tool)
+}
+
+/// Built without `execd-executor`: refuse rather than execute locally.
+#[cfg(not(feature = "execd-executor"))]
+fn build_execd_backend(
+    _exec: &akh_medu::akh_config::ExecBackendConfig,
+    workspace: &str,
+) -> Result<Arc<dyn akh_medu::backend::Backend>, String> {
+    Err(format!(
+        "workspace {workspace}: [exec] kind = \"execd\" but this akhomed was built without \
+         the `execd-executor` feature; rebuild with `--features server` (which includes it) \
+         — refusing to fall back to local execution"
+    ))
+}
+
+/// Drop an evicted agent on the blocking pool, outside the `agents` lock and
+/// off the async runtime. Tearing an agent down can block: its executor
+/// backend stops a lease thread and releases the allocation over blocking
+/// HTTP (`ExecdBackend`), and other members flush or join threads. Only the
+/// hand-off happens under the caller's write guard; the drop itself runs on
+/// another thread, so neither the lock nor a runtime worker waits on it.
+fn drop_evicted_agent(evicted: Option<Arc<StdRwLock<Agent>>>) {
+    if let Some(agent) = evicted {
+        drop(tokio::task::spawn_blocking(move || drop(agent)));
+    }
 }
 
 ///
@@ -474,6 +681,38 @@ impl ServerState {
             hydrated_wakes: Arc::new(Mutex::new(std::collections::HashSet::new())),
             engine_load_locks: RwLock::new(HashMap::new()),
             agent_load_locks: RwLock::new(HashMap::new()),
+            #[cfg(feature = "core-api")]
+            grant_authority: Arc::default(),
+            tool_registries: StdRwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Phase 53b: the akh's `[autonomy]` plus where its executor tools run,
+    /// for the daemon. The placement comes from the same
+    /// `AkhConfig::effective_exec(host [exec])` resolution the agent build
+    /// wires the tools with, so the idle-cycle default (ADR 113 decision 4)
+    /// cannot disagree with the executor actually in use. An unreadable
+    /// `akh.toml` falls back to the default autonomy (on, budgeted) and the
+    /// host executor. Phase 53 fix-up: also the akh's own `[board]` identity.
+    /// Phase 53j: also the akh's `[memory]` (hygiene batch bound).
+    async fn daemon_settings(&self, name: &str) -> DaemonAkhSettings {
+        use akh_medu::agent::autonomy::ExecPlacement;
+        let host_exec = self.config.read().await.exec.clone();
+        match self.get_akh_config(name).await {
+            Ok(cfg) => DaemonAkhSettings {
+                autonomy: cfg.autonomy.clone(),
+                exec: ExecPlacement::from(&cfg.effective_exec(host_exec.as_ref())),
+                board: cfg.board.clone(),
+                memory: cfg.memory,
+                provider: cfg.provider.clone(),
+            },
+            Err(_) => DaemonAkhSettings {
+                autonomy: akh_medu::akh_config::AutonomyConfig::default(),
+                exec: ExecPlacement::from(&host_exec.unwrap_or_default()),
+                board: None,
+                memory: akh_medu::akh_config::MemoryConfig::default(),
+                provider: akh_medu::agent::provider_failure::ProviderConfig::default(),
+            },
         }
     }
 
@@ -700,7 +939,7 @@ impl ServerState {
                     tracing::error!(workspace = %name, %error, "reconnect handoff retained residency because WAL did not drain");
                     continue;
                 }
-                self.agents.write().await.remove(&name);
+                drop_evicted_agent(self.agents.write().await.remove(&name));
                 self.workspaces.write().await.remove(&name);
                 self.psyche_snapshots.write().await.remove(&name);
                 self.nlu_pipelines.write().await.remove(&name);
@@ -724,7 +963,6 @@ impl ServerState {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .remove(&name);
-                        #[cfg(not(feature = "core-server"))]
                         match self.get_agent(&name).await {
                             Ok(_) => {
                                 tracing::info!(workspace = %name, residency_epoch, "claimed and hydrated durable state after reconnect")
@@ -1456,7 +1694,7 @@ impl ServerState {
 
         // Drop the cached agent + engine + ancillary caches so memory is freed.
         // Dropping the engine releases the redb lock so a later wake can reopen it.
-        self.agents.write().await.remove(name);
+        drop_evicted_agent(self.agents.write().await.remove(name));
         self.workspaces.write().await.remove(name);
         self.psyche_snapshots.write().await.remove(name);
         self.nlu_pipelines.write().await.remove(name);
@@ -1908,6 +2146,132 @@ impl ServerState {
             "triples_applied": report.triples_applied,
             "microtheory": pack.microtheory_label(),
         }))
+    }
+
+    /// Run one memory-hygiene pass on a workspace now (`_akh/memory/hygiene`,
+    /// Phase 53j): the same bounded pass the daemon runs on every sleep tick.
+    /// Params: `workspace` (required), `dry_run` (default false),
+    /// `max_mutations` (default: the akh's `[memory] hygiene_batch`).
+    async fn memory_hygiene(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let batch = match params
+            .get("max_mutations")
+            .and_then(serde_json::Value::as_u64)
+        {
+            Some(max) => usize::try_from(max).unwrap_or(usize::MAX),
+            None => self
+                .get_akh_config(ws)
+                .await
+                .map(|cfg| cfg.memory.hygiene_batch)
+                .unwrap_or(akh_medu::schema::DEFAULT_HYGIENE_BATCH),
+        };
+        let dry_run = params
+            .get("dry_run")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let engine = self.get_engine(ws).await?;
+        let report = tokio::task::spawn_blocking(move || {
+            let mut options = akh_medu::schema::HygieneOptions::for_engine(&engine, batch);
+            options.dry_run = dry_run;
+            akh_medu::schema::run_hygiene(&engine, options)
+        })
+        .await
+        .map_err(|e| format!("hygiene task panicked: {e}"))?
+        .map_err(|e| format!("memory hygiene failed: {e}"))?;
+        tracing::info!(
+            target: "akh::autonomy",
+            workspace = %ws,
+            dry_run,
+            merged_triples = report.merged_triples(),
+            superseded = report.superseded,
+            repaired = report.repaired,
+            mutations = report.mutations,
+            truncated = report.truncated,
+            "memory hygiene pass (control plane)"
+        );
+        serde_json::to_value(report).map_err(|e| format!("could not encode hygiene report: {e}"))
+    }
+
+    /// Merge predicate spellings (`_akh/memory/merge_predicates`, Phase 53j).
+    /// Params: `workspace` (required); `mode` = `explicit` (default, needs
+    /// `canonical` + `aliases`), `declared` or `collisions`; `dry_run`;
+    /// `limit` (default 10000 triples).
+    async fn memory_merge_predicates(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        use akh_medu::schema::{MergeRequest, MergeSelection};
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let selection = match params
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("explicit")
+        {
+            "explicit" => MergeSelection::Explicit {
+                canonical: params
+                    .get("canonical")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        "explicit mode needs `canonical` and `aliases` (or use mode=declared / \
+                         mode=collisions)"
+                            .to_string()
+                    })?
+                    .to_string(),
+                aliases: params
+                    .get("aliases")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            },
+            "declared" => MergeSelection::Declared,
+            "collisions" => MergeSelection::Collisions,
+            other => {
+                return Err(format!(
+                    "unknown merge mode \"{other}\": use explicit, declared or collisions"
+                ));
+            }
+        };
+        let request = MergeRequest {
+            selection,
+            dry_run: params
+                .get("dry_run")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            limit: params
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .map(|l| usize::try_from(l).unwrap_or(usize::MAX))
+                .unwrap_or(akh_medu::schema::DEFAULT_MERGE_LIMIT),
+        };
+        let engine = self.get_engine(ws).await?;
+        let outcome =
+            tokio::task::spawn_blocking(move || akh_medu::schema::execute_merge(&engine, &request))
+                .await
+                .map_err(|e| format!("merge task panicked: {e}"))?
+                .map_err(|e| format!("predicate merge failed: {e}"))?;
+        tracing::info!(
+            workspace = %ws,
+            moved = outcome.moved,
+            canonicals = outcome.merged.len(),
+            dry_run = outcome.dry_run,
+            truncated = outcome.truncated,
+            "predicate merge (control plane)"
+        );
+        serde_json::to_value(outcome).map_err(|e| format!("could not encode merge outcome: {e}"))
     }
 
     /// Report the in-force schema for a workspace's engine — every declared
@@ -2369,6 +2733,104 @@ impl ServerState {
     }
 
     /// `_akh/goal/list` — list all goals with status, timestamps, and parent chain.
+    /// `_akh/delegation/grant/mint` (Phase 53e): mint a grant for `workspace`.
+    ///
+    /// Params: `workspace`, `principal` (the delegate), `service_principal`
+    /// (the core principal that will present it, e.g. `sessions`), optional
+    /// `tools` (`{"kind":"read_only_plus_memory_write"}` default, or
+    /// `{"kind":"explicit","tools":[...]}`), `session_id`, `ttl_secs`
+    /// (default 3600, max 86400). Returns the grant and its secret — the only
+    /// time the secret is ever shown.
+    #[cfg(feature = "core-api")]
+    async fn grant_mint(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        use akh_medu::core_service::{GrantTools, MintGrant, authority_in};
+        let field = |name: &str| {
+            params
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| format!("missing required param: {name}"))
+        };
+        let workspace = field("workspace")?;
+        let request = MintGrant {
+            akh: workspace.clone(),
+            principal: field("principal")?,
+            service_principal: field("service_principal")?,
+            tools: match params.get("tools") {
+                None | Some(serde_json::Value::Null) => GrantTools::default(),
+                Some(tools) => serde_json::from_value(tools.clone())
+                    .map_err(|e| format!("invalid param tools: {e}"))?,
+            },
+            session_id: params
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            ttl: params
+                .get("ttl_secs")
+                .and_then(serde_json::Value::as_u64)
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(akh_medu::core_service::DEFAULT_GRANT_TTL),
+        };
+        let authority = authority_in(&self.grant_authority)
+            .map_err(render_grant_error)?
+            .clone();
+        let registry = self.agent_tools(&workspace).await?;
+        let minted = tokio::task::spawn_blocking(move || authority.mint(request, &registry))
+            .await
+            .map_err(|e| format!("grant mint task failed: {e}"))?
+            .map_err(render_grant_error)?;
+        Ok(serde_json::json!({
+            "grant": minted.grant,
+            "secret": minted.secret.expose(),
+        }))
+    }
+
+    /// `_akh/delegation/grant/revoke` (Phase 53e). Params: `id`.
+    #[cfg(feature = "core-api")]
+    async fn grant_revoke(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let id = params
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: id".to_string())?;
+        let id = uuid::Uuid::parse_str(id).map_err(|e| format!("invalid param id: {e}"))?;
+        let authority = akh_medu::core_service::authority_in(&self.grant_authority)
+            .map_err(render_grant_error)?
+            .clone();
+        let grant = tokio::task::spawn_blocking(move || authority.revoke(id))
+            .await
+            .map_err(|e| format!("grant revoke task failed: {e}"))?
+            .map_err(render_grant_error)?;
+        Ok(serde_json::json!({ "grant": grant }))
+    }
+
+    /// `_akh/delegation/grant/list` (Phase 53e). Params: optional `workspace`.
+    /// Secrets are never listed (they are not stored).
+    #[cfg(feature = "core-api")]
+    async fn grant_list(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let workspace = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let authority = akh_medu::core_service::authority_in(&self.grant_authority)
+            .map_err(render_grant_error)?
+            .clone();
+        let grants = tokio::task::spawn_blocking(move || {
+            authority.list(workspace.as_deref()).map(|grants| {
+                grants
+                    .into_iter()
+                    .map(|grant| {
+                        let live = authority.is_live(&grant);
+                        serde_json::json!({ "grant": grant, "live": live })
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .await
+        .map_err(|e| format!("grant list task failed: {e}"))?
+        .map_err(render_grant_error)?;
+        Ok(serde_json::json!({ "count": grants.len(), "grants": grants }))
+    }
+
     async fn goal_list(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
         let ws = params
             .get("workspace")
@@ -2546,9 +3008,13 @@ impl ServerState {
         // is on, `effective_read_roots()` adds `~/.openclaw` so the agent's
         // `LocalFs` can read the akh's own OpenClaw past life (read-only; writes
         // still stay confined to `scratch/`). No config / legacy TOML → empty.
-        let extra_read_roots = AkhConfig::load(&self.paths.workspace_config_file(name))
+        let akh_config = AkhConfig::load(&self.paths.workspace_config_file(name)).ok();
+        let extra_read_roots = akh_config
+            .as_ref()
             .map(|c| c.effective_read_roots())
             .unwrap_or_default();
+        // Phase 53j: the per-akh `[memory] contradiction_policy`.
+        let memory = akh_config.map(|c| c.memory).unwrap_or_default();
 
         let config = EngineConfig {
             dimension: Dimension::DEFAULT,
@@ -2563,8 +3029,18 @@ impl ServerState {
             ..Default::default()
         };
 
-        let engine =
+        let mut engine =
             Engine::new(config).map_err(|e| format!("failed to open workspace \"{name}\": {e}"))?;
+        if memory.contradiction_policy != engine.phase9_config().contradiction_policy {
+            let mut phase9 = engine.phase9_config().clone();
+            phase9.contradiction_policy = memory.contradiction_policy;
+            engine.set_phase9_config(phase9);
+            tracing::info!(
+                workspace = %name,
+                policy = memory.contradiction_policy.as_str(),
+                "contradiction policy set from [memory]"
+            );
+        }
 
         // Wire audit broadcast sender so WS clients receive live entries.
         if let Some(ledger) = engine.audit_ledger() {
@@ -2609,6 +3085,33 @@ impl ServerState {
 
         // Phase 38b: install the mutation WAL (no-op in local-only mode).
         self.wire_wal(name, &engine, residency_epoch).await;
+
+        // Built-in fleet memory pack (`[memory] default_pack`, default on):
+        // installed, upgraded or retired after the WAL is wired so the
+        // change is durable like any other install. Idempotent, and it runs
+        // before the engine is published, so nothing writes concurrently.
+        // A failure is logged and never refuses the akh: it only means the
+        // default declarations are missing until the next open.
+        match akh_medu::schema::ensure_builtin_packs(&engine, name, memory.default_pack_policy()) {
+            Ok(outcomes) => {
+                for (pack, outcome) in outcomes.iter().filter(|(_, o)| o.mutated()) {
+                    tracing::info!(
+                        workspace = %name,
+                        %pack,
+                        outcome = ?outcome,
+                        "built-in schema pack ensured"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    workspace = %name,
+                    %error,
+                    "built-in schema pack could not be ensured; default memory declarations \
+                     are missing until the next open"
+                );
+            }
+        }
 
         let engine = Arc::new(engine);
         let mut map = self.workspaces.write().await;
@@ -2705,6 +3208,23 @@ impl ServerState {
         let akh_config = self.get_akh_config(name).await?;
         let host_exec = self.config.read().await.exec.clone();
         let exec_kind = akh_config.effective_exec(host_exec.as_ref());
+        // Phase 53 decision 6: a deployed akhomed refuses in-process side
+        // effects on every load, including lazy loads of relocated akhs. The
+        // process policy (mode and `allow_legacy_exec`) was fixed at startup;
+        // a replaced config can only make it stricter, never re-admit a
+        // legacy executor the startup policy refused.
+        {
+            let config = self.config.read().await;
+            let policy = akh_medu::deployment::process_policy().only_stricter(
+                akh_medu::deployment::ExecPolicy {
+                    mode: config.deployment,
+                    allow_legacy_exec: config.allow_legacy_exec,
+                },
+            );
+            policy
+                .admit(name, &exec_kind, akh_config.backend)
+                .map_err(|e| format!("workspace {name}: {}", e.summary()))?;
+        }
         // Coding runtimes execute under the local daemon identity. They cannot
         // substitute for an explicitly disabled, remote, or privilege-dropped executor.
         if matches!(
@@ -2718,6 +3238,14 @@ impl ServerState {
                 "workspace {name}: coding-agent runtimes require exec kind in-process; the configured executor cannot be bypassed"
             ));
         }
+
+        // Phase 53g PR 8: additional named execd sandboxes behind
+        // `sandbox_exec`. Validated here, before the primary allocation, so a
+        // bad `[[exec.sandboxes]]` table fails the load without allocating
+        // anything. The sandboxes themselves allocate lazily on first use, so
+        // a down secondary sandbox never blocks the akh from loading.
+        #[cfg(feature = "execd-executor")]
+        let sandbox_exec_tool = build_sandbox_exec_tool(&exec_kind, name)?;
 
         let mut agent = tokio::task::spawn_blocking({
             let engine = Arc::clone(&engine);
@@ -2744,6 +3272,9 @@ impl ServerState {
                                 "executor disabled for workspace (exec kind = none): no shell/file tools registered"
                             );
                             ExecToolWiring::None
+                        }
+                        ExecBackendConfig::Execd { .. } => {
+                            ExecToolWiring::Backend(build_execd_backend(&exec_kind, &name)?)
                         }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
                             let rbc = exec_kind
@@ -2796,6 +3327,9 @@ impl ServerState {
                             );
                             ExecToolWiring::None
                         }
+                        ExecBackendConfig::Execd { .. } => {
+                            ExecToolWiring::Backend(build_execd_backend(&exec_kind, &name)?)
+                        }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
                             // The build was not compiled with `remote-executor`
                             // but the operator asked for it. Refuse to start
@@ -2812,12 +3346,27 @@ impl ServerState {
                     }
                 };
 
-                if Agent::has_persisted_session(&engine) {
+                let agent = if Agent::has_persisted_session(&engine) {
                     Agent::resume_with_exec_wiring(engine, config, exec_wiring)
                 } else {
                     Agent::with_exec_wiring(engine, config, exec_wiring)
                 }
-                .map_err(|e| format!("failed to create agent: {e}"))
+                .map_err(|e| format!("failed to create agent: {e}"))?;
+
+                // Phase 53i (ADR 113 D9): the akh's own static MCP servers.
+                // Blocking discovery, so it runs here in the blocking task;
+                // never fatal (unreachable servers are retried lazily).
+                if !akh_config.mcp.servers.is_empty() {
+                    let report = agent.attach_mcp_servers(&akh_config.mcp.servers);
+                    tracing::info!(
+                        target: "akh::mcp",
+                        workspace = %name,
+                        servers = report.servers.len(),
+                        tools = report.registered_tools(),
+                        "static MCP servers attached"
+                    );
+                }
+                Ok(agent)
             }
         })
         .await
@@ -2825,6 +3374,11 @@ impl ServerState {
         .map_err(|e| format!("failed to create agent: {e}"))?;
 
         tracing::info!(workspace = %name, ?exec_kind, "shared agent created");
+
+        #[cfg(feature = "execd-executor")]
+        if let Some(tool) = sandbox_exec_tool {
+            agent.register_tool(Box::new(tool));
+        }
 
         // Wire the per-akh model manager: pinned model + Ollama endpoint +
         // authoritative system prompt (P1 / ADR-053). Construction is cheap
@@ -2846,6 +3400,48 @@ impl ServerState {
                 name,
             )));
             tracing::info!(workspace = %name, "OpenClaw self-import surface enabled");
+        }
+
+        // Phase 53g PR 5: the native read-only `monitoring_snapshot` tool,
+        // reading this akh's configured akheventd monitor source. Registered
+        // only when the workspace TOML has a `[monitoring]` table.
+        if let Some(monitoring) = akh_config.monitoring.clone() {
+            tracing::info!(
+                workspace = %name,
+                source = %monitoring.source,
+                "monitoring_snapshot tool registered"
+            );
+            agent.register_tool(Box::new(
+                akh_medu::agent::tools::MonitoringSnapshotTool::new(monitoring),
+            ));
+        }
+
+        // Phase 53e (ADR 113 D9): the akh's `[delegation]` config, with
+        // native-session delegation minting its grants through `/v1`.
+        #[cfg(all(feature = "delegation", feature = "core-api"))]
+        if let Some(delegation) = akh_config.delegation.clone() {
+            let native = delegation.native.enabled;
+            let issuer = Arc::new(akh_medu::core_service::CoreGrantIssuer::new(
+                Arc::clone(&self.grant_authority),
+                name,
+                agent.tool_registry_handle(),
+            ));
+            // 53g PR 7: the escalation tools, only for an akh that enables them.
+            if delegation.native.escalation.enabled {
+                register_escalation_tools(
+                    &agent,
+                    name,
+                    &engine,
+                    &delegation.native,
+                    &akh_config.provider.lexicon,
+                    issuer.clone(),
+                );
+            }
+            agent.set_delegation_manager(
+                akh_medu::agent::delegation::DelegationManager::new(delegation)
+                    .with_grant_issuer(issuer),
+            );
+            tracing::info!(workspace = %name, native, "delegation configured from akh.toml");
         }
 
         // ADR 070: if this akh is Candle-backed, load a local GGUF model and
@@ -3131,9 +3727,11 @@ impl ServerState {
         // only wires the config-file default.
         agent.set_capture_transcripts(akh_config.capture_transcripts);
 
-        // Extract the snapshot Arc before moving agent into the RwLock so it
-        // can be registered without ever re-acquiring the agent lock.
+        // Extract the snapshot and tool-registry Arcs before moving agent into
+        // the RwLock so they can be registered without ever re-acquiring the
+        // agent lock.
         let snapshot = agent.psyche_snapshot();
+        let registry = agent.tool_registry_handle();
         let shared = Arc::new(StdRwLock::new(agent));
         let mut agents = self.agents.write().await;
         // Another request may have raced us — keep the first one.
@@ -3142,6 +3740,9 @@ impl ServerState {
             .or_insert(Arc::clone(&shared));
         let result = Arc::clone(entry);
         drop(agents);
+        if Arc::ptr_eq(&result, &shared) {
+            self.remember_tools(name, &result, registry);
+        }
 
         // Register snapshot (idempotent — or_insert keeps the race-winner's snapshot).
         self.psyche_snapshots
@@ -3151,6 +3752,60 @@ impl ServerState {
             .or_insert(snapshot);
 
         Ok(result)
+    }
+
+    /// Record `agent`'s tool registry as the resident one for `name`.
+    fn remember_tools(
+        &self,
+        name: &str,
+        agent: &Arc<StdRwLock<Agent>>,
+        registry: Arc<akh_medu::agent::tool::ToolRegistry>,
+    ) {
+        self.tool_registries
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                name.to_string(),
+                ResidentTools {
+                    agent: Arc::downgrade(agent),
+                    registry: Arc::downgrade(&registry),
+                },
+            );
+    }
+
+    /// The live tool registry of `name`'s Agent (materialising the Agent if
+    /// needed), without taking the Agent lock on an async worker.
+    ///
+    /// Normally served from [`ServerState::tool_registries`]. An Agent that
+    /// entered the map another way (tests, a future insert path) is looked up
+    /// once through `spawn_blocking` and then cached.
+    async fn agent_tools(
+        &self,
+        name: &str,
+    ) -> Result<Arc<akh_medu::agent::tool::ToolRegistry>, String> {
+        let agent = self.get_agent(name).await?;
+        if let Some(registry) = self
+            .tool_registries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .and_then(|resident| resident.for_agent(&agent))
+        {
+            return Ok(registry);
+        }
+        let registry = tokio::task::spawn_blocking({
+            let agent = Arc::clone(&agent);
+            move || {
+                agent
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .tool_registry_handle()
+            }
+        })
+        .await
+        .map_err(|error| format!("tool registry lookup for {name} failed: {error}"))?;
+        self.remember_tools(name, &agent, Arc::clone(&registry));
+        Ok(registry)
     }
 
     /// Return the cached `Agent` for `name` if one is already resident,
@@ -3278,12 +3933,9 @@ impl ServerState {
             .insert(ws_name.to_string(), pause_handle.clone());
         let task_handle = pause_handle.clone();
 
-        // P5: gate background tasks by the akh's [autonomy] config.
-        let autonomy = self
-            .get_akh_config(ws_name)
-            .await
-            .map(|c| c.autonomy.clone())
-            .unwrap_or_default();
+        // P5 / 53b: gate background tasks by the akh's [autonomy] config and
+        // its effective executor placement.
+        let settings = self.daemon_settings(ws_name).await;
 
         let pool = self.pg_pool();
         let global_cfg = self.config.read().await;
@@ -3296,7 +3948,7 @@ impl ServerState {
                 daemon_status,
                 shutdown_rx,
                 daemon_config,
-                autonomy,
+                settings,
                 daemon_ws_name,
                 task_handle,
                 pool,
@@ -3489,6 +4141,20 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
+/// Per-akh settings the background daemon needs from its `akh.toml`.
+struct DaemonAkhSettings {
+    /// `[autonomy]` gating and budget (Phase 53b).
+    autonomy: akh_medu::akh_config::AutonomyConfig,
+    /// Where the akh's executor tools run (ADR 113 decision 4).
+    exec: akh_medu::agent::autonomy::ExecPlacement,
+    /// The akh's own Agent Board identity; `None` = process env fallback.
+    board: Option<akh_medu::agent::djehuty::BoardConfig>,
+    /// `[memory]` hygiene settings (Phase 53j).
+    memory: akh_medu::akh_config::MemoryConfig,
+    /// `[provider]` cooldown ladder and error-code lexicon (Phase 53g PR 4).
+    provider: akh_medu::agent::provider_failure::ProviderConfig,
+}
+
 /// Background daemon task: delegates to [`AgentDaemon`] for the full set of
 /// background learning tasks (goal generation, OODA cycles, equivalence
 /// learning, reflection, consolidation, schema discovery, rule inference,
@@ -3498,7 +4164,7 @@ async fn run_daemon_task(
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     daemon_config: akh_medu::agent::DaemonConfig,
-    autonomy: akh_medu::akh_config::AutonomyConfig,
+    settings: DaemonAkhSettings,
     ws_name: String,
     pause_handle: DaemonPauseHandle,
     // ADR 091: Postgres pool for the sleep-cycle transcript-harvest phase.
@@ -3512,7 +4178,12 @@ async fn run_daemon_task(
     use akh_medu::agent::AgentDaemon;
 
     let mut daemon = AgentDaemon::new(shared_agent, daemon_config)
-        .with_autonomy(autonomy)
+        .with_autonomy(settings.autonomy)
+        .with_exec_placement(settings.exec)
+        .with_board_config(settings.board)
+        .with_memory(settings.memory)
+        .with_provider(settings.provider)
+        .with_workspace(ws_name.clone())
         .with_shutdown(shutdown_rx)
         .with_status(Arc::clone(&status))
         .with_pause_handles(pause_handle.paused, pause_handle.cycle_done);
@@ -3629,7 +4300,7 @@ impl akh_medu::acp::ServerControl for ServerState {
                         .ok_or_else(|| "missing required param: name".to_string())?;
                     // Drop the cached engine + agent before removing the data.
                     self.workspaces.write().await.remove(name);
-                    self.agents.write().await.remove(name);
+                    drop_evicted_agent(self.agents.write().await.remove(name));
                     let manager = WorkspaceManager::new(self.paths.clone());
                     manager
                         .delete(name)
@@ -4026,6 +4697,18 @@ impl akh_medu::acp::ServerControl for ServerState {
                 "goal/cancel" => self.goal_cancel(params).await,
                 "goal/prioritize" => self.goal_prioritize(params).await,
 
+                // ── memory hygiene (Phase 53j, ADR 113) ───────────────────
+                "memory/hygiene" => self.memory_hygiene(params).await,
+                "memory/merge_predicates" => self.memory_merge_predicates(params).await,
+
+                // ── delegation grants (Phase 53e, ADR 113 D9) ─────────────
+                #[cfg(feature = "core-api")]
+                "delegation/grant/mint" => self.grant_mint(params).await,
+                #[cfg(feature = "core-api")]
+                "delegation/grant/revoke" => self.grant_revoke(params).await,
+                #[cfg(feature = "core-api")]
+                "delegation/grant/list" => self.grant_list(params).await,
+
                 other => Err(format!("unknown control-plane method: _akh/{other}")),
             }
         })
@@ -4123,7 +4806,7 @@ async fn start_acp_server(
     Option<String>,
     Vec<tokio::task::JoinHandle<()>>,
 ) {
-    use akh_medu::acp::{AkhAcpAgent, SharedSecretAuth, serve_tcp_loop, serve_unix_loop};
+    use akh_medu::acp::{AcpIngressAuth, AkhAcpAgent, serve_tcp_loop, serve_unix_loop};
     use std::path::PathBuf;
 
     let ws = acp_cfg
@@ -4197,16 +4880,18 @@ async fn start_acp_server(
 
     if let Some(addr) = acp_cfg.tcp_addr() {
         // TCP is a cluster/network ingress and is never opened without a valid
-        // shared-secret source. The Unix socket remains local-only and does not
-        // need the network credential. File-backed auth reloads on initialize,
-        // which permits overlap rotation without restarting this singleton.
-        let auth = match SharedSecretAuth::from_env() {
+        // credential source: `[[acp.principals]]` (scoped per akh, Phase 53) or,
+        // only when none are configured, the legacy unscoped shared secret. The
+        // Unix socket remains local-only and does not need the network
+        // credential. Token files reload on initialize, which permits overlap
+        // rotation without restarting this singleton.
+        let auth = match AcpIngressAuth::from_config(&acp_cfg.principals) {
             Ok(auth) => auth,
             Err(error) => {
                 tracing::error!(
                     addr = %addr,
-                    %error,
-                    "ACP TCP disabled: shared-secret authentication is not configured"
+                    error = ?miette::Report::new(error),
+                    "ACP TCP disabled: ingress authentication is not usable"
                 );
                 return (socket_str, None, handles);
             }
@@ -4408,6 +5093,12 @@ async fn main() {
         }
     };
 
+    // Phase 53a (ADR 113 D2): `/v1` is served only when AKH_CORE_CONFIG names
+    // a core config. Read it before the global config so a deployment that
+    // asked for the core API never silently falls back to default storage.
+    let core_cfg_path: Option<std::path::PathBuf> =
+        std::env::var_os("AKH_CORE_CONFIG").map(std::path::PathBuf::from);
+
     // Load global config from $XDG_CONFIG_HOME/akh-medu/config.toml.
     // Creates a default config file on first boot.
     let config_path = paths.global_config_file();
@@ -4417,7 +5108,7 @@ async fn main() {
             c
         }
         Err(e) => {
-            if cfg!(feature = "core-server") {
+            if core_cfg_path.is_some() {
                 tracing::error!(error = %e, "core configuration failed; refusing default storage fallback");
                 std::process::exit(1);
             }
@@ -4444,25 +5135,68 @@ async fn main() {
         }
     }
 
-    // AKH_AUTO_START env var overrides config if set.
-    // "default" is treated as "no auto-start" (daemons are paused by default).
-    let env_auto_start: Option<Vec<String>> = match std::env::var("AKH_AUTO_START") {
-        Ok(val) => {
-            let trimmed = val.trim();
-            if trimmed.is_empty() || trimmed == "default" {
-                Some(Vec::new())
-            } else {
-                Some(
-                    trimmed
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty() && s != "default")
-                        .collect(),
-                )
-            }
+    // Phase 53 decision 6: resolve deployed mode once (config or
+    // AKH_DEPLOYMENT) and refuse to start a deployed host whose default
+    // executor would run side effects in-process.
+    match config.check_deployment() {
+        Ok(policy) => {
+            let _ = akh_medu::deployment::set_process_policy(policy);
+            tracing::info!(
+                target: "akh::deployment",
+                mode = policy.mode.as_str(),
+                allow_legacy_exec = policy.allow_legacy_exec,
+                "deployment mode"
+            );
         }
-        Err(_) => None,
+        Err(err) => {
+            eprintln!("{:?}", miette::Report::new(err));
+            std::process::exit(1);
+        }
+    }
+
+    // Phase 53a: load the core config right after the global config. A
+    // missing AKH_CORE_CONFIG means "no /v1", never a startup failure; a set
+    // but invalid one refuses to start (nothing has been started yet).
+    #[cfg(feature = "core-api")]
+    let core_config: Option<akh_medu::core_service::CoreConfig> = match &core_cfg_path {
+        None => {
+            tracing::info!("AKH_CORE_CONFIG unset; the /v1 core API is not served");
+            None
+        }
+        Some(path) => match akh_medu::core_service::CoreConfig::load(path) {
+            Ok(core) => Some(core),
+            Err(fault) => {
+                let err = akh_medu::core_service::CoreApiError::Config {
+                    path: path.clone(),
+                    message: fault.message,
+                };
+                eprintln!("{:?}", miette::Report::new(err));
+                std::process::exit(1);
+            }
+        },
     };
+    #[cfg(feature = "core-api")]
+    let core_principal_akhs: Vec<String> = core_config
+        .as_ref()
+        .map(|core| {
+            core.principals
+                .iter()
+                .flat_map(|principal| principal.akhs.iter().cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    #[cfg(not(feature = "core-api"))]
+    let core_principal_akhs: Vec<String> = {
+        if core_cfg_path.is_some() {
+            tracing::warn!(
+                "AKH_CORE_CONFIG is set but this akhomed was built without `core-api`; \
+                 /v1 is not served (build with --features server)"
+            );
+        }
+        Vec::new()
+    };
+
+    let env_auto_start = std::env::var("AKH_AUTO_START").ok();
 
     // CLI --auto-start <workspace> adds to the auto-start list.
     // This is opt-in: workspaces are NOT auto-started unless explicitly listed.
@@ -4480,33 +5214,24 @@ async fn main() {
         }
     }
 
-    // Merge: env var takes precedence if set; otherwise use config + CLI.
-    let auto_start: Vec<String> = if let Some(env_list) = env_auto_start {
-        // Env var overrides everything. Merge with CLI for dedup.
-        let mut merged = env_list;
-        for w in cli_auto_start {
-            if !merged.contains(&w) {
-                merged.push(w);
-            }
-        }
-        merged
-    } else {
-        // Config provides defaults (filtered to remove "default" sentinel),
-        // CLI --auto-start appends.
-        let mut merged: Vec<String> = config
-            .daemon
-            .auto_start
-            .iter()
-            .filter(|s| s.as_str() != "default")
-            .cloned()
-            .collect();
-        for w in cli_auto_start {
-            if !merged.contains(&w) {
-                merged.push(w);
-            }
-        }
-        merged
-    };
+    // Phase 53a (ADR 113 D2): the auto-start set is the UNION of
+    // AKH_AUTO_START, the configured `[daemon] auto_start`, CLI --auto-start
+    // and every akh a core principal serves — an akh reachable over /v1 is a
+    // full akh with its daemon running.
+    let auto_start = resolve_auto_start(
+        env_auto_start.as_deref(),
+        &config.daemon.auto_start,
+        &cli_auto_start,
+        &core_principal_akhs,
+    );
+    tracing::info!(
+        akhs = ?auto_start,
+        env = ?env_auto_start,
+        configured = ?config.daemon.auto_start,
+        cli = ?cli_auto_start,
+        core_principals = ?core_principal_akhs,
+        "resolved auto-start set (union)"
+    );
 
     // Phase 38: open the Postgres backing store (or fall back to local-only).
     let pg_pool = init_postgres(&config).await;
@@ -4529,8 +5254,7 @@ async fn main() {
         tracing::warn!("failed to write PID file: {e}");
     }
 
-    // Session and automation execution is owned by akhsessd/akhrtd in core mode.
-    #[cfg(not(feature = "core-server"))]
+    // Startup order (Phase 53a): workspace daemons → ACP → /v1.
     if !auto_start.is_empty() {
         let daemon_config = state.config.read().await.daemon.to_daemon_config();
         for ws_name in &auto_start {
@@ -4562,12 +5286,9 @@ async fn main() {
                     let daemon_status = Arc::clone(&status);
                     let daemon_ws = ws_name.clone();
                     let dc = daemon_config.clone();
-                    // P5: per-akh automation gating from [autonomy] (off by default).
-                    let autonomy = state
-                        .get_akh_config(ws_name)
-                        .await
-                        .map(|c| c.autonomy.clone())
-                        .unwrap_or_default();
+                    // P5 / 53b: per-akh [autonomy] (on by default, budgeted)
+                    // and the effective executor placement.
+                    let settings = state.daemon_settings(ws_name).await;
                     let pause_handle = DaemonPauseHandle::new();
                     state
                         .daemon_pauses
@@ -4586,7 +5307,7 @@ async fn main() {
                             daemon_status,
                             shutdown_rx,
                             dc,
-                            autonomy,
+                            settings,
                             daemon_ws,
                             task_handle,
                             pool,
@@ -4622,7 +5343,7 @@ async fn main() {
     // workspace — so ensure the one it will bind exists before starting it. The
     // resolution here must match `start_acp_server`'s (acp.workspace → first
     // auto_start → "default").
-    #[cfg(all(feature = "acp", not(feature = "core-server")))]
+    #[cfg(feature = "acp")]
     {
         let acp_ws = state
             .config
@@ -4671,7 +5392,7 @@ async fn main() {
     // inbound surface after ADR-061 P8.5 (REST/WS/web-UI/inbound-MCP retired).
     // Behind the `acp` feature; with it off the daemon has no inbound surface
     // and simply runs its workspace daemons until signalled.
-    #[cfg(all(feature = "acp", not(feature = "core-server")))]
+    #[cfg(feature = "acp")]
     let (acp_shutdown_tx, acp_handles, acp_socket_path) = {
         let acp_cfg = state.config.read().await.acp.clone();
         let fallback_ws = auto_start
@@ -4694,73 +5415,51 @@ async fn main() {
         (acp_tx, handles, acp_socket)
     };
 
-    // No HTTP/WS/MCP surface remains (ADR-061 P8.5) — ACP is the only inbound
-    // transport. Hold the process open until SIGTERM/SIGINT, then drain the ACP
-    // accept loops and workspace daemons. The ACP listeners and workspace
-    // daemons run as their own spawned tasks; main just waits and tears down.
-    #[cfg(feature = "core-server")]
-    let (core_shutdown_tx, core_handle) = {
-        let path = std::env::var_os("AKH_CORE_CONFIG")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                tracing::error!(
-                    "core-server requires AKH_CORE_CONFIG pointing to its scoped service config"
-                );
-                std::process::exit(1);
-            });
-        let config = akh_medu::core_service::CoreConfig::load(&path).unwrap_or_else(|error| {
-            tracing::error!(%error,"invalid cognitive service config");
-            std::process::exit(1)
-        });
-        let address = config.listen;
-        let backend: Arc<dyn akh_medu::core_service::CoreBackend> = state.clone();
-        let app = akh_medu::core_service::CoreApp::new(config, backend).unwrap_or_else(|error| {
-            tracing::error!(%error,"cognitive service initialization failed");
-            std::process::exit(1)
-        });
-        let router = akh_medu::core_service::router(app);
-        let listener = tokio::net::TcpListener::bind(address)
-            .await
-            .unwrap_or_else(|error| {
-                tracing::error!(%error,"cognitive listener bind failed");
-                std::process::exit(1)
-            });
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let handle = tokio::spawn(async move {
-            if let Err(error) = axum::serve(listener, router)
-                .with_graceful_shutdown(async {
-                    let _ = rx.await;
-                })
-                .await
-            {
-                tracing::error!(%error,"cognitive listener failed");
+    // ── /v1 core API (Phase 53a, ADR 113) ── the only other inbound surface
+    // besides ACP: the scoped, service-principal cognitive API, bound last and
+    // only when AKH_CORE_CONFIG is set. Afterwards main holds the process open
+    // until SIGTERM/SIGINT, then drains ACP, /v1 and the workspace daemons
+    // (all of which run as their own spawned tasks).
+    #[cfg(feature = "core-api")]
+    let (core_listener, startup_failed) = match core_config {
+        None => (None, false),
+        Some(core) => match start_core_api(Arc::clone(&state), core).await {
+            Ok(listener) => (Some(listener), false),
+            Err(error) => {
+                // Daemons and ACP are already running: drain them through the
+                // normal shutdown path below instead of exiting mid-flight.
+                eprintln!("{:?}", miette::Report::new(error));
+                (None, true)
             }
-        });
-        tracing::info!(%address,"cognitive service ready; sessions and provider loops are external");
-        (tx, handle)
+        },
     };
+    #[cfg(not(feature = "core-api"))]
+    let startup_failed = false;
 
     let paths_for_shutdown = paths.clone();
     let state_for_shutdown = state;
 
-    let ctrl_c = tokio::signal::ctrl_c();
-    #[cfg(unix)]
-    {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
-        tokio::select! {
-            _ = ctrl_c => {},
-            _ = sigterm.recv() => {},
+    if !startup_failed {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = ctrl_c => {},
+                _ = sigterm.recv() => {},
+            }
         }
-    }
-    #[cfg(not(unix))]
-    {
-        ctrl_c.await.ok();
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.ok();
+        }
     }
     tracing::info!("akhomed shutting down — draining workspace daemons");
 
     // Stop ACP accept loops first so no new sessions start mid-drain.
-    #[cfg(all(feature = "acp", not(feature = "core-server")))]
+    #[cfg(feature = "acp")]
     {
         tracing::info!("stopping ACP listeners");
         let _ = acp_shutdown_tx.send(true);
@@ -4784,10 +5483,11 @@ async fn main() {
         }
     }
 
-    #[cfg(feature = "core-server")]
-    {
+    #[cfg(feature = "core-api")]
+    if let Some((core_shutdown_tx, core_handle)) = core_listener {
+        tracing::info!("stopping /v1 core API listener");
         let _ = core_shutdown_tx.send(());
-        let _ = core_handle.await;
+        let _ = tokio::time::timeout(Duration::from_secs(3), core_handle).await;
     }
 
     // Signal all workspace daemons to stop, then join with timeout.
@@ -4824,7 +5524,7 @@ async fn main() {
     // short grace period to avoid leaving the process hanging.
     if aborted {
         tracing::info!("force-exiting after abort (daemon tasks run sync CPU work)");
-        std::process::exit(0);
+        std::process::exit(if startup_failed { 1 } else { 0 });
     }
 
     // Belt-and-suspenders: clean up PID file on normal exit too (already
@@ -4834,6 +5534,91 @@ async fn main() {
     if owns_pid_file(&paths) {
         akh_medu::client::remove_pid_file(&paths);
     }
+    if startup_failed {
+        std::process::exit(1);
+    }
+}
+
+/// Phase 53a (ADR 113 D2): the akhs whose daemons start at boot — the
+/// order-preserving, de-duplicated union of `AKH_AUTO_START` (comma list),
+/// the configured `[daemon] auto_start`, CLI `--auto-start` and every akh a
+/// core principal serves. `default` stays a "nothing" sentinel. The first
+/// entry is the ACP fallback workspace, so env keeps its historical priority.
+fn resolve_auto_start(
+    env: Option<&str>,
+    configured: &[String],
+    cli: &[String],
+    core_principal_akhs: &[String],
+) -> Vec<String> {
+    let mut merged: Vec<String> = Vec::new();
+    let env_items = env.into_iter().flat_map(|value| value.split(','));
+    let rest = configured
+        .iter()
+        .chain(cli)
+        .chain(core_principal_akhs)
+        .map(String::as_str);
+    for name in env_items.chain(rest).map(str::trim) {
+        if !name.is_empty() && name != "default" && !merged.iter().any(|m| m == name) {
+            merged.push(name.to_string());
+        }
+    }
+    merged
+}
+
+/// Render a grant error for the ACP control plane: code, message and help.
+#[cfg(feature = "core-api")]
+fn render_grant_error(error: akh_medu::core_service::GrantError) -> String {
+    let code = error
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| error.wire_code().to_string());
+    match error.help() {
+        Some(help) => format!("{code}: {error} (help: {help})"),
+        None => format!("{code}: {error}"),
+    }
+}
+
+/// Bind and serve the `/v1` core API (Phase 53a) — last in the startup order,
+/// after the workspace daemons and ACP. Returns the shutdown sender and the
+/// serving task.
+#[cfg(feature = "core-api")]
+async fn start_core_api(
+    state: Arc<ServerState>,
+    core: akh_medu::core_service::CoreConfig,
+) -> Result<
+    (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ),
+    akh_medu::core_service::CoreApiError,
+> {
+    use akh_medu::core_service::{CoreApiError, CoreApp, CoreBackend, router};
+    let address = core.listen;
+    let data_dir = core.data_dir.clone();
+    let grant_slot = Arc::clone(&state.grant_authority);
+    let backend: Arc<dyn CoreBackend> = state;
+    let app = CoreApp::new(core, backend).map_err(|fault| CoreApiError::Config {
+        path: data_dir,
+        message: format!("core operations store: {}", fault.message),
+    })?;
+    // Phase 53e: ACP grant methods and native-session delegation mint here.
+    let _ = grant_slot.set(app.grants.clone());
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .map_err(|source| CoreApiError::Bind { address, source })?;
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        if let Err(error) = axum::serve(listener, router(app))
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
+            .await
+        {
+            tracing::error!(%error, "/v1 core API listener failed");
+        }
+    });
+    tracing::info!(%address, "/v1 core API ready (additive to daemons and ACP)");
+    Ok((tx, handle))
 }
 
 // ── ACP control-plane (`ServerControl for ServerState`) ─────────────────────
@@ -4866,6 +5651,197 @@ mod control_plane_tests {
         paths.ensure_dirs().expect("ensure dirs");
         let state = ServerState::new(paths, AkhomedConfig::default(), None);
         (tmp, state)
+    }
+
+    /// Phase 53j: `_akh/memory/{merge_predicates,hygiene}` over the ACP
+    /// control plane, and the per-akh `[memory] contradiction_policy` reaching
+    /// the engine on load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_hygiene_control_methods_merge_and_report() {
+        let (_tmp, state) = temp_state();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "alpha" }))
+            .await
+            .unwrap();
+        let config_path = state.paths.workspace_config_file("alpha");
+        let mut config = AkhConfig::load(&config_path).unwrap();
+        config.memory.contradiction_policy = akh_medu::engine::ContradictionPolicy::Replace;
+        // This test exercises undeclared spelling collisions; the built-in
+        // fleet pack would declare `next_check`/`state` (covered by
+        // `get_engine_installs_the_fleet_memory_pack_unless_opted_out`).
+        config.memory.default_pack = false;
+        config.save(&config_path).unwrap();
+
+        let engine = state.get_engine("alpha").await.unwrap();
+        assert_eq!(
+            engine.phase9_config().contradiction_policy,
+            akh_medu::engine::ContradictionPolicy::Replace
+        );
+        for (subject, predicate, object) in [
+            ("wi-1", "next_check", "a"),
+            ("wi-2", "next-check", "b"),
+            ("wi-3", "has_state", "open"),
+        ] {
+            engine
+                .add_triple(&Triple::new(
+                    engine.resolve_or_create_entity(subject).unwrap(),
+                    engine.resolve_or_create_relation(predicate).unwrap(),
+                    engine.resolve_or_create_entity(object).unwrap(),
+                ))
+                .unwrap();
+        }
+
+        let merged = state
+            .dispatch(
+                "_akh/memory/merge_predicates",
+                &json!({"workspace": "alpha", "canonical": "state", "aliases": ["has_state"]}),
+            )
+            .await;
+        assert!(
+            merged.unwrap_err().contains("no symbol named"),
+            "an unknown canonical is refused"
+        );
+        engine.resolve_or_create_relation("state").unwrap();
+        let merged = state
+            .dispatch(
+                "_akh/memory/merge_predicates",
+                &json!({"workspace": "alpha", "canonical": "state", "aliases": ["has_state"]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(merged["moved"], 1);
+
+        let dry = state
+            .dispatch(
+                "_akh/memory/hygiene",
+                &json!({"workspace": "alpha", "dry_run": true}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dry["dry_run"], true);
+        assert_eq!(dry["policy"], "replace");
+        assert_eq!(dry["merged"][0]["moved"], 1, "{dry}");
+        let report = state
+            .dispatch("_akh/memory/hygiene", &json!({"workspace": "alpha"}))
+            .await
+            .unwrap();
+        assert_eq!(report["merged"][0]["canonical"], "next-check");
+        let again = state
+            .dispatch("_akh/memory/hygiene", &json!({"workspace": "alpha"}))
+            .await
+            .unwrap();
+        assert_eq!(again["mutations"], 0);
+        assert!(
+            state
+                .dispatch("_akh/memory/hygiene", &json!({}))
+                .await
+                .unwrap_err()
+                .contains("workspace")
+        );
+    }
+
+    /// Phase 53 follow-up (WI 01a0d569-1cf1 item 7): opening an akh installs
+    /// the built-in fleet memory pack; `[memory] default_pack = false` keeps
+    /// it off (and retires a copy installed earlier).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_engine_installs_the_fleet_memory_pack_unless_opted_out() {
+        let (_tmp, state) = temp_state();
+        for name in ["with-pack", "opted-out"] {
+            state
+                .dispatch("_akh/workspace/create", &json!({ "name": name }))
+                .await
+                .unwrap();
+        }
+        let config_path = state.paths.workspace_config_file("opted-out");
+        let mut config = AkhConfig::load(&config_path).unwrap();
+        config.memory.default_pack = false;
+        config.save(&config_path).unwrap();
+
+        let declared = |engine: &akh_medu::engine::Engine| {
+            engine
+                .lookup_symbol("next_check")
+                .map(|p| akh_medu::schema::declared_cardinality(engine, p).is_single_valued())
+                .unwrap_or(false)
+        };
+        let with_pack = state.get_engine("with-pack").await.unwrap();
+        assert!(declared(&with_pack), "a default akh gets the fleet pack");
+        assert!(
+            with_pack
+                .lookup_symbol("mt:schema/builtin/fleet-memory@1.0.0")
+                .is_ok()
+        );
+        let opted_out = state.get_engine("opted-out").await.unwrap();
+        assert!(!declared(&opted_out), "an opted-out akh does not");
+    }
+
+    /// Phase 53e: `_akh/delegation/grant/*` over the ACP control plane.
+    #[cfg(feature = "core-api")]
+    #[tokio::test]
+    async fn delegation_grant_methods_mint_list_and_revoke() {
+        let (tmp, state) = temp_state();
+        // Without the /v1 core API there is no grant authority.
+        let disabled = state
+            .dispatch("_akh/delegation/grant/list", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(disabled.contains("core_api_disabled"), "{disabled}");
+
+        let store =
+            akh_service_store::Store::open(&tmp.path().join("core-operations.redb")).unwrap();
+        state
+            .grant_authority
+            .set(akh_medu::core_service::GrantAuthority::new(store))
+            .unwrap();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "alpha" }))
+            .await
+            .unwrap();
+        let minted = state
+            .dispatch(
+                "_akh/delegation/grant/mint",
+                &json!({"workspace": "alpha", "principal": "native:codex/code",
+                    "service_principal": "sessions",
+                    "tools": {"kind": "explicit", "tools": ["kg_query"]}, "ttl_secs": 60}),
+            )
+            .await
+            .unwrap();
+        let secret = minted["secret"].as_str().unwrap().to_string();
+        assert_eq!(secret.len(), 43, "32 bytes base64url without padding");
+        assert_eq!(minted["grant"]["tools"], json!(["kg_query"]));
+        assert_eq!(minted["grant"]["akh"], "alpha");
+        let id = minted["grant"]["id"].as_str().unwrap().to_string();
+
+        let listed = state
+            .dispatch("_akh/delegation/grant/list", &json!({"workspace": "alpha"}))
+            .await
+            .unwrap();
+        assert_eq!(listed["count"], 1);
+        assert_eq!(listed["grants"][0]["live"], true);
+        assert!(
+            !listed.to_string().contains(&secret),
+            "list must not reveal secrets"
+        );
+
+        let revoked = state
+            .dispatch("_akh/delegation/grant/revoke", &json!({"id": id}))
+            .await
+            .unwrap();
+        assert_eq!(revoked["grant"]["revoked"], true);
+        let listed = state
+            .dispatch("_akh/delegation/grant/list", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(listed["grants"][0]["live"], false);
+
+        let too_long = state
+            .dispatch(
+                "_akh/delegation/grant/mint",
+                &json!({"workspace": "alpha", "principal": "p",
+                    "service_principal": "sessions", "ttl_secs": 999_999}),
+            )
+            .await
+            .unwrap_err();
+        assert!(too_long.contains("ttl_too_long"), "{too_long}");
     }
 
     #[tokio::test]
@@ -4911,20 +5887,6 @@ mod control_plane_tests {
                 status,
             },
         );
-    }
-
-    #[tokio::test]
-    async fn malformed_provider_config_refuses_instead_of_using_defaults() {
-        let (_tmp, state) = temp_state();
-        let path = state.paths.workspace_config_file("codex-test");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            "name = 'codex-test'\nbackend = 'codex'\n[agent_runtime]\nworking_dir = 42\n",
-        )
-        .unwrap();
-        assert!(state.get_akh_config("codex-test").await.is_err());
-        assert!(!state.akh_configs.read().await.contains_key("codex-test"));
     }
 
     #[test]
@@ -5204,7 +6166,7 @@ mod control_plane_tests {
                 .await
                 .expect("production sleep must release every redb owner");
             second
-                .wake_workspace(&workspace)
+                .wake_workspace(&workspace, false, false)
                 .await
                 .expect("production wake must reopen redb in the same process");
         }
@@ -5882,6 +6844,122 @@ mod control_plane_tests {
         assert!(!state.workspaces.read().await.contains_key("publishing"));
     }
 
+    /// Phase 53a: `/v1` must not build a second runtime — the CoreBackend
+    /// hands out the very Engine and ToolRegistry Arcs the resident Agent uses.
+    #[cfg(feature = "core-api")]
+    #[tokio::test]
+    async fn core_api_backend_shares_the_agents_engine_and_tool_registry() {
+        use akh_medu::core_service::CoreBackend;
+        let (_tmp, state) = temp_state();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "core-shared" }))
+            .await
+            .expect("create");
+
+        let engine = CoreBackend::engine(&state, "core-shared").await.unwrap();
+        let tools = CoreBackend::tools(&state, "core-shared").await.unwrap();
+        let agent = state.get_agent("core-shared").await.unwrap();
+
+        assert!(Arc::ptr_eq(
+            &engine,
+            &CoreBackend::engine(&state, "core-shared").await.unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &tools,
+            &CoreBackend::tools(&state, "core-shared").await.unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &engine,
+            &state.get_engine("core-shared").await.unwrap()
+        ));
+        let resident = agent.read().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            std::ptr::eq(resident.engine(), Arc::as_ptr(&engine)),
+            "/v1 engine must be the Agent's engine"
+        );
+        assert!(
+            Arc::ptr_eq(&tools, &resident.tool_registry_handle()),
+            "/v1 tools must be the Agent's live registry"
+        );
+        assert!(tools.manifest("memory_write").is_some());
+    }
+
+    /// Phase 53 review: `/v1` tool resolution and grant minting must not wait
+    /// on the Agent's std lock, which an OODA cycle or turn can hold for long.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn core_api_tools_do_not_wait_on_the_agent_lock() {
+        use akh_medu::core_service::CoreBackend;
+        let (_tmp, state) = temp_state();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "core-busy" }))
+            .await
+            .expect("create");
+        let agent = state.get_agent("core-busy").await.unwrap();
+        let expected = agent
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .tool_registry_handle();
+
+        // A long-running writer (an OODA cycle) holds the agent lock.
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn({
+            let agent = Arc::clone(&agent);
+            move || {
+                let _busy = agent.write().unwrap_or_else(|e| e.into_inner());
+                locked_tx.send(()).unwrap();
+                release_rx.recv().ok();
+            }
+        });
+        locked_rx.recv().unwrap();
+
+        let tools = tokio::time::timeout(
+            Duration::from_secs(5),
+            CoreBackend::tools(&state, "core-busy"),
+        )
+        .await
+        .expect("tools() must not block behind the agent write lock")
+        .unwrap();
+        assert!(Arc::ptr_eq(&tools, &expected));
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        // An evicted Agent's registry is not served (nor kept alive).
+        let weak = Arc::downgrade(&tools);
+        drop((tools, expected, agent));
+        state.agents.write().await.remove("core-busy");
+        assert!(
+            weak.upgrade().is_none(),
+            "the cache must not pin an evicted registry"
+        );
+    }
+
+    #[test]
+    fn auto_start_is_the_union_of_env_config_cli_and_core_principals() {
+        let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            resolve_auto_start(
+                Some(" janus, default ,"),
+                &owned(&["minerva", "janus"]),
+                &owned(&["cli-akh"]),
+                &owned(&["vesta", "minerva"]),
+            ),
+            owned(&["janus", "minerva", "cli-akh", "vesta"])
+        );
+        // No env at all: config first, then the core principals' akhs.
+        assert_eq!(
+            resolve_auto_start(None, &owned(&["default"]), &[], &owned(&["janus"])),
+            owned(&["janus"])
+        );
+        // An empty / "default" env no longer suppresses the others.
+        assert_eq!(
+            resolve_auto_start(Some("default"), &owned(&["a"]), &[], &[]),
+            owned(&["a"])
+        );
+        assert!(resolve_auto_start(None, &[], &[], &[]).is_empty());
+    }
+
     #[tokio::test]
     async fn get_agent_slow_path_is_single_flight() {
         let (_tmp, state) = temp_state();
@@ -6439,15 +7517,24 @@ mod control_plane_tests {
     }
 }
 
-#[cfg(feature = "core-server")]
+#[cfg(feature = "core-api")]
 impl akh_medu::core_service::CoreBackend for ServerState {
     fn engine<'a>(&'a self, akh: &'a str) -> akh_medu::core_service::CoreFuture<'a, Arc<Engine>> {
         Box::pin(async move {
-            // Relational snapshots capture Agent state; core-only tool sessions
-            // must materialize it too, without starting a provider/OODA loop.
+            // Materialize the Agent first: it is the one owner of the akh's
+            // runtime (snapshots capture Agent state), and the engine returned
+            // is the same cached Arc the Agent holds.
             self.get_agent(akh).await?;
             self.get_engine(akh).await
         })
+    }
+    fn tools<'a>(
+        &'a self,
+        akh: &'a str,
+    ) -> akh_medu::core_service::CoreFuture<'a, Arc<akh_medu::agent::tool::ToolRegistry>> {
+        // The agent lock is a std RwLock that a running OODA cycle or turn
+        // can hold for a while; the cached registry never waits on it.
+        Box::pin(async move { self.agent_tools(akh).await })
     }
     fn config<'a>(
         &'a self,

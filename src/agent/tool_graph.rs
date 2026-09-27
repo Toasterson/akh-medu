@@ -228,10 +228,16 @@ impl<'e> ToolGraphRegistrar<'e> {
         };
         let mut removed = 0usize;
         for t in self.engine.triples_from(subject) {
-            if let Ok(result) = self.engine.remove_triple(t.subject, t.predicate, t.object) {
-                if !result.retracted.is_empty() {
-                    removed += 1;
-                }
+            // CascadeIfOrphaned: a capability or category still held by
+            // another tool stays live; count removed edges, not cascades.
+            if let Ok(result) = self.engine.remove_triple_scoped(
+                t.subject,
+                t.predicate,
+                t.object,
+                crate::tms::RetractionScope::CascadeIfOrphaned,
+            ) && result.removed()
+            {
+                removed += 1;
             }
         }
         removed
@@ -329,7 +335,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::agent::tool_manifest::{DangerInfo, DangerLevel, ToolSource};
+    use crate::agent::tool_manifest::{DangerInfo, DangerLevel, ToolEffect, ToolSource};
     use crate::engine::{Engine, EngineConfig};
 
     fn make_engine() -> Engine {
@@ -349,6 +355,7 @@ mod tests {
                 ToolParamSchema::optional("limit", "Max results."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([crate::agent::tool_manifest::Capability::ReadKg]),
                 description: "Read-only.".into(),

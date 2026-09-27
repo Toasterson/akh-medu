@@ -31,6 +31,9 @@ pub fn acquire(profile: &ProviderConfig) -> Result<File> {
                 "Claude requires installed absolute Node and bridge paths",
             ));
         }
+        if profile.kind == RuntimeKind::OpenCode {
+            akh_runtime::opencode::validate_profile(profile).map_err(|e| opencode_fault(&e))?;
+        }
     }
     let scope = profile.isolation.as_ref().ok_or_else(|| {
         Fault::invalid("dedicated runtimes require an explicit private isolation directory")
@@ -59,6 +62,11 @@ pub fn acquire(profile: &ProviderConfig) -> Result<File> {
     for path in ["home", "cache", "config", "config/codex", "config/claude"] {
         helper::private_directory(&scope.directory.join(path))?;
     }
+    if profile.kind == RuntimeKind::OpenCode {
+        // OpenCode reads $XDG_CONFIG_HOME/opencode; its sessions and auth live
+        // under the private HOME ($HOME/.local/share/opencode).
+        helper::private_directory(&scope.directory.join("config/opencode"))?;
+    }
     let files: BTreeMap<String, String> = scope
         .managed_files
         .iter()
@@ -71,6 +79,16 @@ pub fn acquire(profile: &ProviderConfig) -> Result<File> {
     )?;
     akh_runtime::profile::environment(profile).map_err(Fault::invalid)?;
     Ok(lock)
+}
+
+/// An OpenCode profile diagnostic as a service fault. `Fault` has no separate
+/// help field, so the remedy travels in the message like `colocated_forbidden`.
+pub fn opencode_fault(error: &akh_runtime::opencode::OpenCodeProfileError) -> Fault {
+    let message = match error.remedy() {
+        Some(help) => format!("{error}. help: {help}"),
+        None => error.to_string(),
+    };
+    Fault::new(&error.diagnostic_code(), message)
 }
 
 pub async fn action(profile: &ProviderConfig, action: &str) -> Result<()> {
@@ -164,5 +182,32 @@ mod tests {
             .environment
             .insert("CLAUDE_CONFIG_DIR".into(), "/ambient".into());
         assert!(akh_runtime::profile::environment(&profile).is_err());
+    }
+
+    #[test]
+    fn opencode_profiles_get_a_private_config_directory_and_audited_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = |files: serde_json::Value| -> ProviderConfig {
+            serde_json::from_value(serde_json::json!({"revision":"1","kind":"opencode",
+                "working_dir":dir.path(),"binary":"/usr/bin/false","execution_mode":"brokered",
+                "isolation":{"directory":dir.path().join("profile"),"managed_files":files}}))
+            .unwrap()
+        };
+        let lease = acquire(&profile(serde_json::json!({
+            "opencode/opencode.json": "{\"model\":\"openai/gpt-5\"}"
+        })))
+        .unwrap();
+        assert!(
+            dir.path()
+                .join("profile/config/opencode/opencode.json")
+                .is_file()
+        );
+        drop(lease);
+        let fault = acquire(&profile(serde_json::json!({
+            "opencode/plugin/escape.ts": "export default async () => ({})"
+        })))
+        .unwrap_err();
+        assert_eq!(fault.code, "akh::runtime::opencode::managed_file_forbidden");
+        assert!(fault.message.contains("help: "), "{}", fault.message);
     }
 }

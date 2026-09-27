@@ -3,7 +3,7 @@
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::autonomous::rule_engine::RuleEngineConfig;
 use crate::engine::Engine;
@@ -152,6 +152,7 @@ impl Tool for InferRulesTool {
                 ),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([
                     Capability::Reason,

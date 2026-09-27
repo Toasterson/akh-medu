@@ -735,3 +735,100 @@ fn native_publication_preserves_a_racing_branch_and_fences_uncertain_writes_and_
     .unwrap();
     assert_eq!(fixture.executor.operate(request).unwrap(), receipt);
 }
+
+/// 53g PR 7 (D4): a merge-repair profile only fast-forwards an existing
+/// branch. A missing branch is refused without a push; an existing branch at
+/// an ancestor is fast-forwarded; a diverged branch is left untouched.
+#[test]
+fn existing_branch_profile_refuses_creation_and_only_fast_forwards() {
+    let mut fixture = Fixture::new("sha1");
+    let (_daemon, repository, remote) = publication_peer(&fixture);
+    fixture.capture("publication-source");
+    fixture.config.git_publication = vec![
+        serde_json::from_value(json!({
+            "repository": repository,
+            "branch_prefixes": ["refs/heads/anima/"],
+            "config_file": null,
+            "require_existing_branch": true
+        }))
+        .unwrap(),
+    ];
+    fixture.config.validate().unwrap();
+    fixture.executor = Executor::new(
+        Arc::new(fixture.config.clone()),
+        fixture.executor.store.clone(),
+    )
+    .unwrap();
+
+    let created = fixture
+        .executor
+        .operate(publication_request(
+            &fixture,
+            "create-branch",
+            &repository,
+            "refs/heads/anima/new",
+        ))
+        .unwrap();
+    assert_eq!(created.status, TurnStatus::Failed);
+    let result = created.result.unwrap();
+    assert!(!result.success);
+    let refs = git(&remote, &["for-each-ref", "--format=%(refname)"]);
+    assert!(!refs.contains("refs/heads/anima/new"), "{refs}");
+
+    // The PR source branch exists at the base: the verified head is a
+    // fast-forward of it.
+    git(
+        &remote,
+        &["update-ref", "refs/heads/anima/pr", &fixture.base],
+    );
+    let forwarded = fixture
+        .executor
+        .operate(publication_request(
+            &fixture,
+            "fast-forward",
+            &repository,
+            "refs/heads/anima/pr",
+        ))
+        .unwrap();
+    let published: publication::GitPublication =
+        serde_json::from_value(forwarded.result.unwrap().data.unwrap()).unwrap();
+    assert_eq!(
+        published.previous_revision.as_deref(),
+        Some(fixture.base.as_str())
+    );
+    assert!(published.push_acknowledged);
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/anima/pr"]),
+        fixture.head
+    );
+
+    // A branch that moved elsewhere is never rewritten.
+    git(&fixture.root(), &["checkout", "--detach", &fixture.base]);
+    std::fs::write(fixture.root().join("other.txt"), "another writer\n").unwrap();
+    git(&fixture.root(), &["add", "."]);
+    git(&fixture.root(), &["commit", "-m", "other writer"]);
+    let other = git(&fixture.root(), &["rev-parse", "HEAD"]);
+    git(
+        &fixture.root(),
+        &[
+            "push",
+            remote.to_str().unwrap(),
+            &format!("{other}:refs/heads/anima/diverged"),
+        ],
+    );
+    git(&fixture.root(), &["checkout", "--detach", &fixture.head]);
+    let diverged = fixture
+        .executor
+        .operate(publication_request(
+            &fixture,
+            "diverged",
+            &repository,
+            "refs/heads/anima/diverged",
+        ))
+        .unwrap();
+    assert!(!diverged.result.unwrap().success);
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/anima/diverged"]),
+        other
+    );
+}

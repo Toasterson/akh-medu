@@ -174,8 +174,8 @@ fn human_bytes(bytes: usize) -> String {
 
 #[cfg(test)]
 mod byte_rendering_tests {
-    use super::human_bytes;
     use super::NluError;
+    use super::human_bytes;
     use miette::Diagnostic;
 
     #[test]
@@ -186,7 +186,10 @@ mod byte_rendering_tests {
             grid_tokens: 256,
         };
         let help = error.help().expect("must carry the remedy").to_string();
-        assert!(help.contains("<|vision_start|><|image_pad|><|vision_end|>"), "{help}");
+        assert!(
+            help.contains("<|vision_start|><|image_pad|><|vision_end|>"),
+            "{help}"
+        );
         assert!(help.contains("256 tokens"), "{help}");
         assert!(help.contains("not supported yet"), "{help}");
         assert!(error.to_string().contains("0 `<|image_pad|>`"), "{error}");
@@ -225,7 +228,10 @@ mod byte_rendering_tests {
         assert!(help.contains("2.00 GiB"), "headroom: {help}");
         // Every remedy, including the caveat on the tempting one.
         assert!(help.contains("AKH_QWEN35_KV_QUANT_BITS"), "{help}");
-        assert!(help.contains("0.9999"), "compression caveat missing: {help}");
+        assert!(
+            help.contains("0.9999"),
+            "compression caveat missing: {help}"
+        );
         assert!(help.contains("AKH_CANDLE_KV_HEADROOM_BYTES"), "{help}");
     }
 

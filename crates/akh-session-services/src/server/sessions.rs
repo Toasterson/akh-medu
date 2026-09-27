@@ -995,6 +995,7 @@ pub fn session_router(app: SessionApp) -> Router {
             )
             .route("/v1/sessions", get(list_sessions).post(create_session))
             .route("/v1/sessions/{id}", get(get_session))
+            .route("/v1/session-requests/{request_id}", get(session_by_request))
             .route("/v1/sessions/{id}/access", get(session_access))
             .route("/v1/sessions/{id}/lifecycle", get(session_lifecycle))
             .route(
@@ -1196,6 +1197,14 @@ async fn create_session(
 ) -> Api<SessionRecord> {
     http::role(&p, "client")?;
     Ok(Json(app.sessions.create(&p, &request)?))
+}
+async fn session_by_request(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(request_id): Path<String>,
+) -> Api<SessionRecord> {
+    http::role(&p, "client")?;
+    Ok(Json(app.sessions.created_by_request(&p, &request_id)?))
 }
 async fn get_session(
     State(app): State<SessionApp>,
@@ -1596,6 +1605,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -1637,6 +1647,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -1776,6 +1787,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -2059,6 +2071,7 @@ mod lifecycle_tests {
     #[cfg(feature = "core-integration-tests")]
     async fn real_core_roundtrip(_exact: bool, _instructions: Option<&str>) {
         use akh_medu::{
+            agent::tool::ToolRegistry,
             akh_config::AkhConfig,
             core_service::{CoreApp, CoreBackend, CoreConfig, CoreFuture, CorePrincipal},
             engine::Engine,
@@ -2077,6 +2090,11 @@ mod lifecycle_tests {
                         ..Default::default()
                     }))
                 })
+            }
+            // This round-trip exercises context, spans and accepted turns, not
+            // tool calls, so an empty live registry is enough.
+            fn tools<'a>(&'a self, _: &'a str) -> CoreFuture<'a, Arc<ToolRegistry>> {
+                Box::pin(async { Ok(Arc::new(ToolRegistry::new())) })
             }
         }
         // Abort even on assertion failure; no detached local server survives.
@@ -2130,6 +2148,9 @@ mod lifecycle_tests {
                     id: "sessions".into(),
                     token_file: token.clone(),
                     akhs: vec!["test".into()],
+                    tools: Default::default(),
+                    roles: Default::default(),
+                    grants: Default::default(),
                 }],
             },
             Arc::new(Backend(Arc::new(Engine::new(Default::default()).unwrap()))),
@@ -2263,6 +2284,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -2399,6 +2421,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -2454,6 +2477,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -2550,6 +2574,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -2675,6 +2700,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();
@@ -2762,6 +2788,7 @@ mod lifecycle_tests {
                     akh: "test".into(),
                     workspace_profile: "local".into(),
                     conversation_key: None,
+                    grant: None,
                 },
             )
             .unwrap();

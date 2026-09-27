@@ -18,6 +18,7 @@ use super::djehuty::{
     DjehutyMessageView, DjehutyPage, DjehutyThreadId, board_note,
 };
 use super::error::{AgentError, AgentResult};
+use super::llm_metrics::{ModelContact, UsageScope};
 use super::memory::recall_recent_episodes;
 use super::reactor::{ReactorAction, ReactorClaim, ReactorEvent, ReactorStore, ScheduleRule};
 use crate::engine::Engine;
@@ -244,13 +245,121 @@ pub fn ingest_board_events_from_env(engine: &Engine, now: u64) -> AgentResult<Bo
     ingest_board_events(engine, &DjehutyClient::new(config), own_agent_id, now)
 }
 
+/// Board protocol of reactor run reports (ADR 105 rule 3).
+pub const COORDINATION_STATUS_V1: &str = "coordination/status@v1";
+
+/// `state` of a `coordination/status@v1` run report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunReportState {
+    /// The run finished; its outcome is in `detail`.
+    Complete,
+    /// The run failed, or the reactor paused the schedule and needs an
+    /// operator.
+    Blocked,
+}
+
+/// One reactor run, rendered as a `coordination/status@v1` message.
+#[derive(Debug, Clone)]
+pub struct RunReport {
+    pub schedule_id: String,
+    pub schedule_name: String,
+    /// Stable per occurrence and attempt; keys the board idempotency.
+    pub run_key: String,
+    pub state: RunReportState,
+    pub exit_condition: String,
+    pub outcome: String,
+    /// Set when the reactor paused the schedule during this run.
+    pub pause: Option<super::reactor::SchedulePause>,
+}
+
+impl RunReport {
+    /// The board envelope. Retries of the same run post one message.
+    pub fn message(&self) -> DjehutyMessageContent {
+        let detail = serde_json::json!({
+            "schedule": self.schedule_id,
+            "run": self.run_key,
+            "exit_condition": self.exit_condition,
+            "outcome": truncate_chars(&self.outcome, 2_000),
+            "pause": self.pause,
+        });
+        let state = serde_json::to_value(self.state).unwrap_or_default();
+        DjehutyMessageContent {
+            message_type: COORDINATION_STATUS_V1.to_owned(),
+            payload: serde_json::json!({ "state": state, "detail": detail.to_string() }),
+            summary: truncate_chars(
+                &format!(
+                    "{} {}",
+                    self.schedule_name,
+                    state.as_str().unwrap_or_default()
+                ),
+                240,
+            ),
+            retention: super::djehuty::DjehutyRetention::Durable,
+            reply_to: None,
+            idempotency_key: format!("akh-reactor:{}:status", self.run_key),
+        }
+    }
+}
+
+/// Post a run report to `thread` (a board thread UUID).
+pub fn post_run_report(
+    client: &dyn DjehutyBoardApi,
+    thread: &str,
+    report: &RunReport,
+) -> AgentResult<DjehutyMessageId> {
+    let thread_id = uuid::Uuid::parse_str(thread)
+        .map(DjehutyThreadId)
+        .map_err(|error| board_error(format!("invalid report thread {thread:?}: {error}")))?;
+    client
+        .post_thread_message(thread_id, report.message())
+        .map(|posted| posted.id)
+        .map_err(|error| board_error(format!("post run report to thread {thread_id}: {error}")))
+}
+
 /// Execute one tool-free model reply for a claimed Djehuty event and post it
 /// with an idempotency key derived from the durable reactor run id.
+///
+/// This is [`plan_board_reply`] followed by [`post_board_reply`]. The daemon
+/// calls the two halves separately so it can admit the model turn against
+/// the autonomy budget only when a reply is really needed.
 pub fn execute_board_reply(
     agent: &Agent,
     client: &impl DjehutyBoardApi,
     claim: &ReactorClaim,
 ) -> AgentResult<String> {
+    match plan_board_reply(agent, claim)? {
+        BoardReplyPlan::Ignore(summary) => Ok(summary),
+        BoardReplyPlan::Reply(prepared) => {
+            post_board_reply(agent, client, prepared).map_err(|failure| failure.error)
+        }
+    }
+}
+
+/// What a claimed `DjehutyReply` occurrence needs.
+#[derive(Debug)]
+pub enum BoardReplyPlan {
+    /// Nothing to send (the message type is filtered out by the schedule).
+    /// No model call; the string is the run summary.
+    Ignore(String),
+    /// A model reply is needed.
+    Reply(PreparedBoardReply),
+}
+
+/// A board reply whose prompt is built but whose model turn has not run.
+#[derive(Debug)]
+pub struct PreparedBoardReply {
+    thread_id: DjehutyThreadId,
+    reply_to: DjehutyMessageId,
+    agent_id: String,
+    prompt: String,
+    max_reply_chars: usize,
+    run_id: String,
+}
+
+/// Decide whether a claimed `DjehutyReply` needs a model turn, and build its
+/// prompt. Makes no model call.
+pub fn plan_board_reply(agent: &Agent, claim: &ReactorClaim) -> AgentResult<BoardReplyPlan> {
     let ReactorAction::DjehutyReply {
         thread_id,
         prompt_prefix,
@@ -274,10 +383,10 @@ pub fn execute_board_reply(
             .iter()
             .any(|allowed| allowed == &message.message_type)
     {
-        return Ok(format!(
+        return Ok(BoardReplyPlan::Ignore(format!(
             "ignored board message type {} by schedule policy",
             message.message_type
-        ));
+        )));
     }
 
     let thread_id = uuid::Uuid::parse_str(thread_id)
@@ -307,30 +416,61 @@ pub fn execute_board_reply(
         ),
         *max_prompt_chars,
     );
-    let reply = run_tool_free_turn(
-        agent,
-        agent_id.as_deref().unwrap_or("djehuty-board"),
-        &prompt,
-    )?;
-    let reply = truncate_chars(reply.trim(), *max_reply_chars);
+    Ok(BoardReplyPlan::Reply(PreparedBoardReply {
+        thread_id,
+        reply_to: message.id,
+        agent_id: agent_id.as_deref().unwrap_or("djehuty-board").to_owned(),
+        prompt,
+        max_reply_chars: *max_reply_chars,
+        run_id: claim.run_id.clone(),
+    }))
+}
+
+/// Run the model turn for a [`PreparedBoardReply`] and post the reply.
+///
+/// The error says whether the model responded, so the caller charges the
+/// budget and the ADR 105 trip-wire only for real model outcomes.
+pub fn post_board_reply(
+    agent: &Agent,
+    client: &impl DjehutyBoardApi,
+    prepared: PreparedBoardReply,
+) -> Result<String, ModelTurnFailure> {
+    let PreparedBoardReply {
+        thread_id,
+        reply_to,
+        agent_id,
+        prompt,
+        max_reply_chars,
+        run_id,
+    } = prepared;
+    let reply = run_tool_free_turn(agent, &agent_id, &prompt)?;
+    let responded = |error| ModelTurnFailure {
+        contact: ModelContact::Responded,
+        error,
+    };
+    let reply = truncate_chars(reply.trim(), max_reply_chars);
     if reply.is_empty() {
-        return Err(board_error(
+        return Err(responded(board_error(
             "configured model returned an empty board reply",
-        ));
+        )));
     }
 
     let mut content = board_note(
         &reply,
         truncate_chars(&reply, 240),
-        format!("akh-reactor:{}", claim.run_id),
+        format!("akh-reactor:{run_id}"),
     );
-    content.reply_to = Some(message.id);
+    content.reply_to = Some(reply_to);
     let posted = client
         .post_thread_message(thread_id, content)
-        .map_err(|error| board_error(format!("post reply to thread {thread_id}: {error}")))?;
+        .map_err(|error| {
+            responded(board_error(format!(
+                "post reply to thread {thread_id}: {error}"
+            )))
+        })?;
     Ok(format!(
-        "posted board reply {} to message {}",
-        posted.id, message.id
+        "posted board reply {} to message {reply_to}",
+        posted.id
     ))
 }
 
@@ -340,11 +480,37 @@ pub fn execute_board_reply_from_env(agent: &Agent, claim: &ReactorClaim) -> Agen
     execute_board_reply(agent, &DjehutyClient::new(config), claim)
 }
 
+/// A model turn that failed, and whether the model responded before it did.
+#[derive(Debug)]
+pub struct ModelTurnFailure {
+    /// `NotReached` for an absent or unavailable backend and for transport
+    /// failures before any response; `Responded` otherwise.
+    pub contact: ModelContact,
+    /// The failure.
+    pub error: AgentError,
+}
+
+impl From<ModelTurnFailure> for AgentError {
+    fn from(failure: ModelTurnFailure) -> Self {
+        failure.error
+    }
+}
+
+/// One tool-free model turn through the agent's configured backend.
+///
+/// On failure, [`ModelTurnFailure::contact`] says whether the model was
+/// reached: a missing or unavailable backend never is; a failed request
+/// counts as reached only if the backend metered a response for it
+/// ([`RequestOutcome`](super::llm_metrics::RequestOutcome)).
 pub(crate) fn run_tool_free_turn(
     agent: &Agent,
     agent_id: &str,
     prompt: &str,
-) -> AgentResult<String> {
+) -> Result<String, ModelTurnFailure> {
+    let not_reached = |error| ModelTurnFailure {
+        contact: ModelContact::NotReached,
+        error,
+    };
     let backend: Arc<dyn ChatBackend> = match agent.chat_backend.clone() {
         Some(backend) => backend,
         None => agent
@@ -352,20 +518,32 @@ pub(crate) fn run_tool_free_turn(
             .clone()
             .map(super::chat_backend::OllamaChatBackend::new)
             .map(|backend| Arc::new(backend) as Arc<dyn ChatBackend>)
-            .ok_or_else(|| board_error("configured LLM backend is absent"))?,
+            .ok_or_else(|| not_reached(board_error("configured LLM backend is absent")))?,
     };
     if !backend.available() {
-        return Err(board_error("configured LLM backend is unavailable"));
+        return Err(not_reached(board_error(
+            "configured LLM backend is unavailable",
+        )));
     }
     let prepared = backend.prepare_turn(agent_id, agent.psyche(), &[]);
     let conversation = [serde_json::json!({"role": "user", "content": prompt})];
-    let turn = backend
-        .chat_with_tools_prepared(&prepared, agent_id, &conversation, &[], 0)
-        .map_err(|error| board_error(format!("board model turn failed: {error}")))?;
+    let scope = UsageScope::open();
+    let turn = backend.chat_with_tools_prepared(&prepared, agent_id, &conversation, &[], 0);
+    super::provider_failure::observe_chat_result(&turn);
+    let metered = scope.finish();
+    let turn = turn.map_err(|error| ModelTurnFailure {
+        contact: if metered.reached_model() {
+            ModelContact::Responded
+        } else {
+            ModelContact::NotReached
+        },
+        error: board_error(format!("board model turn failed: {error}")),
+    })?;
     if !turn.tool_calls.is_empty() {
-        return Err(board_error(
-            "board model attempted a tool call during a tool-free turn",
-        ));
+        return Err(ModelTurnFailure {
+            contact: ModelContact::Responded,
+            error: board_error("board model attempted a tool call during a tool-free turn"),
+        });
     }
     Ok(turn.content)
 }

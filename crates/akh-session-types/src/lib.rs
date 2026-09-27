@@ -1,10 +1,13 @@
 //! Shared wire contracts. This crate deliberately has no engine, transport or provider dependency.
+pub mod anima;
 pub mod bootstrap;
 pub mod credentials;
+pub mod monitor;
 pub mod neural_spans;
 pub mod publication;
 pub mod questions;
 pub mod repository;
+pub mod streaming;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,16 +59,164 @@ pub enum RuntimeKind {
     Internal,
     Codex,
     Claude,
+    /// sst/opencode driven over the Agent Client Protocol (`opencode acp`).
+    /// Akh tools reach it as a per-turn loopback MCP server; see
+    /// `akh_runtime::opencode` and docs/ai/research/2026-09-25-opencode-runtime-integration.md.
+    #[serde(rename = "opencode")]
+    OpenCode,
 }
 
+/// How a native runtime reaches workspace effects.
+///
+/// `Colocated` stays the default so existing development profiles keep their
+/// meaning. A deployed service does not rely on the default at all (Phase 53
+/// decision 7, ADR 113 decision 3): a runtime profile there must say
+/// `execution_mode = "brokered"` explicitly (see
+/// [`ProviderConfig::execution_mode_setting`]), and `Colocated` is refused.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
     /// Provider native tools are permitted only inside the bound workspace environment.
+    /// Development only: a deployed service refuses it (see [`DeploymentMode`]).
     #[default]
     Colocated,
     /// Workspace tools must traverse the session broker. Admission requires conformance evidence.
     Brokered,
+}
+
+/// Whether a process runs as a development instance or as a deployed service
+/// (Phase 53 decision 6).
+///
+/// Deployed processes execute no workspace side effects in their own address
+/// space (ADR 113 decision 3): akhomed refuses the in-process executor and
+/// in-process coding runtimes, and akhrtd refuses `Colocated` native runtimes.
+/// `Development` is the default so tests and local runs are unaffected.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentMode {
+    /// Local development and tests: in-process execution is allowed.
+    #[default]
+    Development,
+    /// A deployed service: side effects must go through akhsbxd/akhexecd.
+    Deployed,
+}
+
+/// `AKH_DEPLOYMENT` held a value that is not a [`DeploymentMode`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{variable}={value:?} is not a deployment mode; use \"deployed\" or \"development\"")]
+pub struct UnknownDeploymentMode {
+    pub variable: &'static str,
+    pub value: String,
+}
+
+impl DeploymentMode {
+    /// Environment variable that selects deployed mode for any Akh service.
+    pub const ENV: &'static str = "AKH_DEPLOYMENT";
+
+    pub fn is_deployed(self) -> bool {
+        self == Self::Deployed
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Development => "development",
+            Self::Deployed => "deployed",
+        }
+    }
+
+    /// Parse an `AKH_DEPLOYMENT` value (case-insensitive, surrounding
+    /// whitespace ignored).
+    pub fn parse_env_value(value: &str) -> std::result::Result<Self, UnknownDeploymentMode> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "deployed" => Ok(Self::Deployed),
+            "development" | "dev" => Ok(Self::Development),
+            _ => Err(UnknownDeploymentMode {
+                variable: Self::ENV,
+                value: value.to_owned(),
+            }),
+        }
+    }
+
+    /// Combine the configured mode with an optional `AKH_DEPLOYMENT` value.
+    ///
+    /// The environment can only make a process stricter: `deployed` in either
+    /// place wins, so an inherited `AKH_DEPLOYMENT=development` cannot relax a
+    /// host whose configuration says `deployed`.
+    pub fn resolve(
+        configured: Self,
+        env_value: Option<&str>,
+    ) -> std::result::Result<Self, UnknownDeploymentMode> {
+        let from_env = env_value
+            .map(Self::parse_env_value)
+            .transpose()?
+            .unwrap_or_default();
+        Ok(configured.max(from_env))
+    }
+
+    /// [`Self::resolve`] against the live process environment.
+    pub fn resolve_from_env(configured: Self) -> std::result::Result<Self, UnknownDeploymentMode> {
+        let value = std::env::var(Self::ENV).ok();
+        Self::resolve(configured, value.as_deref())
+    }
+}
+
+/// The kind of a workspace entry reported by the executor's read-only `stat`
+/// verb. Symlinks are reported, never followed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceEntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+/// Result of the executor's read-only `stat` verb. A missing entry is
+/// `exists: false` with no kind or size, not an error.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceStat {
+    pub exists: bool,
+    #[serde(default)]
+    pub kind: Option<WorkspaceEntryKind>,
+    /// Byte length for regular files; `None` for other kinds.
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
+impl WorkspaceStat {
+    pub const MISSING: Self = Self {
+        exists: false,
+        kind: None,
+        size: None,
+    };
+
+    pub fn is_symlink(&self) -> bool {
+        self.kind == Some(WorkspaceEntryKind::Symlink)
+    }
+}
+
+/// Workspace operations that never change workspace state. The executor's
+/// mutation fence, its restart recovery and the session broker's approval
+/// policy all consult this one list.
+pub const READ_ONLY_WORKSPACE_OPERATIONS: &[&str] = &[
+    "read",
+    "list",
+    "search",
+    "stat",
+    "exec_poll",
+    "git_snapshot",
+];
+
+/// Read-only verbs whose terminal receipts akhexecd garbage-collects after its
+/// read-receipt retention (24 h). A recovery lookup of such a receipt that
+/// returns `not_found` is safe: the read changed nothing and can be re-issued.
+/// `git_snapshot` is read-only too, but a later `git_publish` consumes its
+/// receipt, so it is kept like a mutation's.
+pub const COLLECTABLE_READ_OPERATIONS: &[&str] = &["read", "list", "search", "stat", "exec_poll"];
+
+pub fn is_read_only_workspace_operation(operation: &str) -> bool {
+    READ_ONLY_WORKSPACE_OPERATIONS.contains(&operation)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -170,6 +321,32 @@ pub enum ApprovalPolicy {
     ReadOnly,
 }
 
+/// A per-delegation grant secret (Phase 53e, ADR 113 decision 9).
+///
+/// The akh mints it; the session service keeps it privately (never in a
+/// `SessionRecord`) and presents it on every cognitive tool call of the
+/// delegated session. On the wire it is a bare string. `Debug` is redacted so
+/// the secret cannot leak through a derived `Debug` of a request.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct GrantToken(String);
+
+impl GrantToken {
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
+    }
+    /// The raw secret. Only hash it or send it; never log or persist it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for GrantToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GrantToken(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NewSession {
@@ -178,6 +355,11 @@ pub struct NewSession {
     pub workspace_profile: String,
     #[serde(default)]
     pub conversation_key: Option<String>,
+    /// Delegation grant the session presents on its cognitive tool calls
+    /// (Phase 53e). Absent on the wire when `None`, so a session service that
+    /// predates the field still accepts grant-less requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<GrantToken>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -486,6 +668,10 @@ pub struct CognitiveToolCall {
     pub akh: String,
     pub tool: String,
     pub arguments: Value,
+    /// The session's delegation grant (Phase 53e). Absent on the wire when
+    /// `None`, so a core that predates the field still accepts the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<GrantToken>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -609,6 +795,11 @@ pub struct OperationReceipt {
     pub result: Option<ToolResult>,
     pub started_at: u64,
     pub finished_at: Option<u64>,
+    /// The authenticated principal that admitted this operation (ADR 113
+    /// attribution). `None` for receipts written before this field existed and
+    /// for in-process callers that bypass the HTTP surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -625,6 +816,24 @@ pub struct EventEnvelope {
     #[serde(default)]
     pub correlation_id: Option<String>,
     pub data: Value,
+}
+
+/// Fault code akhomed returns when an admitted event matches no enabled
+/// reactor schedule. Terminal for a delivery: retrying cannot help until a
+/// schedule subscribes (Phase 53d).
+pub const NO_SUBSCRIBER: &str = "no_subscriber";
+
+/// akhomed's answer to `POST /v1/akhs/{akh}/events` (Phase 53d, ADR 113
+/// decision 4): the event landed in the akh's own reactor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EventAdmission {
+    /// Stable identity of the event inside the akh: `<source>/<type>#<id>`.
+    pub event_key: String,
+    /// Reactor schedules this submission newly queued the event on.
+    pub schedules_woken: Vec<String>,
+    /// The event id was admitted before; nothing new was queued.
+    pub duplicate: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -754,6 +963,43 @@ pub fn validate_key(key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grant_fields_are_absent_when_none_and_round_trip_when_set() {
+        let call = CognitiveToolCall {
+            request_id: "r".into(),
+            session_id: "s".into(),
+            akh: "a".into(),
+            tool: "kg_query".into(),
+            arguments: serde_json::json!({}),
+            grant: None,
+        };
+        let json = serde_json::to_value(&call).unwrap();
+        // A core that predates 53e uses deny_unknown_fields: absent, not null.
+        assert!(!json.as_object().unwrap().contains_key("grant"), "{json}");
+        let granted = CognitiveToolCall {
+            grant: Some(GrantToken::new("secret-value")),
+            ..call
+        };
+        let json = serde_json::to_value(&granted).unwrap();
+        assert_eq!(json["grant"], "secret-value");
+        assert_eq!(
+            serde_json::from_value::<CognitiveToolCall>(json).unwrap(),
+            granted
+        );
+        // The secret never shows up in Debug output.
+        assert!(!format!("{granted:?}").contains("secret-value"));
+
+        let session = NewSession {
+            request_id: "r".into(),
+            akh: "a".into(),
+            workspace_profile: "p".into(),
+            conversation_key: None,
+            grant: None,
+        };
+        let json = serde_json::to_value(&session).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("grant"), "{json}");
+    }
 
     #[test]
     fn a_context_request_without_assembly_serializes_exactly_as_before() {
@@ -896,8 +1142,12 @@ pub struct ProviderConfig {
     pub launcher: Vec<String>,
     #[serde(default = "default_runtime_timeout")]
     pub timeout_secs: u64,
-    #[serde(default)]
-    pub execution_mode: ExecutionMode,
+    /// As configured; `None` when the profile omits it. Read the effective
+    /// mode through [`ProviderConfig::execution_mode`]. An omitted value is
+    /// not serialized, so a profile's digest (and its conformance evidence) is
+    /// unchanged by this being optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<ExecutionMode>,
     pub conformance_file: Option<std::path::PathBuf>,
     #[serde(default)]
     pub native_aliases: BTreeMap<String, String>,
@@ -923,6 +1173,20 @@ pub struct TrainingWorker {
 }
 fn default_runtime_timeout() -> u64 {
     600
+}
+
+impl ProviderConfig {
+    /// The effective execution mode: the configured one, or
+    /// [`ExecutionMode::default`] (`Colocated`) when the profile omits it.
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode.unwrap_or_default()
+    }
+
+    /// Whether the profile states its execution mode explicitly. Deployed
+    /// services require it to.
+    pub fn execution_mode_setting(&self) -> Option<ExecutionMode> {
+        self.execution_mode
+    }
 }
 
 /// Provider-owned state and config, local to the runtime machine. Values are never
@@ -1133,4 +1397,100 @@ pub struct ServiceRestart {
     pub request_id: String,
     pub expected_manifest_sha256: String,
     pub profile: Option<ServiceProfile>,
+}
+
+#[cfg(test)]
+mod deployment_tests {
+    use super::*;
+
+    #[test]
+    fn deployment_mode_defaults_to_development_and_env_only_escalates() {
+        assert_eq!(DeploymentMode::default(), DeploymentMode::Development);
+        let resolve = DeploymentMode::resolve;
+        assert_eq!(
+            resolve(DeploymentMode::Development, None).unwrap(),
+            DeploymentMode::Development
+        );
+        assert_eq!(
+            resolve(DeploymentMode::Development, Some(" Deployed ")).unwrap(),
+            DeploymentMode::Deployed
+        );
+        // An inherited `development` cannot relax a deployed configuration.
+        assert_eq!(
+            resolve(DeploymentMode::Deployed, Some("development")).unwrap(),
+            DeploymentMode::Deployed
+        );
+        let error = resolve(DeploymentMode::Development, Some("prod")).unwrap_err();
+        assert_eq!(error.variable, "AKH_DEPLOYMENT");
+        assert_eq!(error.value, "prod");
+    }
+
+    #[test]
+    fn an_omitted_execution_mode_is_colocated_and_recorded_as_omitted() {
+        assert_eq!(ExecutionMode::default(), ExecutionMode::Colocated);
+        let omitted: ProviderConfig = serde_json::from_value(serde_json::json!({
+            "isolation":null,"model_endpoint":null,"revision":"1","kind":"codex",
+            "working_dir":"/w","binary":"/b","node_binary":null,"bridge_script":null,
+            "conformance_file":null,"effort":null
+        }))
+        .unwrap();
+        assert_eq!(omitted.execution_mode_setting(), None);
+        assert_eq!(omitted.execution_mode(), ExecutionMode::Colocated);
+        // Omission round-trips as omission, so profile digests do not change.
+        assert!(
+            serde_json::to_value(&omitted)
+                .unwrap()
+                .get("execution_mode")
+                .is_none()
+        );
+        let mut brokered = omitted.clone();
+        brokered.execution_mode = Some(ExecutionMode::Brokered);
+        assert_eq!(
+            serde_json::to_value(&brokered).unwrap()["execution_mode"],
+            "brokered"
+        );
+    }
+
+    #[test]
+    fn opencode_runtime_kind_uses_its_product_name_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(RuntimeKind::OpenCode).unwrap(),
+            "opencode"
+        );
+        assert_eq!(
+            serde_json::from_value::<RuntimeKind>(serde_json::json!("opencode")).unwrap(),
+            RuntimeKind::OpenCode
+        );
+        // The snake_case spelling a derive would produce is not accepted.
+        assert!(serde_json::from_value::<RuntimeKind>(serde_json::json!("open_code")).is_err());
+    }
+
+    #[test]
+    fn receipt_principal_is_optional_on_the_wire() {
+        let legacy = serde_json::json!({
+            "id":"op","status":"completed","result":null,"started_at":1,"finished_at":2,
+            "request":{"id":"op","session_id":"s","turn_id":"t","workspace_id":"w",
+                "generation":1,"operation":"stat","arguments":{"path":"."}}
+        });
+        let receipt: OperationReceipt = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(receipt.principal, None);
+        // Absent principals serialize exactly as before, so older strict readers accept them.
+        assert_eq!(serde_json::to_value(&receipt).unwrap(), legacy);
+        let mut attributed = receipt;
+        attributed.principal = Some("akhomed".into());
+        assert_eq!(
+            serde_json::to_value(&attributed).unwrap()["principal"],
+            "akhomed"
+        );
+    }
+
+    #[test]
+    fn stat_is_read_only_and_reports_symlinks_without_following() {
+        assert!(is_read_only_workspace_operation("stat"));
+        assert!(!is_read_only_workspace_operation("write"));
+        let stat: WorkspaceStat =
+            serde_json::from_value(serde_json::json!({"exists":true,"kind":"symlink"})).unwrap();
+        assert!(stat.is_symlink());
+        assert_eq!(stat.size, None);
+    }
 }

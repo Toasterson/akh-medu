@@ -186,6 +186,10 @@ pub enum OllamaError {
         status: u16,
         body: String,
         model: String,
+        /// `Retry-After` and structured `error.code`/`error.type`, for the
+        /// provider-failure taxonomy (Phase 53g PR 4). Not part of the message.
+        /// Boxed so the error stays small on every `Result` path.
+        detail: Box<super::provider_failure::ProviderErrorDetail>,
     },
 
     #[error("Ollama returned unexpected response: {reason}")]
@@ -204,6 +208,48 @@ pub enum OllamaError {
         )
     )]
     Timeout { timeout_secs: u64 },
+}
+
+impl OllamaError {
+    /// Map a `ureq` failure of a request to `url`: an HTTP status becomes
+    /// [`Self::RequestFailed`] with its provider detail captured, anything
+    /// else [`Self::Unreachable`].
+    fn from_ureq(error: ureq::Error, url: &str, model: &str) -> Self {
+        match error {
+            ureq::Error::Status(status, resp) => {
+                let (body, detail) =
+                    super::provider_failure::ProviderErrorDetail::from_response(resp);
+                Self::RequestFailed {
+                    url: url.to_owned(),
+                    status,
+                    body,
+                    model: model.to_owned(),
+                    detail: Box::new(detail),
+                }
+            }
+            other => Self::Unreachable {
+                url: url.to_owned(),
+                reason: other.to_string(),
+            },
+        }
+    }
+
+    /// What this failure says about the provider, for the provider gate.
+    /// `None` for a response the provider sent but the client could not
+    /// parse: the provider answered.
+    pub fn provider_evidence(&self) -> Option<super::provider_failure::ProviderFailureEvidence> {
+        use super::provider_failure::ProviderFailureEvidence;
+        match self {
+            Self::RequestFailed { status, detail, .. } => Some(ProviderFailureEvidence::Http {
+                status: *status,
+                detail: detail.as_ref().clone(),
+            }),
+            Self::Unreachable { .. } | Self::Timeout { .. } => {
+                Some(ProviderFailureEvidence::Transport)
+            }
+            Self::ParseFailed { .. } => None,
+        }
+    }
 }
 
 /// Convenience alias.
@@ -462,18 +508,9 @@ impl OllamaClient {
         if let Some(key) = self.config.resolved_api_key() {
             req = req.set("Authorization", &format!("Bearer {key}"));
         }
-        let response = req.call().map_err(|e| match e {
-            ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
-                url: url.clone(),
-                status,
-                body: resp.into_string().unwrap_or_default(),
-                model: self.config.model.clone(),
-            },
-            other => OllamaError::Unreachable {
-                url: url.clone(),
-                reason: other.to_string(),
-            },
-        })?;
+        let response = req
+            .call()
+            .map_err(|e| OllamaError::from_ureq(e, &url, &self.config.model))?;
 
         let body: serde_json::Value =
             response.into_json().map_err(|e| OllamaError::ParseFailed {
@@ -522,23 +559,17 @@ impl OllamaClient {
         if let Some(key) = self.config.resolved_api_key() {
             req = req.set("Authorization", &format!("Bearer {key}"));
         }
-        let response = req.send_json(&body).map_err(|e| match e {
-            ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
-                url: url.clone(),
-                status,
-                body: resp.into_string().unwrap_or_default(),
-                model: self.config.model.clone(),
-            },
-            other => OllamaError::Unreachable {
-                url: url.clone(),
-                reason: other.to_string(),
-            },
-        })?;
+        let response = req
+            .send_json(&body)
+            .map_err(|e| OllamaError::from_ureq(e, &url, &self.config.model))?;
 
         let chat_resp: ChatResponse =
             response.into_json().map_err(|e| OllamaError::ParseFailed {
                 reason: format!("JSON decode failed: {e}"),
             })?;
+        // Phase 53b: meter one-shot generation (the Librarian's path) for the
+        // autonomy budget; chat paths meter through `LlmRequestMetrics::log`.
+        super::llm_metrics::record_usage(chat_resp.prompt_eval_count, chat_resp.eval_count);
 
         chat_resp
             .message
@@ -584,18 +615,9 @@ impl OllamaClient {
         if let Some(key) = self.config.resolved_api_key() {
             req = req.set("Authorization", &format!("Bearer {key}"));
         }
-        let response = req.send_json(&body).map_err(|e| match e {
-            ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
-                url: url.clone(),
-                status,
-                body: resp.into_string().unwrap_or_default(),
-                model: self.config.model.clone(),
-            },
-            other => OllamaError::Unreachable {
-                url: url.clone(),
-                reason: other.to_string(),
-            },
-        })?;
+        let response = req
+            .send_json(&body)
+            .map_err(|e| OllamaError::from_ureq(e, &url, &self.config.model))?;
 
         let chat_resp: ChatResponse =
             response.into_json().map_err(|e| OllamaError::ParseFailed {
@@ -678,28 +700,25 @@ impl OllamaClient {
         if let Some(key) = self.config.resolved_api_key() {
             req = req.set("Authorization", &format!("Bearer {key}"));
         }
-        let response = req.send_json(&body).map_err(|e| match e {
-            ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
-                url: url.clone(),
-                status,
-                body: resp.into_string().unwrap_or_default(),
-                model: self.config.model.clone(),
-            },
-            other => OllamaError::Unreachable {
-                url: url.clone(),
-                reason: other.to_string(),
-            },
-        })?;
+        let response = req
+            .send_json(&body)
+            .map_err(|e| OllamaError::from_ureq(e, &url, &self.config.model))?;
 
         let chat_resp: ChatResponse = response.into_json().map_err(|e| {
-            metrics.log(&self.config.model, "cancelled");
+            metrics.log(
+                &self.config.model,
+                super::llm_metrics::RequestOutcome::Partial,
+            );
             OllamaError::ParseFailed {
                 reason: format!("JSON decode failed: {e}"),
             }
         })?;
 
         let msg = chat_resp.message.ok_or_else(|| {
-            metrics.log(&self.config.model, "cancelled");
+            metrics.log(
+                &self.config.model,
+                super::llm_metrics::RequestOutcome::Partial,
+            );
             OllamaError::ParseFailed {
                 reason: "Ollama chat response had no message".into(),
             }
@@ -715,7 +734,10 @@ impl OllamaClient {
             metrics.note_tool_call_chunk();
         }
         metrics.set_tokens(chat_resp.prompt_eval_count, chat_resp.eval_count);
-        metrics.log(&self.config.model, "completed");
+        metrics.log(
+            &self.config.model,
+            super::llm_metrics::RequestOutcome::Completed,
+        );
 
         Ok(AssistantTurn {
             content: msg.content.unwrap_or_default(),
@@ -843,18 +865,9 @@ impl OllamaClient {
         if let Some(key) = self.config.resolved_api_key() {
             req = req.set("Authorization", &format!("Bearer {key}"));
         }
-        let response = req.send_json(&body).map_err(|e| match e {
-            ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
-                url: url.clone(),
-                status,
-                body: resp.into_string().unwrap_or_default(),
-                model: self.config.model.clone(),
-            },
-            other => OllamaError::Unreachable {
-                url: url.clone(),
-                reason: other.to_string(),
-            },
-        })?;
+        let response = req
+            .send_json(&body)
+            .map_err(|e| OllamaError::from_ureq(e, &url, &self.config.model))?;
 
         // Client-side heartbeat + decoupled streaming: heartbeats must be
         // delivered DURING provider silence, not after. The previous implementation
@@ -945,7 +958,7 @@ impl OllamaClient {
                         // Signal heartbeat thread to stop before returning error.
                         request_alive.store(false, Ordering::Relaxed);
                         // Log metrics on cancellation path.
-                        metrics.log(&self.config.model, "cancelled");
+                        metrics.log(&self.config.model, metrics.interrupted_outcome());
                         OllamaError::Unreachable {
                             url: url.clone(),
                             reason: format!("stream read error: {e}"),
@@ -1050,7 +1063,10 @@ impl OllamaClient {
         }
 
         // Log metrics on successful completion.
-        metrics.log(&self.config.model, "completed");
+        metrics.log(
+            &self.config.model,
+            super::llm_metrics::RequestOutcome::Completed,
+        );
 
         Ok(AssistantTurn {
             content,
@@ -1100,6 +1116,44 @@ impl OllamaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 53g PR 4: an HTTP error keeps its message and captures the
+    /// status and `Retry-After` (an HTTP-date here) for the provider gate.
+    #[test]
+    fn request_failed_captures_provider_evidence() {
+        use crate::agent::provider_failure::{ProviderFailureEvidence, RetryAfter};
+        let body = r#"{"error":"unauthorized"}"#;
+        let raw = format!(
+            "HTTP/1.1 401 Unauthorized\r\nRetry-After: Wed, 21 Oct 2037 07:28:00 GMT\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response: ureq::Response = raw.parse().unwrap();
+        let error = OllamaError::from_ureq(
+            ureq::Error::Status(401, response),
+            "http://h/api/chat",
+            "glm",
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("Ollama request failed (HTTP 401) at http://h/api/chat: {body}")
+        );
+        let Some(ProviderFailureEvidence::Http { status, detail }) = error.provider_evidence()
+        else {
+            panic!("expected HTTP evidence: {error:?}");
+        };
+        assert_eq!(status, 401);
+        assert!(matches!(detail.retry_after, Some(RetryAfter::At(_))));
+        // Ollama's string `error` is prose, not a structured identifier.
+        assert_eq!((detail.error_code, detail.error_type), (None, None));
+        assert_eq!(
+            OllamaError::ParseFailed { reason: "x".into() }.provider_evidence(),
+            None
+        );
+        assert_eq!(
+            OllamaError::Timeout { timeout_secs: 1 }.provider_evidence(),
+            Some(ProviderFailureEvidence::Transport)
+        );
+    }
 
     /// Consume the complete HTTP request before the mock peer responds. On
     /// macOS, closing a socket with unread request-body bytes can turn a valid

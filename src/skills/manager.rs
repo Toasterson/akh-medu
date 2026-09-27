@@ -1015,6 +1015,59 @@ mod tests {
         assert!(kg.triple_count() >= 2);
     }
 
+    /// The Roman `laya-intervention` skillpack (Phase 53g PR 6,
+    /// `deploy/roman-mini/skills/laya-intervention/`) loads through this
+    /// loader: manifest, vocabulary triples and the action/effect schemas.
+    #[test]
+    fn roman_laya_intervention_skillpack_activates() {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("deploy/roman-mini/skills/laya-intervention");
+        let dir = TempDir::new().unwrap();
+        let skill_dir = dir.path().join("skills").join("laya-intervention");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        for entry in std::fs::read_dir(&source).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), skill_dir.join(entry.file_name())).unwrap();
+        }
+        let mgr = SkillManager::new(dir.path().join("skills"), 100);
+        assert_eq!(mgr.discover().unwrap(), 1);
+        let manifest = mgr.warm("laya-intervention").unwrap();
+        assert_eq!(manifest.procedures_file.as_deref(), Some("procedures.md"));
+        // The Engine path publishes label triples; count what it would get.
+        let activation = mgr
+            .activate_with::<SkillError, _>("laya-intervention", false, |plan| {
+                let labels = plan.label_triples();
+                assert!(labels.iter().any(|(s, p, o, _)| s == "human_required"
+                    && p == "requires"
+                    && o == "human_reply"));
+                Ok(labels.len())
+            })
+            .unwrap();
+        assert!(
+            activation.triples_loaded >= 13,
+            "{}",
+            activation.triples_loaded
+        );
+        assert_eq!(activation.actions_loaded, 7);
+        let actions = mgr.actions("laya-intervention");
+        let record = actions
+            .iter()
+            .find(|a| a.action == "record_human_required")
+            .unwrap();
+        assert!(
+            record
+                .effects
+                .initiates
+                .contains(&"awaiting_human_reply".to_string())
+        );
+        assert!(
+            actions
+                .iter()
+                .filter(|a| a.action.starts_with("record_"))
+                .all(|a| a.effects.terminates == ["intervention_admitted"])
+        );
+    }
+
     #[test]
     fn activate_loads_rules() {
         let (_dir, skills_dir) = setup_skill_dir();

@@ -240,10 +240,7 @@ pub fn validate_tensors(
                 vec![width * 3, width],
             ));
             v.push((format!("v.blk.{block}.attn_qkv.bias"), vec![width * 3]));
-            v.push((
-                format!("v.blk.{block}.attn_out.weight"),
-                vec![width, width],
-            ));
+            v.push((format!("v.blk.{block}.attn_out.weight"), vec![width, width]));
             v.push((format!("v.blk.{block}.attn_out.bias"), vec![width]));
             v.push((
                 format!("v.blk.{block}.ffn_up.weight"),
@@ -298,11 +295,13 @@ pub fn validate_tensors(
 
 /// Positions the learned position grid covers, and its square side.
 pub fn position_grid(content: &gguf_file::Content) -> NluResult<(usize, usize)> {
-    let info = content.tensor_infos.get("v.position_embd.weight").ok_or(
-        NluError::ModelLoadFailed {
-            reason: "projector is missing v.position_embd.weight".into(),
-        },
-    )?;
+    let info =
+        content
+            .tensor_infos
+            .get("v.position_embd.weight")
+            .ok_or(NluError::ModelLoadFailed {
+                reason: "projector is missing v.position_embd.weight".into(),
+            })?;
     let positions = info.shape.dims()[0];
     let side = (positions as f64).sqrt().round() as usize;
     if side * side != positions {
@@ -477,9 +476,13 @@ impl VisionTower {
                 .reshape((self.config.embedding_length, patch_values))
                 .map_err(|e| map(e, "kernel reshape"))?;
             let part = unfolded
-                .matmul(&kernel.t().map_err(|e| map(e, "kernel transpose"))?
-                    .contiguous()
-                    .map_err(|e| map(e, "kernel contiguous"))?)
+                .matmul(
+                    &kernel
+                        .t()
+                        .map_err(|e| map(e, "kernel transpose"))?
+                        .contiguous()
+                        .map_err(|e| map(e, "kernel contiguous"))?,
+                )
                 .map_err(|e| map(e, "patch projection"))?;
             embedded = Some(match embedded {
                 None => part,
@@ -532,8 +535,7 @@ impl VisionTower {
 
         let normed = layer_norm(hidden, &block.ln1_weight, &block.ln1_bias, eps)
             .map_err(|e| map(e, "ln1"))?;
-        let qkv = linear(&normed, &block.qkv_weight, &block.qkv_bias)
-            .map_err(|e| map(e, "qkv"))?;
+        let qkv = linear(&normed, &block.qkv_weight, &block.qkv_bias).map_err(|e| map(e, "qkv"))?;
         let split = |offset: usize| -> NluResult<Tensor> {
             qkv.narrow(1, offset * width, width)
                 .map_err(|e| map(e, "qkv split"))?
@@ -568,8 +570,7 @@ impl VisionTower {
 
         let normed = layer_norm(&hidden, &block.ln2_weight, &block.ln2_bias, eps)
             .map_err(|e| map(e, "ln2"))?;
-        let up = linear(&normed, &block.up_weight, &block.up_bias)
-            .map_err(|e| map(e, "ffn up"))?;
+        let up = linear(&normed, &block.up_weight, &block.up_bias).map_err(|e| map(e, "ffn up"))?;
         let activated = gelu(&up).map_err(|e| map(e, "ffn gelu"))?;
         let down = linear(&activated, &block.down_weight, &block.down_bias)
             .map_err(|e| map(e, "ffn down"))?;
@@ -700,7 +701,11 @@ fn vision_rope_tables(
         let (row, col) = ((patch / grid_w) as f64, (patch % grid_w) as f64);
         for pair in 0..half {
             // Which axis, and the frequency index within it.
-            let (position, k) = if pair < quarter { (row, pair) } else { (col, pair - quarter) };
+            let (position, k) = if pair < quarter {
+                (row, pair)
+            } else {
+                (col, pair - quarter)
+            };
             let inv_freq = theta.powf(-(2.0 * k as f64) / half as f64);
             let angle = position * inv_freq;
             let base = patch * head_dim;
@@ -769,12 +774,7 @@ fn linear(x: &Tensor, weight: &Tensor, bias: &Tensor) -> candle_core::Result<Ten
 }
 
 /// LayerNorm over the last dimension, with weight and bias.
-fn layer_norm(
-    x: &Tensor,
-    weight: &Tensor,
-    bias: &Tensor,
-    eps: f64,
-) -> candle_core::Result<Tensor> {
+fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f64) -> candle_core::Result<Tensor> {
     let mean = x.mean_keepdim(candle_core::D::Minus1)?;
     let centered = x.broadcast_sub(&mean)?;
     let variance = centered.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
@@ -921,9 +921,11 @@ mod tests {
         );
         // A real projection is not degenerate: it must vary across channels.
         let mean = values.iter().sum::<f32>() / values.len() as f32;
-        let variance =
-            values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32;
-        assert!(variance > 1e-6, "embeddings are constant: variance {variance}");
+        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32;
+        assert!(
+            variance > 1e-6,
+            "embeddings are constant: variance {variance}"
+        );
     }
 
     /// The forward pass must refuse geometry it cannot patch evenly.
@@ -987,9 +989,12 @@ mod tests {
     // --- 2D rotary: pinned without a reference, on properties a wrong table
     // would break and a summary statistic would not notice. ---
 
-    fn rotate(grid_h: usize, grid_w: usize, head_dim: usize, x: &candle_core::Tensor)
-        -> candle_core::Tensor
-    {
+    fn rotate(
+        grid_h: usize,
+        grid_w: usize,
+        head_dim: usize,
+        x: &candle_core::Tensor,
+    ) -> candle_core::Tensor {
         let rope = VisionRope::new(grid_h, grid_w, head_dim, &candle_core::Device::Cpu).unwrap();
         apply_vision_rope(x, &rope).unwrap()
     }
@@ -998,18 +1003,30 @@ mod tests {
     /// distinct vector per patch only when `per_patch` is set; otherwise every
     /// patch holds the same vector, so differences after rotation come from
     /// position alone.
-    fn field(heads: usize, patches: usize, head_dim: usize, seed: usize, per_patch: bool)
-        -> candle_core::Tensor
-    {
+    fn field(
+        heads: usize,
+        patches: usize,
+        head_dim: usize,
+        seed: usize,
+        per_patch: bool,
+    ) -> candle_core::Tensor {
         let values: Vec<f32> = (0..heads * patches * head_dim)
             .map(|i| {
                 let d = i % head_dim;
-                let p = if per_patch { (i / head_dim) % patches } else { 0 };
+                let p = if per_patch {
+                    (i / head_dim) % patches
+                } else {
+                    0
+                };
                 (((d * 31 + p * 17 + seed * 7) % 101) as f32 / 50.0) - 1.0
             })
             .collect();
-        candle_core::Tensor::from_vec(values, (heads, patches, head_dim), &candle_core::Device::Cpu)
-            .unwrap()
+        candle_core::Tensor::from_vec(
+            values,
+            (heads, patches, head_dim),
+            &candle_core::Device::Cpu,
+        )
+        .unwrap()
     }
 
     fn dot(a: &candle_core::Tensor, b: &candle_core::Tensor, pa: usize, pb: usize) -> f32 {
@@ -1038,7 +1055,16 @@ mod tests {
         let x = field(2, h * w, d, 5, true);
         let y = rotate(h, w, d, &x);
         let norm = |t: &candle_core::Tensor| -> Vec<f32> {
-            t.sqr().unwrap().sum(2).unwrap().sqrt().unwrap().flatten_all().unwrap().to_vec1().unwrap()
+            t.sqr()
+                .unwrap()
+                .sum(2)
+                .unwrap()
+                .sqrt()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap()
         };
         for (a, b) in norm(&x).iter().zip(norm(&y).iter()) {
             assert!((a - b).abs() < 1e-4, "{a} vs {b}");
@@ -1062,7 +1088,10 @@ mod tests {
         );
         // And a different offset must not - otherwise the test cannot fail.
         let other = dot(&q, &k, at(0, 0), at(2, 1));
-        assert!((same_delta_a - other).abs() > 1e-3, "rope is inert: {same_delta_a} vs {other}");
+        assert!(
+            (same_delta_a - other).abs() > 1e-3,
+            "rope is inert: {same_delta_a} vs {other}"
+        );
     }
 
     #[test]
@@ -1076,7 +1105,10 @@ mod tests {
         // attend exactly like the original.
         let down = dot(&q, &k, at(0, 0), at(1, 0));
         let right = dot(&q, &k, at(0, 0), at(0, 1));
-        assert!((down - right).abs() > 1e-3, "axes collapsed: {down} vs {right}");
+        assert!(
+            (down - right).abs() > 1e-3,
+            "axes collapsed: {down} vs {right}"
+        );
     }
 
     #[test]
@@ -1107,5 +1139,4 @@ mod tests {
             assert!((a - b).abs() < 1e-6, "slot {i}: {a} vs {b}");
         }
     }
-
 }

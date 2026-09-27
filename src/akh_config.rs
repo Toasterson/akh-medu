@@ -55,8 +55,9 @@ pub enum AkhConfigError {
         code(akh::akh_config::parse),
         help(
             "Check akh.toml for TOML syntax errors and that field types match — e.g. \
-             `[ollama_endpoint]` needs `kind = \"local\"` or `kind = \"cloud\"`, and \
-             `path_mode` is `\"local\"` or `\"remote\"`."
+             `[ollama_endpoint]` needs `kind = \"local\"` or `kind = \"cloud\"`, \
+             `path_mode` is `\"local\"` or `\"remote\"`, and `[autonomy.budget]` accepts \
+             only `max_tokens_per_day` and `max_turns_per_day`."
         )
     )]
     Parse { path: String, message: String },
@@ -97,6 +98,18 @@ pub enum AkhConfigError {
         )
     )]
     MissingGrugModel { akh: String },
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    McpServers(#[from] crate::agent::tools::mcp_config::McpServersConfigError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Board(#[from] crate::agent::djehuty::BoardConfigError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Monitoring(#[from] crate::agent::tools::monitoring_snapshot::MonitoringConfigError),
 }
 
 /// One unrecognized key found while loading an `akh.toml`, surfaced so the
@@ -178,7 +191,12 @@ impl Default for OllamaEndpoint {
 /// itself — the akh still has all its own tools. Default policy is therefore
 /// graceful degradation: a server that fails discovery is skipped (with a
 /// visible warning in the turn), not fatal to the session.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Also carries the akh's own **static** MCP servers (`[[mcp.servers]]`,
+/// Phase 53i / ADR 113 decision 9): external MCP servers whose tools are
+/// registered into the akh's persistent tool registry at agent init as
+/// `mcp__<server>__<tool>`. See [`crate::agent::tools::mcp_config`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpConfig {
     /// Opt-in "unsafe" stance: fail the whole turn if any client-pushed MCP
     /// server does not come back from discovery, instead of continuing with
@@ -188,17 +206,100 @@ pub struct McpConfig {
     /// this at the ACP layer regardless of what is set here.
     #[serde(default)]
     pub require_pushed_mcp: bool,
+
+    /// Static per-akh MCP servers (`[[mcp.servers]]`). Empty by default.
+    /// Declared after the scalar above so it serializes after it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<crate::agent::tools::mcp_config::McpServerSpec>,
 }
 
-/// Per-akh background-automation gating (consumed by P5).
+/// Per-akh memory hygiene (`[memory]`, Phase 53j, ADR 113).
 ///
-/// `enabled` is the master switch and defaults to **off** — a fresh akh runs no
-/// background tasks. When enabled, `tasks` provides per-task overrides keyed by
-/// the daemon task name (e.g. `"consolidation"`, `"reflection"`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AutonomyConfig {
-    /// Master switch. When false, no background automation runs (default).
+/// ```toml
+/// [memory]
+/// contradiction_policy = "warn"   # "warn" (default) | "replace" | "reject"
+/// hygiene_batch = 1000            # max graph mutations per hygiene pass
+/// default_pack = true             # install the built-in fleet memory pack
+/// ```
+///
+/// `contradiction_policy` sets what `add_triple` does with a detected
+/// contradiction (warn and insert, replace the conflicting edge, or refuse
+/// the write) and how the daemon's memory-hygiene pass repairs existing
+/// contradictions on functional predicates. Predicates a schema pack
+/// declares `single_valued` are never contradictions: the newest value
+/// supersedes the older ones under every policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryConfig {
+    /// Contradiction policy for this akh's engine and hygiene repair.
     #[serde(default)]
+    pub contradiction_policy: crate::engine::ContradictionPolicy,
+    /// Upper bound on graph mutations per memory-hygiene pass. `0` makes the
+    /// pass report-only.
+    #[serde(default = "default_hygiene_batch")]
+    pub hygiene_batch: usize,
+    /// Install the built-in fleet memory pack (`fleet-memory`,
+    /// [`crate::schema::builtin`]) when the akh's engine opens, and keep it
+    /// at this binary's version. `false` opts out and retires an installed
+    /// copy. The akh's own schema packs override it relation by relation
+    /// either way.
+    #[serde(default = "default_default_pack")]
+    pub default_pack: bool,
+}
+
+fn default_hygiene_batch() -> usize {
+    crate::schema::DEFAULT_HYGIENE_BATCH
+}
+
+const fn default_default_pack() -> bool {
+    true
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            contradiction_policy: crate::engine::ContradictionPolicy::default(),
+            hygiene_batch: default_hygiene_batch(),
+            default_pack: default_default_pack(),
+        }
+    }
+}
+
+impl MemoryConfig {
+    /// The built-in pack policy this table selects.
+    pub fn default_pack_policy(&self) -> crate::schema::DefaultPackPolicy {
+        self.default_pack.into()
+    }
+
+    /// Whether every field is at its default (the table is then omitted
+    /// when the config is saved).
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Per-akh background-automation gating (P5; defaults per ADR 113 decision 6).
+///
+/// `enabled` is the master switch and defaults to **on**: every akh runs its
+/// background tasks, and LLM-cost tasks are bounded by `budget` (Phase 53b).
+/// `tasks` provides per-task overrides keyed by the daemon task name
+/// ([`DaemonTask::as_str`](crate::agent::autonomy::DaemonTask::as_str), for
+/// example `"consolidation"` or `"reflection"`).
+///
+/// ```toml
+/// [autonomy]
+/// enabled = true
+/// tasks = { knowledge_elicitation = false }
+///
+/// [autonomy.budget]
+/// max_tokens_per_day = 250000
+/// max_turns_per_day = 40
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutonomyConfig {
+    /// Master switch. When false, only always-on infrastructure (session
+    /// persistence, triggers, reactor schedules) and explicitly enabled tasks
+    /// run. Defaults to true (ADR 113).
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Per-task enable/disable overrides keyed by daemon task name. An explicit
     /// override **always wins** over the master switch — so a single task can be
@@ -206,6 +307,27 @@ pub struct AutonomyConfig {
     /// or turned off with the master on.
     #[serde(default)]
     pub tasks: std::collections::BTreeMap<String, bool>,
+    /// Daily limits for LLM-cost background work (librarian, knowledge
+    /// elicitation, knowledge extraction via an external API, reactor model
+    /// turns). Defaults to 250 000 tokens and 40 turns per UTC day.
+    #[serde(default)]
+    pub budget: crate::agent::autonomy::AutonomyBudget,
+    /// Which tools the idle OODA cycle may choose on its own. Defaults to
+    /// `safe` (manifest `Safe`, not MCP-proxied). `all` takes effect only
+    /// together with an explicit `tasks.idle_cycle = true`.
+    #[serde(default)]
+    pub idle_cycle_tools: crate::agent::autonomy::IdleCycleTools,
+}
+
+impl Default for AutonomyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tasks: std::collections::BTreeMap::new(),
+            budget: crate::agent::autonomy::AutonomyBudget::default(),
+            idle_cycle_tools: crate::agent::autonomy::IdleCycleTools::default(),
+        }
+    }
 }
 
 /// Which execution backend an akh's executor-facing tools
@@ -323,6 +445,258 @@ pub enum ExecBackendConfig {
     /// kind = "none"
     /// ```
     None,
+    /// Run executor-facing tools in a sandbox workspace that akhsbxd
+    /// allocates and akhexecd operates
+    /// (`crate::backend::execd::ExecdBackend`, Phase 53c / ADR 113 decision
+    /// 3). This is the deployed-mode executor: no side effect runs in
+    /// akhomed's address space.
+    ///
+    /// ```toml
+    /// [exec]
+    /// kind = "execd"
+    /// sandbox_url = "https://akhsbxd.lab.internal"
+    /// sandbox_token_file = "/run/akh/credentials/akhsbxd-token"
+    /// profile = "rust-workspace"
+    /// principal = "janus"
+    /// # executor_url = "http://127.0.0.1:8413"      # default: akhsbxd gateway
+    /// # executor_token_file = "/run/akh/credentials/akhexecd-token"
+    /// # poll_wait_ms = 5000
+    /// # allow_insecure_http = false  # plain http only to loopback unless true
+    ///
+    /// # Optional: more profiles on the same akhsbxd, reached only through the
+    /// # `sandbox_exec` tool (Phase 53g PR 8). The primary stays credential-free.
+    /// # [[exec.sandboxes]]
+    /// # name = "ops"
+    /// # profile = "vesta-ops"
+    /// # description = "Live cluster access under the vesta ServiceAccount"
+    /// ```
+    Execd {
+        /// akhsbxd base URL.
+        sandbox_url: String,
+        /// Bearer token file for akhsbxd (principal with the `session` role).
+        sandbox_token_file: std::path::PathBuf,
+        /// akhexecd base URL for direct operations. Omit to use akhsbxd's
+        /// `/v1/executors/{sandbox}/…` gateway (the default; the token then
+        /// also needs the `executor_proxy` role at akhsbxd).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        executor_url: Option<String>,
+        /// Bearer token file for akhexecd operations (role `session` there).
+        /// Omit to reuse `sandbox_token_file`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        executor_token_file: Option<std::path::PathBuf>,
+        /// akhsbxd workspace profile to allocate from.
+        profile: String,
+        /// Principal the allocation is made for.
+        principal: String,
+        /// Server-side wait per `exec_poll`, 1..=10000 ms.
+        #[serde(default = "default_execd_poll_wait_ms")]
+        poll_wait_ms: u64,
+        /// Accept plain `http://` URLs to non-loopback hosts. The bearer
+        /// tokens then cross the link in clear text; set it only for a
+        /// trusted private link. Loopback (`localhost`, `127.0.0.1`, `[::1]`)
+        /// never needs it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_insecure_http: bool,
+        /// Additional named sandbox profiles on the same akhsbxd, reached through the
+        /// `sandbox_exec` tool (Phase 53g PR 8). The primary `profile` keeps serving
+        /// shell_exec/file_io/edit/glob/grep.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sandboxes: Vec<ExecdSandbox>,
+    },
+}
+
+/// Longest accepted [`SandboxName`], in characters.
+pub const SANDBOX_NAME_MAX_LEN: usize = 32;
+
+/// Name of an additional execd sandbox (`[[exec.sandboxes]] name = "…"`), the
+/// value the model passes as `sandbox` to the `sandbox_exec` tool.
+///
+/// 1..=32 characters of ASCII lowercase letters, digits and `-`, starting with
+/// a letter and not ending with `-`. The name also becomes part of the
+/// allocation session id (`akhomed-<workspace>-<name>-<uuid>`), which is why it
+/// is restricted to this conservative, path- and log-safe alphabet.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SandboxName(String);
+
+impl SandboxName {
+    /// Validate `raw` as a sandbox name.
+    pub fn parse(raw: impl Into<String>) -> Result<Self, SandboxNameError> {
+        let name = raw.into();
+        let problem = if name.is_empty() {
+            Some(SandboxNameProblem::Empty)
+        } else if name.chars().count() > SANDBOX_NAME_MAX_LEN {
+            Some(SandboxNameProblem::TooLong {
+                len: name.chars().count(),
+            })
+        } else if let Some(ch) = name
+            .chars()
+            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
+        {
+            Some(SandboxNameProblem::InvalidChar(ch))
+        } else if !name.starts_with(|c: char| c.is_ascii_lowercase()) {
+            Some(SandboxNameProblem::MustStartWithLetter)
+        } else if name.ends_with('-') {
+            Some(SandboxNameProblem::TrailingHyphen)
+        } else {
+            None
+        };
+        match problem {
+            Some(problem) => Err(SandboxNameError { name, problem }),
+            None => Ok(Self(name)),
+        }
+    }
+
+    /// The name as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SandboxName {
+    type Error = SandboxNameError;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        Self::parse(raw)
+    }
+}
+
+impl std::str::FromStr for SandboxName {
+    type Err = SandboxNameError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
+impl From<SandboxName> for String {
+    fn from(name: SandboxName) -> Self {
+        name.0
+    }
+}
+
+impl AsRef<str> for SandboxName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SandboxName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Which [`SandboxName`] rule a candidate broke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxNameProblem {
+    /// The name is empty.
+    Empty,
+    /// The name exceeds [`SANDBOX_NAME_MAX_LEN`] characters.
+    TooLong { len: usize },
+    /// A character outside `a-z`, `0-9` and `-`.
+    InvalidChar(char),
+    /// The first character is not a lowercase ASCII letter.
+    MustStartWithLetter,
+    /// The name ends with `-`.
+    TrailingHyphen,
+}
+
+impl std::fmt::Display for SandboxNameProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("it is empty"),
+            Self::TooLong { len } => write!(
+                f,
+                "it is {len} characters long (at most {SANDBOX_NAME_MAX_LEN})"
+            ),
+            Self::InvalidChar(ch) => write!(f, "it contains {ch:?}"),
+            Self::MustStartWithLetter => f.write_str("it does not start with a letter a-z"),
+            Self::TrailingHyphen => f.write_str("it ends with '-'"),
+        }
+    }
+}
+
+/// A `[[exec.sandboxes]] name` that is not a valid [`SandboxName`].
+#[derive(Debug, Clone, PartialEq, Eq, Error, Diagnostic)]
+#[error("invalid execd sandbox name {name:?}: {problem}")]
+#[diagnostic(
+    code(akh::config::sandbox_name),
+    help(
+        "Sandbox names are 1 to 32 characters of lowercase ASCII letters, digits and '-', \
+         start with a letter and do not end with '-' (for example `ops` or `gitops-2`). \
+         Rename the `[[exec.sandboxes]]` entry; the name is what the model passes as \
+         `sandbox` to the `sandbox_exec` tool and becomes part of the allocation session id."
+    )
+)]
+pub struct SandboxNameError {
+    /// The rejected candidate.
+    pub name: String,
+    /// The rule it broke.
+    pub problem: SandboxNameProblem,
+}
+
+/// One additional sandbox profile on the workspace's akhsbxd
+/// (`[[exec.sandboxes]]`, Phase 53g PR 8).
+///
+/// It shares the primary's akhsbxd URL, tokens, executor route, poll wait and
+/// insecure-http setting, and differs only in the workspace `profile` it
+/// allocates from, which is how a differently privileged sandbox (for example
+/// one running under an RBAC-scoped ServiceAccount) is reached without giving
+/// the primary sandbox any of its credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecdSandbox {
+    /// Name the model selects the sandbox by.
+    pub name: SandboxName,
+    /// akhsbxd workspace profile to allocate from. Must differ from the
+    /// primary `profile`.
+    pub profile: String,
+    /// Operator-facing description shown in the `sandbox_exec` signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// `[[exec.sandboxes]]` entries that cannot be served as configured.
+#[derive(Debug, Clone, PartialEq, Eq, Error, Diagnostic)]
+pub enum ExecdSandboxConfigError {
+    /// Two entries share one name, so `sandbox_exec` could not tell them apart.
+    #[error("execd sandbox name `{name}` is configured more than once")]
+    #[diagnostic(
+        code(akh::config::exec_sandboxes::duplicate_name),
+        help(
+            "Each `[[exec.sandboxes]]` entry needs a unique `name`. Options: rename one \
+             of the entries, or delete the duplicate if both point at the same profile."
+        )
+    )]
+    DuplicateName { name: SandboxName },
+
+    /// An entry reuses the primary sandbox's profile.
+    #[error(
+        "execd sandbox `{name}` uses profile `{profile}`, which is already the primary \
+         `[exec] profile`"
+    )]
+    #[diagnostic(
+        code(akh::config::exec_sandboxes::primary_profile),
+        help(
+            "Additional sandboxes exist to reach a differently privileged profile; the \
+             primary profile is already served by shell_exec/file_io/edit/glob/grep. \
+             Options: point `[[exec.sandboxes]] profile` at the other akhsbxd profile, or \
+             remove the entry."
+        )
+    )]
+    ProfileIsPrimary { name: SandboxName, profile: String },
+
+    /// An entry has an empty or whitespace-only profile.
+    #[error("execd sandbox `{name}` has an empty `profile`")]
+    #[diagnostic(
+        code(akh::config::exec_sandboxes::empty_profile),
+        help(
+            "Set `profile` on the `[[exec.sandboxes]]` entry to an akhsbxd workspace \
+             profile name (the same kind of value as the primary `[exec] profile`)."
+        )
+    )]
+    EmptyProfile { name: SandboxName },
 }
 
 impl ExecBackendConfig {
@@ -399,10 +773,149 @@ impl ExecBackendConfig {
         }
         Some(cfg)
     }
+
+    /// Translate `kind = "execd"` into the config
+    /// [`crate::backend::execd::ExecdBackend::connect`] takes, minting a fresh
+    /// allocation session for `workspace`. `None` for other kinds.
+    #[cfg(feature = "execd-executor")]
+    pub fn to_execd_config(&self, workspace: &str) -> Option<crate::backend::execd::ExecdConfig> {
+        let Self::Execd { profile, .. } = self else {
+            return None;
+        };
+        self.execd_config_for(workspace, profile)
+    }
+
+    /// Translate one `[[exec.sandboxes]]` entry into the config
+    /// [`crate::backend::execd::ExecdBackend::connect`] takes: the primary's
+    /// akhsbxd URL, tokens, executor route, poll wait and insecure-http
+    /// setting, with the sandbox's own `profile`.
+    ///
+    /// Every call mints a fresh allocation session
+    /// `akhomed-<workspace>-<name>-<uuid v7>`, because akhsbxd never
+    /// reallocates a released session. `None` for kinds other than `execd`.
+    #[cfg(feature = "execd-executor")]
+    pub fn to_execd_sandbox_config(
+        &self,
+        workspace: &str,
+        sandbox: &ExecdSandbox,
+    ) -> Option<crate::backend::execd::ExecdConfig> {
+        self.execd_config_for(&format!("{workspace}-{}", sandbox.name), &sandbox.profile)
+    }
+
+    /// Shared translation behind [`Self::to_execd_config`] and
+    /// [`Self::to_execd_sandbox_config`]: `session_label` becomes the
+    /// `<workspace>` part of the minted session id.
+    #[cfg(feature = "execd-executor")]
+    fn execd_config_for(
+        &self,
+        session_label: &str,
+        profile: &str,
+    ) -> Option<crate::backend::execd::ExecdConfig> {
+        use crate::backend::execd::{ExecdConfig, ExecutorRoute};
+        let Self::Execd {
+            sandbox_url,
+            sandbox_token_file,
+            executor_url,
+            executor_token_file,
+            profile: _,
+            principal,
+            poll_wait_ms,
+            allow_insecure_http,
+            sandboxes: _,
+        } = self
+        else {
+            return None;
+        };
+        let token_file = executor_token_file
+            .clone()
+            .unwrap_or_else(|| sandbox_token_file.clone());
+        let route = match executor_url {
+            Some(url) => ExecutorRoute::Direct {
+                url: url.clone(),
+                token_file,
+            },
+            None => ExecutorRoute::ViaSandbox { token_file },
+        };
+        Some(
+            ExecdConfig::new(
+                sandbox_url.clone(),
+                sandbox_token_file.clone(),
+                profile,
+                principal.clone(),
+                session_label,
+            )
+            .with_executor(route)
+            .with_poll_wait(std::time::Duration::from_millis(*poll_wait_ms))
+            .with_insecure_http(*allow_insecure_http),
+        )
+    }
+
+    /// The `[[exec.sandboxes]]` entries of a `kind = "execd"` executor; empty
+    /// for every other kind.
+    pub fn execd_sandboxes(&self) -> &[ExecdSandbox] {
+        match self {
+            Self::Execd { sandboxes, .. } => sandboxes,
+            _ => &[],
+        }
+    }
+
+    /// Check the `[[exec.sandboxes]]` entries: names are unique, every profile
+    /// is non-empty, and none reuses the primary `profile`. Always `Ok` for
+    /// kinds other than `execd`.
+    ///
+    /// # Errors
+    ///
+    /// The first offending entry, as an [`ExecdSandboxConfigError`].
+    pub fn validate_execd_sandboxes(&self) -> Result<(), ExecdSandboxConfigError> {
+        let Self::Execd {
+            profile: primary,
+            sandboxes,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        let mut seen = std::collections::HashSet::new();
+        for sandbox in sandboxes {
+            if !seen.insert(&sandbox.name) {
+                return Err(ExecdSandboxConfigError::DuplicateName {
+                    name: sandbox.name.clone(),
+                });
+            }
+            let profile = sandbox.profile.trim();
+            if profile.is_empty() {
+                return Err(ExecdSandboxConfigError::EmptyProfile {
+                    name: sandbox.name.clone(),
+                });
+            }
+            if profile == primary.trim() {
+                return Err(ExecdSandboxConfigError::ProfileIsPrimary {
+                    name: sandbox.name.clone(),
+                    profile: sandbox.profile.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Short, stable name of the variant for logs and diagnostics.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::InProcess => "in-process",
+            Self::LocalDrop { .. } => "local-drop",
+            Self::Remote { .. } => "remote",
+            Self::None => "none",
+            Self::Execd { .. } => "execd",
+        }
+    }
 }
 
 fn default_remote_port() -> u16 {
     22
+}
+
+fn default_execd_poll_wait_ms() -> u64 {
+    5_000
 }
 
 impl Default for ExecBackendConfig {
@@ -414,11 +927,74 @@ impl Default for ExecBackendConfig {
 impl AutonomyConfig {
     /// Whether a named daemon task should run. An explicit per-task override
     /// takes precedence; otherwise the task follows the master switch.
+    ///
+    /// This is the raw config rule. The daemon gates with
+    /// [`AutonomyConfig::gate`], which also applies the idle-cycle executor
+    /// default and the always-on infrastructure tasks.
     pub fn task_enabled(&self, task: &str) -> bool {
         match self.tasks.get(task) {
             Some(&v) => v,
             None => self.enabled,
         }
+    }
+
+    /// Resolve whether `task` runs for an akh whose effective executor is
+    /// `exec`.
+    ///
+    /// Order: always-on infrastructure runs; an explicit `tasks` override
+    /// wins; a task that follows another one (harvest follows the sleep
+    /// cycle) takes that task's gate; the master switch applies, except to
+    /// tasks that were only ever env-gated (librarian, OpenClaw sync); the
+    /// idle OODA cycle then defaults off while executor tools run in-process
+    /// (ADR 113 decision 4).
+    pub fn gate(
+        &self,
+        task: crate::agent::autonomy::DaemonTask,
+        exec: crate::agent::autonomy::ExecPlacement,
+    ) -> crate::agent::autonomy::TaskGate {
+        use crate::agent::autonomy::{
+            DaemonTask, DisabledReason, ExecPlacement, TaskGate, TaskGating,
+        };
+        let gating = task.gating();
+        if gating == TaskGating::AlwaysOn {
+            return TaskGate::Enabled;
+        }
+        match (self.tasks.get(task.as_str()), gating) {
+            (Some(true), _) => TaskGate::Enabled,
+            (Some(false), _) => TaskGate::Disabled(DisabledReason::ExplicitlyDisabled),
+            (None, TaskGating::FollowsTask(leader)) => match self.gate(leader, exec) {
+                TaskGate::Enabled => TaskGate::Enabled,
+                TaskGate::Disabled(reason) => TaskGate::Disabled(DisabledReason::FollowsTask {
+                    task: leader,
+                    reason: Box::new(reason),
+                }),
+            },
+            (None, TaskGating::IgnoresMasterSwitch) => TaskGate::Enabled,
+            (None, TaskGating::OptIn) => TaskGate::Disabled(DisabledReason::OptIn),
+            (None, _) if !self.enabled => TaskGate::Disabled(DisabledReason::MasterSwitchOff),
+            (None, _) if task == DaemonTask::IdleCycle && exec == ExecPlacement::InProcess => {
+                TaskGate::Disabled(DisabledReason::InProcessExecutor)
+            }
+            (None, _) => TaskGate::Enabled,
+        }
+    }
+
+    /// The tool policy the idle OODA cycle runs with: safe-only unless
+    /// `idle_cycle_tools = "all"` *and* `tasks.idle_cycle = true` are both
+    /// set.
+    pub fn idle_cycle_candidate_policy(&self) -> crate::agent::ooda::ToolCandidatePolicy {
+        self.idle_cycle_tools
+            .candidate_policy(self.tasks.get("idle_cycle") == Some(&true))
+    }
+
+    /// `tasks` keys that name no [`DaemonTask`](crate::agent::autonomy::DaemonTask).
+    /// Such a key has no effect; the daemon warns about each one at start.
+    pub fn unknown_task_names(&self) -> Vec<&str> {
+        self.tasks
+            .keys()
+            .map(String::as_str)
+            .filter(|name| name.parse::<crate::agent::autonomy::DaemonTask>().is_err())
+            .collect()
     }
 }
 
@@ -646,7 +1222,8 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_runtime: Option<crate::agent::runtime::RuntimeConfig>,
 
-    /// Background-automation gating (P5). Defaults to fully disabled.
+    /// Background-automation gating (P5). Defaults to enabled with a daily
+    /// LLM budget (ADR 113 decision 6).
     #[serde(default)]
     pub autonomy: AutonomyConfig,
 
@@ -654,6 +1231,55 @@ pub struct AkhConfig {
     /// to graceful degradation (`require_pushed_mcp = false`).
     #[serde(default)]
     pub mcp: McpConfig,
+
+    /// This akh's own Agent Board identity (Phase 53): URL + token source (+
+    /// own agent id for inbox ingest). Reactor run reports, `DjehutyReply` and
+    /// board ingress use it; `None` falls back to the process-wide
+    /// `DJEHUTY_BOARD_*` environment (one identity for every akh on the host).
+    ///
+    /// ```toml
+    /// [board]
+    /// url = "https://board.lab.home"
+    /// auth = { token_env = "ROMAN_BOARD_JANUS" }
+    /// agent_id = "019d…"
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<crate::agent::djehuty::BoardConfig>,
+
+    /// Where the native read-only `monitoring_snapshot` tool reads an
+    /// akheventd monitor source (Phase 53g PR 5). The tool is registered only
+    /// when this table is present.
+    ///
+    /// ```toml
+    /// [monitoring]
+    /// endpoint = "http://127.0.0.1:18435"
+    /// source = "roman-alerts"
+    /// token_file = "/…/secrets/monitoring-reader.key"
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitoring: Option<crate::agent::tools::monitoring_snapshot::MonitoringConfig>,
+
+    /// Memory hygiene: contradiction policy and hygiene batch (Phase 53j).
+    #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
+    pub memory: MemoryConfig,
+
+    /// Provider-failure handling for the akh's own model turns (Phase 53g
+    /// PR 4): the cooldown ladder and the exact structured error codes that
+    /// name authentication, quota and rate-limit failures. Defaults: ladder
+    /// 30 min / 1 h / 2 h / 4 h, empty code lists (classify by HTTP status).
+    ///
+    /// ```toml
+    /// [provider]
+    /// cooldown_ladder_secs = [1800, 3600, 7200, 14400]
+    /// quota_error_codes = ["insufficient_quota"]
+    /// auth_error_codes = ["invalid_api_key"]
+    /// rate_limit_error_codes = ["rate_limit_exceeded"]
+    /// ```
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::provider_failure::ProviderConfig::is_default"
+    )]
+    pub provider: crate::agent::provider_failure::ProviderConfig,
 
     /// Delegation / external scheduling (Phase 36). Parsed now; the
     /// `DelegationManager` is wired behind the `delegation` feature in its phase.
@@ -698,6 +1324,10 @@ impl Default for AkhConfig {
             agent_runtime: None,
             autonomy: AutonomyConfig::default(),
             mcp: McpConfig::default(),
+            board: None,
+            monitoring: None,
+            memory: MemoryConfig::default(),
+            provider: crate::agent::provider_failure::ProviderConfig::default(),
             delegation: None,
             exec: None,
         }
@@ -799,6 +1429,13 @@ impl AkhConfig {
             path: path.display().to_string(),
             message: e.to_string(),
         })?;
+        crate::agent::tools::mcp_config::validate_mcp_servers(&cfg.mcp.servers)?;
+        if let Some(board) = &cfg.board {
+            board.validate(cfg.name())?;
+        }
+        if let Some(monitoring) = &cfg.monitoring {
+            monitoring.validate(cfg.name())?;
+        }
         Ok((cfg, Self::unknown_keys(&raw)))
     }
 
@@ -817,6 +1454,9 @@ impl AkhConfig {
             "max_triples",
             "seed_packs",
             "shared_partitions",
+            // Wave R3 power-state switch (`WorkspaceConfig::enabled`); always
+            // serialized, so omitting it here warned on every saved config.
+            "enabled",
             // AkhConfig scalars
             "model",
             "reasoning_effort",
@@ -838,6 +1478,15 @@ impl AkhConfig {
     fn known_tables() -> &'static [(&'static str, &'static [&'static str])] {
         &[
             ("ollama_endpoint", &["kind", "base_url", "api_key"]),
+            // `[[mcp.servers]]` entries are checked by serde itself
+            // (`deny_unknown_fields` on `McpServerSpec`).
+            ("mcp", &["require_pushed_mcp", "servers"]),
+            // `auth` is checked by serde (`deny_unknown_fields` on `BoardAuth`).
+            ("board", &["url", "auth", "agent_id", "allow_insecure_http"]),
+            (
+                "monitoring",
+                &["endpoint", "source", "token_file", "observer_status_file"],
+            ),
             (
                 "agent_runtime",
                 &[
@@ -859,7 +1508,23 @@ impl AkhConfig {
                     "temperature",
                 ],
             ),
-            ("autonomy", &["enabled", "tasks"]),
+            (
+                "autonomy",
+                &["enabled", "tasks", "budget", "idle_cycle_tools"],
+            ),
+            (
+                "memory",
+                &["contradiction_policy", "hygiene_batch", "default_pack"],
+            ),
+            (
+                "provider",
+                &[
+                    "cooldown_ladder_secs",
+                    "auth_error_codes",
+                    "quota_error_codes",
+                    "rate_limit_error_codes",
+                ],
+            ),
             (
                 "delegation",
                 &[
@@ -868,7 +1533,7 @@ impl AkhConfig {
                     "daily_cost_budget_cents",
                     "per_task_max_cents",
                     "akhomed_url",
-                    "local",
+                    "native",
                     "remote",
                     "peers",
                 ],
@@ -885,6 +1550,15 @@ impl AkhConfig {
                     "workdir",
                     "shell",
                     "path",
+                    "sandbox_url",
+                    "sandbox_token_file",
+                    "executor_url",
+                    "executor_token_file",
+                    "profile",
+                    "principal",
+                    "poll_wait_ms",
+                    "allow_insecure_http",
+                    "sandboxes",
                 ],
             ),
         ]
@@ -1156,7 +1830,17 @@ mod tests {
         let cfg = AkhConfig::default();
         assert!(cfg.is_main, "akh defaults to MAIN");
         assert_eq!(cfg.path_mode, PathMode::Local);
-        assert!(!cfg.autonomy.enabled, "automation is off by default");
+        assert!(
+            cfg.autonomy.enabled,
+            "automation is on by default (ADR 113 decision 6)"
+        );
+        assert_eq!(
+            cfg.autonomy.budget,
+            crate::agent::autonomy::AutonomyBudget {
+                max_tokens_per_day: 250_000,
+                max_turns_per_day: 40,
+            }
+        );
         assert_eq!(cfg.ollama_endpoint, OllamaEndpoint::default());
         assert!(cfg.model.is_none());
         assert!(cfg.system_prompt.is_none());
@@ -1204,8 +1888,11 @@ mod tests {
     #[test]
     fn autonomy_task_enabled_override_wins() {
         let mut a = AutonomyConfig::default();
-        // Master off (default) → every task off.
-        assert!(!a.enabled);
+        // Master on by default (ADR 113); switch it off to test overrides.
+        assert!(a.enabled);
+        assert!(a.task_enabled("reflection"));
+        a.enabled = false;
+        // Master off → every unlisted task off.
         assert!(!a.task_enabled("reflection"));
         // Explicit on with the master off → exactly that task runs.
         a.tasks.insert("goal_generation".into(), true);
@@ -1234,6 +1921,355 @@ mod tests {
         assert!(!cfg.autonomy.task_enabled("reflection"));
     }
 
+    /// kg_compaction deletes every `episode:*` triple, so it never runs by
+    /// default, not even with autonomy on; only an explicit opt-in enables it.
+    #[test]
+    fn kg_compaction_is_opt_in() {
+        use crate::agent::autonomy::{DaemonTask, DisabledReason, ExecPlacement, TaskGate};
+        let mut a = AutonomyConfig::default();
+        assert!(a.enabled);
+        for exec in [
+            ExecPlacement::InProcess,
+            ExecPlacement::Contained,
+            ExecPlacement::Disabled,
+        ] {
+            assert_eq!(
+                a.gate(DaemonTask::KgCompaction, exec),
+                TaskGate::Disabled(DisabledReason::OptIn)
+            );
+        }
+        a.tasks.insert("kg_compaction".into(), true);
+        assert_eq!(
+            a.gate(DaemonTask::KgCompaction, ExecPlacement::Disabled),
+            TaskGate::Enabled
+        );
+        a.tasks.insert("kg_compaction".into(), false);
+        assert_eq!(
+            a.gate(DaemonTask::KgCompaction, ExecPlacement::Disabled),
+            TaskGate::Disabled(DisabledReason::ExplicitlyDisabled)
+        );
+    }
+
+    #[test]
+    fn autonomy_gate_applies_decision_4_idle_cycle_default() {
+        use crate::agent::autonomy::{DaemonTask, DisabledReason, ExecPlacement, TaskGate};
+        let mut a = AutonomyConfig::default();
+        // In-process exec: idle OODA tool use is off, everything else on.
+        assert_eq!(
+            a.gate(DaemonTask::IdleCycle, ExecPlacement::InProcess),
+            TaskGate::Disabled(DisabledReason::InProcessExecutor)
+        );
+        assert_eq!(
+            a.gate(DaemonTask::Reflection, ExecPlacement::InProcess),
+            TaskGate::Enabled
+        );
+        // Contained or disabled exec: idle cycle on.
+        for exec in [ExecPlacement::Contained, ExecPlacement::Disabled] {
+            assert_eq!(a.gate(DaemonTask::IdleCycle, exec), TaskGate::Enabled);
+        }
+        // An explicit override wins over the executor default.
+        a.tasks.insert("idle_cycle".into(), true);
+        assert_eq!(
+            a.gate(DaemonTask::IdleCycle, ExecPlacement::InProcess),
+            TaskGate::Enabled
+        );
+        // Master off: gated tasks stop, infrastructure keeps running.
+        a.enabled = false;
+        assert_eq!(
+            a.gate(DaemonTask::Reflection, ExecPlacement::Contained),
+            TaskGate::Disabled(DisabledReason::MasterSwitchOff)
+        );
+        for infra in [
+            DaemonTask::Persist,
+            DaemonTask::TriggerEvaluation,
+            DaemonTask::Reactor,
+        ] {
+            assert_eq!(a.gate(infra, ExecPlacement::InProcess), TaskGate::Enabled);
+        }
+        a.tasks.insert("librarian".into(), false);
+        a.enabled = true;
+        assert_eq!(
+            a.gate(DaemonTask::Librarian, ExecPlacement::Contained),
+            TaskGate::Disabled(DisabledReason::ExplicitlyDisabled)
+        );
+    }
+
+    #[test]
+    fn board_table_parses_is_known_and_round_trips() {
+        let src = r#"
+            name = "janus"
+            model = "glm-5.3"
+            [board]
+            url = "https://board.lab.home"
+            auth = { token_env = "ROMAN_BOARD_JANUS" }
+            agent_id = "019d9844-ce74-7993-a9f0-c953b8f04a4e"
+        "#;
+        let cfg: AkhConfig = toml::from_str(src).expect("parse");
+        let board = cfg.board.as_ref().expect("[board] parsed");
+        assert_eq!(
+            board.auth,
+            crate::agent::djehuty::BoardAuth::TokenEnv("ROMAN_BOARD_JANUS".into())
+        );
+        assert!(board.own_agent_id().is_some());
+        board.validate("janus").expect("valid");
+        let raw: toml::Value = toml::from_str(src).unwrap();
+        assert!(
+            AkhConfig::unknown_keys(&raw).is_empty(),
+            "[board] keys are known"
+        );
+
+        // Saved configs keep `model` above the tables and re-load unchanged.
+        let saved = toml::to_string(&cfg).expect("serialize");
+        let reloaded: AkhConfig = toml::from_str(&saved).expect("reload");
+        assert_eq!(reloaded.board, cfg.board);
+        assert_eq!(reloaded.model.as_deref(), Some("glm-5.3"));
+
+        // A typo inside [board] and an unknown auth kind are refused.
+        assert!(
+            toml::from_str::<AkhConfig>(
+                "name = \"j\"\n[board]\nurl = \"https://b\"\nauth = { token_envv = \"X\" }\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn board_table_rejects_plain_http_and_relative_token_files() {
+        let insecure: AkhConfig = toml::from_str(
+            "name = \"j\"\n[board]\nurl = \"http://board.lab.home\"\nauth = { token_env = \"X\" }\n",
+        )
+        .unwrap();
+        let err = insecure.board.unwrap().validate("j").unwrap_err();
+        assert_eq!(
+            miette::Diagnostic::code(&err).unwrap().to_string(),
+            "akh::board::config::insecure_http"
+        );
+        let relative: AkhConfig = toml::from_str(
+            "name = \"j\"\n[board]\nurl = \"http://127.0.0.1:8080\"\nauth = { token_file = \"b.key\" }\n",
+        )
+        .unwrap();
+        let err = relative.board.unwrap().validate("j").unwrap_err();
+        assert_eq!(
+            miette::Diagnostic::code(&err).unwrap().to_string(),
+            "akh::board::config::token_file"
+        );
+    }
+
+    #[test]
+    fn master_switch_off_keeps_pre_53b_harvest_librarian_and_openclaw_behaviour() {
+        use crate::agent::autonomy::{DaemonTask, DisabledReason, ExecPlacement, TaskGate};
+        let exec = ExecPlacement::Contained;
+        // A pre-53b TOML: `[autonomy] enabled = false`.
+        let mut a = AutonomyConfig {
+            enabled: false,
+            ..AutonomyConfig::default()
+        };
+        // Harvest used to run inside the sleep cycle: it follows its gate.
+        assert_eq!(
+            a.gate(DaemonTask::Harvest, exec),
+            TaskGate::Disabled(DisabledReason::FollowsTask {
+                task: DaemonTask::SleepCycle,
+                reason: Box::new(DisabledReason::MasterSwitchOff),
+            })
+        );
+        a.tasks.insert("sleep_cycle".into(), true);
+        assert_eq!(a.gate(DaemonTask::Harvest, exec), TaskGate::Enabled);
+        // An explicit harvest override still wins.
+        a.tasks.insert("harvest".into(), false);
+        assert_eq!(
+            a.gate(DaemonTask::Harvest, exec),
+            TaskGate::Disabled(DisabledReason::ExplicitlyDisabled)
+        );
+        // Librarian and OpenClaw sync were only env-gated: the master switch
+        // does not turn them off (their env gates apply in the daemon).
+        assert_eq!(a.gate(DaemonTask::Librarian, exec), TaskGate::Enabled);
+        assert_eq!(a.gate(DaemonTask::OpenclawSync, exec), TaskGate::Enabled);
+        a.tasks.insert("openclaw_sync".into(), false);
+        assert_eq!(
+            a.gate(DaemonTask::OpenclawSync, exec),
+            TaskGate::Disabled(DisabledReason::ExplicitlyDisabled)
+        );
+        // Master on: harvest follows the (enabled) sleep cycle, or its own
+        // sleep-cycle opt-out.
+        let mut on = AutonomyConfig::default();
+        assert_eq!(on.gate(DaemonTask::Harvest, exec), TaskGate::Enabled);
+        on.tasks.insert("sleep_cycle".into(), false);
+        assert!(matches!(
+            on.gate(DaemonTask::Harvest, exec),
+            TaskGate::Disabled(DisabledReason::FollowsTask { .. })
+        ));
+    }
+
+    #[test]
+    fn idle_cycle_tools_default_safe_and_all_needs_an_explicit_idle_cycle() {
+        use crate::agent::autonomy::IdleCycleTools;
+        use crate::agent::ooda::ToolCandidatePolicy;
+        let cfg: AkhConfig = toml::from_str("name = \"a\"").unwrap();
+        assert_eq!(cfg.autonomy.idle_cycle_tools, IdleCycleTools::Safe);
+        assert_eq!(
+            cfg.autonomy.idle_cycle_candidate_policy(),
+            ToolCandidatePolicy::SafeNonMcp
+        );
+        // `all` alone is not enough: the cycle stays safe-only.
+        let src = r#"
+            name = "a"
+            [autonomy]
+            idle_cycle_tools = "all"
+        "#;
+        let cfg: AkhConfig = toml::from_str(src).unwrap();
+        assert_eq!(cfg.autonomy.idle_cycle_tools, IdleCycleTools::All);
+        assert_eq!(
+            cfg.autonomy.idle_cycle_candidate_policy(),
+            ToolCandidatePolicy::SafeNonMcp
+        );
+        let raw: toml::Value = toml::from_str(src).unwrap();
+        assert!(AkhConfig::unknown_keys(&raw).is_empty());
+        // `all` + explicit `tasks.idle_cycle = true` opts in.
+        let cfg: AkhConfig = toml::from_str(
+            r#"
+            name = "a"
+            [autonomy]
+            idle_cycle_tools = "all"
+            tasks = { idle_cycle = true }
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.autonomy.idle_cycle_candidate_policy(),
+            ToolCandidatePolicy::Unrestricted
+        );
+        assert!(
+            toml::from_str::<AkhConfig>("name = \"a\"\n[autonomy]\nidle_cycle_tools = \"most\"")
+                .is_err(),
+            "an unknown policy is refused"
+        );
+    }
+
+    #[test]
+    fn autonomy_budget_typos_are_refused() {
+        let src = r#"
+            name = "janus"
+            [autonomy.budget]
+            max_token_per_day = 1000
+        "#;
+        let error = toml::from_str::<AkhConfig>(src).unwrap_err().to_string();
+        assert!(
+            error.contains("max_token_per_day") && error.contains("max_tokens_per_day"),
+            "the error names the typo and the valid keys: {error}"
+        );
+    }
+
+    #[test]
+    fn autonomy_budget_parses_and_is_a_known_table_key() {
+        let src = r#"
+            name = "janus"
+            [autonomy]
+            enabled = true
+            tasks = { idle_cycle = false, seshat_curaton = true }
+            [autonomy.budget]
+            max_turns_per_day = 12
+        "#;
+        let cfg: AkhConfig = toml::from_str(src).expect("parse");
+        assert_eq!(cfg.autonomy.budget.max_turns_per_day, 12);
+        assert_eq!(
+            cfg.autonomy.budget.max_tokens_per_day,
+            crate::agent::autonomy::AutonomyBudget::DEFAULT_MAX_TOKENS_PER_DAY,
+            "an omitted limit keeps its default"
+        );
+        assert_eq!(cfg.autonomy.unknown_task_names(), vec!["seshat_curaton"]);
+        let raw: toml::Value = toml::from_str(src).unwrap();
+        assert!(
+            AkhConfig::unknown_keys(&raw).is_empty(),
+            "`budget` is a known [autonomy] key"
+        );
+        // Round-trips through serialization.
+        let back: AkhConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.autonomy, cfg.autonomy);
+    }
+
+    #[test]
+    fn memory_table_sets_the_contradiction_policy_per_akh() {
+        use crate::engine::ContradictionPolicy;
+
+        // Default: unchanged engine behaviour (warn), default batch.
+        let cfg: AkhConfig = toml::from_str(r#"name = "vesta""#).unwrap();
+        assert_eq!(cfg.memory, MemoryConfig::default());
+        assert_eq!(cfg.memory.contradiction_policy, ContradictionPolicy::Warn);
+        assert_eq!(
+            cfg.memory.hygiene_batch,
+            crate::schema::DEFAULT_HYGIENE_BATCH
+        );
+        assert!(
+            !toml::to_string(&cfg).unwrap().contains("[memory]"),
+            "a default [memory] is not written back"
+        );
+
+        for (value, policy) in [
+            ("warn", ContradictionPolicy::Warn),
+            ("replace", ContradictionPolicy::Replace),
+            ("reject", ContradictionPolicy::Reject),
+        ] {
+            let src = format!(
+                "name = \"vesta\"\n[memory]\ncontradiction_policy = \"{value}\"\nhygiene_batch = 50\n"
+            );
+            let cfg: AkhConfig = toml::from_str(&src).expect("parse");
+            assert_eq!(cfg.memory.contradiction_policy, policy);
+            assert_eq!(cfg.memory.hygiene_batch, 50);
+            let raw: toml::Value = toml::from_str(&src).unwrap();
+            assert!(AkhConfig::unknown_keys(&raw).is_empty());
+            let back: AkhConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.memory, cfg.memory);
+        }
+
+        // An unknown policy is a parse error, not a silent default.
+        assert!(
+            toml::from_str::<AkhConfig>(
+                "name = \"vesta\"\n[memory]\ncontradiction_policy = \"ignore\"\n"
+            )
+            .is_err()
+        );
+        // A typo inside [memory] is flagged; a top-level scalar misplaced
+        // under it is called out as the TOML-ordering footgun.
+        let raw: toml::Value = toml::from_str(
+            "name = \"vesta\"\n[memory]\ncontradiction_polcy = \"replace\"\nmodel = \"x\"\n",
+        )
+        .unwrap();
+        let unknown = AkhConfig::unknown_keys(&raw);
+        assert!(
+            unknown
+                .iter()
+                .any(|k| k.path == "memory.contradiction_polcy")
+        );
+        assert!(
+            unknown.iter().any(|k| k.path == "memory.model"
+                && k.misplaced_under_table.as_deref() == Some("memory"))
+        );
+    }
+
+    /// The built-in fleet memory pack is on unless `[memory] default_pack =
+    /// false`; the key is known, and an opted-out config round-trips.
+    #[test]
+    fn memory_default_pack_is_on_unless_opted_out() {
+        use crate::schema::DefaultPackPolicy;
+
+        let cfg: AkhConfig = toml::from_str(r#"name = "vesta""#).unwrap();
+        assert!(cfg.memory.default_pack);
+        assert_eq!(cfg.memory.default_pack_policy(), DefaultPackPolicy::Enabled);
+
+        let src = "name = \"vesta\"\n[memory]\ndefault_pack = false\n";
+        let cfg: AkhConfig = toml::from_str(src).unwrap();
+        assert!(!cfg.memory.default_pack);
+        assert_eq!(
+            cfg.memory.default_pack_policy(),
+            DefaultPackPolicy::Disabled
+        );
+        assert!(!cfg.memory.is_default(), "an opt-out is written back");
+        let raw: toml::Value = toml::from_str(src).unwrap();
+        assert!(AkhConfig::unknown_keys(&raw).is_empty());
+        let back: AkhConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.memory, cfg.memory);
+    }
+
     #[test]
     fn legacy_workspace_toml_loads_as_akh_config() {
         // A pre-pivot per-workspace TOML carries only WorkspaceConfig fields.
@@ -1252,7 +2288,9 @@ mod tests {
         assert!(cfg.system_prompt.is_none());
         assert!(cfg.related_workspaces.is_empty());
         assert_eq!(cfg.path_mode, PathMode::Local);
-        assert!(!cfg.autonomy.enabled);
+        // No [autonomy] table → the ADR 113 default (on, budgeted).
+        assert!(cfg.autonomy.enabled);
+        assert_eq!(cfg.autonomy, AutonomyConfig::default());
     }
 
     #[test]
@@ -1647,6 +2685,95 @@ mod tests {
         assert!(AkhConfig::unknown_keys(&raw).is_empty());
     }
 
+    /// `[provider]` (Phase 53g PR 4): parses into the typed ladder and
+    /// lexicon, is a known table (a typo inside it is reported), defaults
+    /// when absent, round-trips through `save`, and rejects an empty ladder.
+    #[test]
+    fn provider_table_parses_is_known_and_round_trips() {
+        let toml_src = r#"
+            name = "janus"
+
+            [provider]
+            cooldown_ladder_secs = [60, 600]
+            quota_error_codes = ["insufficient_quota"]
+            auth_error_codes = ["invalid_api_key"]
+            rate_limit_error_codes = ["rate_limit_exceeded"]
+        "#;
+        let raw: toml::Value = toml::from_str(toml_src).unwrap();
+        assert!(AkhConfig::unknown_keys(&raw).is_empty());
+        let cfg: AkhConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            cfg.provider.cooldown_ladder_secs.cooldown(1),
+            std::time::Duration::from_secs(600)
+        );
+        assert!(
+            cfg.provider
+                .lexicon
+                .auth_error_codes
+                .contains("invalid_api_key")
+        );
+
+        let typo: toml::Value =
+            toml::from_str("name = \"a\"\n[provider]\nquota_codes = [\"x\"]\n").unwrap();
+        let unknown = AkhConfig::unknown_keys(&typo);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].path, "provider.quota_codes");
+
+        let absent: AkhConfig = toml::from_str("name = \"a\"\n").unwrap();
+        assert!(absent.provider.is_default());
+        assert!(
+            !toml::to_string(&absent).unwrap().contains("[provider]"),
+            "a default table is not written"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        cfg.save(&path).expect("save");
+        let (loaded, unknown) = AkhConfig::load_checked(&path).expect("load");
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(loaded.provider, cfg.provider);
+
+        assert!(toml::from_str::<AkhConfig>("[provider]\ncooldown_ladder_secs = []\n").is_err());
+    }
+
+    /// Every key `save()` writes must be a known key: a saved config loads
+    /// with no unknown-key warning (regression: the flattened
+    /// `WorkspaceConfig::enabled` was written top-level but missing from
+    /// the known list, so every load warned "value was dropped: enabled").
+    #[test]
+    fn saved_config_has_no_unknown_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+
+        let plain = AkhConfig::with_name("janus");
+        plain.save(&path).expect("save default akh.toml");
+        let raw = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            raw.lines().any(|line| line.starts_with("enabled")),
+            "save writes the workspace power switch top-level:\n{raw}"
+        );
+        let (loaded, unknown) = AkhConfig::load_checked(&path).expect("load");
+        assert!(
+            unknown.is_empty(),
+            "unknown keys in saved config: {unknown:?}"
+        );
+        assert!(loaded.workspace.enabled);
+
+        let mut disabled = AkhConfig::with_name("vesta");
+        disabled.workspace.enabled = false;
+        disabled.model = Some("glm".into());
+        disabled.context_strategy = Some("virtual".into());
+        disabled.autonomy.enabled = false;
+        disabled.save(&path).expect("save disabled akh.toml");
+        let (loaded, unknown) = AkhConfig::load_checked(&path).expect("load");
+        assert!(
+            unknown.is_empty(),
+            "unknown keys in saved config: {unknown:?}"
+        );
+        assert!(!loaded.workspace.enabled, "power switch round-trips");
+        assert!(!loaded.autonomy.enabled);
+    }
+
     #[test]
     fn load_checked_surfaces_typo() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1963,5 +3090,422 @@ workdir = "/Users/toasty/ws"
         assert!(!cfg.is_local_drop_exec());
         assert!(!cfg.is_remote_exec());
         assert!(cfg.to_local_drop_config().is_none());
+    }
+
+    // ── Phase 53i: static per-akh MCP servers ────────────────────────────────
+
+    const MCP_TOML: &str = r#"
+name = "minerva"
+model = "glm-5.3"
+
+[ollama_endpoint]
+kind = "local"
+
+[mcp]
+require_pushed_mcp = false
+
+[[mcp.servers]]
+name = "anima"
+url = "https://anima.wegmueller.it/mcp"
+auth = { token_env = "ROMAN_ANIMA_TOKEN" }
+
+[[mcp.servers]]
+name = "observer"
+url = "http://127.0.0.1:18436/mcp"
+tools = ["monitoring_snapshot"]
+timeout_secs = 60
+auth = { token_file = "/tmp/observer.key" }
+"#;
+
+    #[test]
+    fn mcp_servers_parse_with_no_unknown_keys() {
+        let cfg: AkhConfig = toml::from_str(MCP_TOML).expect("parse");
+        assert_eq!(cfg.mcp.servers.len(), 2);
+        assert_eq!(cfg.mcp.servers[0].name.as_str(), "anima");
+        assert_eq!(
+            cfg.mcp.servers[1].qualified_tool_name("monitoring_snapshot"),
+            "mcp__observer__monitoring_snapshot"
+        );
+        assert_eq!(cfg.model.as_deref(), Some("glm-5.3"));
+        let raw: toml::Value = toml::from_str(MCP_TOML).unwrap();
+        assert!(
+            AkhConfig::unknown_keys(&raw).is_empty(),
+            "{:?}",
+            AkhConfig::unknown_keys(&raw)
+        );
+    }
+
+    #[test]
+    fn monitoring_table_loads_round_trips_and_validates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vesta.toml");
+        let text = "name = \"vesta\"\nmodel = \"glm-5.3\"\n\
+             [monitoring]\nendpoint = \"http://127.0.0.1:18435\"\nsource = \"roman-alerts\"\n\
+             token_file = \"/secrets/monitoring-reader.key\"\n\
+             observer_status_file = \"/state/observer-status.json\"\n";
+        std::fs::write(&path, text).expect("write");
+        let (cfg, unknown) = AkhConfig::load_checked(&path).expect("load");
+        assert!(unknown.is_empty(), "{unknown:?}");
+        let monitoring = cfg.monitoring.clone().expect("[monitoring] parsed");
+        assert_eq!(monitoring.source, "roman-alerts");
+        // Saving keeps every scalar above the first table (TOML ordering).
+        let rendered = toml::to_string(&cfg).expect("serialize");
+        let reparsed: AkhConfig = toml::from_str(&rendered).expect("reparse");
+        assert_eq!(reparsed.monitoring, Some(monitoring));
+        assert_eq!(reparsed.model.as_deref(), Some("glm-5.3"));
+        // Absent table: no tool.
+        let bare: AkhConfig = toml::from_str("name = \"a\"\n").expect("parse");
+        assert!(bare.monitoring.is_none());
+        // A plain-http non-loopback endpoint is refused with a diagnostic.
+        std::fs::write(
+            &path,
+            text.replace("http://127.0.0.1:18435", "http://events.lab.home"),
+        )
+        .expect("write");
+        let err = AkhConfig::load_checked(&path).unwrap_err();
+        assert!(matches!(err, AkhConfigError::Monitoring(_)), "{err:?}");
+        use miette::Diagnostic;
+        assert_eq!(
+            err.code().map(|c| c.to_string()).as_deref(),
+            Some("akh::monitoring::config::insecure_http")
+        );
+        // A typo inside the table is reported, not silently dropped.
+        let raw: toml::Value =
+            toml::from_str("name = \"a\"\n[monitoring]\nsorce = \"x\"\n").expect("parse");
+        assert_eq!(AkhConfig::unknown_keys(&raw)[0].path, "monitoring.sorce");
+    }
+
+    #[test]
+    fn mcp_servers_absent_means_none() {
+        let cfg: AkhConfig = toml::from_str("name = \"a\"\n").expect("parse");
+        assert!(cfg.mcp.servers.is_empty());
+        assert!(!cfg.mcp.require_pushed_mcp);
+    }
+
+    #[test]
+    fn mcp_unknown_table_key_is_reported() {
+        let raw: toml::Value = toml::from_str("name = \"a\"\n[mcp]\nservrs = []\n").expect("parse");
+        let unknown = AkhConfig::unknown_keys(&raw);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].path, "mcp.servrs");
+    }
+
+    #[test]
+    fn mcp_duplicate_servers_fail_load_with_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        std::fs::write(
+            &path,
+            "name = \"a\"\n\
+             [[mcp.servers]]\nname = \"board\"\nurl = \"http://127.0.0.1:1/mcp\"\n\
+             [[mcp.servers]]\nname = \"board\"\nurl = \"http://127.0.0.1:2/mcp\"\n",
+        )
+        .expect("write");
+        let err = AkhConfig::load_checked(&path).unwrap_err();
+        assert!(matches!(err, AkhConfigError::McpServers(_)), "{err:?}");
+        use miette::Diagnostic;
+        assert_eq!(
+            err.code().map(|c| c.to_string()).as_deref(),
+            Some("akh::mcp::config::invalid")
+        );
+        assert!(
+            err.related()
+                .is_some_and(|mut r| r.any(|d| d.to_string().contains("declared more than once")))
+        );
+    }
+
+    #[test]
+    fn mcp_bad_server_name_fails_parse() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        std::fs::write(
+            &path,
+            "name = \"a\"\n[[mcp.servers]]\nname = \"an ima\"\nurl = \"http://h/mcp\"\n",
+        )
+        .expect("write");
+        let err = AkhConfig::load_checked(&path).unwrap_err();
+        assert!(matches!(err, AkhConfigError::Parse { .. }), "{err:?}");
+        assert!(err.to_string().contains("invalid MCP server name"), "{err}");
+    }
+
+    #[test]
+    fn mcp_servers_round_trip_through_save_and_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        let cfg: AkhConfig = toml::from_str(MCP_TOML).expect("parse");
+        cfg.save(&path).expect("save");
+        let (loaded, unknown) = AkhConfig::load_checked(&path).expect("load");
+        // Scoped to `mcp`: a saved config also carries the flattened workspace
+        // `enabled` key, which the known-key list does not cover (pre-existing).
+        assert!(
+            !unknown.iter().any(|k| k.path.starts_with("mcp")),
+            "{unknown:?}"
+        );
+        assert_eq!(loaded.mcp, cfg.mcp);
+        assert_eq!(loaded.model, cfg.model);
+    }
+}
+
+#[cfg(test)]
+mod exec_sandboxes_tests {
+    use super::*;
+
+    const VESTA: &str = r#"
+name = "vesta"
+[exec]
+kind = "execd"
+sandbox_url = "http://vesta-sandbox.lab.home"
+sandbox_token_file = "/x/secrets/vesta-sandbox.key"
+profile = "vesta-gitops"
+principal = "vesta"
+allow_insecure_http = true
+
+[[exec.sandboxes]]
+name = "ops"
+profile = "vesta-ops"
+description = "Live homelab cluster access under the vesta ServiceAccount"
+"#;
+
+    #[test]
+    fn sandbox_name_accepts_the_documented_alphabet() {
+        for ok in ["ops", "gitops-2", "a", "a1-b2", &"a".repeat(32)] {
+            let name = SandboxName::parse(ok).unwrap_or_else(|e| panic!("{ok:?}: {e}"));
+            assert_eq!(name.as_str(), ok);
+            assert_eq!(name.to_string(), ok);
+            assert_eq!(AsRef::<str>::as_ref(&name), ok);
+        }
+    }
+
+    #[test]
+    fn sandbox_name_rejects_each_broken_rule() {
+        let cases = [
+            ("", SandboxNameProblem::Empty),
+            ("Ops", SandboxNameProblem::InvalidChar('O')),
+            ("-x", SandboxNameProblem::MustStartWithLetter),
+            ("1x", SandboxNameProblem::MustStartWithLetter),
+            ("x-", SandboxNameProblem::TrailingHyphen),
+            ("a_b", SandboxNameProblem::InvalidChar('_')),
+            ("a b", SandboxNameProblem::InvalidChar(' ')),
+            (&"a".repeat(33), SandboxNameProblem::TooLong { len: 33 }),
+        ];
+        for (raw, problem) in cases {
+            let err = SandboxName::parse(raw).expect_err(raw);
+            assert_eq!(err.problem, problem, "{raw:?}");
+            assert_eq!(
+                err.code().map(|c| c.to_string()).as_deref(),
+                Some("akh::config::sandbox_name")
+            );
+            assert!(err.help().is_some());
+        }
+    }
+
+    #[test]
+    fn exec_sandboxes_parse_with_no_unknown_keys() {
+        let cfg: AkhConfig = toml::from_str(VESTA).unwrap();
+        assert!(
+            AkhConfig::unknown_keys(&toml::from_str(VESTA).unwrap()).is_empty(),
+            "{:?}",
+            AkhConfig::unknown_keys(&toml::from_str(VESTA).unwrap())
+        );
+        let exec = cfg.effective_exec(None);
+        assert_eq!(exec.kind_name(), "execd");
+        let sandboxes = exec.execd_sandboxes();
+        assert_eq!(sandboxes.len(), 1);
+        assert_eq!(sandboxes[0].name.as_str(), "ops");
+        assert_eq!(sandboxes[0].profile, "vesta-ops");
+        assert_eq!(
+            sandboxes[0].description.as_deref(),
+            Some("Live homelab cluster access under the vesta ServiceAccount")
+        );
+        assert!(exec.validate_execd_sandboxes().is_ok());
+        assert!(ExecBackendConfig::InProcess.execd_sandboxes().is_empty());
+    }
+
+    #[test]
+    fn exec_sandboxes_round_trip_and_default_to_empty() {
+        let cfg: AkhConfig = toml::from_str(VESTA).unwrap();
+        let saved = toml::to_string_pretty(&cfg).unwrap();
+        let reloaded: AkhConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(reloaded.exec, cfg.exec);
+
+        let primary_only = VESTA.split("[[exec.sandboxes]]").next().unwrap();
+        let cfg: AkhConfig = toml::from_str(primary_only).unwrap();
+        assert!(cfg.effective_exec(None).execd_sandboxes().is_empty());
+        assert!(
+            !toml::to_string_pretty(&cfg).unwrap().contains("sandboxes"),
+            "an empty sandbox list is not serialized"
+        );
+    }
+
+    #[test]
+    fn exec_sandboxes_reject_bad_names_and_unknown_fields() {
+        let bad_name = VESTA.replace("name = \"ops\"", "name = \"Ops\"");
+        let err = toml::from_str::<AkhConfig>(&bad_name).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid execd sandbox name"),
+            "{err}"
+        );
+
+        let typo = VESTA.replace("profile = \"vesta-ops\"", "profil = \"vesta-ops\"");
+        assert!(toml::from_str::<AkhConfig>(&typo).is_err());
+    }
+
+    fn with_sandboxes(extra: &str) -> ExecBackendConfig {
+        let raw = format!(
+            "{}{extra}",
+            VESTA.split("[[exec.sandboxes]]").next().unwrap()
+        );
+        toml::from_str::<AkhConfig>(&raw)
+            .unwrap()
+            .effective_exec(None)
+    }
+
+    #[test]
+    fn exec_sandboxes_validation_rejects_duplicates_primary_profile_and_empty_profile() {
+        let duplicate = with_sandboxes(
+            "[[exec.sandboxes]]\nname = \"ops\"\nprofile = \"vesta-ops\"\n\
+             [[exec.sandboxes]]\nname = \"ops\"\nprofile = \"vesta-ops-2\"\n",
+        );
+        let err = duplicate.validate_execd_sandboxes().unwrap_err();
+        assert!(matches!(err, ExecdSandboxConfigError::DuplicateName { .. }));
+        assert!(err.help().is_some());
+
+        let primary =
+            with_sandboxes("[[exec.sandboxes]]\nname = \"ops\"\nprofile = \"vesta-gitops\"\n");
+        assert_eq!(
+            primary.validate_execd_sandboxes().unwrap_err(),
+            ExecdSandboxConfigError::ProfileIsPrimary {
+                name: SandboxName::parse("ops").unwrap(),
+                profile: "vesta-gitops".into(),
+            }
+        );
+
+        let empty = with_sandboxes("[[exec.sandboxes]]\nname = \"ops\"\nprofile = \"  \"\n");
+        assert!(matches!(
+            empty.validate_execd_sandboxes().unwrap_err(),
+            ExecdSandboxConfigError::EmptyProfile { .. }
+        ));
+        assert!(
+            ExecBackendConfig::InProcess
+                .validate_execd_sandboxes()
+                .is_ok()
+        );
+    }
+}
+
+#[cfg(all(test, feature = "execd-executor"))]
+mod execd_config_tests {
+    use super::*;
+    use crate::backend::execd::ExecutorRoute;
+
+    #[test]
+    fn execd_exec_table_parses_without_unknown_keys_and_translates() {
+        let raw = r#"
+name = "janus"
+[exec]
+kind = "execd"
+sandbox_url = "https://akhsbxd.lab"
+sandbox_token_file = "/run/akh/credentials/akhsbxd"
+profile = "rust-workspace"
+principal = "janus"
+"#;
+        let cfg: AkhConfig = toml::from_str(raw).unwrap();
+        assert!(AkhConfig::unknown_keys(&toml::from_str(raw).unwrap()).is_empty());
+        let exec = cfg.effective_exec(None);
+        assert_eq!(exec.kind_name(), "execd");
+        let execd = exec.to_execd_config("janus").unwrap();
+        assert_eq!(execd.profile, "rust-workspace");
+        assert_eq!(execd.poll_wait, std::time::Duration::from_millis(5_000));
+        assert!(execd.session_id.starts_with("akhomed-janus-"));
+        // Without executor_url/_token_file: the akhsbxd gateway with the sandbox token.
+        assert_eq!(
+            execd.executor,
+            ExecutorRoute::ViaSandbox {
+                token_file: "/run/akh/credentials/akhsbxd".into()
+            }
+        );
+        // Each translation mints a fresh allocation session.
+        assert_ne!(
+            exec.to_execd_config("janus").unwrap().session_id,
+            execd.session_id
+        );
+
+        let direct: AkhConfig = toml::from_str(&format!(
+            "{raw}executor_url = \"http://127.0.0.1:8413\"\n\
+             executor_token_file = \"/run/akh/credentials/akhexecd\"\npoll_wait_ms = 250\n"
+        ))
+        .unwrap();
+        let direct = direct
+            .effective_exec(None)
+            .to_execd_config("janus")
+            .unwrap();
+        assert_eq!(
+            direct.executor,
+            ExecutorRoute::Direct {
+                url: "http://127.0.0.1:8413".into(),
+                token_file: "/run/akh/credentials/akhexecd".into()
+            }
+        );
+        assert_eq!(direct.poll_wait, std::time::Duration::from_millis(250));
+        assert!(
+            ExecBackendConfig::InProcess
+                .to_execd_config("janus")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn execd_sandbox_config_uses_the_sandbox_profile_and_shared_route() {
+        let raw = r#"
+name = "vesta"
+[exec]
+kind = "execd"
+sandbox_url = "http://vesta-sandbox.lab.home"
+sandbox_token_file = "/x/secrets/vesta-sandbox.key"
+executor_token_file = "/x/secrets/vesta-executor.key"
+profile = "vesta-gitops"
+principal = "vesta"
+poll_wait_ms = 750
+allow_insecure_http = true
+
+[[exec.sandboxes]]
+name = "ops"
+profile = "vesta-ops"
+"#;
+        let cfg: AkhConfig = toml::from_str(raw).unwrap();
+        let exec = cfg.effective_exec(None);
+        let sandbox = &exec.execd_sandboxes()[0];
+        let primary = exec.to_execd_config("vesta").unwrap();
+        let ops = exec.to_execd_sandbox_config("vesta", sandbox).unwrap();
+
+        assert_eq!(primary.profile, "vesta-gitops");
+        assert_eq!(ops.profile, "vesta-ops");
+        assert_eq!(ops.sandbox_url, primary.sandbox_url);
+        assert_eq!(ops.sandbox_token_file, primary.sandbox_token_file);
+        assert_eq!(ops.executor, primary.executor);
+        assert_eq!(
+            ops.executor,
+            ExecutorRoute::ViaSandbox {
+                token_file: "/x/secrets/vesta-executor.key".into()
+            }
+        );
+        assert_eq!(ops.principal, "vesta");
+        assert_eq!(ops.poll_wait, std::time::Duration::from_millis(750));
+        assert!(ops.allow_insecure_http);
+        assert!(
+            ops.session_id.starts_with("akhomed-vesta-ops-"),
+            "{}",
+            ops.session_id
+        );
+        // Each translation mints a fresh session (akhsbxd never reallocates a
+        // released one), distinct from the primary's.
+        let again = exec.to_execd_sandbox_config("vesta", sandbox).unwrap();
+        assert_ne!(again.session_id, ops.session_id);
+        assert_ne!(ops.session_id, primary.session_id);
+        assert!(
+            ExecBackendConfig::InProcess
+                .to_execd_sandbox_config("vesta", sandbox)
+                .is_none()
+        );
     }
 }

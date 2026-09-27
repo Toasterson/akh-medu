@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use crate::agent::error::{AgentError, AgentResult};
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+    Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
 use crate::wiki::store::{ArticleStore, BlockRef, BlockType, Stance};
@@ -151,6 +151,7 @@ impl Tool for WriteArticleTool {
                 ),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::WriteKg]),
                 description: "Creates or updates wiki articles in durable storage.".into(),
@@ -226,6 +227,7 @@ impl Tool for CiteArticleTool {
                 ToolParamSchema::required("to", "Title of the article being cited."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::WriteKg]),
                 description: "Adds a citation relation between wiki articles.".into(),
@@ -348,6 +350,7 @@ impl Tool for RespondToArticleTool {
                 ToolParamSchema::optional("author", "Author entity label."),
             ],
             danger: DangerInfo {
+                effect: ToolEffect::Mutating,
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::WriteKg]),
                 description: "Creates a response article with a responds_to relation.".into(),
@@ -428,6 +431,7 @@ impl Tool for SearchWikiTool {
                 "Keyword(s) to search for.",
             )],
             danger: DangerInfo {
+                effect: ToolEffect::ReadOnly,
                 level: DangerLevel::Safe,
                 capabilities: HashSet::new(),
                 description: "Read-only keyword search over wiki articles.".into(),

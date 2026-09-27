@@ -125,14 +125,15 @@ mod proxy {
     use std::collections::HashSet;
     use std::time::Duration;
 
-    use serde_json::{Map, Value};
+    use serde_json::Value;
 
     use super::{DiscoveredServerTools, DiscoveryFailure, SessionMcpServerCfg};
     use crate::agent::error::AgentResult;
-    use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+    use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolSignature};
     use crate::agent::tool_manifest::{
-        Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+        Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolSource,
     };
+    use crate::agent::tools::mcp::McpToolDescriptor;
     use crate::engine::Engine;
     use crate::message::{AkhMessage, MessageSink};
     use crate::upstream_client::UpstreamMcpClient;
@@ -154,31 +155,15 @@ mod proxy {
     /// enough that a flap-the-door upstream is not hammered.
     const DISCOVERY_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 
-    /// One parameter of a proxied remote tool, carrying enough type info to
-    /// coerce the LLM's string argument back to the JSON type the server wants.
-    struct ProxyParam {
-        name: String,
-        /// JSON Schema `type` string (`"string"`, `"integer"`, `"number"`,
-        /// `"boolean"`, …); anything else is passed through as a string.
-        ty: String,
-        required: bool,
-        description: String,
-        /// Exact property schema advertised by the remote MCP server. Keeping
-        /// this intact is required for arrays/objects (`seshat_ingest.tags`,
-        /// metadata, future typed tools); flattening to a type string teaches
-        /// the model and repair layer a contract the upstream does not have.
-        schema: Value,
-    }
-
     /// A single remote MCP tool exposed to the akh as a first-class tool.
     ///
     /// Named `mcp__{server}__{remote}` (the Claude-Code convention), it forwards
-    /// each call over streamable-HTTP MCP to the client-pushed server.
+    /// each call over streamable-HTTP MCP to the client-pushed server. The
+    /// descriptor adaptation (schemas, argument coercion) is shared with the
+    /// static per-akh servers via [`McpToolDescriptor`].
     pub struct McpProxyTool {
         tool_name: String,
-        remote_name: String,
-        description: String,
-        params: Vec<ProxyParam>,
+        descriptor: McpToolDescriptor,
         url: String,
         auth_header: Option<String>,
         server: String,
@@ -200,91 +185,40 @@ mod proxy {
             auth_header: Option<&str>,
             descriptor: &Value,
         ) -> Option<Self> {
-            let remote_name = descriptor["name"].as_str()?.to_string();
-            if remote_name.is_empty() {
-                return None;
-            }
-            let description = descriptor["description"].as_str().unwrap_or("").to_string();
-
-            let required: HashSet<String> = descriptor["inputSchema"]["required"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let mut params = Vec::new();
-            if let Some(props) = descriptor["inputSchema"]["properties"].as_object() {
-                for (pname, pschema) in props {
-                    params.push(ProxyParam {
-                        name: pname.clone(),
-                        ty: pschema["type"].as_str().unwrap_or("string").to_string(),
-                        required: required.contains(pname),
-                        description: pschema["description"].as_str().unwrap_or("").to_string(),
-                        schema: pschema.clone(),
-                    });
-                }
-            }
-
+            let descriptor = McpToolDescriptor::parse(descriptor)?;
             Some(Self {
-                tool_name: format!("mcp__{}__{}", sanitize(server), remote_name),
-                remote_name,
-                description,
-                params,
+                tool_name: format!("mcp__{}__{}", sanitize(server), descriptor.remote_name),
+                descriptor,
                 url: url.to_string(),
                 auth_header: auth_header.map(String::from),
                 server: server.to_string(),
             })
         }
 
-        /// Build the remote JSON argument object without flattening structured
-        /// values. Native arrays/objects pass through byte-for-value; legacy
-        /// string-valued backends still get bounded scalar/JSON coercion.
+        /// Build the remote JSON argument object (see
+        /// [`McpToolDescriptor::build_args`]).
         fn build_args(&self, input: &ToolInput) -> Value {
-            let mut args = Map::new();
-            for p in &self.params {
-                let Some(raw) = input.get_value(&p.name) else {
-                    continue;
-                };
-                let value = coerce_schema_value(raw, &p.ty);
-                args.insert(p.name.clone(), value);
-            }
-            Value::Object(args)
+            self.descriptor.build_args(input)
         }
     }
 
     impl Tool for McpProxyTool {
         fn signature(&self) -> ToolSignature {
-            ToolSignature {
-                name: self.tool_name.clone(),
-                description: self.description.clone(),
-                parameters: self
-                    .params
-                    .iter()
-                    .map(|p| ToolParam {
-                        name: p.name.clone(),
-                        description: p.description.clone(),
-                        required: p.required,
-                    })
-                    .collect(),
-            }
+            self.descriptor.signature(&self.tool_name)
         }
 
         fn execute(&self, _engine: &Engine, input: ToolInput) -> AgentResult<ToolOutput> {
             let args = self.build_args(&input);
+            let remote_name = &self.descriptor.remote_name;
             let client =
                 UpstreamMcpClient::from_endpoint(self.url.clone(), self.auth_header.clone());
-            match client.call_tool_text(&self.remote_name, args) {
+            match client.call_tool_text(remote_name, args) {
                 Ok(text) if text.is_empty() => Ok(ToolOutput::ok(format!(
-                    "{} returned no content.",
-                    self.remote_name
+                    "{remote_name} returned no content."
                 ))),
                 Ok(text) => Ok(ToolOutput::ok(text)),
                 Err(e) => Ok(ToolOutput::err(format!(
-                    "upstream MCP tool \"{}\" failed: {e}",
-                    self.remote_name
+                    "upstream MCP tool \"{remote_name}\" failed: {e}"
                 ))),
             }
         }
@@ -292,19 +226,10 @@ mod proxy {
         fn manifest(&self) -> ToolManifest {
             ToolManifest {
                 name: self.tool_name.clone(),
-                description: self.description.clone(),
-                parameters: self
-                    .params
-                    .iter()
-                    .map(|p| ToolParamSchema {
-                        name: p.name.clone(),
-                        description: p.description.clone(),
-                        required: p.required,
-                        param_type: p.ty.clone(),
-                        schema: Some(p.schema.clone()),
-                    })
-                    .collect(),
+                description: self.descriptor.description.clone(),
+                parameters: self.descriptor.param_schemas(),
                 danger: DangerInfo {
+                    effect: ToolEffect::Mutating,
                     level: DangerLevel::Dangerous,
                     capabilities: HashSet::from([Capability::Network]),
                     description: "Calls a client-provided MCP server over the network.".into(),
@@ -314,35 +239,6 @@ mod proxy {
                     server: self.server.clone(),
                 },
             }
-        }
-    }
-
-    fn coerce_schema_value(raw: &Value, ty: &str) -> Value {
-        let Value::String(text) = raw else {
-            return raw.clone();
-        };
-        match ty {
-            "integer" => text
-                .parse::<i64>()
-                .map(Value::from)
-                .unwrap_or_else(|_| raw.clone()),
-            "number" => text
-                .parse::<f64>()
-                .map(Value::from)
-                .unwrap_or_else(|_| raw.clone()),
-            "boolean" => text
-                .parse::<bool>()
-                .map(Value::from)
-                .unwrap_or_else(|_| raw.clone()),
-            "array" => serde_json::from_str::<Value>(text)
-                .ok()
-                .filter(Value::is_array)
-                .unwrap_or_else(|| raw.clone()),
-            "object" => serde_json::from_str::<Value>(text)
-                .ok()
-                .filter(Value::is_object)
-                .unwrap_or_else(|| raw.clone()),
-            _ => raw.clone(),
         }
     }
 
@@ -639,7 +535,7 @@ mod proxy {
                 .expect("proxy");
             let sig = t.signature();
             assert_eq!(sig.name, "mcp__seshat__seshat_search");
-            assert_eq!(t.remote_name, "seshat_search");
+            assert_eq!(t.descriptor.remote_name, "seshat_search");
             let query = sig.parameters.iter().find(|p| p.name == "query").unwrap();
             assert!(query.required);
             let top_k = sig.parameters.iter().find(|p| p.name == "top_k").unwrap();

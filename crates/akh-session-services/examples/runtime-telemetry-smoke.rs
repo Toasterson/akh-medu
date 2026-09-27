@@ -16,7 +16,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tool = tracing::info_span!("runtime.tool", tool.name="synthetic", tool.id="synthetic-tool");
         tool.in_scope(|| {
             let mut operation = akh_session_services::telemetry::Operation::new("tool");
-            akh_session_services::telemetry::delta("reasoning", "Synthetic reasoning event; no model was invoked.");
+            akh_session_services::telemetry::delta(
+                "reasoning",
+                "Synthetic reasoning event; no model was invoked.",
+                1,
+                "passthrough",
+            );
             akh_session_services::telemetry::usage(&serde_json::json!({"prompt_tokens":17,"completion_tokens":3}));
             std::thread::sleep(std::time::Duration::from_millis(20));
             operation.success();
