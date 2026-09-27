@@ -149,14 +149,78 @@ python3 deploy/roman-mini/configure_core.py --root "$ROOT" --binaries "$CARGO_TA
 
 This does the following:
 
-- installs `bin/akhomed-main-$SHA` and `bin/akh-acp-main-$SHA`; the old
-  binaries stay in place;
-- writes `config/core-release.json` (commit, sha256, build command);
+- installs the core at the stable path `bin/akhomed` (copy-to-temp +
+  codesign + atomic rename — the running inode is never touched) and keeps a
+  versioned `bin/akhomed-main-$SHA` alongside it for rollback and audit; only
+  `bin/akhomed` is ever exec'd. Also installs `bin/akh-acp-main-$SHA` (unchanged);
+  the old binaries stay in place;
+- signs `bin/akhomed` with the identity in `config/codesign.json`
+  (`{"identity": "...", "identifier": "dev.akh-medu.akhomed"}`) if that file
+  exists, or ad-hoc (`codesign --sign -`) with a printed warning if it does
+  not. **A stable signing identity is what makes the macOS Local Network
+  privacy (TCC) approval survive a redeploy** — see "Local Network privacy
+  (TCC) and the stable core path" below; without `config/codesign.json` every
+  deploy is again a new TCC identity;
+- writes `config/core-release.json` and `evidence/core-binary.json`
+  (commit, `build_sha256` — the unsigned `target/release` artifact — `sha256`
+  — the installed signed `bin/akhomed` — `codesign`
+  `{identity, identifier, designated_requirement}`, `build_command`,
+  `binary` = `bin/akhomed`, `versioned_binary` = the versioned copy);
 - renders `config.toml`, the three workspace TOMLs, `core.json` (with a new
   `secrets/core-events.key`), `secrets/acp-clients.keys`, `t3-acp.json`, the
   reactor seeds, the staged `events.akh-target.json` and
   `launchd/dev.roman-akhs.core.plist`;
 - copies the new `daemon_credentials.py` and `t3_entrypoint.py` into `bin/`.
+
+`daemon_credentials.py` role `core` refuses to exec anything whose sha256
+does not match `config/core-release.json`'s `sha256` — this, not the
+filename, is the real provenance gate (the filename check only constrains
+the file to `bin/akhomed` or the legacy `bin/akhomed-main-<sha>` shape inside
+`bin/`).
+
+### Local Network privacy (TCC) and the stable core path
+
+macOS Local Network privacy blocks a *new* binary from the LAN (`No route to
+host`, os error 65) until the operator approves it once in *System Settings
+→ Privacy & Security → Local Network*. TCC keys that approval off the
+binary's installed path and code signature together, so the old
+`bin/akhomed-main-<sha>`-per-deploy scheme meant a fresh TCC identity — and a
+fresh manual approval — on every deploy. Installing at the stable path
+`bin/akhomed` and signing it with a stable identity (`config/codesign.json`)
+keeps the same TCC identity across deploys, so **the approval should need to
+happen only once, the first time `config/codesign.json` is in place.**
+
+`config/codesign.json` is operator-written, not repository-rendered (it
+names a real signing identity, so it stays out of the repo). Today the
+keychain on this Mac has only `Apple Development: toasterson@gmail.com
+(QPJC8WM3MN)` (team 84CM4GHWH4); write:
+
+```sh
+cat > "$ROOT/config/codesign.json" <<'JSON'
+{"identity": "Apple Development: toasterson@gmail.com (QPJC8WM3MN)", "identifier": "dev.akh-medu.akhomed"}
+JSON
+chmod 600 "$ROOT/config/codesign.json"
+```
+
+A Developer ID Application certificate should replace this identity later
+(same JSON shape, no code change); an `Apple Development` identity is
+machine-scoped to the keychain that created it, so it still works for a
+LaunchDaemon on this Mac but would not travel to another machine. `--options
+runtime` (the hardened runtime) is deliberately not used: it is unneeded
+without notarization and could break library loading.
+
+**Scope:** only `bin/akhomed` (the Roman core, one per-Roman LAN-facing
+process, hence the only one that hits Local Network TCC) gets the
+stable-path-plus-signing treatment. The session-platform binaries
+(`akheventd`, `akhsessd`, `akhrtd`, `akhsbxd`, `akhexecd`, `akh-trigger`) and
+`akh-acp` are installed with a plain `install -m 755`/`install_binary` copy
+per deploy, as before, and are not code-signed by `configure_core.py`. They
+either only listen on loopback or are short-lived CLI invocations, so they do
+not hit the same TCC gate; generalizing the stable-path-plus-signing scheme
+to them would mean rewriting each of their operator install/rollback steps
+throughout this file and INVENTORY.md, which is a bigger change than this
+pass covers. Revisit if one of them starts making outbound LAN connections
+that trigger a TCC prompt.
 
 It prints warnings, for example a server that has no granted tools. Read
 every warning. Then check the rendered configuration:
@@ -490,6 +554,60 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/dev.roman-akhs.events.pli
 launchctl kickstart -k gui/$UID_/dev.roman-akhs.observer
 launchctl kickstart -k gui/$UID_/dev.roman-akhs.laya-controller
 ```
+
+### Rolling back to a previous full-akh build (stable path, same generation)
+
+The rollback above restores the pre-53f stripped core. Once the Roman is
+already on a full akhomed built through `configure_core.py` (any deploy
+after step 4), rolling back to an *older full-akh* build is narrower: it
+only needs to re-point `bin/akhomed` at an older, already-installed
+`bin/akhomed-main-<old-sha>`, re-signed with the same identity so its sha256
+and signature are consistent, and `core-release.json` rewritten to match.
+Two ways to do this:
+
+**A. Rerun `configure_core.py` from the old commit** (preferred — it also
+re-renders the workspace TOMLs and reactor seeds consistently for that
+commit):
+
+```sh
+git -C "$REPO" checkout "$OLD_SHA"   # a clean checkout of that ancestor of origin/main
+cd "$REPO" && cargo build --release --locked --features server --bin akhomed
+python3 deploy/roman-mini/configure_core.py --root "$ROOT" --binaries "$REPO/target/release" --repo "$REPO"
+kill $(pgrep -f bin/akhomed)   # KeepAlive restarts it
+```
+
+**B. Re-sign the already-installed versioned copy directly**, when the old
+build is still on disk as `bin/akhomed-main-<old-sha>` and rebuilding is not
+wanted:
+
+```sh
+OLD="$ROOT/bin/akhomed-main-<old-sha>"
+TMP="$ROOT/bin/.akhomed.$$.tmp"
+cp -p "$OLD" "$TMP"
+IDENTITY=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["identity"])' "$ROOT/config/codesign.json")
+IDENTIFIER=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("identifier","dev.akh-medu.akhomed"))' "$ROOT/config/codesign.json")
+codesign --force --sign "$IDENTITY" --identifier "$IDENTIFIER" --timestamp=none "$TMP"
+mv "$TMP" "$ROOT/bin/akhomed"                       # atomic rename, same filesystem
+NEW_SHA256=$(shasum -a 256 "$ROOT/bin/akhomed" | awk '{print $1}')
+DR=$(codesign -dr - "$ROOT/bin/akhomed" 2>/dev/null | sed 's/^designated => //')
+python3 -c '
+import json, sys
+path, sha, identity, identifier, dr = sys.argv[1:]
+release = json.load(open(path))
+release["sha256"] = sha
+release["codesign"] = {"identity": identity, "identifier": identifier, "designated_requirement": dr}
+json.dump(release, open(path, "w"), indent=2)
+' "$ROOT/config/core-release.json" "$NEW_SHA256" "$IDENTITY" "$IDENTIFIER" "$DR"
+kill $(pgrep -f bin/akhomed)   # KeepAlive restarts it; daemon_credentials.py checks the sha256 it just wrote
+```
+
+Either way, `daemon_credentials.py` role `core` refuses to start unless
+`bin/akhomed`'s sha256 matches `core-release.json`'s `sha256`, so a partial
+rollback (binary swapped, `core-release.json` not rewritten, or vice versa)
+fails closed with a clear message instead of silently running the wrong
+build.
+
+### The pre-53f rollback (whole generation)
 
 Roll the services back writers first: akhexecd before akhsessd and akhsbxd,
 as described in "Wire compatibility" under step 4. If the new core recorded any

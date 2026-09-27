@@ -4,6 +4,7 @@ Renders a synthetic deployment root into a temporary directory and checks the
 TOML/JSON shapes akhomed and akheventd will load. No git remote, network or
 real credential is used.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -955,6 +956,175 @@ class ProvenanceTests(unittest.TestCase):
             self.git("-c", "commit.gpgsign=false", "commit", "-qam", "branch-only", cwd=repo)
             with self.assertRaisesRegex(fa.RenderError, "not an ancestor of origin/main"):
                 fa.main_provenance(repo, fetch=False)
+
+
+class CodesignConfigTests(unittest.TestCase):
+    """`config/codesign.json` (operator decision 2026-09-27, stable-path signing)."""
+
+    def test_absent_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertIsNone(configure_core.load_codesign_config(Path(temp)))
+
+    def test_reads_identity_and_defaults_the_identifier(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "config").mkdir()
+            (root / "config/codesign.json").write_text(json.dumps({"identity": "Developer ID Application: X"}))
+            self.assertEqual(
+                configure_core.load_codesign_config(root),
+                {"identity": "Developer ID Application: X", "identifier": configure_core.DEFAULT_CODESIGN_IDENTIFIER})
+
+    def test_explicit_identifier_is_kept(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "config").mkdir()
+            (root / "config/codesign.json").write_text(json.dumps({"identity": "X", "identifier": "dev.other"}))
+            self.assertEqual(configure_core.load_codesign_config(root)["identifier"], "dev.other")
+
+    def test_missing_identity_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "config").mkdir()
+            (root / "config/codesign.json").write_text(json.dumps({"identifier": "dev.other"}))
+            with self.assertRaisesRegex(fa.RenderError, "identity"):
+                configure_core.load_codesign_config(root)
+
+
+class FakeCodesignRun:
+    """Stands in for `subprocess.run(["codesign", ...])`: records every call
+    (including the `codesign` argv[0]) and answers `-dr -` with a fixed
+    designated requirement, without a real signing identity or filesystem
+    signature."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, args, capture_output=True, text=True):
+        self.calls.append(args)
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        result = Result()
+        if args[1:3] == ["-dr", "-"]:
+            result.stdout = 'designated => identifier "dev.akh-medu.akhomed" and anchor apple generic\n'
+        return result
+
+
+class CoreBinaryInstallTests(unittest.TestCase):
+    """`install_core_binary` (stable signed `bin/akhomed` + versioned copy)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / "bin").mkdir(parents=True)
+        self.built = self.root / "built-akhomed"
+        self.built.write_bytes(b"#!/bin/sh\necho hi\n")
+        self.prov = fa.Provenance(commit="d" * 40, short="d" * 12, origin_main="d" * 40, committed_at=0)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def install(self, codesign_config):
+        fake = FakeCodesignRun()
+        warnings = []
+        with unittest.mock.patch.object(configure_core.subprocess, "run", fake):
+            info = configure_core.install_core_binary(self.built, self.root, self.prov, codesign_config, warnings)
+        return info, warnings, fake.calls
+
+    def test_stable_path_is_signed_atomically_and_matches_the_build(self):
+        info, warnings, calls = self.install(
+            {"identity": "Developer ID Application: X", "identifier": "dev.akh-medu.akhomed"})
+        stable = self.root / "bin/akhomed"
+        self.assertEqual(stable.read_bytes(), self.built.read_bytes())
+        self.assertEqual([p.name for p in (self.root / "bin").iterdir() if p.name.startswith(".")], [])
+        self.assertEqual(warnings, [])
+        sign_call = next(c for c in calls if c[1] == "--force")
+        self.assertEqual(sign_call[3], "Developer ID Application: X")
+        self.assertEqual(sign_call[sign_call.index("--identifier") + 1], "dev.akh-medu.akhomed")
+        self.assertNotIn("--options", sign_call)
+        self.assertIn("--timestamp=none", sign_call)
+        self.assertEqual(info["binary"], str(stable))
+        self.assertEqual(info["codesign"], {
+            "identity": "Developer ID Application: X", "identifier": "dev.akh-medu.akhomed",
+            "designated_requirement": 'identifier "dev.akh-medu.akhomed" and anchor apple generic'})
+
+    def test_versioned_copy_is_kept_unsigned_for_rollback_and_matches_build_sha256(self):
+        info, _, calls = self.install({"identity": "X", "identifier": "dev.akh-medu.akhomed"})
+        versioned = self.root / "bin" / self.prov.binary_name
+        self.assertEqual(versioned.read_bytes(), self.built.read_bytes())
+        self.assertEqual(info["build_sha256"], hashlib.sha256(self.built.read_bytes()).hexdigest())
+        self.assertEqual(info["versioned_binary"], str(versioned))
+        self.assertFalse(any(str(versioned) in c for c in calls))  # never handed to codesign
+
+    def test_no_config_signs_ad_hoc_and_warns(self):
+        info, warnings, calls = self.install(None)
+        self.assertEqual(info["codesign"], {"identity": "-", "identifier": None, "designated_requirement": None})
+        sign_call = next(c for c in calls if c[1] == "--force")
+        self.assertEqual(sign_call[3], "-")
+        self.assertTrue(any("ad-hoc" in w and "TCC" in w for w in warnings))
+
+    def test_a_failed_signature_leaves_no_temp_file_and_the_stable_path_untouched(self):
+        def failing(args, capture_output=True, text=True):
+            class Result:
+                returncode = 1
+                stdout = ""
+                stderr = "codesign failed"
+            return Result()
+        with unittest.mock.patch.object(configure_core.subprocess, "run", failing):
+            with self.assertRaises(fa.RenderError):
+                configure_core.install_core_binary(
+                    self.built, self.root, self.prov, {"identity": "X", "identifier": "dev.akh-medu.akhomed"}, [])
+        self.assertFalse((self.root / "bin/akhomed").exists())
+        self.assertEqual(list((self.root / "bin").glob(".akhomed.*.tmp")), [])
+
+    def test_rerunning_with_the_same_build_is_stable(self):
+        self.install({"identity": "X", "identifier": "dev.akh-medu.akhomed"})
+        info, warnings, _ = self.install({"identity": "X", "identifier": "dev.akh-medu.akhomed"})
+        self.assertEqual(warnings, [])
+        self.assertEqual(info["build_sha256"], hashlib.sha256(self.built.read_bytes()).hexdigest())
+
+
+@NEEDS_TOMLLIB
+class CoreReleaseFieldsTests(unittest.TestCase):
+    """`render()` threads `install_core_binary`'s fields into core-release.json."""
+
+    def test_release_records_build_sha256_versioned_binary_and_codesign(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fixture(root)
+            prov = fa.Provenance(commit="e" * 40, short="e" * 12, origin_main="e" * 40, committed_at=0)
+            binary = root / "bin" / "akhomed"
+            binary.write_text("#!/bin/sh\n")
+            versioned = root / "bin" / prov.binary_name
+            versioned.write_text("#!/bin/sh\n")
+            configure_core.render(
+                root, prov, binary, "s" * 64, source=SOURCE, build_sha256="b" * 64, versioned_binary=versioned,
+                codesign={"identity": "X", "identifier": "dev.akh-medu.akhomed", "designated_requirement": "..."})
+            release = json.loads((root / "config/core-release.json").read_text())
+            self.assertEqual(release["binary"], str(binary))
+            self.assertEqual(release["versioned_binary"], str(versioned))
+            self.assertEqual(release["build_sha256"], "b" * 64)
+            self.assertEqual(release["sha256"], "s" * 64)
+            self.assertEqual(release["codesign"], {
+                "identity": "X", "identifier": "dev.akh-medu.akhomed", "designated_requirement": "..."})
+            evidence = json.loads((root / "evidence/core-binary.json").read_text())
+            self.assertEqual(evidence, release)
+
+    def test_omitted_fields_default_sanely(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fixture(root)
+            prov = fa.Provenance(commit="f" * 40, short="f" * 12, origin_main="f" * 40, committed_at=0)
+            binary = root / "bin" / prov.binary_name
+            binary.write_text("#!/bin/sh\n")
+            configure_core.render(root, prov, binary, "s" * 64, source=SOURCE)
+            release = json.loads((root / "config/core-release.json").read_text())
+            self.assertIsNone(release["versioned_binary"])
+            self.assertIsNone(release["codesign"])
+            self.assertEqual(release["build_sha256"], "s" * 64)
 
 
 @NEEDS_TOMLLIB

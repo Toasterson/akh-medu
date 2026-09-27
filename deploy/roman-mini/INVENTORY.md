@@ -241,9 +241,14 @@ Each of these needs its own work item before it lands (not done in this pass):
    `dev.roman-akhs.core.plist`.**~~ **Done in 53f prep (repository side):**
    `configure_core.py` now renders the core plist as
    `python3 bin/daemon_credentials.py core <root>`; the `core` role sets
-   `AKH_REACTOR_ENABLE=1` and execs the provenance-named
-   `bin/akhomed-main-<sha>` recorded in `config/core-release.json`. The live
-   plist changes only when the operator runs [CUTOVER.md](CUTOVER.md).
+   `AKH_REACTOR_ENABLE=1` and execs the binary recorded in
+   `config/core-release.json` — the stable, code-signed `bin/akhomed` in
+   normal operation, or a legacy `bin/akhomed-main-<sha>` during a manual
+   rollback — after checking its sha256 against the same file (operator
+   decision 2026-09-27, stable-path signing: the sha256 check, not the
+   filename, is the provenance gate; see CUTOVER.md "Local Network privacy
+   (TCC) and the stable core path"). The live plist changes only when the
+   operator runs [CUTOVER.md](CUTOVER.md).
 8. **Sokar has no credential distinct from `ROMAN_ARCHIVE_TOKEN`.** Confirm
    whether that's intentional (shared token good enough for Sokar's current
    scope) or whether Sokar needs its own 1Password reference before 53i's
@@ -366,7 +371,7 @@ Naming before/after: `mcp__vesta-ops__grafana__query_prometheus` (proxied) →
 2. Copy the updated `vesta_ops.py` into `bin/`: `cp deploy/roman-mini/vesta_ops.py
    ~/Library/Application\ Support/roman-akhs/bin/vesta_ops.py`.
 3. Restart the core so it picks up the new workspace TOML. The core plist has
-   `KeepAlive`, so `kill $(pgrep -f akhomed-main-)` is enough — launchd
+   `KeepAlive`, so `kill $(pgrep -f bin/akhomed)` is enough — launchd
    restarts it from the (already rewritten) config; no sudo needed.
 4. Restart the `vesta-ops` broker so it drops the Grafana passthrough tools:
    `launchctl kickstart -k gui/501/dev.roman-akhs.vesta-ops`.
@@ -999,7 +1004,7 @@ and the core must both come from the PR 5 merge commit or later.
    ```
 
 7. **Restart the core** so it loads the new workspaces and the new binary. The
-   core's `KeepAlive` brings it back, so `kill $(pgrep -f akhomed-main-)` is
+   core's `KeepAlive` brings it back, so `kill $(pgrep -f bin/akhomed)` is
    enough.
 8. **Kickstart the observer.** It is a LaunchAgent, so no sudo:
    `cp -p deploy/roman-mini/observer.py "$ROOT/bin/observer.py" &&
@@ -1051,7 +1056,7 @@ and the core must both come from the PR 5 merge commit or later.
        binary.
     3. Restore `$BK/akheventd` and `$BK/observer.py`.
     4. Restart the services: `sudo launchctl bootout` and then `bootstrap` for
-       `system/dev.roman-akhs.events`, `kill $(pgrep -f akhomed-main-)`, and
+       `system/dev.roman-akhs.events`, `kill $(pgrep -f bin/akhomed)`, and
        `launchctl kickstart -k gui/501/dev.roman-akhs.observer`.
 
     The observer then probes Grafana with kubectl again. The D2 files can stay;
@@ -1271,7 +1276,7 @@ and `REPO=<clean origin/main checkout>`.
    ```
 
 8. **Restart the core** (new binary, new addenda text):
-   `kill $(pgrep -f akhomed-main-)`. KeepAlive brings it back.
+   `kill $(pgrep -f bin/akhomed)`. KeepAlive brings it back.
 9. **Verify shadow mode.** Within about 5 minutes (27 projects, 8 per poll),
    `GET /v1/anima/roman-anima` shows `ok: true`, `shadow: true` and every
    project `baselined: true`, with `counters.emitted` equal to 0:
@@ -1376,7 +1381,7 @@ delivering, because an admitted event with no enabled schedule is a terminal
    ```
 
 6. **Restart the core** so it loads the workspaces without the `laya` server:
-   `kill $(pgrep -f akhomed-main-)`.
+   `kill $(pgrep -f bin/akhomed)`.
 7. **Activate the skillpack** in each Roman, then check that it is `Hot`:
 
    ```sh
@@ -1528,7 +1533,7 @@ down `ops` sandbox never blocks Vesta from loading.
    akhomed built from main. It must know `[[exec.sandboxes]]` and
    `sandbox_exec`: an older binary at best reports the key as unknown and
    runs Vesta without her `ops` sandbox.
-6. Restart the core (`kill $(pgrep -f akhomed-main-)`; KeepAlive restarts it).
+6. Restart the core (`kill $(pgrep -f bin/akhomed)`; KeepAlive restarts it).
    Vesta's load allocates `vesta-gitops`; a failure stops Vesta's load with
    the execd diagnostic in `logs/core.err.log` (fail loud, no local fallback).
 
