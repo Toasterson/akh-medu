@@ -81,7 +81,32 @@ shareable and what stays private. Until then, placeholder mapping:
 | 7 | *(unnamed)* | stillness / brevity / witness |
 | 8 | *(unnamed)* | teacher / transmission |
 
-**2026-09-14 update:** the "trained bias" column now has a public vocabulary — Oxide's fifteen values mapped onto the eight slots, with the three Oxide principles as captain invariants rather than voices. The mapping, the per-step observables and the engine analogs are in [ADR 110](../decisions/110-kaine-character-guided-reward-live-environment.md) §Decision 1; slot *names* are still deferred to Till.
+**2026-09-14 update:** the "trained bias" column now has a public vocabulary — Oxide's fifteen values mapped onto the eight slots, with the three Oxide principles as captain invariants rather than voices. The mapping, the per-step observables and the engine analogs are in [ADR 110](../decisions/110-kaine-character-guided-reward-live-environment.md) §Decision 1; slot names were chosen on 2026-09-27; see §2a.
+
+### 2a. Names (operator decision 2026-09-27)
+
+Egyptian names are primary. They share the fleet's vocabulary (akh, Maat), and reusing an existing
+akh's name is intended: the akhs grew their psyche from the same base, and Lilith knowing them well
+enough to correct them is an improvement. The **Jung** names are the cross-reference to
+psychology. The **Anishinaabe** column is the cross-reference to a Native North American teaching.
+The **elements** give metaphors. Lilith should be able to translate a situation between all four.
+
+| Slot | Role (§2, ADR 110 values) | Egyptian (primary) | Jung | Anishinaabe (Seven Grandfather Teachings) | Element |
+|---|---|---|---|---|---|
+| 1 | Creator: Courage, Optimism, Urgency | **Sekhmet** | Hero | Bravery (*Aakode'ewin*), Bear (*Makwa*) | Fire |
+| 2 | Sage: Rigor, Transparency | **Sia** (alt. Thoth) | Sage | Truth (*Debwewin*), Turtle (*Mishiikenh*) | Metal |
+| 3 | Explorer: Curiosity, Versatility | **Khonsu**, "the traveller" | Explorer | Wisdom (*Nibwaakaawin*), Beaver (*Amik*): partial fit; the wanderer Nanabozho also fits | Air |
+| 4 | Rebel: Candor | **Wepwawet**, "opener of the ways" (alt. Set) | Rebel | Honesty (*Gwayakwaadiziwin*), Sabe (the giant; some tellings Raven) | Lightning |
+| 5 | Caregiver: Empathy, Responsibility | **Isis** | Great Mother | Love (*Zaagi'idiwin*), Eagle (*Migizi*) | Water |
+| 6 | Mirror: Humor | **Bes** | Trickster | Nanabozho, the trickster-teacher (other nations' tricksters: Coyote, Raven, Iktomi) | Light |
+| 7 | Witness: Resilience, Thriftiness | **Geb** (alt. Anubis, the witness at the weighing) | Senex | Respect (*Manaaji'idiwin*), Buffalo (*Mashkode-bizhiki*): takes only what is needed | Earth |
+| 8 | Teacher: Teamwork, Diversity | **Hu**, the spoken word that makes things real (Sia's partner) | Wise Old Man | Humility (*Dabaadendiziwin*), Wolf (*Ma'iingan*): lives for the pack | Wood |
+| Captain | the field: Integrity, Honesty, Decency | **Maat** | the Self | *Mino-bimaadiziwin*, the good life: the teachings held together | Aether |
+
+The Anishinaabe names are cross-references drawn from teachings as they are publicly shared: the
+Seven Grandfather Teachings and the seven stages of life, e.g. Edward Benton-Banai, *The Mishomis
+Book* (1979). Nations differ, and these names make no claim to any lineage. Where the operator's
+teacher's tradition uses other names, that lineage takes precedence (§8).
 
 Public scaffolding that makes this citable without touching the lineage:
 Internal Family Systems (parts led by a Self), Minsky's *Society of Mind*,
@@ -180,6 +205,16 @@ pressure is not yet a form.
 
 ## 5. Belts: graded curriculum with promotion gates
 
+**Belt names (operator decision 2026-09-27).**
+
+| Belt | Egyptian (primary): the soul-parts toward *akh* | Jung (alchemy of individuation) | Anishinaabe (seven stages of life) | Element |
+|---|---|---|---|---|
+| White | **Ren**, the name: identity and forms | Nigredo | Good Life (infancy) | Earth |
+| Yellow | **Ka**, the double: the same form in another tongue | Albedo | Fast Life / Wandering | Water |
+| Green | **Ib**, the heart: weighed against adversaries, as against Maat's feather | Citrinitas | Truth | Fire |
+| Brown | **Ba**, the personality: her own choice of voice | Rubedo | Planning / Doing | Air |
+| Black | **Akh**, the effective spirit that acts and teaches (write "Akh belt" to avoid confusion with "an akh") | Lapis | Elder | Aether |
+
 Five belts. Each = a training stage (SFT on forms → sparring rounds per §4,
 i.e. weighted sibling SFT + sibling-contrast preference, no scalar-judge RL →
 gate).
@@ -243,6 +278,8 @@ four-field, always:
   gate can be structural (JSON validity, selection rubric, length-vs-need).
 
 ## 8. Open questions (Till decides)
+
+*(Questions 1 and 2 were answered 2026-09-27: §2a and §5 names. Question 5, captain placement, is internalized for Lilith per ADR 116.)*
 
 1. **Naming the eight** — from the lineage (what is shareable?) or extend the
    Phase 23 `ArchetypeVoice` set from five to eight (slots 6–8 above).
