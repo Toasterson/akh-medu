@@ -84,6 +84,15 @@ WORKER_RUNTIME_PROFILE = "codex-astra"
 MAX_NEW_PER_DAY = 4
 SKILLS = {"escalation_skill": "astra-escalation", "merge_repair_skill": "mergiraf"}
 
+# Operator decision 2026-09-27 (option a): Codex runtime conformance can only
+# be certified on Linux, so Janus's escalation and merge-repair workers run on
+# the cluster akh-platform akhsessd (talos fleet.json key `janus`) instead of
+# the Mac's local one. `config/janus-delegation.json` is the cutover switch
+# (janus_delegation_switch, below); absent it, Janus keeps the local akhsessd
+# path above unchanged.
+JANUS_DELEGATION_FILE = "config/janus-delegation.json"
+JANUS_DELEGATION_KEYS = {"sessions_url", "token_file", "runtime_profile", "projects"}
+
 # Vesta-only direct Grafana MCP server (PR 3 of the step-2 plan): no broker,
 # no auth, loopback-only via the grafana-tunnel LaunchAgent
 # (`kubectl -n observability port-forward … mcp-grafana 18441:80`).
@@ -622,17 +631,127 @@ def sessions_url(session: dict) -> str:
     return f"http://{listen}" if listen else SESSIONS_URL
 
 
-def render_delegation(session: dict, root: Path, projects, role: str = "janus") -> tuple[dict, list[str]]:
+def janus_delegation_switch(root: Path) -> dict | None:
+    """The cutover switch to the cluster akhsessd for Janus's delegation
+    workers (53g PR 7, operator decision 2026-09-27 option a).
+
+    Codex runtime conformance can only be certified on Linux, so Janus's
+    escalation and merge-repair workers run on the cluster akh-platform
+    akhsessd (`https://anima.wegmueller.it/akh`, talos fleet.json key
+    `janus`) instead of the Mac's local one. `config/janus-delegation.json`
+    is written by the operator (see INVENTORY.md "PR 7", cluster variant).
+    Absent file: `None`, and `render_delegation` keeps the local-akhsessd
+    path exactly as before (`config/janus-escalation.json`'s registered
+    projects gated on the local sessions.json worker profiles). A malformed
+    file fails closed with a `RenderError` instead of half-switching Janus
+    between the two akhsessd instances.
+
+    Keys:
+    - `sessions_url`: the http(s) URL of the cluster akhsessd.
+    - `token_file`: absolute path of the akhsessd bearer token for the
+      `janus-delegation` client principal on the cluster side. Must already
+      exist (0600, written by the operator from the cluster's issued
+      token); never read here.
+    - `runtime_profile`: the Codex runtime profile every registered
+      project's cluster worker profile binds (e.g. `astra-impl-4`, the
+      certified gpt-6-astra runtime). The escalation broker fails an
+      incident closed if the session's actual runtime differs
+      (`EscalationError::RuntimeMismatch`), so this must match what the
+      cluster's `session_grants.<profile>.runtime.profile` actually binds.
+    - `projects`: registered project name (a key of
+      config/janus-escalation.json) -> the cluster's workspace profile name
+      for that project's workers (e.g. `janus-worker-akh-medu`). Only
+      projects listed both here and in config/janus-escalation.json are
+      registered for delegation; the rest are reported as warnings.
+    """
+    path = root / JANUS_DELEGATION_FILE
+    if not path.exists():
+        return None
+    try:
+        settings = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise RenderError(f"{path} is not valid JSON ({error}); fix or remove it") from error
+    if not isinstance(settings, dict):
+        raise RenderError(f"{path} must be a JSON object")
+    unknown = sorted(set(settings) - JANUS_DELEGATION_KEYS)
+    if unknown:
+        raise RenderError(f"{path} has unknown keys {unknown}; allowed: {sorted(JANUS_DELEGATION_KEYS)}")
+    url = settings.get("sessions_url")
+    if not isinstance(url, str) or urlparse(url).scheme not in ("http", "https") or not urlparse(url).hostname:
+        raise RenderError(f"{path} needs `sessions_url`: an http(s) URL of the cluster akhsessd")
+    token = settings.get("token_file")
+    if not isinstance(token, str) or not Path(token).is_absolute():
+        raise RenderError(f"{path} needs `token_file`: the absolute path of the cluster akhsessd token "
+                          "for the janus-delegation client principal")
+    if not Path(token).exists():
+        raise RenderError(
+            f"the cluster akhsessd token {token} does not exist; create it (mode 0600) with the "
+            f"janus-delegation principal's token from the cluster side, or remove {JANUS_DELEGATION_FILE} "
+            "to keep Janus on the local akhsessd")
+    runtime_profile = settings.get("runtime_profile")
+    if not isinstance(runtime_profile, str) or not runtime_profile.strip():
+        raise RenderError(f"{path} needs a non-empty `runtime_profile` (the Codex runtime every "
+                          "registered project's cluster worker profile binds)")
+    projects = settings.get("projects")
+    if not isinstance(projects, dict) or not projects:
+        raise RenderError(f"{path} needs a non-empty `projects` map (registered project name -> "
+                          "cluster workspace profile)")
+    for project, profile in projects.items():
+        if (not isinstance(project, str) or not project.strip()
+                or not isinstance(profile, str) or not profile.strip()):
+            raise RenderError(f"{path}: every `projects` entry needs a non-empty project name "
+                              "and a non-empty cluster workspace profile")
+    return {"sessions_url": url, "token_file": token, "runtime_profile": runtime_profile,
+            "projects": dict(projects)}
+
+
+def render_delegation(session: dict, root: Path, projects, role: str = "janus",
+                      cluster: dict | None = None) -> tuple[dict, list[str]]:
     """`[delegation]` for a delegating role (53g PR 7): the native escalation tools.
 
     `projects` are the registered project names (the keys of
-    config/janus-escalation.json). A project is registered for delegation only
-    when akhsessd already has its worker profile (`workspaces.<profile>` and
+    config/janus-escalation.json). Without `cluster`, a project is
+    registered for delegation only when the Mac's local akhsessd already
+    has its worker profile (`workspaces.<profile>` and
     `akhs.<role>.workspace_profiles`); the others are reported as warnings so
     the tools never point at a profile akhsessd would refuse. Without any
     registered project the escalation tools stay disabled.
+
+    `cluster` (the parsed `config/janus-delegation.json`, see
+    `janus_delegation_switch`) switches every registered project onto the
+    cluster akh-platform akhsessd instead: registration then depends only on
+    `cluster["projects"]` (the cluster side is already live, so there is no
+    local sessions.json to check against), and each project's worker profile
+    binds `cluster["runtime_profile"]` rather than `WORKER_RUNTIME_PROFILE`.
     """
     warnings = []
+    if cluster is not None:
+        cluster_projects = cluster["projects"]
+        profiles = {
+            project: Inline(workspace_profile=cluster_projects[project],
+                            runtime_profile=cluster["runtime_profile"])
+            for project in sorted(projects) if project in cluster_projects
+        }
+        missing = sorted(set(projects) - set(cluster_projects))
+        if missing:
+            warnings.append(f"{role}: config/janus-delegation.json has no cluster worker profile for "
+                            f"project(s) {missing}; not registered for delegation")
+        extra = sorted(set(cluster_projects) - set(projects))
+        if extra:
+            warnings.append(f"{role}: config/janus-delegation.json registers project(s) {extra} that "
+                            "are not in config/janus-escalation.json; ignored")
+        enabled = bool(profiles)
+        if not enabled:
+            warnings.append(f"{role}: no project has a cluster worker profile; the escalation tools stay disabled")
+        escalation = {"enabled": enabled, "report_thread": STATUS_THREAD}
+        escalation.update({key: str(root / "skills" / name) for key, name in SKILLS.items()})
+        native = {"enabled": enabled, "service": "akhsessd", "url": cluster["sessions_url"],
+                  "token_file": cluster["token_file"], "workspace_profile": role,
+                  "core_principal": "sessions", "max_new_per_day": MAX_NEW_PER_DAY,
+                  "profiles": profiles, "escalation": escalation}
+        # `enabled = false` keeps the generic `delegate` tool off; the escalation
+        # tools are gated by [delegation.native.escalation] alone.
+        return {"enabled": False, "native": native}, warnings
     granted = set(session.get("akhs", {}).get(role, {}).get("workspace_profiles", []))
     workspaces = session.get("workspaces", {})
     profiles = {}

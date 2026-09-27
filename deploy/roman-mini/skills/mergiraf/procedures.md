@@ -68,11 +68,15 @@ current source and base commits and live session ownership.
 
 ## Report
 
-1. Record the outcome in memory with `memory_write`: work-item ID, PR number,
-   old source and base SHAs, resulting SHA, files resolved, commands and test
-   outcomes, publication evidence, unresolved blockers and the next owner.
-2. When the job names a `report_thread`, post the same report there on the
-   Agent Board as `coordination/status@v1`.
+1. If `memory_write` is among your tools, record the outcome there: work-item
+   ID, PR number, old source and base SHAs, resulting SHA, files resolved,
+   commands and test outcomes, publication evidence, unresolved blockers and
+   the next owner. Without it, your final answer is the record, plus an
+   `anima__post_message` update on the job's Anima thread when that tool is
+   available; Janus reads either through `escalation_status`.
+2. When the job names a `report_thread` and a Board tool is among your tools,
+   post the same report there as `coordination/status@v1`. Without a Board
+   tool, skip this step.
 3. End your final answer with an `akh-result` block:
 
 ```akh-result

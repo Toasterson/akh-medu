@@ -568,6 +568,47 @@ class DelegationTests(unittest.TestCase):
         with self.assertRaises(fa.RenderError):
             fa.tool_renames(session, "janus")
 
+    def cluster(self, **overrides):
+        settings = {"sessions_url": "https://anima.wegmueller.it/akh", "token_file": "/secrets/x.key",
+                    "runtime_profile": "astra-impl-4", "projects": {"anima": "janus-worker-anima"}}
+        settings.update(overrides)
+        return settings
+
+    def test_cluster_switch_registers_only_its_own_projects_and_warns_on_the_rest(self):
+        root = Path("/deploy")
+        rendered, warnings = fa.render_delegation({}, root, ["anima", "reddwarf"], cluster=self.cluster())
+        self.assertEqual(rendered["native"]["url"], "https://anima.wegmueller.it/akh")
+        self.assertEqual(rendered["native"]["token_file"], "/secrets/x.key")
+        self.assertEqual(dict(rendered["native"]["profiles"]["anima"]),
+                         {"workspace_profile": "janus-worker-anima", "runtime_profile": "astra-impl-4"})
+        self.assertEqual(list(rendered["native"]["profiles"]), ["anima"])
+        self.assertTrue(rendered["native"]["enabled"])
+        self.assertTrue(rendered["native"]["escalation"]["enabled"])
+        self.assertFalse(rendered["enabled"], "the generic delegate tool stays off")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("reddwarf", warnings[0])
+
+    def test_cluster_switch_ignores_the_local_sessions_json(self):
+        root = Path("/deploy")
+        # No local akhsessd grants at all: the cluster side is authoritative,
+        # not the Mac's sessions.json, once the switch file is present.
+        rendered, warnings = fa.render_delegation({}, root, ["anima"], cluster=self.cluster())
+        self.assertEqual(list(rendered["native"]["profiles"]), ["anima"])
+        self.assertEqual(warnings, [])
+
+    def test_cluster_switch_warns_on_projects_it_registers_that_are_not_tracked_locally(self):
+        root = Path("/deploy")
+        cluster = self.cluster(projects={"anima": "janus-worker-anima", "stray": "janus-worker-stray"})
+        _, warnings = fa.render_delegation({}, root, ["anima"], cluster=cluster)
+        self.assertTrue(any("stray" in w and "not in config/janus-escalation.json" in w for w in warnings), warnings)
+
+    def test_cluster_switch_disables_when_no_project_matches(self):
+        root = Path("/deploy")
+        rendered, warnings = fa.render_delegation({}, root, ["reddwarf"], cluster=self.cluster())
+        self.assertFalse(rendered["native"]["enabled"])
+        self.assertFalse(rendered["native"]["escalation"]["enabled"])
+        self.assertIn("stay disabled", warnings[-1])
+
 
 @NEEDS_TOMLLIB
 class VestaSandboxTests(unittest.TestCase):
@@ -687,6 +728,136 @@ class VestaSandboxTests(unittest.TestCase):
         (skill / "procedures.md").write_text("  \n")
         with self.assertRaisesRegex(fa.RenderError, "empty"):
             fa.skill_procedures(skill)
+
+
+class JanusDelegationSwitchTests(unittest.TestCase):
+    """53g PR 7 cluster variant: config/janus-delegation.json (operator decision
+    2026-09-27 option a) switches Janus's workers onto the cluster akhsessd."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / "secrets").mkdir()
+        (self.root / "config").mkdir()
+        self.token = self.root / "secrets/sessions-janus-delegation.key"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def write(self, settings):
+        (self.root / fa.JANUS_DELEGATION_FILE).write_text(json.dumps(settings))
+
+    def valid(self, **overrides):
+        settings = {"sessions_url": "https://anima.wegmueller.it/akh", "token_file": str(self.token),
+                    "runtime_profile": "astra-impl-4",
+                    "projects": {"akh-medu": "janus-worker-akh-medu", "anima": "janus-worker-anima"}}
+        settings.update(overrides)
+        return settings
+
+    def test_absent_file_is_none(self):
+        self.assertIsNone(fa.janus_delegation_switch(self.root))
+
+    def test_valid_switch_is_parsed(self):
+        self.token.write_text("t" * 40 + "\n")
+        self.write(self.valid())
+        cluster = fa.janus_delegation_switch(self.root)
+        self.assertEqual(cluster, {
+            "sessions_url": "https://anima.wegmueller.it/akh", "token_file": str(self.token),
+            "runtime_profile": "astra-impl-4",
+            "projects": {"akh-medu": "janus-worker-akh-medu", "anima": "janus-worker-anima"}})
+
+    def test_bad_switch_files_fail_closed(self):
+        self.token.write_text("t" * 40 + "\n")
+        cases = [
+            ({**self.valid(), "sessions_url": "ftp://x"}, "http"),
+            ({k: v for k, v in self.valid().items() if k != "sessions_url"}, "sessions_url"),
+            ({**self.valid(), "token_file": "relative/key"}, "absolute path"),
+            ({**self.valid(), "token_file": str(self.root / "secrets/missing.key")}, "does not exist"),
+            ({**self.valid(), "extra": 1}, "unknown keys"),
+            ({**self.valid(), "runtime_profile": ""}, "runtime_profile"),
+            ({**self.valid(), "runtime_profile": 7}, "runtime_profile"),
+            ({k: v for k, v in self.valid().items() if k != "runtime_profile"}, "runtime_profile"),
+            ({**self.valid(), "projects": {}}, "projects"),
+            ({**self.valid(), "projects": {"x": ""}}, "projects"),
+            ({**self.valid(), "projects": {"": "y"}}, "projects"),
+            ({**self.valid(), "projects": "not-a-dict"}, "projects"),
+        ]
+        for settings, message in cases:
+            self.write(settings)
+            with self.subTest(settings=settings), self.assertRaisesRegex(fa.RenderError, message):
+                fa.janus_delegation_switch(self.root)
+        (self.root / fa.JANUS_DELEGATION_FILE).write_text("[not json")
+        with self.assertRaisesRegex(fa.RenderError, "not valid JSON"):
+            fa.janus_delegation_switch(self.root)
+
+    def test_non_object_fails_closed(self):
+        (self.root / fa.JANUS_DELEGATION_FILE).write_text("[]")
+        with self.assertRaisesRegex(fa.RenderError, "JSON object"):
+            fa.janus_delegation_switch(self.root)
+
+
+@NEEDS_TOMLLIB
+class JanusDelegationClusterRenderTests(unittest.TestCase):
+    """The full render() with config/janus-delegation.json present, absent and malformed."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        fixture(self.root)
+        self.prov = fa.Provenance(commit="c" * 40, short="c" * 12, origin_main="c" * 40, committed_at=0)
+        self.binary = self.root / "bin" / self.prov.binary_name
+        self.binary.write_text("#!/bin/sh\n")
+        self.token = self.root / "secrets/cluster-janus-delegation.key"
+        self.token.write_text("c" * 48 + "\n")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def switch(self, **overrides):
+        settings = {"sessions_url": "https://anima.wegmueller.it/akh", "token_file": str(self.token),
+                    "runtime_profile": "astra-impl-4",
+                    "projects": {"akh-medu": "janus-worker-akh-medu", "Droneworld": "janus-worker-droneworld"}}
+        settings.update(overrides)
+        (self.root / fa.JANUS_DELEGATION_FILE).write_text(json.dumps(settings))
+
+    def render(self):
+        return configure_core.render(self.root, self.prov, self.binary, "0" * 64, source=SOURCE)
+
+    def workspace(self, role):
+        return tomllib.loads((self.root / f"core-config/akh-medu/workspaces/{role}.toml").read_text())
+
+    def test_switch_renders_the_cluster_akhsessd(self):
+        self.switch()
+        self.render()
+        native = self.workspace("janus")["delegation"]["native"]
+        self.assertEqual(native["url"], "https://anima.wegmueller.it/akh")
+        self.assertEqual(native["token_file"], str(self.token))
+        self.assertEqual(native["profiles"]["akh-medu"],
+                         {"workspace_profile": "janus-worker-akh-medu", "runtime_profile": "astra-impl-4"})
+        self.assertEqual(native["profiles"]["Droneworld"],
+                         {"workspace_profile": "janus-worker-droneworld", "runtime_profile": "astra-impl-4"})
+        self.assertTrue(native["enabled"])
+        self.assertTrue(native["escalation"]["enabled"])
+        self.assertEqual(native["escalation"]["escalation_skill"], str(self.root / "skills/astra-escalation"))
+        # The cluster token is the operator's own, already in place; render()
+        # never generates a local one to sit alongside it.
+        self.assertFalse((self.root / fa.DELEGATION_TOKEN).exists())
+
+    def test_without_the_switch_janus_keeps_the_local_akhsessd(self):
+        self.render()
+        native = self.workspace("janus")["delegation"]["native"]
+        self.assertEqual(native["url"], "http://127.0.0.1:18431")
+        self.assertTrue((self.root / fa.DELEGATION_TOKEN).exists())
+
+    def test_malformed_switch_fails_the_whole_render_closed(self):
+        # The switch is read before the per-role loop, so a malformed file
+        # fails before Janus's workspace TOML is (re)written: the fixture's
+        # pre-existing copy is left exactly as it was, never half-switched.
+        before = (self.root / "core-config/akh-medu/workspaces/janus.toml").read_text()
+        (self.root / fa.JANUS_DELEGATION_FILE).write_text("not json")
+        with self.assertRaisesRegex(fa.RenderError, "not valid JSON"):
+            self.render()
+        self.assertEqual((self.root / "core-config/akh-medu/workspaces/janus.toml").read_text(), before)
 
 
 class WakePromptTests(unittest.TestCase):
