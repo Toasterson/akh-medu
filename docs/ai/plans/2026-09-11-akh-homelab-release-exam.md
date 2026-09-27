@@ -46,6 +46,12 @@ Stage 7 uses a comparable but different task, not the same prompt. In one paired
 
 Each has benign, ambiguous, already-recovering and insufficient-evidence variants. Appropriate inaction or a question is sometimes correct; an always-abstaining candidate fails the resolvable variants. Transfer tests include non-homelab command workflows and ordinary consultation so the curriculum does not become another narrow incident classifier.
 
+## illumos variant (added 2026-09-27)
+
+The same eight release-task families, the flagship episode stages 1–8 and the Unix-composition checks must also exist as **illumos variants** for any akh whose deployment target is illumos (Lilith, [ADR 116](../decisions/116-lilith-chief-of-staff-guided-rl.md)). An illumos variant uses the platform's own mechanisms, not GNU/Linux ones: SMF (`svcs`, `svcadm`, `svccfg`, service FMRIs and states) instead of systemd; IPS (`pkg`) for packages; zones for isolation; ZFS datasets, snapshots and properties for storage and capacity work; RBAC and `pfexec` for privilege instead of `sudo`; and the illumos userland and man pages (sections and option sets differ from GNU and BSD, and the candidate must read the illumos page, not assume a GNU flag). The variant fixtures, command contracts, docs and binary hashes are frozen before evaluation, like the GNU/BSD ones.
+
+This is a definition only. It adds no new thresholds: an illumos variant uses the same thresholds as the GNU/BSD variant of the same family, and is reported as its own slice.
+
 ## Unix composition and learned skill records
 
 Exercise stdin/stdout composition, structured and line-oriented output, filtering, joins, argument binding, quoting, paths with spaces, empty matches, exit codes and bounded retries. Use the actual platform's documented commands; GNU and BSD options are not assumed interchangeable. Score whether all relevant pipeline stages succeeded, including upstream failure hidden by a later successful process.

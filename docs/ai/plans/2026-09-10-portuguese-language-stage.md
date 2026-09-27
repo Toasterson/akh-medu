@@ -116,6 +116,20 @@ Compare the exact parent and candidate on the same cases:
 - Retention of English/German/French and the parent's knowledge, tool, and Dojo
   gates; report each language/task slice so an aggregate cannot conceal a loss.
 
+### Proposed basics threshold (Proposed 2026-09-27, freeze before evaluation)
+
+- **PT-BR basics, per family:** the candidate's PT-BR score on each basics
+  family (simple goal/alert, negation and conditions, useful clarification,
+  accepted correction, basic fact store/retrieve, identifier preservation) must
+  be **≥ 0.85 × the same model's EN score on the same family**, on matched cases.
+- **PT-PT:** reported separately per family, **no gate**.
+- The number stays a proposal until the held-out sample sizes and rubrics above
+  are frozen; freeze it together with them, before any evaluation run.
+- **Certifier prerequisite (doc note only):** the ADR 102 certifier and the
+  knowledge sidecar accept only `en`/`de`/`fr` today (`WorkflowLanguage`). The
+  ADR 102 certifier language list must add `pt` before Portuguese can be
+  certified at all; until then PT results are measurements, not certification.
+
 Completion requires a versioned corpus manifest, tokenizer audit, reproducible
 training record, exact checkpoint identity, and passing Portuguese/retention
 evidence. The current deliverable is this plan. It schedules no job and
