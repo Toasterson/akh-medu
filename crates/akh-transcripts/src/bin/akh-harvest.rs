@@ -39,7 +39,7 @@ use akh_transcripts::model::Source;
 
 /// Agent-session transcript harvester (ADR 119).
 #[derive(Debug, Parser)]
-#[command(name = "akh-harvest", about = "Agent-session transcript harvester (ADR 108)")]
+#[command(name = "akh-harvest", about = "Agent-session transcript harvester (ADR 119)")]
 struct Cli {
     /// Run once and exit. This is the only mode this binary has ever had —
     /// the flag exists because the systemd unit already passes it and a

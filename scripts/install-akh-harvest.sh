@@ -29,7 +29,7 @@ install -m 0755 "$BINARY" "$BIN"
 getent hosts harvest-pg.lab.home >/dev/null 2>&1 || dscacheutil -q host -a name harvest-pg.lab.home 2>/dev/null | grep -q ip_address || \
   echo "NOTE: harvest-pg.lab.home does not resolve here — add '192.168.1.60 harvest-pg.lab.home' to /etc/hosts (needs sudo) before the first run."
 cat > "$CFG/harvest.env" <<ENV
-# akh-harvest on $MACHINE — insert-only role over mTLS to harvest-pg (ADR 108).
+# akh-harvest on $MACHINE — insert-only role over mTLS to harvest-pg (ADR 119).
 AKH_TRANSCRIPTS_DATABASE_URL='postgres://harvest_$MACHINE@harvest-pg.lab.home:5432/transcripts?sslmode=verify-full&sslrootcert=$CERTS/ca.crt&sslcert=$CERTS/tls.crt&sslkey=$CERTS/tls.key'
 AKH_TRANSCRIPTS_MACHINE=$MACHINE
 AKH_TRANSCRIPTS_STATE_DIR=$HOME/.local/state/akh-transcripts
@@ -38,7 +38,7 @@ ENV
 case "$OS" in
   Linux)
     U="$HOME/.config/systemd/user"; mkdir -p "$U"
-    printf '[Unit]\nDescription=akh-harvest — push agent-session transcripts to harvest-pg (ADR 108)\n\n[Service]\nType=oneshot\nEnvironmentFile=%%h/.config/akh-transcripts/harvest.env\nExecStart=%%h/.local/bin/akh-harvest --once\nNice=10\n' > "$U/akh-harvest.service"
+    printf '[Unit]\nDescription=akh-harvest — push agent-session transcripts to harvest-pg (ADR 119)\n\n[Service]\nType=oneshot\nEnvironmentFile=%%h/.config/akh-transcripts/harvest.env\nExecStart=%%h/.local/bin/akh-harvest --once\nNice=10\n' > "$U/akh-harvest.service"
     printf '[Unit]\nDescription=Run akh-harvest every %s\n\n[Timer]\nOnBootSec=3min\nOnUnitActiveSec=%s\nRandomizedDelaySec=60\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' "$INTERVAL" "$INTERVAL" > "$U/akh-harvest.timer"
     systemctl --user daemon-reload; systemctl --user enable --now akh-harvest.timer; systemctl --user start akh-harvest.service
     journalctl --user -u akh-harvest.service -n 5 --no-pager -o cat | grep "harvest complete" || true ;;
