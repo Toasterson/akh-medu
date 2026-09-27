@@ -11,8 +11,8 @@
 ## Operator decision (2026-09-27)
 
 Runpod serving exists for **testing** and is limited. After successful H100 tests, **longer runs move
-to the local GPUs**: the RTX 3090 (planned in the hardware plan; confirm host) and the RX 7900 XTX on
-hephaistos. Serving and training capacity on them must be **quantified**, not assumed.
+to the local GPUs**: the RX 7900 XTX on hephaistos now, and the RTX 3090 once it is installed
+(**not installed as of 2026-09-27**; still a planned purchase in the hardware plan). Serving and training capacity on them must be **quantified**, not assumed.
 
 ## 1. Serving policy
 
@@ -55,6 +55,36 @@ Consequences:
   C6 must therefore run with chunked cross-entropy (ADR 109 Cut CE / fused linear CE) and chunked,
   recompute-backward attention for the global layers (the P6.1b approach, ADR 107). The engine's
   existing rank-2 seam avoided both only because it trains a single query projection.
+
+### 2a. Compressed KV (TurboQuant / int8): assumed on the local card
+
+Gemma 4's KV cache is small. The 40 sliding layers are capped at 1,024 tokens (≈ 0.34 GB), and the 8
+global layers carry one KV head with K = V (1 KB per token per layer).
+
+| Context | KV per sequence, bf16 | int8 | ~3.5-bit (TurboQuant-class) |
+|---|---|---|---|
+| 8K | 0.40 GB | 0.20 GB | 0.09 GB |
+| 32K | 0.60 GB | 0.30 GB | 0.13 GB |
+| 128K | 1.41 GB | 0.70 GB | 0.31 GB |
+| 262K (the architectural maximum) | 2.48 GB | 1.24 GB | 0.54 GB |
+
+**Where it matters: parallel rollouts.** Sibling samples for preference contrast and the ADR 116
+single-executor siblings all hold KV at once. At 32K, 16 rollouts take **9.7 GB in bf16, 4.8 GB in
+int8, and about 2.1 GB at 3.5 bits**. On a 24 GB card that already holds the 7.8 GB 4-bit base,
+**compressed KV (int8, or TurboQuant where the runtime supports it) is assumed for local rollouts
+and long-context serving**.
+
+**Where it does not help: backprop.** Full-sequence backpropagation keeps no KV cache. Its memory is
+the checkpointed activations (12.1 GB at 32K), which need offload or activation compression instead.
+This matches ADR 107: TurboQuant is an inference-side tool.
+
+**Exception: the KLPO replay seam.** Token-wise replay reuses the cached KV. If that KV is compressed:
+- **the sampler and the replay must use the identical quantization**, because KLPO needs the
+  sampler's exact log-probabilities;
+- the existing sampler/replay drift gate (≤ 1e-4) is re-run with the compressed cache.
+
+**Measure in C6b:** tok/s and quality parity with bf16, int8 and TurboQuant-class KV. That covers
+the adapter-as-served check and dev-family TOST on rollouts generated with compressed KV.
 
 ## 3. Throughput ceilings (analytic bounds, not forecasts)
 
@@ -124,7 +154,7 @@ doc. Local spend is reported as kWh.
 
 ## 5. Open inputs
 
-- **Is the RTX 3090 installed, and on which host?** The hardware plan lists it as planned. That
-  host's RAM decides whether 32K via activation offload is possible.
+- **RTX 3090: not installed yet (operator, 2026-09-27).** C6b qualifies the 7900 XTX first and the 3090
+  when it arrives. Its host's RAM decides whether 32K via activation offload is possible.
 - **Whether 4-bit QLoRA works on the 7900 XTX (gfx1100).** This decides whether AMD can run
   full-depth LoRA at all, or only the rank-2 seam and serving.
