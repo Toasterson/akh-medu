@@ -47,7 +47,7 @@ use crate::agent::tool_manifest::{
 };
 use crate::agent::tools::shell_exec::render_exec_result;
 use crate::akh_config::{ExecBackendConfig, ExecdSandboxConfigError, SandboxName};
-use crate::backend::execd::{ExecdBackend, ExecdError};
+use crate::backend::execd::{ExecdBackend, ExecdError, PendingAllocations};
 use crate::backend::{Backend, ExecLocus, ExecRequest};
 use crate::engine::Engine;
 use crate::fs::FsError;
@@ -297,8 +297,12 @@ impl SandboxExecTool {
 
     /// The tool for a workspace's `[exec]` table: one entry per
     /// `[[exec.sandboxes]]`, each allocating through [`ExecdBackend::connect`]
-    /// with [`ExecBackendConfig::to_execd_sandbox_config`] (a fresh session
-    /// per connect). Nothing is allocated here.
+    /// with [`ExecBackendConfig::to_execd_sandbox_config`]. `pending` is
+    /// consulted first: a still-pending attempt from an earlier failed
+    /// connect reattaches to the same allocation session instead of minting
+    /// a fresh one (2026-09-27 incident fix; see
+    /// [`crate::backend::execd::PendingAllocations`]). Nothing is allocated
+    /// here — each sandbox connects lazily on first use.
     ///
     /// Returns `Ok(None)` when the executor is not `execd` or configures no
     /// additional sandboxes.
@@ -310,6 +314,7 @@ impl SandboxExecTool {
     pub fn from_execd_config(
         exec: &ExecBackendConfig,
         workspace: &str,
+        pending: Arc<PendingAllocations>,
     ) -> Result<Option<Self>, ExecdSandboxConfigError> {
         exec.validate_execd_sandboxes()?;
         if exec.execd_sandboxes().is_empty() {
@@ -322,8 +327,10 @@ impl SandboxExecTool {
                 let exec = exec.clone();
                 let workspace = workspace.to_owned();
                 let spec = sandbox.clone();
+                let pending = Arc::clone(&pending);
                 let connector: SandboxConnector = Box::new(move || {
-                    let config =
+                    let label = format!("{workspace}-{}", spec.name);
+                    let fresh =
                         exec.to_execd_sandbox_config(&workspace, &spec)
                             .ok_or_else(|| ExecdError::Config {
                                 reason: format!(
@@ -332,7 +339,30 @@ impl SandboxExecTool {
                                     exec.kind_name()
                                 ),
                             })?;
-                    Ok(Arc::new(ExecdBackend::connect(config)?) as Arc<dyn Backend>)
+                    let config = pending.config_for(&label, fresh);
+                    match ExecdBackend::connect(config.clone()) {
+                        Ok(backend) => {
+                            pending.clear(&label);
+                            Ok(Arc::new(backend) as Arc<dyn Backend>)
+                        }
+                        Err(error) => {
+                            // A pure client-side validation failure never
+                            // reached akhsbxd; everything else (a busy
+                            // timeout, a transport hiccup, a definite
+                            // refusal) is worth reattaching to on the next
+                            // call rather than minting — and orphaning —
+                            // another session.
+                            if matches!(
+                                error,
+                                ExecdError::Config { .. } | ExecdError::Credential { .. }
+                            ) {
+                                pending.clear(&label);
+                            } else {
+                                pending.remember(&label, config);
+                            }
+                            Err(error)
+                        }
+                    }
                 });
                 SandboxEntry::new(
                     sandbox.name.clone(),
@@ -912,14 +942,22 @@ principal = "vesta"
         )
         .unwrap();
         assert!(
-            SandboxExecTool::from_execd_config(&primary_only, "vesta")
-                .unwrap()
-                .is_none()
+            SandboxExecTool::from_execd_config(
+                &primary_only,
+                "vesta",
+                Arc::new(PendingAllocations::new())
+            )
+            .unwrap()
+            .is_none()
         );
         assert!(
-            SandboxExecTool::from_execd_config(&ExecBackendConfig::InProcess, "vesta")
-                .unwrap()
-                .is_none()
+            SandboxExecTool::from_execd_config(
+                &ExecBackendConfig::InProcess,
+                "vesta",
+                Arc::new(PendingAllocations::new())
+            )
+            .unwrap()
+            .is_none()
         );
 
         let with_ops: ExecBackendConfig = toml::from_str(
@@ -936,9 +974,13 @@ profile = "vesta-ops"
 "#,
         )
         .unwrap();
-        let tool = SandboxExecTool::from_execd_config(&with_ops, "vesta")
-            .unwrap()
-            .expect("one sandbox configured");
+        let tool = SandboxExecTool::from_execd_config(
+            &with_ops,
+            "vesta",
+            Arc::new(PendingAllocations::new()),
+        )
+        .unwrap()
+        .expect("one sandbox configured");
         assert_eq!(tool.sandboxes().len(), 1);
         assert_eq!(tool.sandboxes()[0].profile(), "vesta-ops");
 
@@ -957,7 +999,11 @@ profile = "vesta-gitops"
         )
         .unwrap();
         assert!(matches!(
-            SandboxExecTool::from_execd_config(&reused, "vesta"),
+            SandboxExecTool::from_execd_config(
+                &reused,
+                "vesta",
+                Arc::new(PendingAllocations::new())
+            ),
             Err(ExecdSandboxConfigError::ProfileIsPrimary { .. })
         ));
     }

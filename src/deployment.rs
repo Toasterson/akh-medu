@@ -289,6 +289,7 @@ mod tests {
             principal: "janus".into(),
             poll_wait_ms: 5_000,
             allow_insecure_http: false,
+            allocate_timeout_secs: 120,
             sandboxes: Vec::new(),
         }
     }
