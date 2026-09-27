@@ -6,7 +6,7 @@
 > Anima: project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, Plan `01a0e1f9-ca71-74a3-9baf-0552f96bf329`; slice WIs are listed in the plan doc
 > Builds on: ADR 040 (procedural skills), ADR 041 (skill intelligence), ADR 091
 > (transcript capture), ADR 105 (run governance), ADR 113 (full akh always),
-> the 2026-09-22 typed-execution and akhpack proposal, Phase 11h chunking
+> [ADR 115](115-typed-execution-and-akhpack-v1.md) (typed execution and akhpack v1), Phase 11h chunking
 > Input: [AgentRun harvest](../research/2026-09-26-agentrun-harvest/README.md)
 
 ## Context
@@ -35,7 +35,8 @@ Two constraints frame the decision:
    near-uniform scores, and the 288-decision replay gave nothing controller
    grade. Routing today comes from structural rules that match machine codes.
 2. **The REPL and package work is proposed, not landed.** Slices A0–A3 of the
-   typed-execution plan have no Anima items yet. The codification loop must be
+   [typed-execution plan](../plans/2026-09-22-typed-execution-and-akhpack-v1.md)
+   are now WI-502–WI-505 under ADR 115; they remain draft. The codification loop must be
    useful before they land and better after.
 
 ## Decision

@@ -5,7 +5,7 @@
 - **ADR:** [114](../decisions/114-knowledge-work-codification.md)
 - **Research:** [AgentRun harvest](../research/2026-09-26-agentrun-harvest/README.md)
 - **Anima:** project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, **Plan `01a0e1f9-ca71-74a3-9baf-0552f96bf329`** (the phase umbrella; workflow Feature Development). Slice work items under the Plan, all draft, `source=architect-session`: 54a `01a0e1fa-173a-7e22-b6d1-40da7a8b1255`, 54b `01a0e1fa-320a-7a72-bde3-210ad96239f3`, 54c `01a0e1fa-80c3-7f40-a76e-38c6cc5a93af`, 54d `01a0e1fa-9ce6-7a02-97d3-8f8effbc74b2`, 54e `01a0e1fa-b8e3-7171-a81c-948a66a1110a`, 54f `01a0e1fa-cce7-7883-97ff-f9f26293c3e9`. (A first set created 2026-09-26 without `plan_id`, plus a mistaken umbrella WI `01a0df4f-5d03`, were cancelled 2026-09-27.)
-- **Depends on:** Phase 11h chunking (live), Phase 30/31 skillpacks (live), Phase 53c/53d/53e (landing), typed-execution slices A1–A3 (proposed, [plan](2026-09-22-typed-execution-and-akhpack-v1.md))
+- **Depends on:** Phase 11h chunking (live), Phase 30/31 skillpacks (live), Phase 53c/53d/53e (landing), typed-execution slices A1–A3 (ADR 115, WI-503–WI-505, [plan](2026-09-22-typed-execution-and-akhpack-v1.md))
 
 ## Goal
 
@@ -44,3 +44,10 @@ tools deliver the cost saving without it.
 - Promote 54a/54b from draft when the 53d reactor admission PR is on main.
 - Set the per-akh codifier budget before 54c is promoted; the default is zero.
 - Choose the two jobs for 54f when 54d is in testing.
+
+## Package prerequisite registration (2026-09-27)
+
+ADR 115 now supplies a native Plan with A0–A9 work items. WI-500 / 54e has hard
+blocks edges to WI-503 / A1, WI-504 / A2 and WI-505 / A3, preserving its existing
+54d dependency. The already documented 53e requirement is also a native hard
+edge to WI-483; its lifecycle is unchanged. See the [typed-execution hierarchy](2026-09-22-typed-execution-and-akhpack-v1.md#native-anima-hierarchy-and-dag). No Phase 54 items were promoted.

@@ -1,8 +1,11 @@
 # Implementation plan: typed execution and akhpack v1
 
-Date: 2026-09-22
-Status: proposed implementation slices; no dispatch, implementation or native test performed.
-Architecture: [typed execution environments and akhpack v1](../2026-09-22-typed-execution-and-akhpack-v1.md).
+Date: 2026-09-22; published 2026-09-27.
+Status: implementation plan registered; all ten items draft, no dispatch or native acceptance claimed.
+Architecture: [ADR 115](../decisions/115-typed-execution-and-akhpack-v1.md).
+Anima: [Akh-Medu Plan](https://anima.wegmueller.it/plans/01a0e25c-390c-7c61-ab5e-0fd7b910ad1f).
+Workflow: Feature Development (`10000000-0000-0000-0000-000000000001`).
+Shared documents: [ADR](https://anima.wegmueller.it/documents/01a0e25c-3924-7271-8a23-be604ed5702a) · [Plan](https://anima.wegmueller.it/documents/01a0e25c-393b-76e1-a65e-2174f7abb29c).
 
 ## Scope and completion
 
@@ -11,9 +14,15 @@ admitted `any`, intent-specific operations, sandbox-local Shen editing, on-deman
 WASM installation, opaque credentials, bounded event/inference workflows and
 read-only packed VFS mounts. Prove the integrated path natively on `oibuild`.
 
-The identifiers below are local plan slice IDs, not Anima work-item codes.
-Reconcile with WI-420/provider ownership, WI-472/output budgets and the existing
-Shen work before creating tracker items. Do not duplicate or take over their work.
+A0–A9 are stable slice names, mapped to native Anima Work Items below. Each item
+belongs to this Plan and the Akh-Medu project, with the Feature Development
+workflow. Related WI-420/provider ownership, WI-472/output budgets and existing
+Shen work remain owned by their current workers.
+
+ADR 113 keeps the full Akh and admission in `akhomed`; all caller effects route
+through `akhsbxd`/`akhexecd`. ADR 114 keeps structural decisions live and learned
+classifiers in shadow. The small discovery surface must never strip the Akh's
+full tool registry or cognition. Deploy only from `origin/main`, with short SHA.
 
 ## Ordered slices and acceptance
 
@@ -25,7 +34,7 @@ Shen work before creating tracker items. Do not duplicate or take over their wor
 | A3: package activation and component bridge | A1, A2 | `akhpack`, REPL loader, WASM runtime/WIT | Resolve/pin/verify/activate transaction, generated TS contracts and runtime codecs, exact WIT compatibility and host imports. Install updates types for the next cell; active cells retain their lock. |
 | A4: sandbox state and switching | A1, A2 | session/executor/sandbox services and shared types | Explicit environment selection, binding-generation fencing, schema-versioned durable state, receipt recovery and output cursors. Switch A→B→A without data or authority leakage; restart without effect replay. |
 | A5: Shen source editing | A1, A4 | `crates/shend` plus sandbox worker and VFS edit adapter | Rust/TS syntax snapshots, node queries, typed structural edits, preview/commit/reparse and diagnostics. Revision conflict and incomplete rename resolution fail explicitly. Crash recovery preserves a declared workspace revision. |
-| A6: credentials, inference and reactions | A3, A4 | host capability broker, inference client, event service | Opaque credential sinks, protected values, schema-checked classifier output and pinned handlers. Prove no plaintext guest exposure, target restrictions, deduplication and bounded reactions. |
+| A6: credentials, inference and reactions | A3, A4 | host capability broker, inference client, akhomed admission and thin event ingress | Opaque credential sinks, protected values, schema-checked shadow classifier output, structural live routing and pinned handlers. Prove no plaintext guest exposure, target restrictions, deduplication and bounded reactions. |
 | A7: typed development/host operations | A0, A4, A5 | repository/bootstrap/publication/snapshot services; diagnostics/build adapters | Replace shell use cases with domain operations. Prove shell-free process descendants for admitted native build jobs; report unsupported toolchains explicitly. |
 | A8: remove shell surfaces and migrate providers | A3–A7 | executor/broker, `src/agent` backends, provider adapters and fixtures | Remove command strings, generic argv, remote-shell paths and provider fallbacks. Conformance rejects clients that retain bypasses. Replace test shell fixtures with native helper binaries. |
 | A9: integrated native release gate | A8 | integration fixtures and native evidence | Complete the scenario and negative matrix below on oibuild at the exact candidate revision. Review/CI and deployment remain separate subsequent gates. |
@@ -55,7 +64,9 @@ release has no compatibility flag restoring shell execution.
 6. Admit an event to a registered handler. Invoke a deterministic inference
    fixture first, then one real configured small model for integration evidence.
    Validate the result schema and trigger one already-authorized state change.
-   Record latency; do not infer classifier quality from this smoke test.
+   Use structural decisions for the live action and retain learned-model output
+   as shadow evidence. Record latency; this smoke test grants no learned dispatch
+   authority and makes no classifier-quality claim.
 7. Switch to sandbox B and demonstrate isolation and differently scoped host
    controls. Return to A and retrieve the retained data without re-ingestion.
 8. Restart the interpreter/executor. Restore explicit durable data and handler
@@ -143,5 +154,61 @@ sets the v1 package limits and trust policy, and approves the concrete type/code
 contracts. It must also resolve which native build workflows can satisfy the
 shell-free rule. General toolchain compatibility is not assumed from AST editing.
 
-No Anima items were created or changed for this document. No runtime tests or
-oibuild tests have been run as part of this architecture-only turn.
+Published to the hierarchy below on 2026-09-27. Items remain draft for operator
+promotion; no implementation, native runtime acceptance or deployment is claimed.
+
+## Native Anima hierarchy and DAG
+
+| Slice | Work Item | Hard prerequisites |
+| --- | --- | --- |
+| A0 | [WI-502](https://anima.wegmueller.it/work-items/01a0e25d-8308-7453-a7b8-4829025e925d) | none |
+| A1 | [WI-503](https://anima.wegmueller.it/work-items/01a0e25d-835a-7530-8d64-882d1ec22277) | A0 / WI-502 |
+| A2 | [WI-504](https://anima.wegmueller.it/work-items/01a0e25d-83b3-7681-984c-6a5c6381a591) | A0 / WI-502 |
+| A3 | [WI-505](https://anima.wegmueller.it/work-items/01a0e25d-83fc-7513-8434-a1b4452d9b19) | A1 / WI-503, A2 / WI-504 |
+| A4 | [WI-506](https://anima.wegmueller.it/work-items/01a0e25d-844d-78f1-88a6-9d914a4e8037) | A1 / WI-503, A2 / WI-504 |
+| A5 | [WI-507](https://anima.wegmueller.it/work-items/01a0e25d-8495-7a80-918f-6bd15ae97066) | A1 / WI-503, A4 / WI-506 |
+| A6 | [WI-508](https://anima.wegmueller.it/work-items/01a0e25d-84df-7083-b27d-a55f14922728) | A3 / WI-505, A4 / WI-506 |
+| A7 | [WI-509](https://anima.wegmueller.it/work-items/01a0e25d-8519-76d2-86ee-21c205e84c16) | A0 / WI-502, A4 / WI-506, A5 / WI-507 |
+| A8 | [WI-510](https://anima.wegmueller.it/work-items/01a0e25d-855c-79e1-ad0b-40bc8c6e7b54) | A3 / WI-505, A4 / WI-506, A5 / WI-507, A6 / WI-508, A7 / WI-509 |
+| A9 | [WI-511](https://anima.wegmueller.it/work-items/01a0e25d-85d7-7123-a277-6c4e04731f7a) | A8 / WI-510 |
+
+```mermaid
+flowchart TD
+    A0["A0 · WI-502"]
+    A1["A1 · WI-503"]
+    A2["A2 · WI-504"]
+    A3["A3 · WI-505"]
+    A4["A4 · WI-506"]
+    A5["A5 · WI-507"]
+    A6["A6 · WI-508"]
+    A7["A7 · WI-509"]
+    A8["A8 · WI-510"]
+    A9["A9 · WI-511"]
+    A0 --> A1
+    A0 --> A2
+    A1 --> A3
+    A2 --> A3
+    A1 --> A4
+    A2 --> A4
+    A1 --> A5
+    A4 --> A5
+    A3 --> A6
+    A4 --> A6
+    A0 --> A7
+    A4 --> A7
+    A5 --> A7
+    A3 --> A8
+    A4 --> A8
+    A5 --> A8
+    A6 --> A8
+    A7 --> A8
+    A8 --> A9
+    A1 --> C["54e · WI-500"]
+    A2 --> C
+    A3 --> C
+    G["53e · WI-483"] --> C
+```
+
+There are 19 internal hard edges. The existing [54e / WI-500](https://anima.wegmueller.it/work-items/01a0e1fa-b8e3-7171-a81c-948a66a1110a) additionally has hard edges to A1, A2 and A3; its existing 54d dependency is preserved. Its existing 53e requirement is now also a native hard edge to WI-483; that prerequisite retains its real lifecycle state and must be satisfied before dispatch. [Machine-readable mapping](2026-09-27-adr115-tracker.json).
+
+A0 is the only root. Operator promotion starts the existing implementation workflow; publication does not promote or dispatch these items.

@@ -1,5 +1,12 @@
 # Akh-medu Architecture
 
+> 2026-09-27 — **ADR 115 accepted for implementation planning**:
+> [typed execution environments and akhpack v1](decisions/115-typed-execution-and-akhpack-v1.md),
+> [A0–A9 implementation DAG](plans/2026-09-22-typed-execution-and-akhpack-v1.md).
+> No-any TypeScript, shell removal, Shen editing, packed VFS and native oibuild
+> acceptance. Preserves ADR 113 full-Akh ownership and ADR 114 structural live /
+> learned shadow decisions. This is a planned capability, not a runtime release.
+
 > Last updated: 2026-09-26 (**53g PR 8** — Vesta's side effects move into
 > execd sandboxes; see "Core Service, Autonomy and Delegation" below).
 >
