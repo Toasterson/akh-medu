@@ -1,0 +1,20 @@
+{
+  "device": "hip",
+  "exit_code": 0,
+  "seconds": 22.625140576998092,
+  "command": [
+    "target/release/examples/candle_session_probe",
+    "--model",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+    "--tokenizer",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+    "--tokens",
+    "64",
+    "--prompt",
+    "<|turn>user\nSay hello in one short sentence.<turn|>\n<|turn>model\n",
+    "--device",
+    "hip",
+    "--hidden-dump",
+    "training/lilith/vulkan-20260921/fixed/hip.f32"
+  ]
+}

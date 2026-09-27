@@ -1,0 +1,326 @@
+{
+  "id": "unsloth/gemma-4-12b-it-GGUF",
+  "sha": "fc034cfff751157913579611efad8462ac1be606",
+  "lastModified": "2026-07-17T12:52:56.000Z",
+  "cardData": {
+    "license": "apache-2.0",
+    "license_link": "https://ai.google.dev/gemma/docs/gemma_4_license",
+    "pipeline_tag": "image-text-to-text",
+    "base_model": "google/gemma-4-12B-it",
+    "tags": [
+      "gemma4",
+      "unsloth",
+      "gemma",
+      "google",
+      "gemma4_unified"
+    ]
+  },
+  "siblings": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "7987fb22bc9ee6c8a6fe5a43258d13066ef8a4d4",
+      "size": 4296
+    },
+    {
+      "rfilename": "MTP/README.md",
+      "blobId": "d04eeb5e31b9996f979a1faa5156fbdd1f8625bc",
+      "size": 2098
+    },
+    {
+      "rfilename": "MTP/mtp-gemma-4-12b-it-BF16.gguf",
+      "blobId": "c892469b418e843ae6165ceec9d63e91d003c876",
+      "size": 861520128,
+      "lfs": {
+        "sha256": "20b0e5caf9152e816a56f92c702528bffc7a7c930f20c33cf6616ac216998037",
+        "size": 861520128,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "MTP/mtp-gemma-4-12b-it-F16.gguf",
+      "blobId": "cd72865030c48912c010cf22b4f38709d1f95784",
+      "size": 861520128,
+      "lfs": {
+        "sha256": "ee0987dd6c29dae4c183713f5614814808f284c28f11c739d3ba075e73332ccf",
+        "size": 861520128,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "MTP/mtp-gemma-4-12b-it-Q8_0.gguf",
+      "blobId": "354fa6ecd29b6348269c6e685c632e70deefb2a9",
+      "size": 465109248,
+      "lfs": {
+        "sha256": "145db9094bc0f85f1701e255a2ed216dcc9800fc8bc8631ad00905b456bd451b",
+        "size": 465109248,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "3b275b7a6957ac97aa4f5146652ab850ed212e5f",
+      "size": 31650
+    },
+    {
+      "rfilename": "gemma-4-12b-it-BF16.gguf",
+      "blobId": "f9d09fe235400d0b140de1a04d56798d6950cb0c",
+      "size": 23832066656,
+      "lfs": {
+        "sha256": "5a5eefea73350705c6753105b725a51301d653e8d6646173db29a7e8da8e6efd",
+        "size": 23832066656,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-IQ4_NL.gguf",
+      "blobId": "60ae976ee0ff9e9919c5fdfe6f38fba4c2ebefdb",
+      "size": 6716357440,
+      "lfs": {
+        "sha256": "cc9aaaa7b03ccec47f4451de0e4bc569c176dbd630e790041c0a641a07f5854e",
+        "size": 6716357440,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-IQ4_XS.gguf",
+      "blobId": "eafec85e5ea2bd24289a350189c945b4cf620395",
+      "size": 6375734080,
+      "lfs": {
+        "sha256": "b0037d0e0de0290177045ca214b2a0fb1079d18bde57842b3ca32f5b0cd76774",
+        "size": 6375734080,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q3_K_M.gguf",
+      "blobId": "c0a1646c7cd6d9e915dbb5f6775ae0d6e678ad0a",
+      "size": 5693872960,
+      "lfs": {
+        "sha256": "dbf58f4c413b82b27106867eb42f7087e4172a172f6f201e2e11598a6582e504",
+        "size": 5693872960,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q3_K_S.gguf",
+      "blobId": "6fe13a5b3e50f5375cf8da102f4da0e4c1901df4",
+      "size": 5135014720,
+      "lfs": {
+        "sha256": "564b1d460efbac33bbd3d16626a1fe484ba648c20d48db1a85a6b97d1d563cd7",
+        "size": 5135014720,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q4_0.gguf",
+      "blobId": "dd3283b31c476730ea64731ce53be8019a5d7f8a",
+      "size": 6738475840,
+      "lfs": {
+        "sha256": "7cef807d864aed1cbb9b93623df3724bb5d19a943fca01c56146dda78004233a",
+        "size": 6738475840,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q4_1.gguf",
+      "blobId": "4b1b1912bccc4b4b1a593fe16b57fd7ca343d440",
+      "size": 7397604160,
+      "lfs": {
+        "sha256": "0198376132defdb9597974b1911c7363792ae5d2ca9e85c1889e0e2b66774d81",
+        "size": 7397604160,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q4_K_M.gguf",
+      "blobId": "8e8764be282692a1d62bc76c6486021857385b9e",
+      "size": 7121861440,
+      "lfs": {
+        "sha256": "0a270ec9fe6b34f4a0d33992b6135117b484ebc4766ab76b51d4ae8c457e4c42",
+        "size": 7121861440,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q4_K_S.gguf",
+      "blobId": "874e4321aae222bf4440b387a8a02455dd3c00c4",
+      "size": 6764526400,
+      "lfs": {
+        "sha256": "8bfbcccb50049e670dcc55ba1aabf7e79c65c06eea96e42a0689baf7503aa81f",
+        "size": 6764526400,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q5_K_M.gguf",
+      "blobId": "eb620ba916dbbfdbe082074eae687eea093c2745",
+      "size": 8413576000,
+      "lfs": {
+        "sha256": "32c554c7d1338a23837ae39b3db482213a4a642f96df3b2619f516a2375d16cd",
+        "size": 8413576000,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q5_K_S.gguf",
+      "blobId": "001f58be386603de734f985ee76036745ac76428",
+      "size": 8204680000,
+      "lfs": {
+        "sha256": "e46322136b87c83cc2c49f499db64fc2b5fb4a717e1f9ffa54039f85d4958a3a",
+        "size": 8204680000,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q6_K.gguf",
+      "blobId": "7e6467741f898d5b7276025de71773d6821d71fe",
+      "size": 9786022720,
+      "lfs": {
+        "sha256": "6f394336500bb5409bd68c31aa9d75097b5e6104f6cf30c82a09a7b64df41faf",
+        "size": 9786022720,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-Q8_0.gguf",
+      "blobId": "4d3fa2b55965abd3e9cf3a2b7ef5b93269178d7a",
+      "size": 12669647680,
+      "lfs": {
+        "sha256": "f20e7ff1be28c283eeeb18fc895733791c56a5851d5cd3fe9691b7f7d12afa72",
+        "size": 12669647680,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-IQ2_M.gguf",
+      "blobId": "eea1a6690a14f182c7f560528ead1e9b6ff2560d",
+      "size": 4213353280,
+      "lfs": {
+        "sha256": "4bd2461d35398dbcf5f3d5f0c9ad91cac78ae35b556e3a81f315a0cc0815ae8c",
+        "size": 4213353280,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-IQ3_XXS.gguf",
+      "blobId": "4aa84b116378d5caad3a293604a8798521832c17",
+      "size": 4639716160,
+      "lfs": {
+        "sha256": "0cf13ac91a6c1b1aaaeae633181c75af0f1fa3da1a89abf2086038e105c789f0",
+        "size": 4639716160,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-Q2_K_XL.gguf",
+      "blobId": "1704d2b3749299db5e36341712f25234d04529cf",
+      "size": 4661419840,
+      "lfs": {
+        "sha256": "aa6e1ccf5cd1c5340c4786f0bda2478181327f14aba2359e51e455d02c90bff3",
+        "size": 4661419840,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-Q3_K_XL.gguf",
+      "blobId": "7ba07605464f07793b0177b4e0c3e003125c45f9",
+      "size": 6022684480,
+      "lfs": {
+        "sha256": "30adc491834f9e57625331b5ae2a51d59a817458d6d9406eca4fd71ff88b9295",
+        "size": 6022684480,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-Q4_K_XL.gguf",
+      "blobId": "998a3fc6639154edc4b12e48a7a177338259049a",
+      "size": 7366423360,
+      "lfs": {
+        "sha256": "90fd944d227e9d9b68e7e2c7d5b57b79d4c66ed521b0919fbbd932cf834f6f8e",
+        "size": 7366423360,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-Q5_K_XL.gguf",
+      "blobId": "11b4e3dac132b9f9c9c65eb03bc9b9120dcc3528",
+      "size": 8606021440,
+      "lfs": {
+        "sha256": "d9d55dbb17c73cf274cc1e701a1564a5b35ec03ffde474e7c6c93c3562d8d825",
+        "size": 8606021440,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-Q6_K_XL.gguf",
+      "blobId": "9a65003ea636b5d13de2800044c6669928b0d0e4",
+      "size": 10685012800,
+      "lfs": {
+        "sha256": "70d04059c74be85c5e709921f05acac412b8b8f24f3ee7dd07e91ddc5f4d4de8",
+        "size": 10685012800,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "gemma-4-12b-it-UD-Q8_K_XL.gguf",
+      "blobId": "461220597cb269bbc31b5e64ca09871e47fac9ba",
+      "size": 13637327680,
+      "lfs": {
+        "sha256": "a6ba22cbee602e69cb27c88bc73768db0ee4bda60831898e6db8cb1856e4162a",
+        "size": 13637327680,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "imatrix_unsloth.gguf_file",
+      "blobId": "f0646ff3e8e36a16dddd5105f5754e4ffba846fa",
+      "size": 7480640,
+      "lfs": {
+        "sha256": "1d5c0a0d890fb1dec63ae7ace1d315a8ccef0788395ed4914a14f768fcb2911b",
+        "size": 7480640,
+        "pointerSize": 132
+      }
+    },
+    {
+      "rfilename": "mmproj-BF16.gguf",
+      "blobId": "4952ac7d3fe2c338bf1501f4644c5cc1b44eaa98",
+      "size": 175115840,
+      "lfs": {
+        "sha256": "2e269f906eb15169ee9ce880ea649bd6d42d4964c21f8ede10d0d0efc738bcbb",
+        "size": 175115840,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "mmproj-F16.gguf",
+      "blobId": "f9b5d2adf5d00cfcaed5e2a4a265905b606fd6d2",
+      "size": 175115840,
+      "lfs": {
+        "sha256": "91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e",
+        "size": 175115840,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "mmproj-F32.gguf",
+      "blobId": "e1a9b0b5f49ea5e644fa7807ced368007ab156d3",
+      "size": 209522240,
+      "lfs": {
+        "sha256": "630307d3d5e036d40d16e7c6252a2095efdf396d4168ad0cc85a752e0c21ce6e",
+        "size": 209522240,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "mtp-gemma-4-12b-it.gguf",
+      "blobId": "354fa6ecd29b6348269c6e685c632e70deefb2a9",
+      "size": 465109248,
+      "lfs": {
+        "sha256": "145db9094bc0f85f1701e255a2ed216dcc9800fc8bc8631ad00905b456bd451b",
+        "size": 465109248,
+        "pointerSize": 134
+      }
+    }
+  ],
+  "config": {}
+}

@@ -1,0 +1,354 @@
+{
+  "schema": "lilith/rl-tasks@2",
+  "reward_contract": "binary semantic correctness of extracted artifact; formatting_compliant is recorded but not rewarded",
+  "tasks": [
+    {
+      "id": "signed-clamp/2",
+      "family": "bounded_normalization",
+      "split": "train",
+      "prompt": "Inputs are arbitrary integers. Return a clamped to the inclusive interval from -b to b; return -1 if b is outside 0..255. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "c15b7f71c80b11457757e6e5031d179a233d18b36b9d3f4abeec57f574f7da51",
+      "source_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10",
+      "cases_sha256": "2f82a8f4635e49906da1e106c5a9763a6ebed7906cfd2a32e320935cb76ece38",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 496,
+        "total_cases": 496,
+        "generated_text_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10",
+        "artifact_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            -1025,
+            -1
+          ],
+          "expected": -1,
+          "actual": 1
+        },
+        "cases": 1,
+        "total_cases": 496,
+        "generated_text_sha256": "fcf3aa03ba62ec476926cba6cbb2dbd61a3375dbda2bd5c33e36e044d4266592",
+        "artifact_sha256": "fcf3aa03ba62ec476926cba6cbb2dbd61a3375dbda2bd5c33e36e044d4266592",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      }
+    },
+    {
+      "id": "bounded-add/2",
+      "family": "bounded_normalization",
+      "split": "train",
+      "prompt": "Inputs are arbitrary integers. If a or b is outside -128..127, return -1. Otherwise return their sum clamped to -128..127. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "e4f0e1010bc53e49d8d8a22494bc0d05f9503ca86ae7f971081b30672ec6df08",
+      "source_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681",
+      "cases_sha256": "950f87a01b3b54a1c16d2e09da223a04cda3ae9a907067b237443b23c0720cb5",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 961,
+        "total_cases": 961,
+        "generated_text_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681",
+        "artifact_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            -1025,
+            -1025
+          ],
+          "expected": -1,
+          "actual": -2050
+        },
+        "cases": 1,
+        "total_cases": 961,
+        "generated_text_sha256": "de024fce1fa7157e24667a378bbde60732147302fe5301fbc55130e22f18f5c6",
+        "artifact_sha256": "de024fce1fa7157e24667a378bbde60732147302fe5301fbc55130e22f18f5c6",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      }
+    },
+    {
+      "id": "align-up-power2/2",
+      "family": "alignment",
+      "split": "train",
+      "prompt": "Inputs are arbitrary integers. Return the smallest multiple of b greater than or equal to a. Return -1 unless 0 <= a <= 65535 and b is one of 1,2,4,8,16,32,64. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "ee426b1f2988ded7dc8141816f53c57818a13ac8cdff1103256017846fa6c8c4",
+      "source_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616",
+      "cases_sha256": "4e7cf6b50a5361c889967908901705f214d8e20dbed9c0396ce00f700bae2f30",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 374,
+        "total_cases": 374,
+        "generated_text_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616",
+        "artifact_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "division_by_zero",
+        "counterexample": {
+          "inputs": [
+            -1025,
+            0
+          ],
+          "expected": -1
+        },
+        "cases": 1,
+        "total_cases": 374,
+        "generated_text_sha256": "464613f3e1fa93d4f062a503ba57de769049081993bce6278678909387e355a1",
+        "artifact_sha256": "464613f3e1fa93d4f062a503ba57de769049081993bce6278678909387e355a1",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      }
+    },
+    {
+      "id": "aligned-offset-valid/2",
+      "family": "alignment",
+      "split": "train",
+      "prompt": "Inputs are arbitrary integers. Return bool indicating that a is in 0..65535, b is one of 1,2,4,8,16,32,64, and a is aligned to b. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "0b05fe6a01ea42c9daf3f4addf61a15f3b580cda71b7e84fcadfe07d78ad23e7",
+      "source_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4",
+      "cases_sha256": "9aaeae3d40cb5dd0df3137f75df9f09cb4274aa557a0196ba98c55642bae595f",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 363,
+        "total_cases": 363,
+        "generated_text_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4",
+        "artifact_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "division_by_zero",
+        "counterexample": {
+          "inputs": [
+            -1025,
+            0
+          ],
+          "expected": false
+        },
+        "cases": 1,
+        "total_cases": 363,
+        "generated_text_sha256": "deedcab359d01c654c7c4fedf74117e5a3307501297da2588312db4b92b2796d",
+        "artifact_sha256": "deedcab359d01c654c7c4fedf74117e5a3307501297da2588312db4b92b2796d",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      }
+    },
+    {
+      "id": "signed-field-extract/2",
+      "family": "packed_fields",
+      "split": "development_holdout",
+      "prompt": "Input a is an arbitrary integer and b is a field width. Return -1 unless 0 <= a <= 65535 and 1 <= b <= 8. Otherwise interpret the low b bits of a as a signed two-complement integer. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "d0129b6d8432fff1eee054d230e6871fa6c490083a33a41fa12257f765d18956",
+      "source_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676",
+      "cases_sha256": "e94f8117d49f9a667ffd8dae04504f5a4e003d6092b04a4f76ccbad7d0b6f4f0",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 350,
+        "total_cases": 350,
+        "generated_text_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676",
+        "artifact_sha256": "b61930c9e3b60a088eafbe72c77cea54bdc869df6d0760bc66b272d082172676",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            -1025,
+            0
+          ],
+          "expected": -1,
+          "actual": 0
+        },
+        "cases": 1,
+        "total_cases": 350,
+        "generated_text_sha256": "53d6a90b17ba4886e057396f2cce16e8b33f15a79528830c3ff72fda3d3d9763",
+        "artifact_sha256": "53d6a90b17ba4886e057396f2cce16e8b33f15a79528830c3ff72fda3d3d9763",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      }
+    },
+    {
+      "id": "field-fits-unsigned/2",
+      "family": "packed_fields",
+      "split": "development_holdout",
+      "prompt": "Inputs are arbitrary integers. Return bool indicating that a fits in an unsigned field of width b, where b must be 1..16. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "58b5666dfd62c3dd48bb534daad77260e05b6c7cc6d8f208e2e372a7df851a0c",
+      "source_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a",
+      "cases_sha256": "4c88f9b2df8f0d27c58ad7e478d8ba7d6b4e184273d9bb39ca83d2f1b974e060",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 630,
+        "total_cases": 630,
+        "generated_text_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a",
+        "artifact_sha256": "a926f603fc3cb2b0163419d7fec19d8a5401515e8f97850636e4db3c40caa71a",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            0,
+            0
+          ],
+          "expected": false,
+          "actual": true
+        },
+        "cases": 271,
+        "total_cases": 630,
+        "generated_text_sha256": "6bbb41c26050c7b3353eace8748f32c5c2e0e06699d6a20d59cf76d1c92d271b",
+        "artifact_sha256": "6bbb41c26050c7b3353eace8748f32c5c2e0e06699d6a20d59cf76d1c92d271b",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      }
+    },
+    {
+      "id": "window-end/2",
+      "family": "range_windows",
+      "split": "development_holdout",
+      "prompt": "Inputs are arbitrary integers. a is a start offset and b is a length. Return the inclusive end offset, or -1 unless 0 <= a <= 65535, 1 <= b <= 256, and the end is at most 65535. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "7e273c593c613916fa0d77453c5643c50dbaf170d1e78d98da08a5f9fc1ada9f",
+      "source_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20",
+      "cases_sha256": "8e542b5fabd42124c57dcbf35513f3054843e8ab4d09fd8cae0214dea9720ccf",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 578,
+        "total_cases": 578,
+        "generated_text_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20",
+        "artifact_sha256": "aff2fd0437e65ee9e7cca96b698a424c22479bd5f4dde52726758eea0fbd7d20",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            -1025,
+            -1
+          ],
+          "expected": -1,
+          "actual": -1026
+        },
+        "cases": 1,
+        "total_cases": 578,
+        "generated_text_sha256": "de024fce1fa7157e24667a378bbde60732147302fe5301fbc55130e22f18f5c6",
+        "artifact_sha256": "de024fce1fa7157e24667a378bbde60732147302fe5301fbc55130e22f18f5c6",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      }
+    },
+    {
+      "id": "windows-overlap/2",
+      "family": "range_windows",
+      "split": "development_holdout",
+      "prompt": "Inputs a and b are packed windows: high byte is start and low byte is positive length. Return bool indicating whether the two half-open windows overlap. Return False if either low byte is zero. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "prompt_sha256": "84090311197c900ff8ee3f12ef36b85068cb5526bca8de3dfd6aa21ea89d341c",
+      "source_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7",
+      "cases_sha256": "f6f3e06e4f4c2fb0931ba8b18d81ce07c632f1fdeac836078624dc376fadab12",
+      "reference_receipt": {
+        "passed": true,
+        "category": "passed",
+        "counterexample": null,
+        "cases": 121,
+        "total_cases": 121,
+        "generated_text_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7",
+        "artifact_sha256": "b525ef704af5fed13bf72fdfbc68715750ea676be2c93c0282492a5ebd0964a7",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      },
+      "negative_control_receipt": {
+        "passed": false,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "inputs": [
+            0,
+            0
+          ],
+          "expected": false,
+          "actual": true
+        },
+        "cases": 1,
+        "total_cases": 121,
+        "generated_text_sha256": "17380ecd706b4f2528f939b32d86e8f3753c0cd5464f1ccab92ca6e065223928",
+        "artifact_sha256": "17380ecd706b4f2528f939b32d86e8f3753c0cd5464f1ccab92ca6e065223928",
+        "presentation": "raw_source",
+        "formatting_compliant": true
+      }
+    }
+  ],
+  "training_targets": [
+    {
+      "id": "signed-clamp/2",
+      "family": "bounded_normalization",
+      "input": "Inputs are arbitrary integers. Return a clamped to the inclusive interval from -b to b; return -1 if b is outside 0..255. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "output": "def f(a, b):\n    if not 0 <= b <= 255:\n        return -1\n    if a < -b:\n        return -b\n    if a > b:\n        return b\n    return a\n",
+      "source_sha256": "37a193287f6d239b981f3c697fe7995d545c42c443e5b28d6da2ad0f7518ec10",
+      "origin": "assistant_authored_reference",
+      "teacher_model": null
+    },
+    {
+      "id": "bounded-add/2",
+      "family": "bounded_normalization",
+      "input": "Inputs are arbitrary integers. If a or b is outside -128..127, return -1. Otherwise return their sum clamped to -128..127. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "output": "def f(a, b):\n    if not (-128 <= a <= 127 and -128 <= b <= 127):\n        return -1\n    if a + b < -128:\n        return -128\n    if a + b > 127:\n        return 127\n    return a + b\n",
+      "source_sha256": "2327cfd78547ea933505f9aeabe649a64aeccbdfd23688d160b229c85c4a2681",
+      "origin": "assistant_authored_reference",
+      "teacher_model": null
+    },
+    {
+      "id": "align-up-power2/2",
+      "family": "alignment",
+      "input": "Inputs are arbitrary integers. Return the smallest multiple of b greater than or equal to a. Return -1 unless 0 <= a <= 65535 and b is one of 1,2,4,8,16,32,64. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "output": "def f(a, b):\n    if not (0 <= a <= 65535 and 1 <= b <= 64 and b & (b - 1) == 0):\n        return -1\n    return (a + b - 1) // b * b\n",
+      "source_sha256": "3925355c88fc438bfbdae3b1103858e4c2bc057c9ea890ad403463f2b8ddf616",
+      "origin": "assistant_authored_reference",
+      "teacher_model": null
+    },
+    {
+      "id": "aligned-offset-valid/2",
+      "family": "alignment",
+      "input": "Inputs are arbitrary integers. Return bool indicating that a is in 0..65535, b is one of 1,2,4,8,16,32,64, and a is aligned to b. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63.",
+      "output": "def f(a, b):\n    return 0 <= a <= 65535 and 1 <= b <= 64 and b & (b - 1) == 0 and a % b == 0\n",
+      "source_sha256": "fc4856c9247a6a74c8bb88a0834ca36098daa7df1f78fb16364f9117934ebfb4",
+      "origin": "assistant_authored_reference",
+      "teacher_model": null
+    }
+  ],
+  "verifier_sha256": "ca7d125daf1448b0890b8d6f97f2c85773c1400edd51659769a0578d51c9664c",
+  "interpreter_sha256": "e038d465c0d4d9d04e97b1b01abea0916ad99ab48d2ac86f11f48ac21bf94a0f",
+  "limitations": [
+    "public development holdout; frozen before model generation",
+    "finite cases are not proofs",
+    "assistant-authored references",
+    "Python only; no native illumos validation"
+  ]
+}

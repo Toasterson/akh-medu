@@ -104,6 +104,36 @@ pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result
         #[cfg(feature = "candle-runtime")]
         native::validate_device(&native.device)?;
     }
+    if let Some(worker) = &profile.training_worker {
+        let valid_hash =
+            |hash: &str| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+        if worker.model.trim().is_empty()
+            || profile.isolation.is_none()
+            || request.binding.model.as_deref() != Some(worker.model.as_str())
+            || !worker.executable.is_absolute()
+            || !worker.worker_config_path.is_absolute()
+            || !valid_hash(&worker.executable_sha256)
+            || !valid_hash(&worker.worker_config_sha256)
+            || worker.script.is_some() != worker.script_sha256.is_some()
+            || worker
+                .script
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute())
+            || worker
+                .script_sha256
+                .as_deref()
+                .is_some_and(|hash| !valid_hash(hash))
+            || worker.max_context_tokens == 0
+            || worker.max_context_tokens > 262_144
+            || worker.max_output_tokens as usize >= worker.max_context_tokens
+            || worker.max_tool_calls == 0
+            || worker.max_tool_calls > 65_536
+        {
+            return Err(Fault::invalid(
+                "training worker requires absolute SHA256-pinned artifacts, matching model, and bounded context/tool limits",
+            ));
+        }
+    }
     if profile.kind != RuntimeKind::Internal
         || profile.execution_mode() != ExecutionMode::Brokered
         || profile.timeout_secs == 0
@@ -131,11 +161,16 @@ pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result
 }
 
 fn limits(profile: &ProviderConfig) -> Result<(u32, u32)> {
-    match (&profile.model_endpoint, &profile.native_candle) {
-        (Some(e), None) => Ok((e.max_iterations, e.max_output_tokens)),
-        (None, Some(n)) => Ok((n.max_iterations, n.max_output_tokens)),
+    match (
+        &profile.model_endpoint,
+        &profile.native_candle,
+        &profile.training_worker,
+    ) {
+        (Some(e), None, None) => Ok((e.max_iterations, e.max_output_tokens)),
+        (None, Some(n), None) => Ok((n.max_iterations, n.max_output_tokens)),
+        (None, None, Some(worker)) => Ok((worker.max_iterations, worker.max_output_tokens)),
         _ => Err(Fault::invalid(
-            "internal runtime requires exactly one model_endpoint or native_candle",
+            "internal runtime requires exactly one model_endpoint, native_candle, or training_worker",
         )),
     }
 }
@@ -157,6 +192,21 @@ pub(crate) fn run_loop(
     cancel: &AtomicBool,
 ) -> Result<String> {
     validate(profile, request)?;
+    if profile.training_worker.is_some() {
+        return akh_runtime::run_training_worker(profile, request, host, cancel).map_err(|error| {
+            match error {
+                akh_runtime::TrainingWorkerError::Boundary(message) => {
+                    Fault::new("model_incomplete", message)
+                }
+                akh_runtime::TrainingWorkerError::UnknownOutcome(message) => {
+                    Fault::new("unknown_outcome", message)
+                }
+                akh_runtime::TrainingWorkerError::Cancelled(message) => {
+                    Fault::new("model_cancelled", message)
+                }
+            }
+        });
+    }
     let (max_iterations, max_output_tokens) = limits(profile)?;
     let id = request
         .provider_session
@@ -1042,6 +1092,65 @@ mod tests {
                 .unwrap_err()
                 .message
                 .contains("exactly one")
+        );
+    }
+    #[test]
+    fn training_worker_configuration_is_pinned_bounded_and_exclusive() {
+        let (mut profile, request) = fixture(
+            "https://model.example/v1/chat/completions",
+            std::path::Path::new("/tmp"),
+        );
+        profile.model_endpoint = None;
+        profile.training_worker = Some(TrainingWorker {
+            executable: "/runtime/python".into(),
+            executable_sha256: "0".repeat(64),
+            script: Some("/runtime/worker.py".into()),
+            script_sha256: Some("1".repeat(64)),
+            worker_config_path: "/runtime/worker.json".into(),
+            worker_config_sha256: "2".repeat(64),
+            model: "fixture".into(),
+            max_iterations: 8,
+            max_context_tokens: 262_144,
+            max_output_tokens: 65_536,
+            max_tool_calls: 8,
+        });
+        profile.isolation = Some(RuntimeIsolation {
+            directory: "/runtime/isolation".into(),
+            managed_files: Default::default(),
+            environment_files: Default::default(),
+            login_command: vec![],
+            status_command: vec![],
+            version_command: vec![],
+            validation_artifacts: vec![],
+        });
+        assert!(validate(&profile, &request).is_ok());
+        profile.model_endpoint = fixture(
+            "https://model.example/v1/chat/completions",
+            std::path::Path::new("/tmp"),
+        )
+        .0
+        .model_endpoint;
+        assert!(
+            validate(&profile, &request)
+                .unwrap_err()
+                .message
+                .contains("exactly one")
+        );
+        profile.model_endpoint = None;
+        profile.training_worker.as_mut().unwrap().max_context_tokens = 262_145;
+        assert!(
+            validate(&profile, &request)
+                .unwrap_err()
+                .message
+                .contains("bounded")
+        );
+        profile.training_worker.as_mut().unwrap().max_context_tokens = 262_144;
+        profile.training_worker.as_mut().unwrap().script_sha256 = None;
+        assert!(
+            validate(&profile, &request)
+                .unwrap_err()
+                .message
+                .contains("pinned")
         );
     }
     #[test]

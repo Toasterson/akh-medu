@@ -1,0 +1,40 @@
+{
+  "schema": "lilith/rl-retention@2",
+  "status": "passed",
+  "pid": 56551,
+  "retention_probe_sha256": "3986a2f63e987a88c486a4c8c0dbbaa8b984fb60dcaed81b50335b2d98b09baf",
+  "protocol_sha256": "811d78761f48188eccf9a7c38d17d8af704dcc633d1d805c510bc74715724089",
+  "v1_tasks_sha256": "e038d465c0d4d9d04e97b1b01abea0916ad99ab48d2ac86f11f48ac21bf94a0f",
+  "v2_artifact_contract_sha256": "ca7d125daf1448b0890b8d6f97f2c85773c1400edd51659769a0578d51c9664c",
+  "trajectory_core_sha256": "da7fa533df75e59522b0523f6ae8f552c8d70485c347960b851615e8e6ebe5fa",
+  "runner_core_sha256": "ed03a1564914a3bea25229f6865dc09c79298c8b8b75b950a4c06712c541ce56",
+  "retention_manifest_sha256": "5d215ee5b6105a80127b234b54af56414078b0ef763299ef66d8967e27e9ea75",
+  "experiment_result_sha256": "2db7d8804dd11f872d8e3645fd475c6c7983901cae41f22a421aadbaf19447a4",
+  "deployed_weights_changed": false,
+  "arms": {
+    "base": {
+      "passed": 4,
+      "completed": 4,
+      "total": 4,
+      "adapter_sha256": "bf79f04d4ee5487d669ef010e0376aafddbcdea831a2192072ea62269a2677c6"
+    },
+    "sft": {
+      "passed": 4,
+      "completed": 4,
+      "total": 4,
+      "adapter_sha256": "5c7af89bf578e57bef3036f6c574edfa6c71ef69139604c16bad68cb9a00e5f4"
+    },
+    "klpo": {
+      "passed": 4,
+      "completed": 4,
+      "total": 4,
+      "adapter_sha256": "c583780e5eca2e517464d2e50a53ebfb5d874affc1a856834e2ef262e7cf3db3"
+    }
+  },
+  "cold_reload_arm": "klpo",
+  "cold_reload_candidate_sha256": "80be5b0fbeb264292f84f0e757adf84259a213c4c3654dc87bd3c448fb1ff808",
+  "cold_reload_exact": true,
+  "previous_pid": 44108,
+  "elapsed_seconds": 409.7882142240014,
+  "peak_gpu_bytes": 23984101376
+}

@@ -1,0 +1,14 @@
+{
+  "async": {
+    "repeat_max_abs": 19.9375,
+    "full_max_abs": 0.5625
+  },
+  "resident": {
+    "repeat_max_abs": 0.0,
+    "full_max_abs": 0.5625
+  },
+  "synchronous": {
+    "repeat_max_abs": 0.0,
+    "full_max_abs": 0.5625
+  }
+}

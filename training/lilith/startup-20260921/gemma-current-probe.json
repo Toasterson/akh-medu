@@ -1,0 +1,20 @@
+{
+  "exit_code": 0,
+  "timeout": false,
+  "wall_seconds": 15.095516682999005,
+  "command": [
+    "target/release/examples/candle_session_probe",
+    "--model",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+    "--tokenizer",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+    "--device",
+    "hip",
+    "--tokens",
+    "64",
+    "--prompt",
+    "<|turn>user\nSay hello in one short sentence.<turn|>\n<|turn>model\n"
+  ],
+  "repo_head": "329ebff421d2eff75ef12f29001baac20ff01ef3",
+  "binary_sha256": "9e4f6917fa43ba96b2631d0afb2a8c5c33d7d24dc0ab4c2bb87ab909265d123a"
+}

@@ -1,0 +1,36 @@
+{
+  "last_durable_phase": "base-train-1024_rollout_signed-clamp/2",
+  "memory_controls": {
+    "1024": {
+      "finite_gradients": true,
+      "gradient_norms": {
+        "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": 0.0,
+        "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": 47.65367126464844
+      },
+      "peak_gpu_bytes": 24832647680,
+      "scored_positions": 8,
+      "tokens": 1024
+    },
+    "512": {
+      "finite_gradients": true,
+      "gradient_norms": {
+        "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": 0.0,
+        "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": 45.14167404174805
+      },
+      "peak_gpu_bytes": 24404435456,
+      "scored_positions": 8,
+      "tokens": 512
+    }
+  },
+  "pid": 94113,
+  "preserved_artifacts": {
+    "base-train-512-trajectories.json": "895aae5ae6f30b53fc7dd6f2debacaa75d5a287d1fc1cd51e6f2f839f9537d8d",
+    "config.json": "c91d2b91d5912c6044e74e511db8654dde0311277c1074d6e6c8854353023daf",
+    "result.json": "857d2c4bf1a962041cc3e2576342d73ee8b80062a858623db2e06c45ca959f50"
+  },
+  "protocol_sha256": "10bd7c84a678972541d96c11b08b35c8c7dbcf044569f82ac12205140465d324",
+  "reason": "superseded by user requirement for generous reasoning and training inside akhrtd runtime",
+  "runner_sha256": "141b407698d8e5462be5d5ec076b5b9c0fc0a9425a3aec3aa0128d5f9bf037d7",
+  "schema": "lilith/external-cancellation@1",
+  "timestamp_utc": "2026-09-22T15:51:08.606294+00:00"
+}

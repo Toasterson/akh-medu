@@ -1,0 +1,9 @@
+{
+  "scripts/session-platform/lilith_contracts.py": "74da3c54d254af23c69d29b8b6dbabe0e1d8a09043945638ab2f8d0197b0ee97",
+  "scripts/session-platform/lilith_verification.py": "e2682f782429123d8c0c0d0436192e7cf06fa1e3d5a210697ccc77b6b06c84c6",
+  "scripts/session-platform/lilith_coordination.py": "8152e59ec2bdc21045d47ba949def2257ac54718ed535e93f20d1b65135e080a",
+  "scripts/session-platform/prepare-lilith.py": "e97ef8a6a8086c74615357171f7e19cb5bb0afaa94131e7fb7b04558074b0fcc",
+  "scripts/session-platform/lilith-review-smoke.py": "17655e5a26f7848d4b6cd41d0cd6f371346bf530d3cdb41f852777d5fa5d9db0",
+  "scripts/session-platform/test_lilith_contracts.py": "cf172024b4401b57d1bd9a0ad27b4c42416b1db132a3a8b8e74ecae52120b39d",
+  "scripts/session-platform/test_prepare_lilith.py": "4b393742321d21b3ad6d679db21a8155fe4ff1055b96efc7c8856a86ebbd03b2"
+}

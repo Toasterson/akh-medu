@@ -1,0 +1,18 @@
+{
+  "schema": "lilith/mimo-native-receipt-audit@1",
+  "passed": true,
+  "result_sha256": "8d95638fcd09d1f076bc127fd06f1b7ff3c12ead1ef507317bba5fcd962fdb71",
+  "receipts_checked": [
+    "signed-clamp/2",
+    "bounded-add/2",
+    "align-up-power2/2",
+    "aligned-offset-valid/2",
+    "field-fits-unsigned/2",
+    "window-end/2",
+    "windows-overlap/2"
+  ],
+  "native_passed": 6,
+  "native_failed": 1,
+  "grammar_rejected_not_executed": 1,
+  "score_unchanged": "6/8 frozen interpreter"
+}

@@ -1,0 +1,149 @@
+[
+  {
+    "contract": {
+      "artifact": "range_within_u64.py",
+      "id": "u64-range/1",
+      "specification": "Write range_within_u64(start: int, length: int, limit: int) -> bool. Inputs are integers. Return False if any input is outside unsigned 64-bit range 0..18446744073709551615. Otherwise return whether the half-open range [start, start+length) fits within [0, limit). An empty range at start==limit is valid. Reject start>limit even for an empty range. Use the overflow-safe comparison length <= limit - start after checking start <= limit. Use only integer/bool literals, comparisons, boolean operators, subtraction, if and return.",
+      "verifier_sha256": "e2682f782429123d8c0c0d0436192e7cf06fa1e3d5a210697ccc77b6b06c84c6"
+    },
+    "family": "bounded_range",
+    "features": [
+      [
+        "domain",
+        "integer"
+      ],
+      [
+        "operation",
+        "capacity_check"
+      ],
+      [
+        "boundary",
+        "empty_allowed"
+      ],
+      [
+        "policy",
+        "reject_invalid"
+      ],
+      [
+        "evidence",
+        "host_python"
+      ]
+    ],
+    "id": "d2bf9dcfd7768306639f912d1aaca655fa17a4824d585ab200cf8327d7c8f397",
+    "limitations": [
+      "not C/ABI/kernel validation",
+      "not native illumos validation",
+      "not a quality parity result"
+    ],
+    "preconditions": [
+      "integer inputs",
+      "local Python reference semantics"
+    ],
+    "provenance": {
+      "assignment": "e767fed134b49c4c88b8eec1f2bcd58bd8e606da7b4084bf4333c5bf5cdb3855",
+      "assignment_sha256": "24ff211d96ef6344836dbbb07cfe9683350423c08b99b62c70f5efc1a4002f71",
+      "author_turn": "01a0c4ee-3776-7c53-9db4-ae44defde492",
+      "historical_contract_pinned": true,
+      "original_evidence": {
+        "cases": 2926,
+        "contract": {
+          "artifact": "range_within_u64.py",
+          "id": "u64-range/1",
+          "specification": "Write range_within_u64(start: int, length: int, limit: int) -> bool. Inputs are integers. Return False if any input is outside unsigned 64-bit range 0..18446744073709551615. Otherwise return whether the half-open range [start, start+length) fits within [0, limit). An empty range at start==limit is valid. Reject start>limit even for an empty range. Use the overflow-safe comparison length <= limit - start after checking start <= limit. Use only integer/bool literals, comparisons, boolean operators, subtraction, if and return.",
+          "verifier_sha256": "e2682f782429123d8c0c0d0436192e7cf06fa1e3d5a210697ccc77b6b06c84c6"
+        },
+        "kind": "host_fixture_verification",
+        "passed": true,
+        "receipt": "e767fed134b49c4c88b8eec1f2bcd58bd8e606da7b4084bf4333c5bf5cdb3855-verification",
+        "scope": "Python unsigned-64 range reference fixture; not C overflow, ABI, kernel or native illumos validation",
+        "source_sha256": "35c0c9b1fad048dee36690135c587756c82f96250805a369d268baf89e8a2c23",
+        "verifier": "u64-range/1"
+      },
+      "parent": "01a0c4ee-3773-7833-87ad-c0fb9906267e",
+      "principle_origin": "operator-curated; source replayed; teacher opinion retained separately",
+      "teacher": "ptah-inline-reviewer",
+      "teacher_opinion": "No defect found. The implementation correctly validates inputs against the u64 range, rejects `start > limit` (including empty ranges), and uses the overflow-safe comparison `length <= limit - start` after confirming `start <= limit`. The special case `start == limit and length == 0` is handled, though logically subsumed by the general check. All constraints (integer/bool literals, comparisons, boolean operators, subtraction, if/return) are satisfied. The host verifier passed 2926 cases within the stated Python fixture scope.",
+      "teacher_session": "01a0c4f0-47d4-72f3-9d4b-55882d2108d0",
+      "teacher_turn": "01a0c4f0-47d8-7c42-94a4-79dc5a1af320"
+    },
+    "replay": {
+      "cases": 2926,
+      "passed": true,
+      "scope": "Python unsigned-64 range reference fixture; not C overflow, ABI, kernel or native illumos validation",
+      "source_sha256": "35c0c9b1fad048dee36690135c587756c82f96250805a369d268baf89e8a2c23"
+    },
+    "schema": "lilith/lesson@1",
+    "source": "def range_within_u64(start: int, length: int, limit: int) -> bool:\n    u64_max = 18446744073709551615\n    if start < 0 or start > u64_max or length < 0 or length > u64_max or limit < 0 or limit > u64_max:\n        return False\n    if start > limit:\n        return False\n    if start == limit and length == 0:\n        return True\n    if length == 0:\n        return True\n    if length <= limit - start:\n        return True\n    return False",
+    "source_sha256": "35c0c9b1fad048dee36690135c587756c82f96250805a369d268baf89e8a2c23",
+    "text": "For bounded unsigned arithmetic, reject out-of-domain inputs first. Check the starting quantity is within the capacity before comparing the requested amount with capacity minus starting quantity. An empty request at the boundary needs an explicit contract. Python reference tests do not establish C overflow or native platform correctness."
+  },
+  {
+    "contract": {
+      "artifact": "clamp_u8.py",
+      "id": "integer-clamp/1",
+      "specification": "Write a Python function clamp_u8(value: int) -> int that returns 0 for integers below 0, 255 for integers above 255, otherwise value. Use only if comparisons and returns.",
+      "verifier_sha256": "e2682f782429123d8c0c0d0436192e7cf06fa1e3d5a210697ccc77b6b06c84c6"
+    },
+    "family": "saturation",
+    "features": [
+      [
+        "domain",
+        "integer"
+      ],
+      [
+        "operation",
+        "saturate"
+      ],
+      [
+        "boundary",
+        "inclusive"
+      ],
+      [
+        "policy",
+        "preserve_in_range"
+      ],
+      [
+        "evidence",
+        "host_python"
+      ]
+    ],
+    "id": "d679778a0218eaf9152d22e0532f9a96321837e8e77a0915f252086499278907",
+    "limitations": [
+      "not C/ABI/kernel validation",
+      "not native illumos validation",
+      "not a quality parity result"
+    ],
+    "preconditions": [
+      "integer inputs",
+      "local Python reference semantics"
+    ],
+    "provenance": {
+      "assignment": "387ec4c2cec1429654b4d3eee99c6af8a941d3fe4a52ffb3a581fbbe567a2b23",
+      "assignment_sha256": "043b2458ab775211784fef2d9a2313278922ec504985b72a542e84912a1ce8ef",
+      "author_turn": "01a0c489-9ec0-76f2-b2c9-317584cd1169",
+      "historical_contract_pinned": false,
+      "original_evidence": {
+        "cases": 2051,
+        "passed": true,
+        "scope": "integer clamp fixture only; not general code execution or illumos validation",
+        "source_sha256": "bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6"
+      },
+      "parent": "01a0c489-9ebe-7f10-9484-6a412210fae1",
+      "principle_origin": "operator-curated; source replayed; teacher opinion retained separately",
+      "teacher": "ptah-validator",
+      "teacher_opinion": "No defect found in the supplied clamp logic: it correctly maps values below 0 to 0, above 255 to 255, and leaves 0\u2013255 unchanged.\n\nHowever, verification evidence is incomplete: the artifact file was not present in the workspace (read failed), so the SHA-256 could not be independently confirmed. The 2051-case pass claim lacks a test receipt, and the scope explicitly excludes general code execution and illumos validation.",
+      "teacher_session": "01a0c48c-32f3-7970-9619-8ef82d7787ed",
+      "teacher_turn": "01a0c48c-32f8-7751-9a76-1def4e4bc700"
+    },
+    "replay": {
+      "cases": 2051,
+      "passed": true,
+      "scope": "integer clamp fixture only; not general code execution or illumos validation",
+      "source_sha256": "bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6"
+    },
+    "schema": "lilith/lesson@1",
+    "source": "def clamp_u8(value: int) -> int:\n    if value < 0:\n        return 0\n    if value > 255:\n        return 255\n    return value",
+    "source_sha256": "bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6",
+    "text": "For an integer saturation contract, check both bounds and preserve in-range values. Test values immediately below, at, and above each bound. Do not confuse saturation with rejecting invalid input."
+  }
+]

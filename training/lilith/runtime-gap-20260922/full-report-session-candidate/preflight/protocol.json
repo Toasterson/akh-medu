@@ -1,0 +1,44 @@
+{
+  "schema": "lilith/candidate-full-report-session@1",
+  "driver_sha256": "fed277f8067a0f19cb797a7265fcbb8c49ad5563ce15340b3d1a6812cd7da81e",
+  "source_protocol_sha256": "8b3d3aeec9dc35ed7428aac35b6a307884e60118c4c7f7e11e5c7fa9f03e4a69",
+  "source_assignments_sha256": "6b0554136b2e0556243004d1f035f4e5faeaaef99f49d78b9c54d788d7be8746",
+  "source_sessions_sha256": "ef8efe407629db229ac30ef4e307c581a25ca466824891ddb7a074168b885661",
+  "request_sha256": "3131c64cb7dd19088869e25a25f740aa0347532d06579c2b9698a175c91fd73e",
+  "system_sha256": "5b14cb11745dd13184a50e8f2baacbb2cf5752cfcc992d2dfdc715ba25d22325",
+  "prompt_tokens_pinned": 735,
+  "max_output_tokens": 768,
+  "turn_deadline_seconds": 120,
+  "binaries": {
+    "akhexecd": {
+      "path": "/home/toasty/ws/agi/akh-medu/target/release/akhexecd",
+      "sha256": "1d8c4a4a9f6d40e3280d57d67f824d3638e6f8d7e2cbaec1a700dd2f58a7ae92"
+    },
+    "akhsbxd": {
+      "path": "/home/toasty/ws/agi/akh-medu/target/release/akhsbxd",
+      "sha256": "3a6e24432bce8a55cdf7e33b91026015ebd0136ebd270f6ec7ce94be473b573f"
+    },
+    "akhrtd": {
+      "path": "/home/toasty/.local/share/akh-medu/lilith-candidate-binaries-20260922/akhrtd-vulkan-candidate",
+      "sha256": "f1a03f6138e65bb6065be7ba9fdf64f76897b99c8d1ca90661662555229ddbbe"
+    },
+    "akhsessd": {
+      "path": "/home/toasty/ws/agi/akh-medu/target/release/akhsessd",
+      "sha256": "2994f0b42f390aa1ae090b4ce829c8926e5d1f459d0969dcc3637af0b945b3ef"
+    }
+  },
+  "model_pins": {
+    "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
+  },
+  "environment": {
+    "AKH_GPU_MATMUL": "0",
+    "AKH_GPU_QUANT": "0",
+    "AKH_VULKAN_PIPELINE_CACHE_ENTRIES": "16384",
+    "AKH_VULKAN_REUSABLE_KV": "1",
+    "AKH_VULKAN_GROUPED_DECODE": "1",
+    "AKH_VULKAN_MATMUL_STRIDES": "1",
+    "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
+  },
+  "scope": "Exact model-run3 tool-free reporter system/user replay in a fresh private Vulkan-only stack. Candidate binary only; no shared deployment or Ptah/HIP claim."
+}

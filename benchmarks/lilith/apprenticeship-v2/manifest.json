@@ -1,0 +1,122 @@
+{
+  "schema": "lilith/evaluation@2",
+  "claims": {
+    "qwen_certified": false,
+    "illumos_native": false,
+    "sealed": false
+  },
+  "verifier_sha256": "4dc89010085072b08c953a4b7770c82702579f3eae57d4e76fcd401e38b38d05",
+  "arms": [
+    "none",
+    "text",
+    "vsa",
+    "independent_reference"
+  ],
+  "training_families": [
+    "saturation",
+    "bounded_range",
+    "permission_masks",
+    "byte_order",
+    "error_conventions"
+  ],
+  "held_out_families": [
+    "alignment",
+    "interval_intersection",
+    "modular_sequence_order"
+  ],
+  "seeds": [
+    0
+  ],
+  "budget": {
+    "attempts": 1,
+    "tools": 0,
+    "max_new_tokens": 512,
+    "context_tokens": 4096,
+    "lesson_bytes": 1400,
+    "wall_seconds": 600
+  },
+  "models": {
+    "candidate": {
+      "sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+      "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
+    },
+    "reference": {
+      "sha256": "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec",
+      "tokenizer_sha256": "e271c182ffa63eebd6d0f60a688fb90d3e87a1141c99c4d87a0d4508badfefea",
+      "upstream_qwen_equivalence": false,
+      "label": "Ptah local Qwen derivative; not certified upstream reference"
+    }
+  },
+  "training_source_sha256": [
+    "35c0c9b1fad048dee36690135c587756c82f96250805a369d268baf89e8a2c23",
+    "3e87b3635f5fe91e1bf59103912115ba5e33d4f0c94bded45be02d458b7e45b2",
+    "50c37b98b6bfc429f92e58f9a5d398e0e4d6466d04b01a8de239895533624d92",
+    "59f4cb702576da68765a59689653d824b5e342ec5ead8ab42af66051d32d8a06",
+    "b6aaaeae81e879b7d1dc9839f1551b58fed98d2c7716e2be497e372c2657e25d",
+    "bd3e50a7d01f5a3b1ca4792a1162a4e311a4578a05962a28495d7796572f84f6"
+  ],
+  "training_source_fingerprints": [
+    "1871380015c40be36003974eb5941b9e0c558ac8b588f59ab1a23a049746a2f9",
+    "1a7ac8f8c79665d8d52968dfc00d04ab5db060e020e60bf4591628714d6733b0",
+    "62585f05e5c73af808aba7a2835ecc5738b7aa3f33f26013c43501dc7ffc9a68",
+    "7cdf930cc6e1856e686a7e650dfa03fda48cb3e003e1f9dcf248b0e5882add8f",
+    "b309ef7fcbfba883d5447d832daf4610f3478ceac2842a9a64b589e6562ee35b",
+    "c87c4a7f7d45cad1a1542b111089b26d1bfeb4c452aa1c2b6da0a0f702737c2a"
+  ],
+  "excluded_source_sha256": [],
+  "tasks": [
+    {
+      "id": "alignment-8",
+      "family": "alignment",
+      "bits": 8,
+      "prompt": "Inputs are integers. Reject any input outside 0..255 by returning -1. Write align_up(value: int, alignment: int) -> int. Also reject alignment zero or alignment not a power of two. Return the smallest multiple of alignment at least value, or -1 if the result exceeds 255.",
+      "prompt_sha256": "556f1b965ec1e64ef505c42c603cedb6189f6880b1a9d68fef4717a4b1a1bb83"
+    },
+    {
+      "id": "alignment-16",
+      "family": "alignment",
+      "bits": 16,
+      "prompt": "Inputs are integers. Reject any input outside 0..65535 by returning -1. Write align_up(value: int, alignment: int) -> int. Also reject alignment zero or alignment not a power of two. Return the smallest multiple of alignment at least value, or -1 if the result exceeds 65535.",
+      "prompt_sha256": "0f6e7a4a99c8a6b489152a171087f7476454fee31755191bf143a65b50ffd0d3"
+    },
+    {
+      "id": "interval_intersection-8",
+      "family": "interval_intersection",
+      "bits": 8,
+      "prompt": "Inputs are integers. Reject any input outside 0..255 by returning -1. Write overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int. Reject an end smaller than its start. Return the number of integer positions in the intersection of half-open intervals [a_start,a_end) and [b_start,b_end). Empty intervals and touching endpoints have zero overlap.",
+      "prompt_sha256": "9ea4d46e732442c218a2608a0bad6b8b373306ff32c8756cc16cdbd8ffc58a3f"
+    },
+    {
+      "id": "interval_intersection-16",
+      "family": "interval_intersection",
+      "bits": 16,
+      "prompt": "Inputs are integers. Reject any input outside 0..65535 by returning -1. Write overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int. Reject an end smaller than its start. Return the number of integer positions in the intersection of half-open intervals [a_start,a_end) and [b_start,b_end). Empty intervals and touching endpoints have zero overlap.",
+      "prompt_sha256": "a16faecb4521cacc4b4acea6bffb538f8e54b03a477f4091a2a997ff700b96e4"
+    },
+    {
+      "id": "modular_sequence_order-8",
+      "family": "modular_sequence_order",
+      "bits": 8,
+      "prompt": "Inputs are integers. Reject any input outside 0..255 by returning -1. Write ring_distance(start: int, end: int, modulus: int) -> int. Also reject modulus zero or either position at least modulus. Return the forward distance from start to end wrapping at modulus; equal positions have distance zero.",
+      "prompt_sha256": "3bb3f73aa536db7dc734bbb9af7b8705814175456711ce02345e641c08533acc"
+    },
+    {
+      "id": "modular_sequence_order-16",
+      "family": "modular_sequence_order",
+      "bits": 16,
+      "prompt": "Inputs are integers. Reject any input outside 0..65535 by returning -1. Write ring_distance(start: int, end: int, modulus: int) -> int. Also reject modulus zero or either position at least modulus. Return the forward distance from start to end wrapping at modulus; equal positions have distance zero.",
+      "prompt_sha256": "5c003a34221714343fa184a5f9a0336d833108f10d7c40e61c8d56d1e07ef38e"
+    }
+  ],
+  "common_instruction": "Return only one Python function, with no Markdown fences or explanatory prose. Use integer/bool literals, local assignment, if/else, return, comparisons, and/or/not, conditional expressions, +, -, *, //, %, and bitwise & only. No calls (including min/max), imports, loops, shifts, exponentiation, decorators, helper functions, containers or strings. Keep the source under 4096 bytes. These are local Python reference tasks, not native OS validation.",
+  "training_inventory": [
+    {
+      "path": "training/lilith/curriculum-20260921/data/candidates.jsonl",
+      "sha256": "48fdf72bbd782ceeae21c1ebde8e5dcbae9b65758342aa9ee0bbdbe4fd136507"
+    },
+    {
+      "path": "training/lilith/apprenticeship-20260921/candidate-train.jsonl",
+      "sha256": "6de63f1da4172e74af9070a21d63c644bec65df7127feaa22b4f681e955445fd"
+    }
+  ]
+}

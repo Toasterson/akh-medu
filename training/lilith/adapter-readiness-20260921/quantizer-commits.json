@@ -1,0 +1,602 @@
+[
+  {
+    "id": "fc034cfff751157913579611efad8462ac1be606",
+    "title": "Added Gemma official chat template update",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-07-17T12:52:56.000Z"
+  },
+  {
+    "id": "d997c805aafe035a8024f961c6e1afd6b30d79a5",
+    "title": "Update MTP README for renamed drafters",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-07-09T06:45:02.000Z"
+  },
+  {
+    "id": "7c8e94b53dfec15d43a42fea9703a86c224ecd9a",
+    "title": "Rename MTP GGUFs",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-07-09T06:27:45.000Z"
+  },
+  {
+    "id": "3249fa54d5efa384afc552cc6700ad091efd5c39",
+    "title": "Remove old uppercase-12B drafter filenames",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-09T15:32:24.000Z"
+  },
+  {
+    "id": "21f0d36ceda2a3edcf934ef862ff2e905321fb04",
+    "title": "Lowercase 12B drafter filenames to 12b (match repo naming); update MTP README",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-09T15:32:20.000Z"
+  },
+  {
+    "id": "745b94fa62cc6a3ad2f2f5bde63fb8fdcead7337",
+    "title": "Add Jun 9 update: MTP support with link to MTP guide",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-09T14:48:57.000Z"
+  },
+  {
+    "id": "c0e396f9ee60d3ad702248f17edc3ec22384c287",
+    "title": "Remove interim mtp- prefixed drafters (superseded by final names)",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-09T14:34:29.000Z"
+  },
+  {
+    "id": "7c573db4693fee7cf927cd8e2ebb1c2f87599e96",
+    "title": "Rename MTP drafters: root mtp-gemma-4-*-it.gguf for -hf; MTP/ files use -MTP suffix; update README",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-09T14:34:25.000Z"
+  },
+  {
+    "id": "ef3796e39c0d101bd1f3590da423dd4682a67e15",
+    "title": "Remove old-named MTP drafters (superseded by mtp- prefixed copies)",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-09T14:31:20.000Z"
+  },
+  {
+    "id": "e6b6dacf4da95afa66be62ec5c8b827598220a52",
+    "title": "Add root-level mtp- drafter for -hf auto-discovery; rename MTP/ drafters to mtp- prefix; update MTP README",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-09T14:31:16.000Z"
+  },
+  {
+    "id": "5161202e34057160dac9e7907010144f8ef4e4f6",
+    "title": "Update MTP README: PR #23398 merged into mainline llama.cpp",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-08T00:12:11.000Z"
+  },
+  {
+    "id": "3f09de26549e6d7ea54f1b83755149f840fcd333",
+    "title": "Add MTP drafter README (build + run instructions)",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-05T14:03:41.000Z"
+  },
+  {
+    "id": "aefae16cf4d08ff71166fe973c84d78906a4d40c",
+    "title": "Add Gemma 4 12B MTP drafter (gemma-4-12B-it-MTP-Q8_0.gguf) from PR ggml-org/llama.cpp#23398",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-05T13:51:50.000Z"
+  },
+  {
+    "id": "a26f2254502fb5a6909e90edd0235d1e4718b506",
+    "title": "Add Gemma 4 12B MTP drafter (gemma-4-12B-it-MTP-BF16.gguf) from PR ggml-org/llama.cpp#23398",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-05T13:51:44.000Z"
+  },
+  {
+    "id": "b0a4f3d8edeb2f85ee0594037418cab9883def56",
+    "title": "Add Gemma 4 12B MTP drafter (gemma-4-12B-it-MTP-F16.gguf) from PR ggml-org/llama.cpp#23398",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-05T13:51:36.000Z"
+  },
+  {
+    "id": "63238a33fe662634aea31a417f8c9e9385028726",
+    "title": "Fix F16 mmproj vision and audio: upcast patch_embd.weight to F32 to prevent F16 accumulation overflow",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-05T08:58:16.000Z"
+  },
+  {
+    "id": "b5f80f1dd8eddc9c2593e7e54e6af2deb93e2510",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:36:06.000Z"
+  },
+  {
+    "id": "8dd48984868f4e9585adcb3f02681e42c5e15df6",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:34:42.000Z"
+  },
+  {
+    "id": "78d68c55a4fad09f6600c0a456407dae8d8bb5ba",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:34:39.000Z"
+  },
+  {
+    "id": "274bce1f5a44ae7a55e57d9e426099e01646cca3",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:34:37.000Z"
+  },
+  {
+    "id": "80f1266dd5d8996f812b3c6a26b131930c18671e",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:34:31.000Z"
+  },
+  {
+    "id": "dd53c9e423f9481c9a79f456ec331254651b59b5",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:34:29.000Z"
+  },
+  {
+    "id": "9c9ad94c8ef63f89ccc65b1c3df226dec82b2572",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:34:25.000Z"
+  },
+  {
+    "id": "a7fa0ecd84b52d47fa7afc134ec8a0a6caefa846",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:29:13.000Z"
+  },
+  {
+    "id": "19b2423a9fc1050f1b235c2caabe76e32360db67",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:29:10.000Z"
+  },
+  {
+    "id": "75e2468e2a49958c063821e7bae21d8dac383269",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:29:06.000Z"
+  },
+  {
+    "id": "b87095a9cb2b78829b917049f959787c40141666",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:29:06.000Z"
+  },
+  {
+    "id": "ce78478146079102a2bb1043375f3a42d4c290c4",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:29:06.000Z"
+  },
+  {
+    "id": "1f6f1d485721423264f7fbe465b6e1b5ee219bdc",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:29:05.000Z"
+  },
+  {
+    "id": "5676e47a173b4ff36b2d70ad29e9b8fa885f39ed",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:29:04.000Z"
+  },
+  {
+    "id": "4c8e74be8eb6597d8de0e0437e808c3712248d83",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:22:33.000Z"
+  },
+  {
+    "id": "2fb900de9104a5d1edeb1daa0d79cb3961d7febf",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:22:31.000Z"
+  },
+  {
+    "id": "aa3ee13fddd43864c3656fc17220c34c395e36cc",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:22:30.000Z"
+  },
+  {
+    "id": "351c38899a571fc1bafea0ce4c31d6bf1f44d560",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:22:27.000Z"
+  },
+  {
+    "id": "831cf9e7aff6ccf179950eb6993f52e0c315e54e",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:22:25.000Z"
+  },
+  {
+    "id": "605c5e5629bd04536c3fbf96e34bd56c4922cf78",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:22:25.000Z"
+  },
+  {
+    "id": "92815e24813735806e853a72a0baad8981028d82",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:22:24.000Z"
+  },
+  {
+    "id": "15c2733a95e9a50845c47642db7673fd9feb6af9",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T21:14:46.000Z"
+  },
+  {
+    "id": "4c4a156dcf05f35c239d596a5eb110783fd78ed5",
+    "title": "remove upload preflight",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T20:40:04.000Z"
+  },
+  {
+    "id": "305a7351a540baf062a745d096c4447778ef97ef",
+    "title": "upload preflight (auto-removed)",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T20:40:00.000Z"
+  },
+  {
+    "id": "faacc07cd184152e87f520a91e1112947b0751da",
+    "title": "Add llama.cpp run steps (text, vision, audio) to README",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T20:17:22.000Z"
+  },
+  {
+    "id": "b2f1b1f5549253e499db75d34f94acb233d8b7ca",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T02:33:26.000Z"
+  },
+  {
+    "id": "fab8e2e17d44b268e40b4f744706ff1438061042",
+    "title": "remove upload preflight",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T02:31:05.000Z"
+  },
+  {
+    "id": "6f61a237e4fe1e090e04093c5fab897606721f85",
+    "title": "upload preflight (auto-removed)",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T02:31:01.000Z"
+  },
+  {
+    "id": "619e2e3383a67805534abd7a87019253f420c78a",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T02:28:11.000Z"
+  },
+  {
+    "id": "26b3b1de0fe562d97ca5ce8966817a833b97a0ad",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T02:27:21.000Z"
+  },
+  {
+    "id": "d8215288152791c7116abe9c8830d171cda2df00",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T02:26:46.000Z"
+  },
+  {
+    "id": "835e0d64ae709d0da8af72511be9ad21ffbe2b6d",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T02:26:41.000Z"
+  },
+  {
+    "id": "b3c986580ffbac497f43dda62caa41b262d9da0f",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T02:26:41.000Z"
+  },
+  {
+    "id": "2721d24ed13bfd29c5b59cbdce7f7fed4319241a",
+    "title": "Upload folder using huggingface_hub",
+    "message": "",
+    "authors": [
+      {
+        "user": "danielhanchen",
+        "avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/62ecdc18b72a69615d6bd857/qAHhWJbSsmoezFHiErBUT.png"
+      }
+    ],
+    "date": "2026-06-04T02:26:35.000Z"
+  }
+]

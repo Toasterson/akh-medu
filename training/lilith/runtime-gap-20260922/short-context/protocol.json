@@ -1,0 +1,31 @@
+{
+  "schema": "lilith/latency-replay@2",
+  "binary_sha256": "a2e93655264ed393c9592d330ebb7bc9529406ed33df66d88b760c06a598494e",
+  "driver_sha256": "de077411c0d3a105705e178e96ae1f7a028033aab607ba263c0fd154de79fae8",
+  "model_sha256": "43fec98c5102b1c446b4ddd0a9439f1db3a2e1f2e0b8cd143ce1ea619a9403d6",
+  "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+  "prompt_sha256": "50f9a6e12746296268a00880239f2d9573347e1408333db57dbe66f7c6cc0024",
+  "command": [
+    "/home/toasty/ws/agi/akh-medu/target/release/examples/candle_session_probe",
+    "--model",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+    "--tokenizer",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+    "--device",
+    "vulkan",
+    "--prompt-file",
+    "training/lilith/runtime-gap-20260922/short-context/prompt.txt",
+    "--tokens",
+    "8"
+  ],
+  "timeout": 240,
+  "ttft_limit_seconds": 30,
+  "min_decode_tps": 15,
+  "scope": "Exact tool-free reporter system/user rendering; completion CLI replaces session services. Eight-token cap minimizes decode; original 768-token report must be revalidated separately.",
+  "env": {
+    "AKH_GPU_MATMUL": "0",
+    "AKH_GPU_QUANT": "0",
+    "AKH_VULKAN_PIPELINE_CACHE_ENTRIES": "16384",
+    "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
+  }
+}

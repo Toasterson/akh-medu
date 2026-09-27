@@ -1,0 +1,14 @@
+{
+  "schema": "lilith/rl-retention@2",
+  "status": "running",
+  "pid": 56106,
+  "retention_probe_sha256": "b0bf8648486ce2d710bc9779c7d90ca4f87fc4fa20c4a8efc4edb065fffa5c88",
+  "protocol_sha256": "811d78761f48188eccf9a7c38d17d8af704dcc633d1d805c510bc74715724089",
+  "v1_tasks_sha256": "e038d465c0d4d9d04e97b1b01abea0916ad99ab48d2ac86f11f48ac21bf94a0f",
+  "v2_artifact_contract_sha256": "ca7d125daf1448b0890b8d6f97f2c85773c1400edd51659769a0578d51c9664c",
+  "trajectory_core_sha256": "da7fa533df75e59522b0523f6ae8f552c8d70485c347960b851615e8e6ebe5fa",
+  "runner_core_sha256": "ed03a1564914a3bea25229f6865dc09c79298c8b8b75b950a4c06712c541ce56",
+  "retention_manifest_sha256": "00a1daeec64c7f23bf2e373a5d71193f68569edc7c85893598f8314cce29f1e6",
+  "experiment_result_sha256": "2db7d8804dd11f872d8e3645fd475c6c7983901cae41f22a421aadbaf19447a4",
+  "deployed_weights_changed": false
+}

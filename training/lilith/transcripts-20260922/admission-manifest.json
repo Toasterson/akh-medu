@@ -1,0 +1,32 @@
+{
+  "schema": "akh/lilith-transcript-admission@1",
+  "source_surface": "akh-transcripts-mcp/get_session rendered events",
+  "source_sessions": 3,
+  "source_events": 17218,
+  "records": 286,
+  "training_kinds": {
+    "supervised_imitation": 286,
+    "verified_outcome": 0
+  },
+  "splits": {
+    "train": 95,
+    "validation": 191
+  },
+  "rejected": {},
+  "dataset_sha256": "a7113cda7f90e718446c6a97ab96503df77716038daea413ac5fdc7bafd2bc1f",
+  "deny_families_sha256": "5dcbacf0276c27e95d6505e03110be07c0ae4b8ecb185c23c92ef01a763c54f9",
+  "deny_sessions_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "eval_fingerprints_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "admission_source_sha256": "7a5fc05cedf9ff512908e5fcdceec45da5b5657e4323bffd14591810eac966a8",
+  "reward_manifest_semantic_sha256": "a491b9bd86fd52b1f4ca5dd756e218bd31e9b6e4ff5baae5c9f7961d917a2734",
+  "private_artifacts": [
+    "~/.local/share/akh-medu/lilith-training/transcripts-20260922/sessions-linux.json",
+    "~/.local/share/akh-medu/lilith-training/transcripts-20260922/admitted.jsonl",
+    "~/.local/share/akh-medu/lilith-training/transcripts-20260922/private-manifest.json"
+  ],
+  "limitations": [
+    "MCP-rendered redaction is trusted and augmented locally",
+    "supervised_imitation rows carry no reward",
+    "three sessions produce a highly imbalanced session-level split"
+  ]
+}

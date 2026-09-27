@@ -1,0 +1,11 @@
+{
+  "schema": "lilith/latency-diagnosis@1",
+  "prefill_gate_passed": true,
+  "decode_gate_passed": false,
+  "decode_tps_floor": 15,
+  "observed_decode_tps": [
+    1.1286239656024308,
+    1.2707226089263683
+  ],
+  "finding": "Original prefill-only gate missed the slow decode. Version2 adds explicit decode threshold; both recorded rounds fail it. No retiming or score change."
+}

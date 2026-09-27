@@ -1,0 +1,174 @@
+[
+  {
+    "label": "a0",
+    "entries": 2048,
+    "tps": [
+      12.497257421111367,
+      20.73290063372398
+    ],
+    "peak_rss_kib": 1226544,
+    "device_memory": [
+      {
+        "free": 17487826944,
+        "memory_bound_context_limit": null,
+        "phase": "memory_after_generation",
+        "source": "amdgpu sysfs mem_info_vram",
+        "total": 25753026560
+      }
+    ],
+    "cache": [
+      {
+        "bypassed": 0,
+        "compile_failures": 0,
+        "entries": 2048,
+        "evictions": 7144,
+        "hits": 778856,
+        "misses": 9192,
+        "phase": "vulkan_pipeline_cache",
+        "round": 0,
+        "source_bytes": 1196896
+      },
+      {
+        "bypassed": 0,
+        "compile_failures": 0,
+        "entries": 2048,
+        "evictions": 16166,
+        "hits": 1554346,
+        "misses": 18214,
+        "phase": "vulkan_pipeline_cache",
+        "round": 1,
+        "source_bytes": 1196896
+      }
+    ],
+    "hidden_sha256": "87d22a22e7073a2eb643e7b4fa73dd15aed92cbf547960850806613a82cc6ef5"
+  },
+  {
+    "label": "b0",
+    "entries": 16384,
+    "tps": [
+      21.208570083422924,
+      23.49334139225331
+    ],
+    "peak_rss_kib": 1226548,
+    "device_memory": [
+      {
+        "free": 17213100032,
+        "memory_bound_context_limit": null,
+        "phase": "memory_after_generation",
+        "source": "amdgpu sysfs mem_info_vram",
+        "total": 25753026560
+      }
+    ],
+    "cache": [
+      {
+        "bypassed": 0,
+        "compile_failures": 0,
+        "entries": 9192,
+        "evictions": 0,
+        "hits": 778856,
+        "misses": 9192,
+        "phase": "vulkan_pipeline_cache",
+        "round": 0,
+        "source_bytes": 5218956
+      },
+      {
+        "bypassed": 0,
+        "compile_failures": 0,
+        "entries": 9192,
+        "evictions": 0,
+        "hits": 1563368,
+        "misses": 9192,
+        "phase": "vulkan_pipeline_cache",
+        "round": 1,
+        "source_bytes": 5218956
+      }
+    ],
+    "hidden_sha256": "87d22a22e7073a2eb643e7b4fa73dd15aed92cbf547960850806613a82cc6ef5"
+  },
+  {
+    "label": "b1",
+    "entries": 16384,
+    "tps": [
+      21.176106674570608,
+      23.43795656837804
+    ],
+    "peak_rss_kib": 1226420,
+    "device_memory": [
+      {
+        "free": 17213100032,
+        "memory_bound_context_limit": null,
+        "phase": "memory_after_generation",
+        "source": "amdgpu sysfs mem_info_vram",
+        "total": 25753026560
+      }
+    ],
+    "cache": [
+      {
+        "bypassed": 0,
+        "compile_failures": 0,
+        "entries": 9192,
+        "evictions": 0,
+        "hits": 778856,
+        "misses": 9192,
+        "phase": "vulkan_pipeline_cache",
+        "round": 0,
+        "source_bytes": 5218956
+      },
+      {
+        "bypassed": 0,
+        "compile_failures": 0,
+        "entries": 9192,
+        "evictions": 0,
+        "hits": 1563368,
+        "misses": 9192,
+        "phase": "vulkan_pipeline_cache",
+        "round": 1,
+        "source_bytes": 5218956
+      }
+    ],
+    "hidden_sha256": "87d22a22e7073a2eb643e7b4fa73dd15aed92cbf547960850806613a82cc6ef5"
+  },
+  {
+    "label": "a1",
+    "entries": 2048,
+    "tps": [
+      21.017370901062577,
+      20.9100641753707
+    ],
+    "peak_rss_kib": 1226416,
+    "device_memory": [
+      {
+        "free": 17487826944,
+        "memory_bound_context_limit": null,
+        "phase": "memory_after_generation",
+        "source": "amdgpu sysfs mem_info_vram",
+        "total": 25753026560
+      }
+    ],
+    "cache": [
+      {
+        "bypassed": 0,
+        "compile_failures": 0,
+        "entries": 2048,
+        "evictions": 7144,
+        "hits": 778856,
+        "misses": 9192,
+        "phase": "vulkan_pipeline_cache",
+        "round": 0,
+        "source_bytes": 1196896
+      },
+      {
+        "bypassed": 0,
+        "compile_failures": 0,
+        "entries": 2048,
+        "evictions": 16166,
+        "hits": 1554346,
+        "misses": 18214,
+        "phase": "vulkan_pipeline_cache",
+        "round": 1,
+        "source_bytes": 1196896
+      }
+    ],
+    "hidden_sha256": "87d22a22e7073a2eb643e7b4fa73dd15aed92cbf547960850806613a82cc6ef5"
+  }
+]

@@ -1,0 +1,330 @@
+[
+  {
+    "reference_actions": [
+      {
+        "action": "observe"
+      },
+      {
+        "action": "observe"
+      },
+      {
+        "action": "report"
+      }
+    ],
+    "reference_reward": {
+      "family": "act_to_perceive",
+      "klpo_reward": 1.0,
+      "passed": true,
+      "principles": {
+        "decency": true,
+        "honesty": true,
+        "integrity": true
+      },
+      "reasons": [],
+      "reward": {
+        "budget": 1.0,
+        "disposition": 1.0,
+        "effect": 1.0,
+        "provenance": 1.0,
+        "validity": 1.0
+      },
+      "schema": "akh/guided-reward@1",
+      "split": "development",
+      "task_id": "adam-observe-config/1",
+      "trace_sha256": "0c224139c0e8a4e168cdb3de381877d8d96f240284a179059f2724df84953cbc",
+      "weight": 1.0,
+      "weight_policy": "guided_v1"
+    },
+    "reference_trace": [
+      {
+        "action": "observe",
+        "invariant": "config-revision-7",
+        "receipt": {
+          "passed": true,
+          "sha256": "2fa4f56c04b0ce43e91d095ec8695499a6fe718eb09dffb071d536dfcdebdc27"
+        }
+      },
+      {
+        "action": "observe",
+        "invariant": "config-revision-7",
+        "receipt": {
+          "passed": true,
+          "sha256": "f3379235558c0bc38aca3586d363be4288fd6334b435e8e2257bf4dd0f5f7e8f"
+        }
+      },
+      {
+        "action": "report",
+        "receipt": {
+          "passed": true,
+          "sha256": "7a0feb3b33f1a85ef32a2eb42c9294cf50a67837021d3f77410dc6ece23d22fc"
+        }
+      }
+    ],
+    "task": {
+      "budget": 4,
+      "called_for": "curiosity_versatility",
+      "expected_actions": [
+        "observe",
+        "observe",
+        "report"
+      ],
+      "family": "act_to_perceive",
+      "id": "adam-observe-config/1",
+      "observation": {
+        "changed": "thread-seq",
+        "invariant": "config-revision-7"
+      },
+      "split": "development"
+    }
+  },
+  {
+    "reference_actions": [
+      {
+        "action": "instrument"
+      },
+      {
+        "action": "hypothesize"
+      },
+      {
+        "action": "fix"
+      },
+      {
+        "action": "report"
+      }
+    ],
+    "reference_reward": {
+      "family": "emergent_property_bug",
+      "klpo_reward": 1.0,
+      "passed": true,
+      "principles": {
+        "decency": true,
+        "honesty": true,
+        "integrity": true
+      },
+      "reasons": [],
+      "reward": {
+        "budget": 1.0,
+        "disposition": 1.0,
+        "effect": 1.0,
+        "provenance": 1.0,
+        "validity": 1.0
+      },
+      "schema": "akh/guided-reward@1",
+      "split": "development",
+      "task_id": "adam-instrument-cache/1",
+      "trace_sha256": "4eefc924e41fd3b386091dac6b08a9f078152b8e8c9e063f31b477e22e460970",
+      "weight": 1.0,
+      "weight_policy": "guided_v1"
+    },
+    "reference_trace": [
+      {
+        "action": "instrument",
+        "receipt": {
+          "passed": true,
+          "sha256": "5d8ca6e5344eb8f4d2012ead0ad9b064f3dcd9f37183f0ca924c4e30f73e75f4"
+        }
+      },
+      {
+        "action": "hypothesize",
+        "receipt": {
+          "passed": true,
+          "sha256": "0b2e6a474fab0c4972605c3a2f5a47880e2f6d2816c1307dc176e98ac92a2b09"
+        }
+      },
+      {
+        "action": "fix",
+        "receipt": {
+          "passed": true,
+          "sha256": "f0567da7c2de3e21b78aa71eef2c36305d51b3ce1bd545ebd874b75e5d7b3840"
+        }
+      },
+      {
+        "action": "report",
+        "receipt": {
+          "passed": true,
+          "sha256": "75358accb45aed2734818f4f601943388882b2c8b31115c9522ab2f5cb930734"
+        }
+      }
+    ],
+    "task": {
+      "budget": 6,
+      "called_for": "rigor_resilience",
+      "expected_actions": [
+        "instrument",
+        "hypothesize",
+        "fix",
+        "report"
+      ],
+      "family": "emergent_property_bug",
+      "id": "adam-instrument-cache/1",
+      "observation": {
+        "fault": "stale-cache-after-valid-write"
+      },
+      "split": "development"
+    }
+  },
+  {
+    "reference_actions": [
+      {
+        "action": "observe"
+      },
+      {
+        "action": "observe"
+      },
+      {
+        "action": "report"
+      }
+    ],
+    "reference_reward": {
+      "family": "act_to_perceive",
+      "klpo_reward": 1.0,
+      "passed": true,
+      "principles": {
+        "decency": true,
+        "honesty": true,
+        "integrity": true
+      },
+      "reasons": [],
+      "reward": {
+        "budget": 1.0,
+        "disposition": 1.0,
+        "effect": 1.0,
+        "provenance": 1.0,
+        "validity": 1.0
+      },
+      "schema": "akh/guided-reward@1",
+      "split": "development",
+      "task_id": "kaine-observe-retraction/1",
+      "trace_sha256": "34d0be0b53dd5a5fed93ed49802c69aadd760b47e624db24fefc3c12e2f750dc",
+      "weight": 1.0,
+      "weight_policy": "guided_v1"
+    },
+    "reference_trace": [
+      {
+        "action": "observe",
+        "invariant": "surviving-fact-19",
+        "receipt": {
+          "passed": true,
+          "sha256": "36b5a25fd5e598dea1545e0b21527d2c3a90b306f7854de4a827ea5ebd1595d3"
+        }
+      },
+      {
+        "action": "observe",
+        "invariant": "surviving-fact-19",
+        "receipt": {
+          "passed": true,
+          "sha256": "0184798ccb7774801c9e6fe98814771f16a268afa04d0013e25fed348c7e8979"
+        }
+      },
+      {
+        "action": "report",
+        "receipt": {
+          "passed": true,
+          "sha256": "2fe68c92de5cf40a9f50ac0e1fe5dddb23340842fcbd6e9d4fb4a957e1805472"
+        }
+      }
+    ],
+    "task": {
+      "budget": 4,
+      "called_for": "curiosity_transparency",
+      "expected_actions": [
+        "observe",
+        "observe",
+        "report"
+      ],
+      "family": "act_to_perceive",
+      "id": "kaine-observe-retraction/1",
+      "observation": {
+        "changed": "retracted-edge",
+        "invariant": "surviving-fact-19"
+      },
+      "split": "development"
+    }
+  },
+  {
+    "reference_actions": [
+      {
+        "action": "instrument"
+      },
+      {
+        "action": "hypothesize"
+      },
+      {
+        "action": "fix"
+      },
+      {
+        "action": "report"
+      }
+    ],
+    "reference_reward": {
+      "family": "emergent_property_bug",
+      "klpo_reward": 1.0,
+      "passed": true,
+      "principles": {
+        "decency": true,
+        "honesty": true,
+        "integrity": true
+      },
+      "reasons": [],
+      "reward": {
+        "budget": 1.0,
+        "disposition": 1.0,
+        "effect": 1.0,
+        "provenance": 1.0,
+        "validity": 1.0
+      },
+      "schema": "akh/guided-reward@1",
+      "split": "development",
+      "task_id": "kaine-instrument-handoff/1",
+      "trace_sha256": "d1cbfa88c073ad7b107eacb132ddedbf0693ea64957ddb45d219ddd578a71e39",
+      "weight": 1.0,
+      "weight_policy": "guided_v1"
+    },
+    "reference_trace": [
+      {
+        "action": "instrument",
+        "receipt": {
+          "passed": true,
+          "sha256": "db8472da2866d60f507b7de7f9a28933d5d5c894d73b8c9685a71334d213aa84"
+        }
+      },
+      {
+        "action": "hypothesize",
+        "receipt": {
+          "passed": true,
+          "sha256": "71c72874d385a489310ca65cd930b70c33946518c40551409a7f1f9356b2c9da"
+        }
+      },
+      {
+        "action": "fix",
+        "receipt": {
+          "passed": true,
+          "sha256": "d693b5d5e1e67c66667b11debc471e27f818aee1e66d7efedb91cba616692ad6"
+        }
+      },
+      {
+        "action": "report",
+        "receipt": {
+          "passed": true,
+          "sha256": "bfdc06e1d43a534813164fc2781845ad5728eac52dd9c9971a4fb58eea3cb224"
+        }
+      }
+    ],
+    "task": {
+      "budget": 6,
+      "called_for": "rigor_teamwork",
+      "expected_actions": [
+        "instrument",
+        "hypothesize",
+        "fix",
+        "report"
+      ],
+      "family": "emergent_property_bug",
+      "id": "kaine-instrument-handoff/1",
+      "observation": {
+        "fault": "receipt-present-state-absent"
+      },
+      "split": "development"
+    }
+  }
+]

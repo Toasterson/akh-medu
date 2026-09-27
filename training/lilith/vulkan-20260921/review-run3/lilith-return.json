@@ -1,0 +1,131 @@
+{
+  "closed_at": null,
+  "core_service": null,
+  "schema_version": 1,
+  "id": "01a0c45b-2b19-7882-8e3f-c752aae00da3",
+  "principal": "operator",
+  "akh": "lilith",
+  "conversation_key": null,
+  "workspace_profile": "local-dev",
+  "workspace": {
+    "id": "akh-1f1fec1c494dc91ccd080a45b5797cd7",
+    "sandbox_id": "akh-1f1fec1c494dc91ccd080a45b5797cd7",
+    "executor": "akhexecd",
+    "generation": 1,
+    "site": "hephaistos",
+    "root": "/home/toasty/.local/share/akh-medu/lilith-dev-vulkan-20260921/workspaces/akh-1f1fec1c494dc91ccd080a45b5797cd7",
+    "platform": "linux",
+    "confinement": "unconfined"
+  },
+  "runtime": {
+    "runtime": "akhrtd",
+    "profile": "lilith",
+    "revision": "lilith-local-v1",
+    "kind": "internal",
+    "model": "lilith-gemma4-12b",
+    "execution_mode": "brokered"
+  },
+  "instructions": "You are Lilith, the human interface and coordinator of Akhs. Complete assigned work within its scope, inspect evidence, verify results, and report uncertainty. This is a local development workspace; illumos validation is not available yet.",
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read a UTF-8 file in the assigned workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "read_only": true,
+      "destination": {
+        "kind": "workspace",
+        "operation": "read"
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Write a UTF-8 file in the assigned workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "create": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content",
+          "create"
+        ],
+        "type": "object"
+      },
+      "read_only": false,
+      "destination": {
+        "kind": "workspace",
+        "operation": "write"
+      }
+    }
+  ],
+  "approval_policy": "allow_granted",
+  "generation": 2,
+  "next_sequence": 17,
+  "turns": [
+    {
+      "id": "01a0c45b-2b1b-7433-acd4-8bd9723d4b80",
+      "request_id": "7203f1019a214ffe96aea46944b046a6-lilith-write",
+      "input": {
+        "origin": {
+          "kind": "human",
+          "principal": "operator"
+        },
+        "text": "Remember the word cedar. Use write_file to create clamp_u8.py with create=true. Write a Python function clamp_u8(value: int) -> int that returns 0 for integers below 0, 255 for integers above 255, otherwise value. Use only if comparisons and returns, no imports, calls, decorators or loops. Write actual Python, not markdown. Then confirm briefly.",
+        "data": null,
+        "artifacts": []
+      },
+      "status": "completed",
+      "generation": 1,
+      "runtime_job_id": "01a0c45b-2b1b-7433-acd4-8bd9723d4b80",
+      "cancel_requested": false,
+      "output": "The file clamp_u8.py has been created successfully. cedar",
+      "error": null,
+      "created_at": 1790000704283
+    },
+    {
+      "id": "01a0c45e-f0c3-7b53-a318-a12fd73a1805",
+      "request_id": "7203f1019a214ffe96aea46944b046a6-lilith-return",
+      "input": {
+        "origin": {
+          "kind": "human",
+          "principal": "operator"
+        },
+        "text": "What word did I originally ask you to remember? Reply with only that word, without tools.",
+        "data": null,
+        "artifacts": []
+      },
+      "status": "completed",
+      "generation": 2,
+      "runtime_job_id": "01a0c45e-f0c3-7b53-a318-a12fd73a1805",
+      "cancel_requested": false,
+      "output": "cedar",
+      "error": null,
+      "created_at": 1790000951491
+    }
+  ],
+  "provider_session": "internal-01a0c45b-2e86-7e00-8cfa-eedccce0a763",
+  "controller": null,
+  "created_at": 1790000704281,
+  "last_progress_at": 1790001029131,
+  "dispatch_failures": 0
+}

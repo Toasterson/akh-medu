@@ -1,0 +1,27 @@
+{
+  "kind": "local_durable_coordination_integration",
+  "status": "failed",
+  "phases": [
+    {
+      "phase": "stack_ready",
+      "runtime_pid": 270907,
+      "devices": {
+        "lilith": {
+          "kind": "vulkan",
+          "ordinal": 0
+        },
+        "ptah": {
+          "kind": "hip",
+          "ordinal": 0
+        }
+      }
+    },
+    {
+      "phase": "coordination_scope",
+      "session_id": "01a0c4eb-a881-7563-9bcf-56f99f018f19",
+      "turn_id": "01a0c4eb-a883-7782-a5b1-0c25eb04c1e7"
+    }
+  ],
+  "error": "lilith-write ended failed: {'id': '01a0c4eb-a883-7782-a5b1-0c25eb04c1e7', 'request_id': 'df7878468b464ff3ad756de49e2648eb-lilith-write', 'input': {'origin': {'kind': 'human', 'principal': 'operator'}, 'text': 'Remember the word cedar. Use write_file to create range_within_u64.py with create=true. Write range_within_u64(start: int, length: int, limit: int) -> bool. Inputs are integers. Return False if any input is outside unsigned 64-bit range 0..18446744073709551615. Otherwise return whether the half-open range [start, start+length) fits within [0, limit). An empty range at start==limit is valid. Reject start>limit even for an empty range. Use the overflow-safe comparison length <= limit - start after checking start <= limit. Use only integer/bool literals, comparisons, boolean operators, subtraction, if and return. No imports, calls, decorators or loops. Write actual Python, not markdown. Then use request_review with path=range_within_u64.py and objective=Review the u64-range/1 contract. After it acknowledges the queued review, finish your turn briefly.', 'data': None, 'artifacts': []}, 'status': 'failed', 'generation': 1, 'runtime_job_id': '01a0c4eb-a883-7782-a5b1-0c25eb04c1e7', 'cancel_requested': False, 'output': None, 'error': {'code': 'model_incomplete', 'message': 'native model exhausted its output token budget'}, 'created_at': 1790010173571}",
+  "services_stopped": true
+}

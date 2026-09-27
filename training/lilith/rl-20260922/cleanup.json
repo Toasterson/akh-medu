@@ -1,0 +1,13 @@
+{
+  "schema": "lilith/rl-cleanup@2",
+  "primary_pid": 44108,
+  "primary_exit_code": 0,
+  "retention_pid": 56551,
+  "retention_exit_code": 0,
+  "active_lilith_hf_processes": 0,
+  "rocm_device_holders_after_cleanup": 0,
+  "torch_models_released_by_process_exit": true,
+  "gpu_ownership_handed_to_coordination": true,
+  "vm_restart_authorized_after_release": true,
+  "deployed_weights_changed": false
+}

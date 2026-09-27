@@ -1,0 +1,577 @@
+{
+  "executor_contract": {
+    "cleanup_policy": "unique-run-directory-removed-after-every-attempt",
+    "execution_boundary": "ssh_guest",
+    "guest_identity": "lilith-illumos-20260922",
+    "host_exposure": "SLIRP loopback SSH only; no host mounts or forwarded secrets",
+    "known_hosts_sha256": "aa8a5572c99c8529d8df19c9269c2690a500205bf0d4a5ba058f7ce75aeb90ee",
+    "max_output_bytes": 65536,
+    "max_snapshot_bytes": 33554432,
+    "max_timeout_s": 60,
+    "privilege_policy": "unprivileged akh-exec; executor never invokes sudo",
+    "rootfs_sha256": "b4c8340826ae2f53d684ea22ae360d3813e8d2a075b60c439205ce4dbdc32e80",
+    "schema": "lilith/native-executor-contract@1",
+    "ssh": {
+      "host": "127.0.0.1",
+      "host_key_fingerprint": "SHA256:9XvZc8Pd/zkdM9zOqOQEXp2Z0ZDej3IPI3ommnQeVj0",
+      "port": 10115,
+      "user": "akh-exec"
+    },
+    "staging_protocol": "tar-stdin+exact-content-v1"
+  },
+  "records_sha256": "e9a5fa481827e70f5722240e8f622b28ce8d8193918e6317265087d9233e9189",
+  "results": [
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "5afdb6b164707a3ab645d8b477d7d2d86b306d778b57180831c85b1498d70418",
+        "cases": 0,
+        "category": "grammar",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "701217dac5e317184063b31913f71b05b30ce58d6d2138244eb9d7c37c1201ec",
+        "passed": false,
+        "presentation": "single_markdown_fence",
+        "total_cases": 496
+      },
+      "executed": false,
+      "grammar_admitted": false,
+      "grammar_error": "grammar",
+      "official_evidence": {
+        "artifact_sha256": "5afdb6b164707a3ab645d8b477d7d2d86b306d778b57180831c85b1498d70418",
+        "cases": 0,
+        "category": "grammar",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "701217dac5e317184063b31913f71b05b30ce58d6d2138244eb9d7c37c1201ec",
+        "passed": false,
+        "presentation": "single_markdown_fence",
+        "total_cases": 496
+      },
+      "role": "lilith",
+      "task_id": "signed-clamp/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "6e2b07d1e5704f8b290169aa2ac8f027871501226fcc05a10ee082f0c5ff65e9",
+        "cases": 961,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "2de7ac3e5417810c090907dc5ca3e162ea2731f42ed18ad5fdb30d854daf22fd",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 961
+      },
+      "executed": true,
+      "exit_code": 0,
+      "grammar_admitted": true,
+      "grammar_error": null,
+      "native_passed": true,
+      "official_evidence": {
+        "artifact_sha256": "6e2b07d1e5704f8b290169aa2ac8f027871501226fcc05a10ee082f0c5ff65e9",
+        "cases": 961,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "2de7ac3e5417810c090907dc5ca3e162ea2731f42ed18ad5fdb30d854daf22fd",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 961
+      },
+      "receipt_path": "training/lilith/native-20260922/model-lilith-bounded-add-2-receipt.json",
+      "role": "lilith",
+      "stderr": "",
+      "stdout": "native-cases-ok 961\n",
+      "task_id": "bounded-add/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "f9c15afcea58f4d5bd7c410cbd4646de566d6ebfbf75d59afd86bcdf31b8870a",
+        "cases": 0,
+        "category": "grammar",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "dc4c779238af6a7e0ff7880a792ba000f1f1fc2e72f6d9ab85a10ff34fc36433",
+        "passed": false,
+        "presentation": "single_markdown_fence",
+        "total_cases": 374
+      },
+      "executed": false,
+      "grammar_admitted": false,
+      "grammar_error": "grammar",
+      "official_evidence": {
+        "artifact_sha256": "f9c15afcea58f4d5bd7c410cbd4646de566d6ebfbf75d59afd86bcdf31b8870a",
+        "cases": 0,
+        "category": "grammar",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "dc4c779238af6a7e0ff7880a792ba000f1f1fc2e72f6d9ab85a10ff34fc36433",
+        "passed": false,
+        "presentation": "single_markdown_fence",
+        "total_cases": 374
+      },
+      "role": "lilith",
+      "task_id": "align-up-power2/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "de943022c5311026ab48207e76a19f6f3f9c87256194bd62add892740eaa9a67",
+        "cases": 1,
+        "category": "division_by_zero",
+        "counterexample": {
+          "expected": false,
+          "inputs": [
+            -1025,
+            0
+          ]
+        },
+        "formatting_compliant": false,
+        "generated_text_sha256": "a89dbe739485cb4fa43c80cba02ee6356c6cb6366d693a8c8b3127ebd2003f83",
+        "passed": false,
+        "presentation": "single_markdown_fence",
+        "total_cases": 363
+      },
+      "executed": true,
+      "exit_code": 1,
+      "grammar_admitted": true,
+      "grammar_error": null,
+      "native_passed": false,
+      "official_evidence": {
+        "artifact_sha256": "de943022c5311026ab48207e76a19f6f3f9c87256194bd62add892740eaa9a67",
+        "cases": 1,
+        "category": "division_by_zero",
+        "counterexample": {
+          "expected": false,
+          "inputs": [
+            -1025,
+            0
+          ]
+        },
+        "formatting_compliant": false,
+        "generated_text_sha256": "a89dbe739485cb4fa43c80cba02ee6356c6cb6366d693a8c8b3127ebd2003f83",
+        "passed": false,
+        "presentation": "single_markdown_fence",
+        "total_cases": 363
+      },
+      "receipt_path": "training/lilith/native-20260922/model-lilith-aligned-offset-valid-2-receipt.json",
+      "role": "lilith",
+      "stderr": "Traceback (most recent call last):\n  File \"/var/tmp/lilith-native/463c2ab8dc9242f9b7a925fdfebd7fce/candidate.py\", line 23, in <module>\n    _actual = f(_a, _b)\n  File \"/var/tmp/lilith-native/463c2ab8dc9242f9b7a925fdfebd7fce/candidate.py\", line 17, in f\n    is_aligned = (a % b) == 0\nZeroDivisionError: integer division or modulo by zero\n",
+      "stdout": "",
+      "task_id": "aligned-offset-valid/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "0f63960919aad055f3c3dfb8533b2a7d6a1600100d8e9ea33b136358dbef63c1",
+        "cases": 350,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "802f626356fb964d483fba3c4e0b0bce205fdaf081d5e7b938b3ee4c8d5ba641",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 350
+      },
+      "executed": true,
+      "exit_code": 0,
+      "grammar_admitted": true,
+      "grammar_error": null,
+      "native_passed": true,
+      "official_evidence": {
+        "artifact_sha256": "0f63960919aad055f3c3dfb8533b2a7d6a1600100d8e9ea33b136358dbef63c1",
+        "cases": 350,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "802f626356fb964d483fba3c4e0b0bce205fdaf081d5e7b938b3ee4c8d5ba641",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 350
+      },
+      "receipt_path": "training/lilith/native-20260922/model-lilith-signed-field-extract-2-receipt.json",
+      "role": "lilith",
+      "stderr": "",
+      "stdout": "native-cases-ok 350\n",
+      "task_id": "signed-field-extract/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "6ad31bbb1a943214e3343a4d9ef507ac48d9e7966631a2afe0300f2135d64c67",
+        "cases": 271,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "actual": true,
+          "expected": false,
+          "inputs": [
+            0,
+            0
+          ]
+        },
+        "formatting_compliant": false,
+        "generated_text_sha256": "a04109a3502db41b54a273479258587282550c13cf0b40df4d46d0f34ab377e3",
+        "passed": false,
+        "presentation": "single_markdown_fence",
+        "total_cases": 630
+      },
+      "executed": true,
+      "exit_code": 1,
+      "grammar_admitted": true,
+      "grammar_error": null,
+      "native_passed": false,
+      "official_evidence": {
+        "artifact_sha256": "6ad31bbb1a943214e3343a4d9ef507ac48d9e7966631a2afe0300f2135d64c67",
+        "cases": 271,
+        "category": "contract_mismatch",
+        "counterexample": {
+          "actual": true,
+          "expected": false,
+          "inputs": [
+            0,
+            0
+          ]
+        },
+        "formatting_compliant": false,
+        "generated_text_sha256": "a04109a3502db41b54a273479258587282550c13cf0b40df4d46d0f34ab377e3",
+        "passed": false,
+        "presentation": "single_markdown_fence",
+        "total_cases": 630
+      },
+      "receipt_path": "training/lilith/native-20260922/model-lilith-field-fits-unsigned-2-receipt.json",
+      "role": "lilith",
+      "stderr": "Traceback (most recent call last):\n  File \"/var/tmp/lilith-native/5797b965fcee4ef7b2867883b4dfc2c5/candidate.py\", line 13, in <module>\n    raise AssertionError((_a, _b, _expected, _actual))\nAssertionError: (0, 0, False, True)\n",
+      "stdout": "",
+      "task_id": "field-fits-unsigned/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "c1250236a68c88a1fe113c4da934854cdffcd3933757a9955e5e218b8e05f8e7",
+        "cases": 578,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "bb28c6e34a03049dfc0612c8efedf1cf34641e829213a38c628c1d3b40a4a2e3",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 578
+      },
+      "executed": true,
+      "exit_code": 0,
+      "grammar_admitted": true,
+      "grammar_error": null,
+      "native_passed": true,
+      "official_evidence": {
+        "artifact_sha256": "c1250236a68c88a1fe113c4da934854cdffcd3933757a9955e5e218b8e05f8e7",
+        "cases": 578,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "bb28c6e34a03049dfc0612c8efedf1cf34641e829213a38c628c1d3b40a4a2e3",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 578
+      },
+      "receipt_path": "training/lilith/native-20260922/model-lilith-window-end-2-receipt.json",
+      "role": "lilith",
+      "stderr": "",
+      "stdout": "native-cases-ok 578\n",
+      "task_id": "window-end/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "cff9bd92623ab57d9ea0c2960d74a737bde4065b47eee46ad24ccc5fb2bd5dbc",
+        "cases": 121,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "6747d97a5950ef4dfe769eb22bf58b9c8a3942cb471f500f04731a3b9f3059a8",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 121
+      },
+      "executed": true,
+      "exit_code": 0,
+      "grammar_admitted": true,
+      "grammar_error": null,
+      "native_passed": true,
+      "official_evidence": {
+        "artifact_sha256": "cff9bd92623ab57d9ea0c2960d74a737bde4065b47eee46ad24ccc5fb2bd5dbc",
+        "cases": 121,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "6747d97a5950ef4dfe769eb22bf58b9c8a3942cb471f500f04731a3b9f3059a8",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 121
+      },
+      "receipt_path": "training/lilith/native-20260922/model-lilith-windows-overlap-2-receipt.json",
+      "role": "lilith",
+      "stderr": "",
+      "stdout": "native-cases-ok 121\n",
+      "task_id": "windows-overlap/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "1b89b7d0c2734cbe4802ef2609fce8b628a22db20ecf79f02ee228f2e80327e9",
+        "cases": 496,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "80224f4a65e9a83acb5f2575aea3cc9743118a63da52155c04b676908f91eff0",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 496
+      },
+      "executed": true,
+      "exit_code": 0,
+      "grammar_admitted": true,
+      "grammar_error": null,
+      "native_passed": true,
+      "official_evidence": {
+        "artifact_sha256": "1b89b7d0c2734cbe4802ef2609fce8b628a22db20ecf79f02ee228f2e80327e9",
+        "cases": 496,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "80224f4a65e9a83acb5f2575aea3cc9743118a63da52155c04b676908f91eff0",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 496
+      },
+      "receipt_path": "training/lilith/native-20260922/model-ptah-signed-clamp-2-receipt.json",
+      "role": "ptah",
+      "stderr": "",
+      "stdout": "native-cases-ok 496\n",
+      "task_id": "signed-clamp/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "291a3f15391ad1293d7c596b5c1c559716d3dd29b01cea7d4716fa26b8f4c5e9",
+        "cases": 961,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "5a6171bef47a23bbe38810954bb0e39746951626fce05d84df376c01367deb95",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 961
+      },
+      "executed": true,
+      "exit_code": 0,
+      "grammar_admitted": true,
+      "grammar_error": null,
+      "native_passed": true,
+      "official_evidence": {
+        "artifact_sha256": "291a3f15391ad1293d7c596b5c1c559716d3dd29b01cea7d4716fa26b8f4c5e9",
+        "cases": 961,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "5a6171bef47a23bbe38810954bb0e39746951626fce05d84df376c01367deb95",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 961
+      },
+      "receipt_path": "training/lilith/native-20260922/model-ptah-bounded-add-2-receipt.json",
+      "role": "ptah",
+      "stderr": "",
+      "stdout": "native-cases-ok 961\n",
+      "task_id": "bounded-add/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "4d70df341076e897f80d0b0cae81963c50d9dd31c1c654dfb077df87da4016ca",
+        "cases": 0,
+        "category": "grammar",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "38055fda14d112d5906d3c9c04dc0d7fecc63b82d444ecd2efc86908448f3a2d",
+        "passed": false,
+        "presentation": "single_markdown_fence",
+        "total_cases": 374
+      },
+      "executed": false,
+      "grammar_admitted": false,
+      "grammar_error": "grammar",
+      "official_evidence": {
+        "artifact_sha256": "4d70df341076e897f80d0b0cae81963c50d9dd31c1c654dfb077df87da4016ca",
+        "cases": 0,
+        "category": "grammar",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "38055fda14d112d5906d3c9c04dc0d7fecc63b82d444ecd2efc86908448f3a2d",
+        "passed": false,
+        "presentation": "single_markdown_fence",
+        "total_cases": 374
+      },
+      "role": "ptah",
+      "task_id": "align-up-power2/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "de646e2b554e71c2fb3aeb80134d2eae6ad408ce0fd10daa3008ec08106b6b2d",
+        "cases": 0,
+        "category": "grammar",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "ac59cd2de495a25382f785d3aae12c1b03a95f53698d324afcf3038f596e219f",
+        "passed": false,
+        "presentation": "single_markdown_fence",
+        "total_cases": 363
+      },
+      "executed": false,
+      "grammar_admitted": false,
+      "grammar_error": "grammar",
+      "official_evidence": {
+        "artifact_sha256": "de646e2b554e71c2fb3aeb80134d2eae6ad408ce0fd10daa3008ec08106b6b2d",
+        "cases": 0,
+        "category": "grammar",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "ac59cd2de495a25382f785d3aae12c1b03a95f53698d324afcf3038f596e219f",
+        "passed": false,
+        "presentation": "single_markdown_fence",
+        "total_cases": 363
+      },
+      "role": "ptah",
+      "task_id": "aligned-offset-valid/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "f3e9d6d9eb8a64db6fc97bc392b1ba2349d9a45db2ae8b30d41ef06361eb6cb5",
+        "cases": 350,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "7004089a3dcf1c930be861a1387f97d846833fedf61b22236eb23638a04a12a8",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 350
+      },
+      "executed": true,
+      "exit_code": 0,
+      "grammar_admitted": true,
+      "grammar_error": null,
+      "native_passed": true,
+      "official_evidence": {
+        "artifact_sha256": "f3e9d6d9eb8a64db6fc97bc392b1ba2349d9a45db2ae8b30d41ef06361eb6cb5",
+        "cases": 350,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "7004089a3dcf1c930be861a1387f97d846833fedf61b22236eb23638a04a12a8",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 350
+      },
+      "receipt_path": "training/lilith/native-20260922/model-ptah-signed-field-extract-2-receipt.json",
+      "role": "ptah",
+      "stderr": "",
+      "stdout": "native-cases-ok 350\n",
+      "task_id": "signed-field-extract/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "51892bf00a614a9ccf5b5163fe7391a82aad844f4d668b9aa0d94c41830b3fdf",
+        "cases": 630,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "01041dca23d4f97bf247fde351e2ded90f2e4f2c40e13a636c4d05006d2cfda5",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 630
+      },
+      "executed": true,
+      "exit_code": 0,
+      "grammar_admitted": true,
+      "grammar_error": null,
+      "native_passed": true,
+      "official_evidence": {
+        "artifact_sha256": "51892bf00a614a9ccf5b5163fe7391a82aad844f4d668b9aa0d94c41830b3fdf",
+        "cases": 630,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "01041dca23d4f97bf247fde351e2ded90f2e4f2c40e13a636c4d05006d2cfda5",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 630
+      },
+      "receipt_path": "training/lilith/native-20260922/model-ptah-field-fits-unsigned-2-receipt.json",
+      "role": "ptah",
+      "stderr": "",
+      "stdout": "native-cases-ok 630\n",
+      "task_id": "field-fits-unsigned/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "25bb928764dab7a4be2d0e0b346a4fded9be164bb34c78dcbea2bac46848aa1c",
+        "cases": 578,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "0b87305f29da8d4eb174a4d9b312fc8e9a7828956826c07c749f55535e8cefb5",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 578
+      },
+      "executed": true,
+      "exit_code": 0,
+      "grammar_admitted": true,
+      "grammar_error": null,
+      "native_passed": true,
+      "official_evidence": {
+        "artifact_sha256": "25bb928764dab7a4be2d0e0b346a4fded9be164bb34c78dcbea2bac46848aa1c",
+        "cases": 578,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "0b87305f29da8d4eb174a4d9b312fc8e9a7828956826c07c749f55535e8cefb5",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 578
+      },
+      "receipt_path": "training/lilith/native-20260922/model-ptah-window-end-2-receipt.json",
+      "role": "ptah",
+      "stderr": "",
+      "stdout": "native-cases-ok 578\n",
+      "task_id": "window-end/2"
+    },
+    {
+      "bounded_verifier": {
+        "artifact_sha256": "7f6ce9765cfb9ca1b8bfba6923ff1ab85952f532313ab90fd407f361d7a934e7",
+        "cases": 121,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "e9458ae0781ec55c292ec3e89eadeef544a20e3fed30f9ab0b7c3187a76c00b0",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 121
+      },
+      "executed": true,
+      "exit_code": 0,
+      "grammar_admitted": true,
+      "grammar_error": null,
+      "native_passed": true,
+      "official_evidence": {
+        "artifact_sha256": "7f6ce9765cfb9ca1b8bfba6923ff1ab85952f532313ab90fd407f361d7a934e7",
+        "cases": 121,
+        "category": "passed",
+        "counterexample": null,
+        "formatting_compliant": false,
+        "generated_text_sha256": "e9458ae0781ec55c292ec3e89eadeef544a20e3fed30f9ab0b7c3187a76c00b0",
+        "passed": true,
+        "presentation": "single_markdown_fence",
+        "total_cases": 121
+      },
+      "receipt_path": "training/lilith/native-20260922/model-ptah-windows-overlap-2-receipt.json",
+      "role": "ptah",
+      "stderr": "",
+      "stdout": "native-cases-ok 121\n",
+      "task_id": "windows-overlap/2"
+    }
+  ],
+  "schema": "lilith/native-model-diagnostic@2",
+  "scope": "unscored diagnostic; official verifier scores unchanged"
+}

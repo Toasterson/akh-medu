@@ -1,0 +1,23 @@
+{
+  "reason": "User requested stop for today and Runpod handoff",
+  "response": {
+    "id": "01a0ca84-bfb3-70e1-a68b-04b11c829823",
+    "request_id": "2487bdfd03044a6a8f9f642028541268",
+    "input": {
+      "origin": {
+        "kind": "human",
+        "principal": "operator"
+      },
+      "text": "Execute the pinned operator-owned Lilith learning run within this assigned workspace.",
+      "data": null,
+      "artifacts": []
+    },
+    "status": "running",
+    "generation": 1,
+    "runtime_job_id": "01a0ca84-bfb3-70e1-a68b-04b11c829823",
+    "cancel_requested": true,
+    "output": null,
+    "error": null,
+    "created_at": 1790104092595
+  }
+}

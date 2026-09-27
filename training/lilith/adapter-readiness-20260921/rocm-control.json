@@ -1,0 +1,27 @@
+{
+  "torch": "2.7.1+rocm6.3",
+  "hip": "6.3.42131-fa1d09cbd",
+  "status": "passed",
+  "device": "AMD Radeon Graphics",
+  "properties": "_CudaDeviceProperties(name='AMD Radeon Graphics', major=11, minor=0, gcnArchName='gfx1100', total_memory=24560MB, multi_processor_count=48, uuid=33306666-3364-6438-3435-626131643832, L2_cache_size=6MB)",
+  "output": [
+    [
+      18.0,
+      36.0
+    ],
+    [
+      72.0,
+      144.0
+    ]
+  ],
+  "gradient": [
+    [
+      6.0,
+      24.0
+    ],
+    [
+      6.0,
+      24.0
+    ]
+  ]
+}

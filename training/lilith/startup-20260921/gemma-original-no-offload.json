@@ -1,0 +1,7 @@
+{
+  "exit_code": 0,
+  "timeout": false,
+  "wall_seconds": 14.347424834999401,
+  "changed_variable": "AKH_GPU_MATMUL=0",
+  "kind": "original_repro_not_quality_benchmark"
+}

@@ -1,0 +1,18 @@
+{
+  "full_vocab_bitwise_equal": true,
+  "greedy_tokens_equal": true,
+  "rounds": [
+    {
+      "round": 0,
+      "baseline_tps": 1.4649216784992483,
+      "candidate_tps": 6.724149951694668,
+      "prefill_seconds": 25.192428664
+    },
+    {
+      "round": 1,
+      "baseline_tps": 1.2744918931871132,
+      "candidate_tps": 15.082192887931614,
+      "prefill_seconds": 22.590484222
+    }
+  ]
+}

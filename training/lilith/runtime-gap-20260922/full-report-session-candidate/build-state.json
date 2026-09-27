@@ -1,0 +1,9 @@
+{
+  "prebuild_akhrtd_sha256": "09a224fa4b07e7f2d5fe907e82c143c60d891be7a99b98a20b2c9c2104240fd1",
+  "backup_sha256": "09a224fa4b07e7f2d5fe907e82c143c60d891be7a99b98a20b2c9c2104240fd1",
+  "backup_path": "/home/toasty/.local/share/akh-medu/lilith-candidate-binaries-20260922/akhrtd-before-build",
+  "candidate_path": "/home/toasty/.local/share/akh-medu/lilith-candidate-binaries-20260922/akhrtd-vulkan-candidate",
+  "candidate_sha256": "f1a03f6138e65bb6065be7ba9fdf64f76897b99c8d1ca90661662555229ddbbe",
+  "restored_target_sha256": "09a224fa4b07e7f2d5fe907e82c143c60d891be7a99b98a20b2c9c2104240fd1",
+  "target_restored_byte_identical": true
+}

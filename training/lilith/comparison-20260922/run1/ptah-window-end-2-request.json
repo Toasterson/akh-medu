@@ -1,0 +1,5 @@
+{
+  "session_id": "01a0c920-a274-75c3-9916-05cfb9f5a466",
+  "turn_id": "01a0c920-a276-7f12-9d88-95507a1cbf7c",
+  "prompt": "Inputs are arbitrary integers. a is a start offset and b is a length. Return the inclusive end offset, or -1 unless 0 <= a <= 65535, 1 <= b <= 256, and the end is at most 65535. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63."
+}

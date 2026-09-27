@@ -1,0 +1,5 @@
+{
+  "session_id": "01a0c91e-1602-7221-86d9-1833b72a55ff",
+  "turn_id": "01a0c91e-1603-7cb2-9bd8-45bb22a3da18",
+  "prompt": "Inputs are arbitrary integers. Return a clamped to the inclusive interval from -b to b; return -1 if b is outside 0..255. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63."
+}

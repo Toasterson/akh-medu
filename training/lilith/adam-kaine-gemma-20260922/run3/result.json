@@ -1,0 +1,55 @@
+{
+  "schema": "lilith/rl-probe@1",
+  "status": "cancelled",
+  "pid": 94113,
+  "deployed_weights_changed": false,
+  "quality_claim": false,
+  "source_sha256": "141b407698d8e5462be5d5ec076b5b9c0fc0a9425a3aec3aa0128d5f9bf037d7",
+  "training_protocol_sha256": "10bd7c84a678972541d96c11b08b35c8c7dbcf044569f82ac12205140465d324",
+  "task_manifest_sha256": "c0491f56454ae407a659c1bf73fb56ad754985d22154c19f13781c5bd0b1dc3a",
+  "phase": "cancelled_external",
+  "elapsed_seconds": 386.86307357199985,
+  "memory_control": {
+    "tokens": 512,
+    "scored_positions": 8,
+    "finite_gradients": true,
+    "gradient_norms": {
+      "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": 0.0,
+      "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": 45.14167404174805
+    },
+    "peak_gpu_bytes": 24404435456
+  },
+  "initial_policy": {
+    "model_sha256": "5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d",
+    "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "adapter_sha256": "bf79f04d4ee5487d669ef010e0376aafddbcdea831a2192072ea62269a2677c6",
+    "version": "initial-bf79f04d4ee5487d"
+  },
+  "base_transcript_validation": {
+    "sum_nll": 2727.755558013916,
+    "tokens": 352,
+    "mean_token_nll": 7.749305562539534,
+    "record_ids": [
+      "420d8996c8dc9f2b24665ec049520d8bb4039ab62a0cbdb21dfc84541725f024",
+      "541c37c816decc80e6b5b9506bf40ad3a27c8e6bde0faa78eecbab1c1836aca8",
+      "4747453930dd011e2051c805511901f72f4b6fe306a22769c2ed6c8f7a2c58bd",
+      "2a752d4e1ba125a7c7c767374e27996b5063a43139dbb7dde24fceba161f4a34",
+      "4e23daead53aa14f9838edaa979cfac36195e2d114516f05c5e305e8f8974721",
+      "610a318f94564550ec8711d20b8d85e47af67f57487e35643e16c88d8abbef16",
+      "b4a9b894d62064ec94d4bf5f70dcf2beed9f209e80afa144d800fd10fac07249",
+      "28d6d385976154b3305fdfcb58fff5e975a17f132f770cf38005b363dc901618"
+    ]
+  },
+  "memory_control_1024": {
+    "tokens": 1024,
+    "scored_positions": 8,
+    "finite_gradients": true,
+    "gradient_norms": {
+      "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_A.default.weight": 0.0,
+      "base_model.model.model.language_model.layers.47.self_attn.q_proj.lora_B.default.weight": 47.65367126464844
+    },
+    "peak_gpu_bytes": 24832647680
+  },
+  "cancellation_receipt_sha256": "0e9456b6693ab37c7bf19de8093990c5a2770ce2d08393f40ba2d5adba10eb86",
+  "cancel_reason": "superseded by user requirement for generous reasoning and training inside akhrtd runtime"
+}

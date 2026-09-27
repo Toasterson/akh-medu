@@ -1,0 +1,303 @@
+{
+  "schema": "lilith/reference-curriculum@1",
+  "train_families": [
+    "byte_order",
+    "error_conventions",
+    "permission_masks"
+  ],
+  "development_holdout_families": [
+    "alignment",
+    "interval_intersection",
+    "modular_sequence_order"
+  ],
+  "references": 8,
+  "candidate_examples": 4,
+  "correction_examples": 4,
+  "reference_checks": 143121,
+  "receipts": [
+    {
+      "id": "align-up/1",
+      "family": "alignment",
+      "split": "development_holdout",
+      "reference": {
+        "passed": true,
+        "cases": 1107,
+        "failed_cases": 0,
+        "first_counterexample": null,
+        "source_sha256": "9bd07a01651650e57bbedd74d74bf7d8862b22a34bd261c37eb709f4381d9035"
+      },
+      "negative_control": {
+        "passed": false,
+        "cases": 1107,
+        "failed_cases": 669,
+        "first_counterexample": {
+          "inputs": [
+            1,
+            3
+          ],
+          "expected": 3,
+          "actual": 1
+        },
+        "source_sha256": "0119ce6b52b518dd203fac352936453212ac08302c375f4eb33b8f2cd6d684d0"
+      },
+      "provenance": {
+        "origin": "assistant_authored_reference",
+        "teacher_session": null,
+        "teacher_model": null,
+        "native_illumos_validated": false,
+        "verifier_sha256": "3e6bd79a7ff37d49d779ba82803b0f28c00fde321f254d03d97d2dbf5f7aa03c",
+        "cases_sha256": "210c6a03abf17a0f59a80bca95cab7e235c6b4974cb585812ba51d5a3d715b88"
+      }
+    },
+    {
+      "id": "is-power-two/1",
+      "family": "alignment",
+      "split": "development_holdout",
+      "reference": {
+        "passed": true,
+        "cases": 1033,
+        "failed_cases": 0,
+        "first_counterexample": null,
+        "source_sha256": "6b34a8673d5e4b73093ec9eaaf7014a81ba4b625476c3b5eb5f49ef327bce7c7"
+      },
+      "negative_control": {
+        "passed": false,
+        "cases": 1033,
+        "failed_cases": 1,
+        "first_counterexample": {
+          "inputs": [
+            0
+          ],
+          "expected": false,
+          "actual": true
+        },
+        "source_sha256": "a916683e5d282d01d410c8ae0d389aced898ae2095cd46fcba1562ec33927545"
+      },
+      "provenance": {
+        "origin": "assistant_authored_reference",
+        "teacher_session": null,
+        "teacher_model": null,
+        "native_illumos_validated": false,
+        "verifier_sha256": "3e6bd79a7ff37d49d779ba82803b0f28c00fde321f254d03d97d2dbf5f7aa03c",
+        "cases_sha256": "f9fede3a59d6984f5ab8fce8b51c5865ea577cc09f994920ee3682fd3281d442"
+      }
+    },
+    {
+      "id": "has-all-flags/1",
+      "family": "permission_masks",
+      "split": "train_candidate",
+      "reference": {
+        "passed": true,
+        "cases": 1027,
+        "failed_cases": 0,
+        "first_counterexample": null,
+        "source_sha256": "50c37b98b6bfc429f92e58f9a5d398e0e4d6466d04b01a8de239895533624d92"
+      },
+      "negative_control": {
+        "passed": false,
+        "cases": 1027,
+        "failed_cases": 603,
+        "first_counterexample": {
+          "inputs": [
+            0,
+            0
+          ],
+          "expected": true,
+          "actual": false
+        },
+        "source_sha256": "05128b0c144ecd045cee293dc6a7c6edb2420804d5f42892177741d3f62e835b"
+      },
+      "provenance": {
+        "origin": "assistant_authored_reference",
+        "teacher_session": null,
+        "teacher_model": null,
+        "native_illumos_validated": false,
+        "verifier_sha256": "3e6bd79a7ff37d49d779ba82803b0f28c00fde321f254d03d97d2dbf5f7aa03c",
+        "cases_sha256": "870aac83ecee215d00212c805028e29b69e9403d5ed1127728de3355c09928e2"
+      }
+    },
+    {
+      "id": "decode-le16/1",
+      "family": "byte_order",
+      "split": "train_candidate",
+      "reference": {
+        "passed": true,
+        "cases": 65536,
+        "failed_cases": 0,
+        "first_counterexample": null,
+        "source_sha256": "3e87b3635f5fe91e1bf59103912115ba5e33d4f0c94bded45be02d458b7e45b2"
+      },
+      "negative_control": {
+        "passed": false,
+        "cases": 65536,
+        "failed_cases": 65280,
+        "first_counterexample": {
+          "inputs": [
+            0,
+            1
+          ],
+          "expected": 256,
+          "actual": 1
+        },
+        "source_sha256": "b67c37434a649eb63ee4143d5270aac7c1694936a37bcb642a4fbec518ab049d"
+      },
+      "provenance": {
+        "origin": "assistant_authored_reference",
+        "teacher_session": null,
+        "teacher_model": null,
+        "native_illumos_validated": false,
+        "verifier_sha256": "3e6bd79a7ff37d49d779ba82803b0f28c00fde321f254d03d97d2dbf5f7aa03c",
+        "cases_sha256": "30f8319bb1d28e5e615f981bdbc3ca080f63a06e999c29cde10f100148adc934"
+      }
+    },
+    {
+      "id": "encode-le16/1",
+      "family": "byte_order",
+      "split": "train_candidate",
+      "reference": {
+        "passed": true,
+        "cases": 65536,
+        "failed_cases": 0,
+        "first_counterexample": null,
+        "source_sha256": "b6aaaeae81e879b7d1dc9839f1551b58fed98d2c7716e2be497e372c2657e25d"
+      },
+      "negative_control": {
+        "passed": false,
+        "cases": 65536,
+        "failed_cases": 65280,
+        "first_counterexample": {
+          "inputs": [
+            1
+          ],
+          "expected": [
+            1,
+            0
+          ],
+          "actual": [
+            0,
+            1
+          ]
+        },
+        "source_sha256": "df68a6deaa2274d73ab3c3d7795dc9e8f041d527830b21e860ccbcda931892f1"
+      },
+      "provenance": {
+        "origin": "assistant_authored_reference",
+        "teacher_session": null,
+        "teacher_model": null,
+        "native_illumos_validated": false,
+        "verifier_sha256": "3e6bd79a7ff37d49d779ba82803b0f28c00fde321f254d03d97d2dbf5f7aa03c",
+        "cases_sha256": "d71083de614dc0b9035cfb6d591f1cf9a21167cdefc4def14c766fbe97292e12"
+      }
+    },
+    {
+      "id": "negative-errno/1",
+      "family": "error_conventions",
+      "split": "train_candidate",
+      "reference": {
+        "passed": true,
+        "cases": 8193,
+        "failed_cases": 0,
+        "first_counterexample": null,
+        "source_sha256": "59f4cb702576da68765a59689653d824b5e342ec5ead8ab42af66051d32d8a06"
+      },
+      "negative_control": {
+        "passed": false,
+        "cases": 8193,
+        "failed_cases": 4096,
+        "first_counterexample": {
+          "inputs": [
+            -4096
+          ],
+          "expected": -4096,
+          "actual": 4096
+        },
+        "source_sha256": "aabc5bf1ad17f79789506cba64946daaeb991775acbb6a7c104ca28e137e53f6"
+      },
+      "provenance": {
+        "origin": "assistant_authored_reference",
+        "teacher_session": null,
+        "teacher_model": null,
+        "native_illumos_validated": false,
+        "verifier_sha256": "3e6bd79a7ff37d49d779ba82803b0f28c00fde321f254d03d97d2dbf5f7aa03c",
+        "cases_sha256": "b19a17efe782a504fa77ee4613002b4fa8cf9627e7334f24c6ed755ee8385840"
+      }
+    },
+    {
+      "id": "interval-overlap/1",
+      "family": "interval_intersection",
+      "split": "development_holdout",
+      "reference": {
+        "passed": true,
+        "cases": 625,
+        "failed_cases": 0,
+        "first_counterexample": null,
+        "source_sha256": "b84485995677a74686056b41e634fab5cec8d9c11c41e5444be029f3ff68065f"
+      },
+      "negative_control": {
+        "passed": false,
+        "cases": 625,
+        "failed_cases": 155,
+        "first_counterexample": {
+          "inputs": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "expected": false,
+          "actual": true
+        },
+        "source_sha256": "ecb6fbdab03f578659a18d336037a111db4728c0b5ffb9b4183c95176ef3c197"
+      },
+      "provenance": {
+        "origin": "assistant_authored_reference",
+        "teacher_session": null,
+        "teacher_model": null,
+        "native_illumos_validated": false,
+        "verifier_sha256": "3e6bd79a7ff37d49d779ba82803b0f28c00fde321f254d03d97d2dbf5f7aa03c",
+        "cases_sha256": "79827e09289b4189afb7c626d828166c1a289f5e53cd61a4317c7c1ac50a68c4"
+      }
+    },
+    {
+      "id": "serial-newer-u32/1",
+      "family": "modular_sequence_order",
+      "split": "development_holdout",
+      "reference": {
+        "passed": true,
+        "cases": 64,
+        "failed_cases": 0,
+        "first_counterexample": null,
+        "source_sha256": "f75e4cd6e235189288249e72a943fcfe193a2a83ca1b3da473cfcfd06d6563d4"
+      },
+      "negative_control": {
+        "passed": false,
+        "cases": 64,
+        "failed_cases": 17,
+        "first_counterexample": {
+          "inputs": [
+            0,
+            2147483649
+          ],
+          "expected": true,
+          "actual": false
+        },
+        "source_sha256": "266590319182db29078928bd181cbbe60d0b2cd076447dfed10376a23802ad96"
+      },
+      "provenance": {
+        "origin": "assistant_authored_reference",
+        "teacher_session": null,
+        "teacher_model": null,
+        "native_illumos_validated": false,
+        "verifier_sha256": "3e6bd79a7ff37d49d779ba82803b0f28c00fde321f254d03d97d2dbf5f7aa03c",
+        "cases_sha256": "37d5392b394094c5d214687223a97e2cc2e8d56ee26e1d848d37ba69754ccbc1"
+      }
+    }
+  ],
+  "limitations": [
+    "public development holdout, not sealed certification",
+    "finite reference checks, not proof of correctness",
+    "no teacher-model or agent execution provenance",
+    "no weight update or coding-quality improvement demonstrated",
+    "Python integer semantics; no native illumos, C overflow, ABI or kernel validation"
+  ]
+}

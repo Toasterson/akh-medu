@@ -1,0 +1,34 @@
+{
+  "status": "passed",
+  "pid": 80177,
+  "exit_code": 0,
+  "generations": [
+    {
+      "decode_seconds": 6.20224292,
+      "decode_steps_including_eos": 7,
+      "decode_steps_per_second": 1.1286239656024308,
+      "finish": "Length",
+      "phase": "generation",
+      "prompt_tokens": 773,
+      "round": 0,
+      "seconds_including_prefill": 29.029117309,
+      "text": "<|channel>thought\n<channel|>**Objective:**\n",
+      "time_to_first_token_seconds": 22.82428791,
+      "tokens": 8
+    },
+    {
+      "decode_seconds": 5.5086766780000005,
+      "decode_steps_including_eos": 7,
+      "decode_steps_per_second": 1.2707226089263683,
+      "finish": "Length",
+      "phase": "generation",
+      "prompt_tokens": 773,
+      "round": 1,
+      "seconds_including_prefill": 29.0750178,
+      "text": "<|channel>thought\n<channel|>**Objective:**\n",
+      "time_to_first_token_seconds": 23.565516523,
+      "tokens": 8
+    }
+  ],
+  "elapsed_seconds": 76.27766738100036
+}

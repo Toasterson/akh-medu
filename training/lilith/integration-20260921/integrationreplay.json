@@ -1,0 +1,16 @@
+{
+  "schema": "lilith/learning-integration-replay@1",
+  "mode": "offline_historical_assignment_replay",
+  "new_teacher_turn": false,
+  "new_model_execution": false,
+  "source_file": "training/lilith/contracts-20260921/run2/assignments.json",
+  "source_file_sha256": "d30708e03d9b43f6cda219e0e709b8fb1ef29bb56c55d26b4a68ecf6b96bb71e",
+  "source_assignment_id": "e767fed134b49c4c88b8eec1f2bcd58bd8e606da7b4084bf4333c5bf5cdb3855",
+  "source_assignment_sha256": "24ff211d96ef6344836dbbb07cfe9683350423c08b99b62c70f5efc1a4002f71",
+  "store_identity_stable": true,
+  "revoked_status_refreshed": true,
+  "switched_store_rejected": true,
+  "rejection": "learning receipt belongs to a different or unidentified lesson store",
+  "destination_store_empty": true,
+  "passed": true
+}

@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/home/toasty/.local/share/akh-medu/lilith-runtime-before-20260922/gemma-decode-probe",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+    "training/lilith/runtime-gap-20260922/baseline/prompt.txt",
+    "8"
+  ],
+  "binary_sha256": "29739df2bb2184e7639c87d6a31da788093a1e68d61d182dc270b1a5e2152d2d",
+  "flags": {
+    "AKH_VULKAN_REUSABLE_KV": "1",
+    "AKH_VULKAN_GROUPED_DECODE": "1",
+    "AKH_VULKAN_MATMUL_STRIDES": "0"
+  },
+  "timeout_seconds": 240,
+  "comparison": "same binary, full vocab hashes and greedy token parity"
+}

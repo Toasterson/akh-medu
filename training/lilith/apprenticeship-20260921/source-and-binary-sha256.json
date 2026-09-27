@@ -1,0 +1,10 @@
+{
+  "examples/lilith_lesson_vsa.rs": "67eada8b7f54440553ee82f09e7911cb9f5515ada6267e0dbb2640084348be67",
+  "scripts/session-platform/lilith_apprenticeship.py": "9389c45d0e9e5e76d95ac7491da24049d85c74b1d0f3bdac32e193eeaed1f73a",
+  "scripts/session-platform/lilith_transfer_probe.py": "c8993e076b14330ac04be680855ad95518299562b52ce49bdb5477efaa281e14",
+  "scripts/session-platform/prepare-lilith.py": "2663d9ce8fb823af2c16f29af682e39ebdc40894e168ee0fdee1ed950f9f600e",
+  "training/lilith/apprenticeship-20260921/protocol.json": "16ab86ea621ba4054e6394a2d460cc2457f36d09d716f92ebfe33af21620e846",
+  "training/lilith/apprenticeship-20260921/probe_transfer.py": "35b9e54e8503ff45de903765ec36953b93679a303b176f252b5645d1cae65102",
+  "target/release/examples/lilith_lesson_vsa": "fd1304e28b9526d2d74f42328c98903992e4652d91b2de5153359ed0fb39445c",
+  "target/release/akhrtd": "09a224fa4b07e7f2d5fe907e82c143c60d891be7a99b98a20b2c9c2104240fd1"
+}

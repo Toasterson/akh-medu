@@ -70,3 +70,12 @@ could cause recompilation and require parameterizing shaders or revising the
 limit. Then rebuild the daemons and rerun exact-model five-daemon acceptance
 before packaging or deployment. This change alone does not complete runtime
 performance, memory, idle-power, or homelab cutover acceptance.
+
+## Lilith follow-up — 2026-09-21
+
+Gemma measurements now establish a working-set mismatch at the provisional
+2,048-entry limit. A bounded `AKH_VULKAN_PIPELINE_CACHE_ENTRIES` override (maximum
+16,384; unchanged 16 MiB source budget) improved local warm decode by 12.7–16.7%
+with bitwise-identical hidden states and identical generated text. The library
+default is unchanged; Lilith's Vulkan launch environment opts into 16,384.
+See [controlled results and memory costs](../../../training/lilith/vulkan-tps-20260921/README.md).

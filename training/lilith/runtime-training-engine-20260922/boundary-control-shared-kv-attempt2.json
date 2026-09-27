@@ -1,0 +1,8 @@
+{
+  "schema": "lilith/training-engine-boundary-control@2",
+  "status": "error",
+  "shared_kv_persisted": true,
+  "error": "TypeError: GemmaTrainingEngine._forward() takes 4 positional arguments but 5 were given",
+  "traceback": "Traceback (most recent call last):\n  File \"<stdin>\", line 12, in <module>\nTypeError: GemmaTrainingEngine._forward() takes 4 positional arguments but 5 were given\n",
+  "elapsed_seconds": 198.73554123699796
+}

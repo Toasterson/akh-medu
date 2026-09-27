@@ -1,0 +1,14 @@
+{
+  "schema": "lilith/vulkan-cold-probe@1",
+  "binary_sha256": "208d0b76bf9da76b2a928b7f92bb969157adf3e845c3b510a309131345f88c18",
+  "driver_sha256": "b65fc1d9294e5ce434ecc74232c9c5ae1397aa452b80cd5d0ef60355b5a918a9",
+  "example_sha256": "1267fe8b1c3a328ffb3ac9f55f2ec41b6a44e72b211d9642d346ad8ffa360b3f",
+  "runtime_sha256": "ca1fa981ecdb22913c098abf9eb8987155036226d76ce884851b6e329789ab42",
+  "manifest_sha256": "90ec6f8933a19c541b56b37c27737b47f740c590df1e7bfda5a6d76b4620dc9a",
+  "experiment_receipt_sha256": "2db7d8804dd11f872d8e3645fd475c6c7983901cae41f22a421aadbaf19447a4",
+  "candidate_source_sha256": "80be5b0fbeb264292f84f0e757adf84259a213c4c3654dc87bd3c448fb1ff808",
+  "tokens": 32,
+  "processes": 2,
+  "quality_claim": false,
+  "performance_design": "Single adapted then base timing per process; descriptive only"
+}

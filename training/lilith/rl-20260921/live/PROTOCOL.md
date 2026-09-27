@@ -1,0 +1,29 @@
+# Bounded synchronous KLPO experiment
+
+Frozen before first model generation: four train tasks, four public development holdouts from `../tasks.json`; task/module/case/prompt hashes checked before GPU loading. The first loader attempt was interrupted before collection to add that manifest gate. `run2` is the first collecting run. Historical failed or interrupted evidence is retained.
+
+One BF16 Gemma4Unified parent resides on the local ROCm GPU, with rank-2 LoRA on the final layer's query projection only. The parent, tokenizer, chat template, source modules, and task manifest are pinned. No services, tools, VSA retrieval, lessons, held-out reference targets, or deployed model modifications participate.
+
+The maximum prompt is 159 tokens. Each rollout has 128 new tokens and a 384-token context ceiling. The official template uses `enable_thinking=False`; raw task prompts and rendered prompts are recorded separately. Allowed termination IDs come from the model configuration, including the actual sampled EOS token in the stored policy trajectory.
+
+Behavior sampling uses temperature 1, full vocabulary, no top-k/top-p clipping, and FP64 normalized CPU categorical weights. At every visited prefix, the implementation samples one action and eight independent auxiliary draws with replacement from the same distribution using distinct RNG generators. It records actual IDs and normalized log probabilities. Identical token values from independent draws are retained. RNG namespaces/seeds are fixed per task and reused across arms for common-random-number comparisons; these are paired exploratory observations, not independent replications.
+
+The base arm collects eight rollouts. Its four train trajectories form the only on-policy update bank; completed successes and failures are retained, while truncated/failed generations remain evaluation failures and never become partial training examples. Independent binary verifier rewards are 1 for completed passing artifacts and 0 otherwise. Format errors count as failures under the frozen plain-Python contract.
+
+Both optimizer arms reset the identical initial adapter and create a fresh AdamW optimizer. SFT receives the four canonical training targets; KLPO receives eligible complete on-policy records. This is explicitly different supervision, although prompt sets and the one-step optimizer budget match. Both arms then receive the same eight evaluation prompts and decoding budgets. Maximum total: 24 rollouts.
+
+KLPO uses the tested token-MC backward surrogate from `lilith_rl.py`, with beta 0.1. Scoring chunks retain complete causal prefixes, accumulate gradients normalized by the total count of eligible complete responses, and perform one optimizer step after all records. Eight positions per scoring chunk limit full-vocabulary logit memory. Initial behavior-versus-trainer log-probability drift is measured before either update; if it exceeds 1e-4, both optimizer arms use one-position chunks. Persistent drift above that threshold aborts before updating. This numerical fallback is declared before collection and is not outcome-based tuning.
+
+For this small experiment only, fewer than two distinct eligible rewards skips the KLPO step and reports an uninformative batch. This conservative experiment gate is not a mathematical requirement of KLPO. There is no forced resampling, reward rewriting, or extra training to manufacture a gain. A durable central ledger claims each complete bank once before optimizer work; crashes after claim require audit and cannot replay silently.
+
+The live process first runs a 384-token synthetic forward/backward memory control without changing optimizer weights. After the experiment finishes and frees the GPU, a distinct cold process reloads the selected updated candidate (KLPO if updated, otherwise SFT). It verifies file and tensor hashes and compares exact fixed-prefix log probabilities. This validates HF/ROCm cold reload, not export or adapter application in the deployed Vulkan backend. No coding-quality improvement is asserted from four public holdouts.
+
+## Observed outcome
+
+`run2/result.json` passed the bounded mechanics experiment in **402.3 seconds**. All 24 sampled trajectories terminated normally. Base, SFT, and KLPO each scored **1/4 train and 0/4 development holdout** under the frozen raw-source contract. SFT and KLPO each performed one real optimizer step from the same initial adapter; both candidate tensor hashes changed. The KLPO ledger consumed exactly four complete records in one update, including all three zero-reward responses. No quality gain was demonstrated.
+
+The 384-token memory control peaked at **24,297,685,504 bytes (22.63 GiB)**. Initial eight-position scoring drift was **0.01348149** log-probability units; the declared one-position fallback reduced it to **2.22e-7**, and both update arms used that mode. The reward signal primarily measured Markdown-fence compliance: the root's independent audit found that exact wrapper extraction made all seven fenced outputs per arm pass the unchanged semantic verifier. That extraction is an unscored diagnosis, not a reward rewrite or promotion result.
+
+`cold-reload-run2/result.json` passed in a distinct process in **153.3 seconds**. It loaded the updated KLPO candidate, verified its file hash and full adapter tensor fingerprint, and reproduced exact fixed-prefix FP32 log probabilities. This closes the bounded HF/ROCm cold-reload check; Vulkan export/application and actual coding-quality improvement remain unproved.
+
+`cleanup.json` records both successful process exits, the one-use ledger counts, and GPU usage after cleanup. Source and manifest hashes still match the executed snapshots. Scratch candidates and private training cache are retained; deployed Gemma weights and runtime services were not changed.

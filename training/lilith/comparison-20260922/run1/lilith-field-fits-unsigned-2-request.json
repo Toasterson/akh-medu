@@ -1,0 +1,5 @@
+{
+  "session_id": "01a0c91d-6275-7250-9c32-1665a4eed3cd",
+  "turn_id": "01a0c91d-6276-7d83-9b3a-ae5d0cd7f19e",
+  "prompt": "Inputs are arbitrary integers. Return bool indicating that a fits in an unsigned field of width b, where b must be 1..16. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63."
+}

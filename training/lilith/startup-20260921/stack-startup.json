@@ -1,0 +1,6 @@
+{
+  "status": "failed",
+  "error": "akhexecd health timeout",
+  "services_stopped": true,
+  "kind": "isolated_startup_not_model_or_native_validation"
+}

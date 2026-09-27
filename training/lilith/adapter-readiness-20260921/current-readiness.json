@@ -1,0 +1,34 @@
+{
+  "schema": "lilith/current-adapter-readiness@1",
+  "assessed_at_utc": "2026-09-21T19:55:45.508154+00:00",
+  "deployed_weights_changed": false,
+  "scratch_adapter_weights_changed": true,
+  "isolated_environment_ready": true,
+  "exact_parent_acquired_and_hashverified": true,
+  "exact_architecture_target_verified": true,
+  "rocm_bf16_numeric_control_passed": true,
+  "last_layer_synthetic_optimizer_save_reload_passed": true,
+  "mechanics_receipt": "mechanics-run1/result.json",
+  "ready_for_curriculum_training": false,
+  "ready_to_deploy": false,
+  "remaining_gates": [
+    "Diagnosed weaknesses, sufficient admitted task-family data, retention replay, and independent quality holdouts.",
+    "Broader adapter target/sequence/batch memory and numerical behavior are untested.",
+    "Adapter export/application on deployed quantized Gemma Vulkan backend is not validated.",
+    "Quantizer source recipe/revision proof and exact deployed-artifact parity."
+  ],
+  "gpu_vram_used_after_process_exit": {
+    "/sys/class/drm/card0/device/mem_info_vram_used": "36159488"
+  },
+  "process_exit_code": 0,
+  "sources_sha256": {
+    "scripts/session-platform/lilith_adapter_mechanics.py": "552f6207dc0922cd0cd76be26234d6e015d7aa826d2e3c712425a3679a268bae",
+    "scripts/session-platform/lilith_adapter_preflight.py": "cfe7e9bc29301dfe0d91bab72772de56310e980154bd25e7d135a7a43cb86559",
+    "scripts/train_lora.py": "52914a09cb84ee4d13565f9c4d97ff244d8134c74cd98d3f5f84b42aaf3633aa"
+  },
+  "bounded_sft_and_klpo_updates_passed": true,
+  "cold_process_klpo_reload_passed": true,
+  "rl_receipt": "../rl-20260921/live/run2/result.json",
+  "cold_reload_receipt": "../rl-20260921/live/cold-reload-run2/result.json",
+  "quality_improvement_established": false
+}

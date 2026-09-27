@@ -1,0 +1,12 @@
+{
+  "split": "development_candidate",
+  "examples": 1,
+  "excluded_families": [
+    "bounded_range"
+  ],
+  "excluded_reason": "current development transfer family",
+  "weights_updated": false,
+  "eligible_for_training": false,
+  "reason": "tiny seed corpus; Gemma 4 adapter path and broader independent evaluation not certified",
+  "corpus_sha256": "6de63f1da4172e74af9070a21d63c644bec65df7127feaa22b4f681e955445fd"
+}

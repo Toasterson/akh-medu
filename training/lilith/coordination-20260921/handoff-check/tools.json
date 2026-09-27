@@ -1,0 +1,32 @@
+[
+  {
+    "call": {
+      "id": "internal-0-0",
+      "session_id": "01a0c493-c60e-7a61-8613-2c03444ddfaf",
+      "turn_id": "01a0c493-c611-7f33-bbc8-0cd47a66a251",
+      "generation": 1,
+      "name": "read_file",
+      "arguments": {
+        "path": "clamp_u8.py"
+      }
+    },
+    "operation_id": "756ddd822f58376a5459093b920090d405df052ba037b344279eb0b84aaaf328",
+    "destination": {
+      "kind": "workspace",
+      "operation": "read"
+    },
+    "sent": true,
+    "result": {
+      "success": false,
+      "text": "not_found: No such file or directory (os error 2)",
+      "data": {
+        "error": {
+          "code": "not_found",
+          "message": "No such file or directory (os error 2)"
+        }
+      },
+      "receipt": "756ddd822f58376a5459093b920090d405df052ba037b344279eb0b84aaaf328"
+    },
+    "unknown": false
+  }
+]

@@ -1,0 +1,19 @@
+{
+  "schema": "akh/lilith-transcript-sft-subset@1",
+  "source_dataset_sha256": "18d221763bd9acb6b0e7b90945eee2bb45383ad323dab6f02ab00606802a97e9",
+  "records": 16,
+  "splits": {"train": 8, "validation": 8},
+  "eligible_before_cap": {"train": 186, "validation": 131},
+  "excluded_by_cap": {"train": 178, "validation": 123},
+  "caps": {"train": 8, "validation": 8, "max_total_tokens": 512, "max_assistant_tokens": 480, "min_prompt_tokens": 4, "min_assistant_tokens": 16},
+  "selection": "sha256(record_id, fixed policy), ascending; structural filters before cap",
+  "rejected": {"assistant_over_budget_no_truncation": 36, "empty_or_acknowledgement": 6, "insufficient_learning_content": 11, "total_over_budget_no_truncation": 189},
+  "token_lengths": {"min": 35, "max": 496, "mean": 275.12},
+  "record_ids_sha256": "8e310321251dbdd6627ce2dd93da9e8f8b175cf514f10e0d1a208aa98bc5e288",
+  "private_subset_sha256": "e662d28289165d8cc419a4b65bba63d7eb88b414e5f7ce63aff62c7a3028dd94",
+  "tokenizer_json_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+  "tokenizer_config_sha256": "09e6222fd7049dae603d0f61a8b10af5a813f22dca10e6cdc6918f76d7661104",
+  "chat_template_sha256": "c1f63d5762fd2e3245def1224779fadd74c650841e9430f65af8cd4dfa25d6fa",
+  "private_subset": "~/.local/share/akh-medu/lilith-training/transcripts-20260922/sft-subset-v1.jsonl",
+  "limitations": ["structural selection does not assert response correctness", "validation uses the pre-existing held-out session split", "over-budget examples are rejected, never truncated"]
+}

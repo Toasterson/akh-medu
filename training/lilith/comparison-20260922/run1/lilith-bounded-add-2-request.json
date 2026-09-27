@@ -1,0 +1,5 @@
+{
+  "session_id": "01a0c91c-8f82-7922-b27d-9868d7f48b9d",
+  "turn_id": "01a0c91c-8f86-7c21-89aa-93af684e571a",
+  "prompt": "Inputs are arbitrary integers. If a or b is outside -128..127, return -1. Otherwise return their sum clamped to -128..127. Output Python source defining f(a, b), with optional int/bool annotations and no defaults. A single enclosing ```python fence is accepted but unnecessary. Allowed: integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>. No imports, calls, loops or other syntax. All intermediate integers must fit signed 128 bits; shift counts must be 0..63."
+}

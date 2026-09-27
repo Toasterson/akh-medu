@@ -1,0 +1,35 @@
+{
+  "command": [
+    "sh",
+    "-c",
+    "python3 -c 'open(\"big\",\"wb\").write(b\"x\"*1000000)'; code=$?; wc -c big 2>/dev/null; exit $code"
+  ],
+  "copy_in": {
+    "content_bytes": 177,
+    "content_sha256": "e12bd4b6df7095c31b0892c2a6ae2dd0d636fdace8d781499f6a1e199f930f67",
+    "snapshot_bytes": 10240,
+    "snapshot_entries": 3,
+    "snapshot_sha256": "6f6ad1cb442722079321a56649a8db01c78aeda3952f75ad9c98954ca06f8394"
+  },
+  "duration_ms": 1762,
+  "exit_code": 1,
+  "guest": {
+    "host": "127.0.0.1",
+    "port": 10115,
+    "user": "akh-exec"
+  },
+  "passed": false,
+  "remote_cleanup_succeeded": true,
+  "run_id": "c96f70fb5e814f3b931e00235e512c73",
+  "schema": "lilith/native-execution@1",
+  "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nOSError: [Errno 27] File too large\n",
+  "stderr_sha256": "ef64f7ca4511dbc3090a4b00ec1823265f2dbf129e6f273c82a3ede3a99f77cb",
+  "stderr_truncated": false,
+  "stdout": "   65536 big\n",
+  "stdout_sha256": "08d49d7f2a27efd31a50f62304c9770fe34b216ea310656b898c399096423a68",
+  "stdout_truncated": false,
+  "supervisor_status": "exit",
+  "target": "check.py",
+  "timed_out": false,
+  "timeout_s": 10
+}

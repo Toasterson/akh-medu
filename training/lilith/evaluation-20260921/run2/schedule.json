@@ -1,0 +1,728 @@
+{
+  "proposed": [
+    {
+      "task": "alignment-8",
+      "arm": "none",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-8",
+      "arm": "text",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-8",
+      "arm": "vsa",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-8",
+      "arm": "independent_reference",
+      "seed": 0,
+      "model_role": "reference",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-16",
+      "arm": "text",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-16",
+      "arm": "vsa",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-16",
+      "arm": "independent_reference",
+      "seed": 0,
+      "model_role": "reference",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-16",
+      "arm": "none",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-8",
+      "arm": "vsa",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-8",
+      "arm": "independent_reference",
+      "seed": 0,
+      "model_role": "reference",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-8",
+      "arm": "none",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-8",
+      "arm": "text",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-16",
+      "arm": "independent_reference",
+      "seed": 0,
+      "model_role": "reference",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-16",
+      "arm": "none",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-16",
+      "arm": "text",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-16",
+      "arm": "vsa",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "arm": "none",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "arm": "text",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "arm": "vsa",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "arm": "independent_reference",
+      "seed": 0,
+      "model_role": "reference",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-16",
+      "arm": "text",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-16",
+      "arm": "vsa",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-16",
+      "arm": "independent_reference",
+      "seed": 0,
+      "model_role": "reference",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-16",
+      "arm": "none",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    }
+  ],
+  "actual": [
+    {
+      "task": "alignment-8",
+      "arm": "none",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-8",
+      "arm": "text",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-8",
+      "arm": "vsa",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-16",
+      "arm": "text",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-16",
+      "arm": "vsa",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-16",
+      "arm": "none",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-8",
+      "arm": "vsa",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-8",
+      "arm": "none",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-8",
+      "arm": "text",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-16",
+      "arm": "none",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-16",
+      "arm": "text",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-16",
+      "arm": "vsa",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "arm": "none",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "arm": "text",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "arm": "vsa",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-16",
+      "arm": "text",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-16",
+      "arm": "vsa",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-16",
+      "arm": "none",
+      "seed": 0,
+      "model_role": "candidate",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-8",
+      "arm": "independent_reference",
+      "seed": 0,
+      "model_role": "reference",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "alignment-16",
+      "arm": "independent_reference",
+      "seed": 0,
+      "model_role": "reference",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-8",
+      "arm": "independent_reference",
+      "seed": 0,
+      "model_role": "reference",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "interval_intersection-16",
+      "arm": "independent_reference",
+      "seed": 0,
+      "model_role": "reference",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-8",
+      "arm": "independent_reference",
+      "seed": 0,
+      "model_role": "reference",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    },
+    {
+      "task": "modular_sequence_order-16",
+      "arm": "independent_reference",
+      "seed": 0,
+      "model_role": "reference",
+      "fresh_session": true,
+      "budget": {
+        "attempts": 1,
+        "tools": 0,
+        "max_new_tokens": 512,
+        "context_tokens": 4096,
+        "lesson_bytes": 1400,
+        "wall_seconds": 600
+      }
+    }
+  ],
+  "deviation": "Batch candidate then reference to avoid residency swaps; no latency comparison.",
+  "seed_scope": "Pair/repetition label only; no per-request decoder RNG control exposed."
+}

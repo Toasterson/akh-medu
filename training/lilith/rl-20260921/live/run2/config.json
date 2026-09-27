@@ -1,0 +1,89 @@
+{
+  "train_tasks": 4,
+  "holdout_tasks": 4,
+  "max_new_tokens": 128,
+  "max_context_tokens": 384,
+  "mc_samples": 8,
+  "temperature": 1.0,
+  "scoring_chunk": 8,
+  "drift_chunk_fallback_threshold": 0.0001,
+  "beta": 0.1,
+  "learning_rate": 0.0001,
+  "optimizer_steps_per_arm": 1,
+  "eos_ids": [
+    1,
+    106
+  ],
+  "chat_template_sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0",
+  "task_module_sha256": "e038d465c0d4d9d04e97b1b01abea0916ad99ab48d2ac86f11f48ac21bf94a0f",
+  "trajectory_module_sha256": "da7fa533df75e59522b0523f6ae8f552c8d70485c347960b851615e8e6ebe5fa",
+  "prompt_lengths": {
+    "mask-intersection-u8/1": 135,
+    "required-flags-u8/1": 148,
+    "compose-le16/1": 139,
+    "select-le16-byte/1": 148,
+    "table-slot-offset/1": 149,
+    "table-slot-valid/1": 159,
+    "resource-unit-bytes/1": 143,
+    "complete-resource-units/1": 158
+  },
+  "canonical_train_token_lengths": {
+    "mask-intersection-u8/1": 44,
+    "required-flags-u8/1": 17,
+    "compose-le16/1": 49,
+    "select-le16-byte/1": 25
+  },
+  "sampler": "full-support FP64 CPU categorical from actual logits; trainer FP32; MC8 IID replacement separate generator",
+  "uninformative_reward_rule": "skip KLPO if fewer than two distinct eligible complete rewards",
+  "authoritative_tasks": {
+    "mask-intersection-u8/1": {
+      "id": "mask-intersection-u8/1",
+      "family": "permission_masks",
+      "split": "train",
+      "prompt_sha256": "ef27b8261fe668df1d42602cd693513c7a9bc2b9ea92ff09c6923543c95da84a"
+    },
+    "required-flags-u8/1": {
+      "id": "required-flags-u8/1",
+      "family": "permission_masks",
+      "split": "train",
+      "prompt_sha256": "f77a2baa5804c62412feaf101b3b5b2970a4995a99acc49abaff1590a99ac179"
+    },
+    "compose-le16/1": {
+      "id": "compose-le16/1",
+      "family": "byte_order",
+      "split": "train",
+      "prompt_sha256": "c1f0e7af396d53d309a393c7b396124c934a618b15a5a58b068973385a5e5ce5"
+    },
+    "select-le16-byte/1": {
+      "id": "select-le16-byte/1",
+      "family": "byte_order",
+      "split": "train",
+      "prompt_sha256": "ec1521482168ba84b46f2c395bf9be210e9a55c9b9440f49b5e7711989de5b61"
+    },
+    "table-slot-offset/1": {
+      "id": "table-slot-offset/1",
+      "family": "table_index",
+      "split": "development_holdout",
+      "prompt_sha256": "f778d293d8a64aead9e64f4f935b8b0130cb0ca534f9c6be8933f762313fc469"
+    },
+    "table-slot-valid/1": {
+      "id": "table-slot-valid/1",
+      "family": "table_index",
+      "split": "development_holdout",
+      "prompt_sha256": "4838fe4e4d834fdf23cc50bdbbb665e6af4b1952e364247de39f112869058e8f"
+    },
+    "resource-unit-bytes/1": {
+      "id": "resource-unit-bytes/1",
+      "family": "resource_units",
+      "split": "development_holdout",
+      "prompt_sha256": "540dcd04504b1b44baaadd3ea13fad41857014137a741d0f9826470f6e306951"
+    },
+    "complete-resource-units/1": {
+      "id": "complete-resource-units/1",
+      "family": "resource_units",
+      "split": "development_holdout",
+      "prompt_sha256": "06e4897060bbfd034de3b8f8ce7efaebb954db956382fd02c064605c96a68fa5"
+    }
+  },
+  "task_manifest_sha256": "5039d69b828095516eadd6f814ec92a2b547381b3cf20fafe4e9381748601abf"
+}

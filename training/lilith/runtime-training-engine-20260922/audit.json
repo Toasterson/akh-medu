@@ -1,0 +1,24 @@
+{
+  "schema": "lilith/cache-fix-audit@1",
+  "passed": true,
+  "engine_sha256": "5c68f6a1d451c87b6d77e3a54c2786305208a35b5b366ad8661a9ca0bbcb73d0",
+  "control_sha256": "b5dc74b5914ddda74f5510f97f6b06f85e4b9aeb67516c6270bb474f506ba0fa",
+  "evidence_sha256": {
+    "qualified-cache-control.json": "03b5116465833b55f4807485eeb18266f3e95196c1e9804091bc86cc3643c17a",
+    "fixed-context-memory-control.json": "8fc66260f8cff28556a4ff3a91ceefd9c50cab055c55d7cb72e11942f23da61c",
+    "transfer-variants-original-arithmetic.json": "7e72d8c6b09a63f7c3f1f58da73dae2c7e9b786931aee6a8c697977c5ec5b426"
+  },
+  "cache_correctness_qualified": true,
+  "batched_bf16_exact_equivalence": false,
+  "math_review_pending": false,
+  "optimizer_steps": 0,
+  "release_promoted": false,
+  "math_review": {
+    "model": "kimi-k3",
+    "agent": "akh-tecton",
+    "message_id": "01a0ca45-5193-7ed1-9b39-ce40ef1d6796",
+    "reply_sha256": "69dda9ab7f17a23809e393f3e9b2e7089936926d5aeb9827b8a0ecb237a6a2fb",
+    "disposition": "kimi-math/README.md"
+  },
+  "batched_bf16_calibration": "open"
+}

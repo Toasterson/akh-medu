@@ -1,0 +1,19 @@
+{
+  "goal": "Improve warm Gemma Vulkan decode throughput without changing model arithmetic.",
+  "gate": {
+    "minimum_speedup": 1.1,
+    "same_generated_text": true,
+    "bitwise_identical_prefill_hidden": true
+  },
+  "order": "A B B A, two resident generations per process; compare second generations",
+  "reference_entries": 2048,
+  "candidate_entries": {
+    "128_tokens": 8192,
+    "256_tokens": 16384
+  },
+  "source_byte_budget": 16777216,
+  "builds_during_measurement": false,
+  "probe_sha256": "a2e93655264ed393c9592d330ebb7bc9529406ed33df66d88b760c06a598494e",
+  "optional_byte_budget_override_present": false,
+  "limits": "Peak process RSS and final device memory are observed, not a bound on driver-internal allocations; timings are local short-turn development measurements."
+}

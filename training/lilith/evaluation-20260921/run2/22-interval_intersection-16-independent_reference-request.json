@@ -1,0 +1,5 @@
+{
+  "text": "Return only one Python function, with no Markdown fences or explanatory prose. Use integer/bool literals, local assignment, if/else, return, comparisons, and/or/not, conditional expressions, +, -, *, //, %, and bitwise & only. No calls (including min/max), imports, loops, shifts, exponentiation, decorators, helper functions, containers or strings. Keep the source under 4096 bytes. These are local Python reference tasks, not native OS validation.\n\nInputs are integers. Reject any input outside 0..65535 by returning -1. Write overlap_size(a_start: int, a_end: int, b_start: int, b_end: int) -> int. Reject an end smaller than its start. Return the number of integer positions in the intersection of half-open intervals [a_start,a_end) and [b_start,b_end). Empty intervals and touching endpoints have zero overlap.",
+  "session_id": "01a0c529-fead-7590-a734-23b03de578a7",
+  "turn_id": "01a0c529-feaf-7d21-bb8e-7488375c9129"
+}

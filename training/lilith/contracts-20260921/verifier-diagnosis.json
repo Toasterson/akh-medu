@@ -1,0 +1,42 @@
+[
+  {
+    "label": "valid",
+    "outcome": "passed",
+    "verification": {
+      "passed": true,
+      "cases": 2926,
+      "source_sha256": "1d07d26e79f1ae1b5d737ea6933518b88d3458adf649aafaf082f502f9e9b333",
+      "scope": "Python unsigned-64 range reference fixture; not C overflow, ABI, kernel or native illumos validation"
+    }
+  },
+  {
+    "label": "empty_boundary_off_by_one",
+    "outcome": "rejected",
+    "counterexample": "range_within_u64(0, 0, 0) returned False; expected True"
+  },
+  {
+    "label": "missing_limit_upper_bound",
+    "outcome": "rejected",
+    "counterexample": "range_within_u64(0, 0, 18446744073709551616) returned True; expected False"
+  },
+  {
+    "label": "accepts_negative_start",
+    "outcome": "rejected",
+    "counterexample": "range_within_u64(-1, 0, 0) returned True; expected False"
+  },
+  {
+    "label": "integer_instead_of_boolean",
+    "outcome": "rejected",
+    "counterexample": "range_within_u64(-1, -1, -1) returned 0; expected False"
+  },
+  {
+    "label": "equivalent_without_redundant_length_bound",
+    "outcome": "passed",
+    "verification": {
+      "passed": true,
+      "cases": 2926,
+      "source_sha256": "1681e663659e610f543a8390c91fe4b5163c18725ed52877a9111533ecc7c098",
+      "scope": "Python unsigned-64 range reference fixture; not C overflow, ABI, kernel or native illumos validation"
+    }
+  }
+]

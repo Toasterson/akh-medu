@@ -1125,6 +1125,11 @@ pub struct ProviderConfig {
     pub model_endpoint: Option<ModelEndpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_candle: Option<NativeCandle>,
+    /// Optional provider-owned training process for an internal runtime. The
+    /// worker receives no daemon credentials and can reach tools only through
+    /// the host-owned NDJSON callback bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_worker: Option<TrainingWorker>,
     pub revision: String,
     pub kind: RuntimeKind,
     pub working_dir: std::path::PathBuf,
@@ -1147,6 +1152,24 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub native_aliases: BTreeMap<String, String>,
     pub effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TrainingWorker {
+    pub executable: std::path::PathBuf,
+    pub executable_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_sha256: Option<String>,
+    pub worker_config_path: std::path::PathBuf,
+    pub worker_config_sha256: String,
+    pub model: String,
+    pub max_iterations: u32,
+    pub max_context_tokens: usize,
+    pub max_output_tokens: u32,
+    pub max_tool_calls: u32,
 }
 fn default_runtime_timeout() -> u64 {
     600

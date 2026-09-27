@@ -1,0 +1,18 @@
+{
+  "status": "completed",
+  "command": [
+    "/home/toasty/ws/agi/akh-medu/target/release/examples/lilith_vulkan_adapter",
+    "--model",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.gguf",
+    "--tokenizer",
+    "/home/toasty/.local/share/akh-medu/models/llm/gemma4-12b.tokenizer.json",
+    "--adapter",
+    "/home/toasty/ws/agi/akh-medu/training/lilith/vulkan-adapter-20260922/klpo-export",
+    "--output",
+    "/home/toasty/ws/agi/akh-medu/training/lilith/vulkan-adapter-20260922/probe-1.json",
+    "--tokens",
+    "32"
+  ],
+  "exit_code": 0,
+  "elapsed_seconds": 60.106719984996744
+}

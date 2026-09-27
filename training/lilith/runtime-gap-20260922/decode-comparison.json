@@ -1,0 +1,19 @@
+{
+  "full_vocab_bitwise_equal": true,
+  "greedy_tokens_equal": true,
+  "rounds": [
+    {
+      "round": 0,
+      "baseline_tps": 1.4649216784992483,
+      "candidate_tps": 7.855409860745174,
+      "speedup": 5.362341192733742
+    },
+    {
+      "round": 1,
+      "baseline_tps": 1.2744918931871132,
+      "candidate_tps": 14.251430898122996,
+      "speedup": 11.182049077208752
+    }
+  ],
+  "scope": "Eight tokens, two resident rounds; original full report not yet certified"
+}

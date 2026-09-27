@@ -1,0 +1,7 @@
+{
+  "status": "preflight_failed",
+  "error": "OSError: fixed port still in use immediately after fixture1",
+  "services_started": false,
+  "gpu_used": false,
+  "preserved_as_launcher_regression": true
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "task_id": "signed-clamp/2",
+    "family": "bounded_normalization",
+    "split": "train",
+    "prompt_sha256": "c15b7f71c80b11457757e6e5031d179a233d18b36b9d3f4abeec57f574f7da51",
+    "input_tokens": 136,
+    "output_tokens": 512,
+    "elapsed_seconds": 31.22647874299946,
+    "raw_output": "<think>We need to write a function f(a, b) that returns clamp(a, -b, b), but returns -1 if b is outside 0..255.\n\nConstraints: no loops, no calls (except maybe builtins? \"No imports, calls\" \u2014 so no function calls at all). Only integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>.\n\nInput: arbitrary integers. So a and b can be any int (Python arbitrary precision). All intermediate integers must fit signed 128 bits. Shift counts 0..63.\n\nSo we need to compute clamp without loops. Let's think.\n\nWe need:\n- if b < 0 or b > 255: return -1\n- else return min(max(a, -b), b)\n\nSince b in 0..255, -b is in -255..0.\n\nWe can compute:\n```\nif b < 0 or b > 255:\n    return -1\nt = a\nif t < -b: t = -b\nif t > b: t = b\nreturn t\n```\nThat's fine. But wait \u2014 \"return -1 if b is outside 0..255\". What if b is huge, like 10**100? Then -b is fine, but comparisons fine. The check handles it.\n\nBut careful: if b is outside 0..255 we return -1 before computing -b. Good.\n\nAlso need to handle: what if a is arbitrary large? clamp result is within [-255,255] so fine.\n\nLet's write with annotations: `def f(a: int, b: int) -> int:`.\n\nCheck operators allowed: comparisons (==, !=, <, >, <=, >=), and/or/not, + - * // % & | ^ ~ << >>. Good.\n\nLet me write it.\n\n```python\ndef f(a: int, b: int) -> int:\n    if b < 0 or b > 255:\n        return -1\n    t = a\n    if t < -b:\n        t = -b\n    if t > b:\n        t = b\n    return t\n```\n\nIntermedi",
+    "reasoning": "",
+    "content": "<think>We need to write a function f(a, b) that returns clamp(a, -b, b), but returns -1 if b is outside 0..255.\n\nConstraints: no loops, no calls (except maybe builtins? \"No imports, calls\" \u2014 so no function calls at all). Only integer/bool literals, local assignments, if/else, return, comparisons, and/or/not, + - * // % & | ^ ~ << >>.\n\nInput: arbitrary integers. So a and b can be any int (Python arbitrary precision). All intermediate integers must fit signed 128 bits. Shift counts 0..63.\n\nSo we need to compute clamp without loops. Let's think.\n\nWe need:\n- if b < 0 or b > 255: return -1\n- else return min(max(a, -b), b)\n\nSince b in 0..255, -b is in -255..0.\n\nWe can compute:\n```\nif b < 0 or b > 255:\n    return -1\nt = a\nif t < -b: t = -b\nif t > b: t = b\nreturn t\n```\nThat's fine. But wait \u2014 \"return -1 if b is outside 0..255\". What if b is huge, like 10**100? Then -b is fine, but comparisons fine. The check handles it.\n\nBut careful: if b is outside 0..255 we return -1 before computing -b. Good.\n\nAlso need to handle: what if a is arbitrary large? clamp result is within [-255,255] so fine.\n\nLet's write with annotations: `def f(a: int, b: int) -> int:`.\n\nCheck operators allowed: comparisons (==, !=, <, >, <=, >=), and/or/not, + - * // % & | ^ ~ << >>. Good.\n\nLet me write it.\n\n```python\ndef f(a: int, b: int) -> int:\n    if b < 0 or b > 255:\n        return -1\n    t = a\n    if t < -b:\n        t = -b\n    if t > b:\n        t = b\n    return t\n```\n\nIntermedi",
+    "evidence": {
+      "passed": false,
+      "category": "syntax",
+      "counterexample": null,
+      "cases": 0,
+      "total_cases": 496,
+      "generated_text_sha256": "5af3305298e789969eeabab29bc41c3e597016c4c45809299990f22a53d26dd8",
+      "artifact_sha256": "5af3305298e789969eeabab29bc41c3e597016c4c45809299990f22a53d26dd8",
+      "presentation": "raw_source",
+      "formatting_compliant": true
+    },
+    "peak_allocated_bytes": 18930840576
+  }
+]

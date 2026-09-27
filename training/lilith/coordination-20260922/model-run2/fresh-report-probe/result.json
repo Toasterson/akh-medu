@@ -1,0 +1,7 @@
+{
+  "status": "interrupted",
+  "original_unknown_turn_resolved": false,
+  "truth_review": "pending",
+  "error": "TimeoutError: report deadline",
+  "services_stopped": true
+}

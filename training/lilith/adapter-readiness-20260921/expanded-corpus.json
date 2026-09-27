@@ -1,0 +1,36 @@
+{
+  "schema": "lilith/expanded-corpus-readiness@1",
+  "candidate_examples": 4,
+  "correction_examples": 4,
+  "reference_checks": 143121,
+  "train_families": [
+    "byte_order",
+    "error_conventions",
+    "permission_masks"
+  ],
+  "development_holdout_families": [
+    "alignment",
+    "interval_intersection",
+    "modular_sequence_order"
+  ],
+  "ready_to_train": false,
+  "reason": "Small assistant-authored development references are not a certified diagnosed-model-failure curriculum or independent release evaluation. Mechanics and deployment certification still missing.",
+  "files": {
+    "corrections.jsonl": {
+      "sha256": "9c8298fa45c8fc6d36b93fbffcf6d95c7ca3c517ae03e9b3918a406876c387d7",
+      "rows": 4
+    },
+    "development-holdouts.jsonl": {
+      "sha256": "db598730df1fc81bb55c01cdddcd1a583808beea4813d597ec820760d79e94f6",
+      "rows": 4
+    },
+    "candidates.jsonl": {
+      "sha256": "48fdf72bbd782ceeae21c1ebde8e5dcbae9b65758342aa9ee0bbdbe4fd136507",
+      "rows": 4
+    },
+    "manifest.json": {
+      "sha256": "6443db4425ae36a3a7339e7c534a2744c92dbac17c5396494247b98a7d9841c9",
+      "rows": null
+    }
+  }
+}
