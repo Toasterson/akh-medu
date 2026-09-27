@@ -1,6 +1,6 @@
 # ADR 116 — Lilith as Chief of Staff: autonomy on the sentience path, the full live system in training, guided RL on Runpod
 
-> Date: 2026-09-27 (revision 2 the same day, after the operator's answers)
+> Date: 2026-09-27 (revision 3 the same day: WireGuard, supervisor, volume)
 > Status: Proposed (design; no pod created, no training started under this ADR)
 > Plan: [2026-09-27 Lilith Chief of Staff RL](../plans/2026-09-27-lilith-chief-of-staff-rl-runpod.md) · Anima Plan `01a0e26f-d032-7541-80cb-34e3f29c8842`
 > Builds on: [Project Lilith](../plans/2026-09-21-project-lilith.md), [Lilith runtime training](../plans/2026-09-22-lilith-runtime-training.md), [Runpod handoff](../plans/2026-09-22-lilith-runpod-handoff.md), [dojo curriculum](../manuals/2026-09-01-babyllm-dojo-curriculum.md), ADR 099 (engine as captain), ADR 105 (run governance), ADR 110 (guided reward, live environment), ADR 111 (Kaine ladder), ADR 113 (full akh always)
@@ -88,11 +88,14 @@ path**:
 ADR 110 Decision 3 says: train in the real environment. Lilith gets **the full system** in training
 and inference alike:
 
-- **Tunnel.** The Runpod pod joins the fleet network as an ephemeral node carrying Lilith's own
-  identity. The default is a Tailscale node with `--tun=userspace-networking` (works without TUN in
-  a pod), tagged `tag:lilith`, with an ACL limited to the services she uses. WireGuard to a fleet
-  gateway is the fallback. C6 picks one. The fleet has no active tailnet today: Tailscale on
-  hephaistos and the Mac is logged out.
+- **Tunnel: pure WireGuard (operator decision 2026-09-27; no Tailscale).** A WireGuard hub runs on a
+  public fleet host (C6a picks the host: archibald, or a home-router port-forward) and routes only to
+  the services below. Each pod session gets a fresh peer keypair and a /32 address, with the peer
+  added at pod start and removed at stop. Runpod pods usually lack `NET_ADMIN` and `/dev/net/tun`,
+  so the pod side runs a **userspace WireGuard client** (wireproxy for SOCKS/HTTP, or onetun for
+  per-service port forwards). It speaks the WireGuard protocol end to end, and the first test pod
+  verifies the kernel capabilities. hephaistos's existing `TR-WG-TW` is an outbound client tunnel
+  (`0.0.0.0/0` to an external endpoint), not a fleet hub.
 - **Services over the tunnel:**
   - akh runtime services (`akhsessd`/`akhrtd`/`akhsbxd`/`akhexecd`), so she keeps the full tool
     registry;
@@ -182,13 +185,17 @@ Each record gets a keep/drop decision with a reason. Nothing enters the CoS corp
   The trainer is PyTorch CUDA + Transformers + PEFT + TRL, with pinned versions.
 - **Placement.** Runpod, driven with the agent API key read from 1Password at call time and never
   written to disk.
-  - Pods: `akh-medu-lilith-serve` (48 GB-class, started and stopped) and
-    `akh-medu-lilith-train-<run>` (1× H100 80GB, A100 80GB fallback).
-  - One network volume.
-  - Operator approval right before every billable create, resize, restart or delete, and before
-    every training run.
-  - Start/stop of the existing serve pod is automated only after the operator sets a monthly cap
-    (plan, operator decision 1).
+  - Network volume `akh-medu-lilith-vol` (`c6kdciozex`, 100 GB, **EU-FR-1**), created 2026-09-27.
+    EU-FR-1 was chosen because it has H100 80GB stock and network storage close to the Swiss
+    homelab. No 48 GB-class GPU was in stock in any EU storage datacenter, so serving also uses the
+    H100 (`akh-medu-lilith-serve`, started and stopped). Training uses `akh-medu-lilith-train-<run>`,
+    1× H100 80GB.
+  - **Supervisor** (operator decision 2026-09-27): the architect session (Claude) is Lilith's
+    supervisor. It starts and stops her pods and evaluates training.
+  - **Cap:** the account's prepaid credit. The operator tops it up when needed, up to the account
+    spend limit. The supervisor never adds funds. It reports spend with every run report, and it
+    stops pods before the credit runs out.
+  - Deleting volumes, or creating resources other than Lilith pods, still needs operator approval.
 - **Provenance.** Pod binaries are built from `origin/main` SHAs (satisfied for the Lilith code
   since #418).
 - **Governance.** One ADR 105 run WI per training run.
