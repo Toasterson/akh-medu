@@ -308,6 +308,27 @@ impl NativeSessionClient {
         )
     }
 
+    /// `POST /v1/sessions/{id}/repository`: the session-owner's repository
+    /// checkout intent (53g PR bootstrap fix, 2026-09-27 incident). Must be
+    /// called while the session's workspace is still unallocated —
+    /// akhsessd's allocator otherwise stalls the session on
+    /// `bootstrap_pending` and later force-retires it as stalled. Idempotent:
+    /// a retry with the same `request` gets back the same receipt; a session
+    /// that already recorded another intent (a different commit, or another
+    /// principal's) answers `conflict` (see
+    /// [`NativeSessionError::is_conflict`]).
+    pub fn prepare_repository(
+        &self,
+        session_id: &str,
+        request: &akh_session_types::bootstrap::BootstrapRepository,
+    ) -> Result<akh_session_types::bootstrap::RepositoryBootstrapReceipt, NativeSessionError> {
+        self.send(
+            "POST",
+            &format!("/v1/sessions/{}/repository", segment(session_id)),
+            Some(request),
+        )
+    }
+
     /// `GET /v1/session-requests/{request_id}`: the session a create with
     /// this request id made for this client (53g PR 7). `not_found` means no
     /// such create ever landed.

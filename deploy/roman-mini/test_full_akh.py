@@ -588,6 +588,19 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("reddwarf", warnings[0])
 
+    def test_cluster_switch_renders_a_declared_repository(self):
+        # 53g PR bootstrap fix: the {workspace_profile, repository} table
+        # form, read directly (as `render_delegation` sees it whether it
+        # came from `janus_delegation_switch` or a caller's raw dict).
+        root = Path("/deploy")
+        rendered, warnings = fa.render_delegation({}, root, ["anima"], cluster=self.cluster(
+            projects={"anima": {"workspace_profile": "janus-worker-anima",
+                                "repository": "https://code.aopc.cloud/toasterson/Anima.git"}}))
+        self.assertEqual(dict(rendered["native"]["profiles"]["anima"]),
+                         {"workspace_profile": "janus-worker-anima", "runtime_profile": "astra-impl-4",
+                          "repository": "https://code.aopc.cloud/toasterson/Anima.git"})
+        self.assertEqual(warnings, [])
+
     def test_cluster_switch_ignores_the_local_sessions_json(self):
         root = Path("/deploy")
         # No local akhsessd grants at all: the cluster side is authoritative,
@@ -781,6 +794,14 @@ class JanusDelegationSwitchTests(unittest.TestCase):
             ({**self.valid(), "projects": {"x": ""}}, "projects"),
             ({**self.valid(), "projects": {"": "y"}}, "projects"),
             ({**self.valid(), "projects": "not-a-dict"}, "projects"),
+            # 53g PR bootstrap fix: the {workspace_profile, repository} table form.
+            ({**self.valid(), "projects": {"akh-medu": {}}}, "workspace_profile"),
+            ({**self.valid(), "projects": {"akh-medu": {"workspace_profile": ""}}}, "workspace_profile"),
+            ({**self.valid(), "projects": {"akh-medu": {"repository": "https://x/y.git"}}}, "workspace_profile"),
+            ({**self.valid(), "projects": {"akh-medu": {"workspace_profile": "p", "repository": ""}}}, "repository"),
+            ({**self.valid(), "projects": {"akh-medu": {"workspace_profile": "p", "repository": 5}}}, "repository"),
+            ({**self.valid(), "projects": {"akh-medu": {"workspace_profile": "p", "extra": 1}}}, "unknown keys"),
+            ({**self.valid(), "projects": {"akh-medu": 7}}, "projects"),
         ]
         for settings, message in cases:
             self.write(settings)
@@ -794,6 +815,29 @@ class JanusDelegationSwitchTests(unittest.TestCase):
         (self.root / fa.JANUS_DELEGATION_FILE).write_text("[]")
         with self.assertRaisesRegex(fa.RenderError, "JSON object"):
             fa.janus_delegation_switch(self.root)
+
+    def test_project_object_form_with_repository_is_parsed(self):
+        # 53g PR bootstrap fix: a `projects` entry may be a
+        # {workspace_profile, repository} table instead of the plain string,
+        # and the two forms may be mixed in the same file.
+        self.token.write_text("t" * 40 + "\n")
+        self.write(self.valid(projects={
+            "akh-medu": {"workspace_profile": "janus-worker-akh-medu",
+                        "repository": "https://code.aopc.cloud/toasterson/akh-medu.git"},
+            "anima": "janus-worker-anima",
+        }))
+        cluster = fa.janus_delegation_switch(self.root)
+        self.assertEqual(cluster["projects"], {
+            "akh-medu": {"workspace_profile": "janus-worker-akh-medu",
+                        "repository": "https://code.aopc.cloud/toasterson/akh-medu.git"},
+            "anima": "janus-worker-anima",
+        })
+
+    def test_project_object_form_without_repository_is_parsed(self):
+        self.token.write_text("t" * 40 + "\n")
+        self.write(self.valid(projects={"akh-medu": {"workspace_profile": "janus-worker-akh-medu"}}))
+        cluster = fa.janus_delegation_switch(self.root)
+        self.assertEqual(cluster["projects"], {"akh-medu": {"workspace_profile": "janus-worker-akh-medu"}})
 
 
 @NEEDS_TOMLLIB
@@ -848,6 +892,24 @@ class JanusDelegationClusterRenderTests(unittest.TestCase):
         native = self.workspace("janus")["delegation"]["native"]
         self.assertEqual(native["url"], "http://127.0.0.1:18431")
         self.assertTrue((self.root / fa.DELEGATION_TOKEN).exists())
+
+    def test_switch_renders_the_repository_bootstrap_field(self):
+        # 53g PR bootstrap fix: a {workspace_profile, repository} table entry
+        # renders `repository` into the project's profile; a plain-string
+        # entry (no bootstrap) still renders with no `repository` key.
+        self.switch(projects={
+            "akh-medu": {"workspace_profile": "janus-worker-akh-medu",
+                        "repository": "https://code.aopc.cloud/toasterson/akh-medu.git"},
+            "Droneworld": "janus-worker-droneworld",
+        })
+        self.render()
+        native = self.workspace("janus")["delegation"]["native"]
+        self.assertEqual(native["profiles"]["akh-medu"],
+                         {"workspace_profile": "janus-worker-akh-medu", "runtime_profile": "astra-impl-4",
+                          "repository": "https://code.aopc.cloud/toasterson/akh-medu.git"})
+        self.assertEqual(native["profiles"]["Droneworld"],
+                         {"workspace_profile": "janus-worker-droneworld", "runtime_profile": "astra-impl-4"})
+        self.assertNotIn("repository", native["profiles"]["Droneworld"])
 
     def test_malformed_switch_fails_the_whole_render_closed(self):
         # The switch is read before the per-role loop, so a malformed file

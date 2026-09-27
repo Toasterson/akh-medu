@@ -4646,6 +4646,7 @@ mod tests {
                     kind: IncidentKind::Escalation,
                     project: "akh-medu".into(),
                     workspace_profile: "janus-worker-akh-medu".into(),
+                    head_sha: None,
                     job: serde_json::json!({"summary": "x"}),
                 },
                 4,
