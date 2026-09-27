@@ -192,6 +192,29 @@ pub enum EscalationError {
         actual: String,
     },
 
+    /// The session's repository-bootstrap intent conflicts with one akhsessd
+    /// already recorded for it (53g PR bootstrap fix).
+    #[error(
+        "session {session_id} already has another repository-bootstrap intent for project \
+         {project}"
+    )]
+    #[diagnostic(
+        code(akh::delegation::escalation::bootstrap_conflict),
+        help(
+            "akhsessd accepts exactly one repository-checkout intent per session. This usually \
+             means the incident's `head_sha` changed between retries under the same key, or \
+             this session was recovered from a create that another principal's intent already \
+             reached. The session was retired and its grant revoked. Open a new incident key \
+             with the current commit."
+        )
+    )]
+    RepositoryBootstrapConflict {
+        /// The session.
+        session_id: String,
+        /// The project.
+        project: String,
+    },
+
     /// Ledger failure (invalid key, limit, unknown incident, store).
     #[error(transparent)]
     #[diagnostic(transparent)]
@@ -784,6 +807,16 @@ impl EscalationService {
                 "a registered project or its workspace profile is empty",
             ));
         }
+        if native
+            .profiles
+            .values()
+            .any(|profile| profile.repository.as_deref().is_some_and(str::is_empty))
+        {
+            return Err(config(
+                "a registered project's `repository` is set but empty; omit it instead to \
+                 leave that project's sessions unbootstrapped",
+            ));
+        }
         let escalation_skill = escalation
             .escalation_skill
             .clone()
@@ -874,6 +907,7 @@ impl EscalationService {
             request.incident_key.clone(),
             IncidentKind::Escalation,
             &request.project,
+            request.head_sha.as_ref().map(CommitSha::as_str),
             job,
         )
     }
@@ -893,7 +927,13 @@ impl EscalationService {
             "incident_key": key,
             "request": request,
         });
-        self.admit_and_dispatch(key, IncidentKind::MergeRepair, &request.project, job)
+        self.admit_and_dispatch(
+            key,
+            IncidentKind::MergeRepair,
+            &request.project,
+            Some(request.head_sha.as_str()),
+            job,
+        )
     }
 
     fn admit_and_dispatch(
@@ -901,9 +941,24 @@ impl EscalationService {
         key: IncidentKey,
         kind: IncidentKind,
         project: &str,
+        head_sha: Option<&str>,
         job: Value,
     ) -> EscalationResult<EscalationReceipt> {
         let profile = self.profile(project)?;
+        if profile.repository.is_some() && head_sha.is_none() {
+            // The worker session would stall in `bootstrap_pending` and be
+            // force-retired without a commit to check the repository out at
+            // (the 2026-09-27 incident); fail the call itself rather than
+            // admitting an incident that can never make progress.
+            return Err(EscalationError::input(
+                "head_sha",
+                format!(
+                    "is required: project `{project}`'s delegation profile declares a \
+                     repository to bootstrap, so the worker session needs the exact commit \
+                     (the current base/head from Anima) to check out"
+                ),
+            ));
+        }
         let admitted = self.ledger.admit(
             NewIncident {
                 request_id: request_id_for(&self.akh, kind, &key),
@@ -911,6 +966,7 @@ impl EscalationService {
                 kind,
                 project: project.to_owned(),
                 workspace_profile: profile.workspace_profile.clone(),
+                head_sha: head_sha.map(str::to_owned),
                 job,
             },
             self.native.max_new_per_day,
@@ -944,7 +1000,11 @@ impl EscalationService {
             Ok(record) => Ok((record, None)),
             Err(error) => {
                 let failure = error.as_failure();
-                let settled = matches!(error, EscalationError::RuntimeMismatch { .. });
+                let settled = matches!(
+                    error,
+                    EscalationError::RuntimeMismatch { .. }
+                        | EscalationError::RepositoryBootstrapConflict { .. }
+                );
                 tracing::warn!(
                     target: "akh::delegation",
                     akh = %self.akh, incident = %key, error = ?miette::Report::new(error),
@@ -979,6 +1039,25 @@ impl EscalationService {
             None => self.find_or_create_session(&record)?,
         };
         let record = self.ledger.get(key).unwrap_or(record);
+        // Prepare the session's repository-checkout intent before its
+        // workspace is needed (53g PR bootstrap fix, 2026-09-27 incident):
+        // akhsessd's allocator otherwise stalls the session on
+        // `bootstrap_pending` and force-retires it as stalled. Safe to repeat
+        // every dispatch while the incident stays pending; akhsessd answers
+        // the same receipt for a retry with the same commit.
+        if let Some(repository) = &profile.repository {
+            if let Err(error) = self.prepare_repository(&record, &session.id, repository) {
+                if matches!(error, EscalationError::RepositoryBootstrapConflict { .. }) {
+                    self.release(&record, &session.id);
+                    let failure = error.as_failure();
+                    self.ledger.update(key, self.now(), |r| {
+                        r.state = IncidentState::Failed;
+                        r.last_error = Some(failure);
+                    })?;
+                }
+                return Err(error);
+            }
+        }
         if let Some(expected) = &profile.runtime_profile {
             let actual = session.runtime.as_ref().map(|r| r.profile.as_str());
             if actual != Some(expected.as_str()) {
@@ -1159,6 +1238,51 @@ impl EscalationService {
         }
     }
 
+    /// Prepare the session's repository-checkout intent (53g PR bootstrap
+    /// fix): `POST /v1/sessions/{id}/repository` with the incident's exact
+    /// commit. A transport failure or other rejection is returned as-is and
+    /// retried on the incident's next dispatch (the ledger keeps it
+    /// pending); a conflicting intent already on the session is
+    /// [`EscalationError::RepositoryBootstrapConflict`], which the caller
+    /// settles as failed.
+    ///
+    /// # Errors
+    ///
+    /// [`EscalationError::Config`] if the incident has no `head_sha` (should
+    /// not happen: `admit_and_dispatch` requires one whenever the project's
+    /// profile carries a `repository`), or the akhsessd call's own error.
+    fn prepare_repository(
+        &self,
+        record: &IncidentRecord,
+        session_id: &str,
+        repository: &str,
+    ) -> EscalationResult<()> {
+        let Some(head_sha) = record.head_sha.as_deref() else {
+            return Err(EscalationError::Config {
+                reason: format!(
+                    "incident `{}` has no head_sha but project `{}`'s delegation profile \
+                     declares a repository to bootstrap",
+                    record.incident_key, record.project
+                ),
+            });
+        };
+        let request = akh_session_types::bootstrap::BootstrapRepository {
+            request_id: format!("{}-repository", record.request_id),
+            checkout: akh_session_types::bootstrap::RepositoryCheckout {
+                repository: repository.to_owned(),
+                revision: head_sha.to_owned(),
+            },
+        };
+        match self.client.prepare_repository(session_id, &request) {
+            Ok(_receipt) => Ok(()),
+            Err(error) if error.is_conflict() => Err(EscalationError::RepositoryBootstrapConflict {
+                session_id: session_id.to_owned(),
+                project: record.project.clone(),
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Revoke the incident's grant and close its session, best effort.
     fn release(&self, record: &IncidentRecord, session_id: &str) {
         if let Some(grant) = &record.grant_id
@@ -1236,10 +1360,9 @@ impl EscalationService {
             IncidentState::Running => NextOwner::Worker,
             IncidentState::Failed
                 if provider_blocked
-                    || record
-                        .last_error
-                        .as_ref()
-                        .is_some_and(|f| f.code.ends_with("runtime_mismatch")) =>
+                    || record.last_error.as_ref().is_some_and(|f| {
+                        f.code.ends_with("runtime_mismatch") || f.code.ends_with("bootstrap_conflict")
+                    }) =>
             {
                 NextOwner::Operator
             }

@@ -659,8 +659,18 @@ def janus_delegation_switch(root: Path) -> dict | None:
       (`EscalationError::RuntimeMismatch`), so this must match what the
       cluster's `session_grants.<profile>.runtime.profile` actually binds.
     - `projects`: registered project name (a key of
-      config/janus-escalation.json) -> the cluster's workspace profile name
-      for that project's workers (e.g. `janus-worker-akh-medu`). Only
+      config/janus-escalation.json) -> either the cluster's workspace
+      profile name for that project's workers (e.g. `janus-worker-akh-medu`,
+      the plain-string shorthand), or a table
+      `{"workspace_profile": "janus-worker-akh-medu", "repository": "..."}`.
+      `repository` (53g PR bootstrap fix, 2026-09-27 incident) is the exact
+      URL the cluster's worker profile lists in its `bootstrap_repositories`;
+      when set, `render_delegation` renders it into
+      `[delegation.native.profiles.<project>]` so the akh prepares that
+      session's repository-checkout intent before its workspace is needed
+      (`EscalationError` `head_sha` is then required on `escalate` for that
+      project). Omit `repository` to keep the pre-fix behavior for a project
+      whose cluster worker profile does not require a checkout. Only
       projects listed both here and in config/janus-escalation.json are
       registered for delegation; the rest are reported as warnings.
     """
@@ -697,10 +707,33 @@ def janus_delegation_switch(root: Path) -> dict | None:
         raise RenderError(f"{path} needs a non-empty `projects` map (registered project name -> "
                           "cluster workspace profile)")
     for project, profile in projects.items():
-        if (not isinstance(project, str) or not project.strip()
-                or not isinstance(profile, str) or not profile.strip()):
+        if not isinstance(project, str) or not project.strip():
             raise RenderError(f"{path}: every `projects` entry needs a non-empty project name "
-                              "and a non-empty cluster workspace profile")
+                              "and a non-empty cluster workspace profile (or a "
+                              "{workspace_profile, repository} table)")
+        if isinstance(profile, str):
+            if not profile.strip():
+                raise RenderError(f"{path}: every `projects` entry needs a non-empty project name "
+                                  "and a non-empty cluster workspace profile (or a "
+                                  "{workspace_profile, repository} table)")
+            continue
+        if isinstance(profile, dict):
+            unknown_profile_keys = sorted(set(profile) - {"workspace_profile", "repository"})
+            if unknown_profile_keys:
+                raise RenderError(f"{path}: projects.{project} has unknown keys "
+                                  f"{unknown_profile_keys}; allowed: workspace_profile, repository")
+            workspace_profile = profile.get("workspace_profile")
+            if not isinstance(workspace_profile, str) or not workspace_profile.strip():
+                raise RenderError(f"{path}: projects.{project} needs a non-empty "
+                                  "`workspace_profile`")
+            repository = profile.get("repository")
+            if repository is not None and (not isinstance(repository, str) or not repository.strip()):
+                raise RenderError(f"{path}: projects.{project}.repository must be a non-empty "
+                                  "string when set")
+            continue
+        raise RenderError(f"{path}: every `projects` entry needs a non-empty project name "
+                          "and a non-empty cluster workspace profile (or a "
+                          "{workspace_profile, repository} table)")
     return {"sessions_url": url, "token_file": token, "runtime_profile": runtime_profile,
             "projects": dict(projects)}
 
@@ -727,9 +760,20 @@ def render_delegation(session: dict, root: Path, projects, role: str = "janus",
     warnings = []
     if cluster is not None:
         cluster_projects = cluster["projects"]
+
+        def cluster_profile(value):
+            # A `projects` entry is either the plain workspace-profile
+            # string (shorthand, no repository bootstrap) or a
+            # {workspace_profile, repository} table (53g PR bootstrap fix).
+            fields = {"workspace_profile": value if isinstance(value, str) else value["workspace_profile"],
+                      "runtime_profile": cluster["runtime_profile"]}
+            repository = None if isinstance(value, str) else value.get("repository")
+            if repository:
+                fields["repository"] = repository
+            return Inline(**fields)
+
         profiles = {
-            project: Inline(workspace_profile=cluster_projects[project],
-                            runtime_profile=cluster["runtime_profile"])
+            project: cluster_profile(cluster_projects[project])
             for project in sorted(projects) if project in cluster_projects
         }
         missing = sorted(set(projects) - set(cluster_projects))

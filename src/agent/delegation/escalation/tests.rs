@@ -18,6 +18,7 @@ const REPORT_THREAD: &str = "01a0ab49-9cc4-7012-8785-1eada26fbd46";
 const WORK_ITEM: &str = "01a0d569-1cf1-7a2b-8c3d-4e5f60718293";
 const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 const BASE: &str = "89abcdef0123456789abcdef0123456789abcdef";
+const REPO: &str = "https://code.aopc.cloud/toasterson/akh-medu.git";
 
 // ---------------------------------------------------------------------------
 // Stub akhsessd
@@ -31,6 +32,8 @@ struct StubState {
     sessions: BTreeMap<String, Value>,
     runtime_profile: String,
     drop_next_create_answer: bool,
+    /// session id → the `BootstrapRepository` intent recorded for it.
+    repository: BTreeMap<String, Value>,
     next: u32,
 }
 
@@ -223,6 +226,26 @@ fn handle(state: &Mutex<StubState>, method: &str, path: &str, body: Value) -> (u
             }
             None => (404, fault("not_found")),
         },
+        ("POST", ["v1", "sessions", id, "repository"]) => {
+            if !s.sessions.contains_key(*id) {
+                return (404, fault("not_found"));
+            }
+            match s.repository.get(*id) {
+                Some(existing) if existing == &body => {}
+                Some(_) => return (409, fault("conflict")),
+                None => {
+                    s.repository.insert(id.to_string(), body.clone());
+                }
+            }
+            let receipt = json!({
+                "schema_version": 1u16,
+                "session_id": id,
+                "request": body,
+                "principal": "janus",
+                "at": 1u64,
+            });
+            (200, receipt.to_string())
+        }
         ("POST", ["v1", "sessions", _, "retire"]) => (200, "{}".into()),
         _ => (404, String::new()),
     }
@@ -287,12 +310,25 @@ fn native_config(runtime_profile: Option<&str>) -> NativeDelegationConfig {
         NativeProjectProfile {
             workspace_profile: "janus-worker-akh-medu".into(),
             runtime_profile: runtime_profile.map(str::to_owned),
+            repository: None,
         },
     );
     config.escalation.enabled = true;
     config.escalation.escalation_skill = Some(skills_dir().join("astra-escalation"));
     config.escalation.merge_repair_skill = Some(skills_dir().join("mergiraf"));
     config.escalation.report_thread = Some(REPORT_THREAD.into());
+    config
+}
+
+/// [`native_config`] with `akh-medu`'s profile declaring `repository`
+/// (53g PR bootstrap fix).
+fn native_config_with_repository(runtime_profile: Option<&str>, repository: &str) -> NativeDelegationConfig {
+    let mut config = native_config(runtime_profile);
+    config
+        .profiles
+        .get_mut("akh-medu")
+        .expect("akh-medu is always registered by native_config")
+        .repository = Some(repository.to_owned());
     config
 }
 
@@ -701,6 +737,134 @@ fn a_session_on_the_wrong_runtime_is_retired_and_the_incident_fails_closed() {
 }
 
 // ---------------------------------------------------------------------------
+// Repository bootstrap (53g PR bootstrap fix, 2026-09-27 incident)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn escalate_without_head_sha_is_rejected_when_the_profile_declares_a_repository() {
+    let fx = fixture_with(
+        Stub::start("codex-astra"),
+        &native_config_with_repository(Some("codex-astra"), REPO),
+        IncidentLedger::in_memory(),
+    );
+    let mut without_head = escalation("WI-no-head");
+    without_head.as_object_mut().unwrap().remove("head_sha");
+    let error = EscalationRequest::from_params(&params(without_head))
+        .and_then(|request| fx.service.escalate(&request))
+        .unwrap_err();
+    assert_eq!(code_of(&error), "akh::delegation::escalation::input");
+    assert!(error.to_string().contains("head_sha"), "{error}");
+    // The call was refused before admission: no ledger record, no session.
+    assert!(
+        fx.service
+            .ledger()
+            .get(&IncidentKey::parse("WI-no-head").unwrap())
+            .is_none()
+    );
+    assert_eq!(fx.stub.count("POST", "/v1/sessions"), 0);
+}
+
+#[test]
+fn a_project_without_a_repository_still_accepts_escalate_without_head_sha() {
+    // The pre-2026-09-27 behavior is unchanged for a project whose profile
+    // does not declare a repository.
+    let fx = fixture();
+    let mut without_head = escalation("WI-no-repo-no-head");
+    without_head.as_object_mut().unwrap().remove("head_sha");
+    let receipt = fx
+        .service
+        .escalate(&EscalationRequest::from_params(&params(without_head)).unwrap())
+        .unwrap();
+    assert_eq!(receipt.state, IncidentState::Running);
+    assert_eq!(fx.stub.count("POST", "/repository"), 0);
+}
+
+#[test]
+fn escalate_with_a_repository_profile_prepares_the_bootstrap_intent_before_the_brief() {
+    let fx = fixture_with(
+        Stub::start("codex-astra"),
+        &native_config_with_repository(Some("codex-astra"), REPO),
+        IncidentLedger::in_memory(),
+    );
+    let receipt = escalate(&fx, "WI-bootstrap").unwrap();
+    assert_eq!(receipt.state, IncidentState::Running);
+    let prepared = fx.stub.bodies("POST", "/repository");
+    assert_eq!(prepared.len(), 1);
+    assert_eq!(prepared[0]["checkout"]["repository"], json!(REPO));
+    assert_eq!(prepared[0]["checkout"]["revision"], json!(HEAD));
+    let requests = fx.stub.lock().requests.clone();
+    let repository_at = requests
+        .iter()
+        .position(|(method, path, _)| method == "POST" && path.ends_with("/repository"))
+        .unwrap();
+    let inputs_at = requests
+        .iter()
+        .position(|(method, path, _)| method == "POST" && path.ends_with("/inputs"))
+        .unwrap();
+    assert!(
+        repository_at < inputs_at,
+        "the repository intent must reach akhsessd before the brief, or its \
+         allocator can stall the session on bootstrap_pending"
+    );
+}
+
+#[test]
+fn a_retried_bootstrap_intent_is_idempotent() {
+    let fx = fixture_with(
+        Stub::start("codex-astra"),
+        &native_config_with_repository(Some("codex-astra"), REPO),
+        IncidentLedger::in_memory(),
+    );
+    let receipt = escalate(&fx, "WI-bootstrap-retry").unwrap();
+    let record = fx.service.ledger().get(&receipt.incident_key).unwrap();
+    let session_id = record.session_id.clone().unwrap();
+    // A retry with the same commit (as a repeated dispatch while the
+    // incident was still pending would make) gets back the same receipt
+    // instead of a conflict.
+    fx.service
+        .prepare_repository(&record, &session_id, REPO)
+        .unwrap();
+    fx.service
+        .prepare_repository(&record, &session_id, REPO)
+        .unwrap();
+    assert_eq!(
+        fx.stub.count("POST", "/repository"),
+        3,
+        "1 from escalate's own dispatch plus 2 direct retries"
+    );
+}
+
+#[test]
+fn a_conflicting_bootstrap_intent_fails_the_incident_closed() {
+    let fx = fixture_with(
+        Stub::start("codex-astra"),
+        &native_config_with_repository(Some("codex-astra"), REPO),
+        IncidentLedger::in_memory(),
+    );
+    // Seed the session id the escalation's create is about to make (the
+    // stub's first, deterministic "sess-1") with another repository intent,
+    // as if a different principal's create had already reached it.
+    fx.stub.lock().repository.insert(
+        "sess-1".into(),
+        json!({"request_id": "other", "checkout": {"repository": REPO, "revision": BASE}}),
+    );
+    let receipt = escalate(&fx, "WI-bootstrap-conflict").unwrap();
+    assert_eq!(receipt.state, IncidentState::Failed);
+    assert_eq!(
+        receipt.dispatch_error.unwrap().code,
+        "akh::delegation::escalation::bootstrap_conflict"
+    );
+    assert_eq!(fx.stub.count("POST", "/inputs"), 0, "no brief was sent");
+    assert_eq!(fx.stub.count("POST", "/archive"), 1);
+    assert!(fx.issuer.calls().contains(&"revoke grant-1".to_string()));
+    let status = fx
+        .service
+        .status(&IncidentKey::parse("WI-bootstrap-conflict").unwrap())
+        .unwrap();
+    assert_eq!(status.next_owner, NextOwner::Operator);
+}
+
+// ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------
 
@@ -824,6 +988,7 @@ fn crashed_after_create(dir: &std::path::Path, key: &str) -> (IncidentRecord, St
                 kind: IncidentKind::Escalation,
                 project: "akh-medu".into(),
                 workspace_profile: "janus-worker-akh-medu".into(),
+                head_sha: None,
                 job: json!({"kind": "escalation", "incident_key": key, "request": request}),
             },
             4,
@@ -974,7 +1139,8 @@ fn project_profiles_parse_as_names_or_tables_and_the_legacy_profile_still_parses
     let config: crate::agent::delegation::DelegationConfig = toml::from_str(
         "[native]\nenabled = true\nworkspace_profile = \"code\"\nmax_new_per_day = 2\n\
          [native.profiles]\nakh-medu = \"janus-worker-akh-medu\"\n\
-         anima = { workspace_profile = \"janus-worker-anima\", runtime_profile = \"codex-astra\" }\n\
+         anima = { workspace_profile = \"janus-worker-anima\", runtime_profile = \"codex-astra\", \
+         repository = \"https://code.aopc.cloud/toasterson/Anima.git\" }\n\
          [native.escalation]\nenabled = true\nescalation_skill = \"/s/a\"\nmerge_repair_skill = \"/s/m\"\n",
     )
     .unwrap();
@@ -984,7 +1150,8 @@ fn project_profiles_parse_as_names_or_tables_and_the_legacy_profile_still_parses
         config.native.project_profile("akh-medu").unwrap(),
         &NativeProjectProfile {
             workspace_profile: "janus-worker-akh-medu".into(),
-            runtime_profile: None
+            runtime_profile: None,
+            repository: None,
         }
     );
     assert_eq!(
@@ -995,6 +1162,15 @@ fn project_profiles_parse_as_names_or_tables_and_the_legacy_profile_still_parses
             .runtime_profile
             .as_deref(),
         Some("codex-astra")
+    );
+    assert_eq!(
+        config
+            .native
+            .project_profile("anima")
+            .unwrap()
+            .repository
+            .as_deref(),
+        Some("https://code.aopc.cloud/toasterson/Anima.git")
     );
     assert!(config.native.escalation.enabled);
     // A config written before PR 7 keeps its single profile and the defaults.

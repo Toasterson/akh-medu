@@ -97,7 +97,14 @@ pub enum GrantTools {
 ///
 /// [delegation.native.profiles]           # 53g PR 7: per registered project
 /// akh-medu = "janus-worker-akh-medu"     # shorthand: the workspace profile
-/// anima = { workspace_profile = "janus-worker-anima", runtime_profile = "codex-astra" }
+/// anima = { workspace_profile = "janus-worker-anima", runtime_profile = "codex-astra",
+///            repository = "https://code.aopc.cloud/toasterson/Anima.git" }
+/// # `repository` (53g PR bootstrap fix): the exact URL the akhsessd worker
+/// # profile lists in its `bootstrap_repositories`. When set, every
+/// # delegation to this project prepares that session's repository-checkout
+/// # intent (`POST /v1/sessions/{id}/repository`) before its workspace is
+/// # allocated, and `head_sha` is then required on the `escalate` call.
+/// # Absent: no bootstrap call is made (the pre-2026-09-27 behavior).
 ///
 /// [delegation.native.escalation]         # the Janus-only escalation tools
 /// enabled = true
@@ -186,6 +193,15 @@ pub struct NativeProjectProfile {
     /// other runtime (for example the delegating akh's own) is retired and
     /// the delegation fails closed instead of running uncontained.
     pub runtime_profile: Option<String>,
+    /// The exact repository URL the akhsessd worker profile lists in its
+    /// `bootstrap_repositories` (53g PR bootstrap fix, 2026-09-27 incident).
+    /// When set, [`EscalationService`](super::escalation::EscalationService)
+    /// prepares the session's repository-checkout intent
+    /// (`POST /v1/sessions/{id}/repository`, the incident's `head_sha`)
+    /// before its workspace is needed, so akhsessd's allocator does not
+    /// stall the session on `bootstrap_pending`. Absent: no bootstrap call
+    /// is made, and `head_sha` stays optional on `escalate`.
+    pub repository: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -196,6 +212,8 @@ enum ProjectProfileRepr {
         workspace_profile: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runtime_profile: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repository: Option<String>,
     },
 }
 
@@ -205,13 +223,16 @@ impl From<ProjectProfileRepr> for NativeProjectProfile {
             ProjectProfileRepr::Name(workspace_profile) => Self {
                 workspace_profile,
                 runtime_profile: None,
+                repository: None,
             },
             ProjectProfileRepr::Table {
                 workspace_profile,
                 runtime_profile,
+                repository,
             } => Self {
                 workspace_profile,
                 runtime_profile,
+                repository,
             },
         }
     }
@@ -219,11 +240,12 @@ impl From<ProjectProfileRepr> for NativeProjectProfile {
 
 impl From<NativeProjectProfile> for ProjectProfileRepr {
     fn from(profile: NativeProjectProfile) -> Self {
-        match profile.runtime_profile {
-            None => Self::Name(profile.workspace_profile),
-            runtime_profile => Self::Table {
+        match (profile.runtime_profile, profile.repository) {
+            (None, None) => Self::Name(profile.workspace_profile),
+            (runtime_profile, repository) => Self::Table {
                 workspace_profile: profile.workspace_profile,
                 runtime_profile,
+                repository,
             },
         }
     }

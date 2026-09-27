@@ -345,6 +345,13 @@ pub struct IncidentRecord {
     pub workspace_profile: String,
     /// The akhsessd create request id (derived from the key; stable).
     pub request_id: String,
+    /// The exact commit the worker's repository checkout is pinned to (53g
+    /// PR bootstrap fix). Set whenever the request carried a `head_sha`;
+    /// required for a project whose profile declares a `repository`, and
+    /// used to prepare that session's bootstrap intent on every dispatch
+    /// while the incident stays pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
     /// Creates sent (or possibly sent) to akhsessd. Non-zero means a lookup
     /// by [`Self::request_id`] must precede any new create.
     #[serde(default)]
@@ -410,6 +417,9 @@ pub struct NewIncident {
     pub workspace_profile: String,
     /// The akhsessd create request id ([`request_id_for`]).
     pub request_id: String,
+    /// The exact commit to bootstrap the worker's repository checkout at,
+    /// when the request carried one (53g PR bootstrap fix).
+    pub head_sha: Option<String>,
     /// The validated job.
     pub job: serde_json::Value,
 }
@@ -533,6 +543,7 @@ impl IncidentLedger {
             project: incident.project,
             workspace_profile: incident.workspace_profile,
             request_id: incident.request_id,
+            head_sha: incident.head_sha,
             create_attempts: 0,
             grant_id: None,
             session_id: None,
@@ -687,6 +698,7 @@ mod tests {
             kind,
             project: "akh-medu".into(),
             workspace_profile: "janus-worker-akh-medu".into(),
+            head_sha: None,
             job: serde_json::json!({"summary": value}),
         }
     }

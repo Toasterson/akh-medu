@@ -716,19 +716,74 @@ keys, a non-absolute or missing `token_file`, an empty `runtime_profile`, or
 an empty/non-string `projects` map) fails the whole render closed instead of
 half-switching Janus between the two akhsessd instances.
 
+**Repository bootstrap fix (2026-09-27 incident, `src/agent/delegation/`).**
+Every worker workspace profile above requires a repository checkout
+(akhsessd's `bootstrap_repositories`); nobody was calling its bootstrap API,
+so every escalation/merge-repair session sat `bootstrap_pending` until
+akhsessd force-retired it as stalled (`cancelled`). Janus's native delegation
+client now prepares the checkout itself, right after creating the session and
+before its workspace is allocated
+(`POST /v1/sessions/{id}/repository`, `{"request_id": "<incident
+request_id>-repository", "checkout": {"repository": "<profile.repository>",
+"revision": "<incident head_sha>"}}`; see
+`EscalationService::prepare_repository` and
+`NativeSessionClient::prepare_repository` in `src/agent/delegation/{escalation,native_session}.rs`).
+Each `projects` entry may now be a `{workspace_profile, repository}` table
+instead of the plain string, where `repository` is the *exact* URL the
+cluster's worker profile lists in `bootstrap_repositories` (talos
+`fleet.json`'s `janus.projects[].repository`); the plain-string form is
+unchanged and keeps the pre-fix behavior (no bootstrap call) for a project
+whose worker profile does not require one. `head_sha` on `escalate` becomes
+**required**, not merely "when known", for any project whose profile
+declares a `repository` — the Rust side fails the call itself
+(`akh::delegation::escalation::input`) before admitting an incident that
+could never make progress; `dispatch_merge_repair`'s `head_sha` was already
+required. A retry with the same commit is idempotent (akhsessd returns the
+same receipt); a session that already recorded a different intent fails the
+incident closed (`akh::delegation::escalation::bootstrap_conflict`,
+`EscalationError::RepositoryBootstrapConflict`) the same way a runtime
+mismatch does — released, `next_owner: operator`, open a new incident key
+with the current commit.
+
+**Cluster-side prerequisite the operator still owns.** The
+`session_bootstrap` route (`POST /v1/sessions/{id}/repository`) requires the
+calling principal to hold role `session_bootstrap`
+(`crate::http::role(principal, "session_bootstrap")` in
+`crates/akh-session-services/src/session_bootstrap.rs`), not just `client`.
+Grant that role to the cluster's `janus-delegation` principal (talos
+`akh-platform` config) before relying on this fix; without it every bootstrap
+call is rejected `forbidden` and the incident stays pending, retried forever
+(not a fatal error, but no progress either).
+
 ```json
 {
   "sessions_url": "https://anima.wegmueller.it/akh",
   "token_file": "<ROOT>/secrets/sessions-janus-delegation.key",
   "runtime_profile": "astra-impl-4",
   "projects": {
-    "akh-medu": "janus-worker-akh-medu",
-    "anima": "janus-worker-anima",
-    "reddwarf": "janus-worker-reddwarf",
-    "board": "janus-worker-board"
+    "akh-medu": {
+      "workspace_profile": "janus-worker-akh-medu",
+      "repository": "https://code.aopc.cloud/toasterson/akh-medu.git"
+    },
+    "anima": {
+      "workspace_profile": "janus-worker-anima",
+      "repository": "https://code.aopc.cloud/toasterson/Anima.git"
+    },
+    "reddwarf": {
+      "workspace_profile": "janus-worker-reddwarf",
+      "repository": "https://code.aopc.cloud/CloudNebulaProject/reddwarf.git"
+    },
+    "board": {
+      "workspace_profile": "janus-worker-board",
+      "repository": "https://code.aopc.cloud/toasterson/djehuty-board.git"
+    }
   }
 }
 ```
+
+(The repository URLs above are talos `fleet.json`'s current
+`janus.projects[].repository` values, 2026-09-27; re-check them there before
+reusing this block verbatim.)
 
 Only projects listed both here and as keys of `config/janus-escalation.json`
 are registered for delegation; a project registered in one but not the other
