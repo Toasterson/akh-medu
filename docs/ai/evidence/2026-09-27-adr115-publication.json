@@ -1,0 +1,288 @@
+{
+  "verified_at": "2026-09-27 10:24:04 UTC",
+  "source_commit": "5335fc4cedcfbd7f8fe257ae1c31530f63275e1c",
+  "source_commit_verified_on_origin_main": true,
+  "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+  "plan_id": "01a0e25c-390c-7c61-ab5e-0fd7b910ad1f",
+  "workflow_id": "10000000-0000-0000-0000-000000000001",
+  "workflow_name": "Feature Development",
+  "documents": [
+    {
+      "kind": "adr",
+      "path": "docs/ai/decisions/115-typed-execution-and-akhpack-v1.md",
+      "document_id": "01a0e25c-3924-7271-8a23-be604ed5702a",
+      "slug": "akh-medu-adr-115-typed-execution-akhpack-v1",
+      "chunk_count": 28,
+      "word_count": 3334,
+      "version": 1,
+      "content_hash": "283e263a20e4af5feb5ec0f79f76236b371b0768fc250c515c56ffb550d38b7b",
+      "seshat_document_id": "5cfbba1c-da72-4914-b8a2-31e83911e3b0",
+      "visibility": "public",
+      "content_hash_matches_source": true
+    },
+    {
+      "kind": "plan",
+      "path": "docs/ai/plans/2026-09-22-typed-execution-and-akhpack-v1.md",
+      "document_id": "01a0e25c-393b-76e1-a65e-2174f7abb29c",
+      "slug": "akh-medu-adr-115-implementation-plan",
+      "chunk_count": 19,
+      "word_count": 2071,
+      "version": 1,
+      "content_hash": "332040fedce1f0f38f303ca3aff26d872e5f0556901f0fb477f075cf35e860fb",
+      "seshat_document_id": "2dd792d3-e8cb-4ba7-aefd-6b77b12ace92",
+      "visibility": "public",
+      "content_hash_matches_source": true
+    }
+  ],
+  "verification": {
+    "local_document_links": true,
+    "markdown_fences": true,
+    "whitespace": true,
+    "unique_items": 10,
+    "internal_dag_acyclic": true,
+    "internal_hard_edges": 19,
+    "all_items_draft": true,
+    "anima_document_search_matches": 2,
+    "seshat_semantic_search_query": "akhpack v1 constrained ZIP verified VFS TypeScript any",
+    "seshat_semantic_search_found_both": true,
+    "seshat_pending_embeddings_at_check": 0
+  },
+  "work_items": [
+    {
+      "slice": "A0",
+      "id": "01a0e25d-8308-7453-a7b8-4829025e925d",
+      "code": "WI-502",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0e25c-390c-7c61-ab5e-0fd7b910ad1f",
+      "current_phase": "draft",
+      "depends_on": []
+    },
+    {
+      "slice": "A1",
+      "id": "01a0e25d-835a-7530-8d64-882d1ec22277",
+      "code": "WI-503",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0e25c-390c-7c61-ab5e-0fd7b910ad1f",
+      "current_phase": "draft",
+      "depends_on": [
+        {
+          "id": "01a0e25d-8308-7453-a7b8-4829025e925d",
+          "kind": "blocks",
+          "state": "pending"
+        }
+      ]
+    },
+    {
+      "slice": "A2",
+      "id": "01a0e25d-83b3-7681-984c-6a5c6381a591",
+      "code": "WI-504",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0e25c-390c-7c61-ab5e-0fd7b910ad1f",
+      "current_phase": "draft",
+      "depends_on": [
+        {
+          "id": "01a0e25d-8308-7453-a7b8-4829025e925d",
+          "kind": "blocks",
+          "state": "pending"
+        }
+      ]
+    },
+    {
+      "slice": "A3",
+      "id": "01a0e25d-83fc-7513-8434-a1b4452d9b19",
+      "code": "WI-505",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0e25c-390c-7c61-ab5e-0fd7b910ad1f",
+      "current_phase": "draft",
+      "depends_on": [
+        {
+          "id": "01a0e25d-835a-7530-8d64-882d1ec22277",
+          "kind": "blocks",
+          "state": "pending"
+        },
+        {
+          "id": "01a0e25d-83b3-7681-984c-6a5c6381a591",
+          "kind": "blocks",
+          "state": "pending"
+        }
+      ]
+    },
+    {
+      "slice": "A4",
+      "id": "01a0e25d-844d-78f1-88a6-9d914a4e8037",
+      "code": "WI-506",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0e25c-390c-7c61-ab5e-0fd7b910ad1f",
+      "current_phase": "draft",
+      "depends_on": [
+        {
+          "id": "01a0e25d-835a-7530-8d64-882d1ec22277",
+          "kind": "blocks",
+          "state": "pending"
+        },
+        {
+          "id": "01a0e25d-83b3-7681-984c-6a5c6381a591",
+          "kind": "blocks",
+          "state": "pending"
+        }
+      ]
+    },
+    {
+      "slice": "A5",
+      "id": "01a0e25d-8495-7a80-918f-6bd15ae97066",
+      "code": "WI-507",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0e25c-390c-7c61-ab5e-0fd7b910ad1f",
+      "current_phase": "draft",
+      "depends_on": [
+        {
+          "id": "01a0e25d-835a-7530-8d64-882d1ec22277",
+          "kind": "blocks",
+          "state": "pending"
+        },
+        {
+          "id": "01a0e25d-844d-78f1-88a6-9d914a4e8037",
+          "kind": "blocks",
+          "state": "pending"
+        }
+      ]
+    },
+    {
+      "slice": "A6",
+      "id": "01a0e25d-84df-7083-b27d-a55f14922728",
+      "code": "WI-508",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0e25c-390c-7c61-ab5e-0fd7b910ad1f",
+      "current_phase": "draft",
+      "depends_on": [
+        {
+          "id": "01a0e25d-83fc-7513-8434-a1b4452d9b19",
+          "kind": "blocks",
+          "state": "pending"
+        },
+        {
+          "id": "01a0e25d-844d-78f1-88a6-9d914a4e8037",
+          "kind": "blocks",
+          "state": "pending"
+        }
+      ]
+    },
+    {
+      "slice": "A7",
+      "id": "01a0e25d-8519-76d2-86ee-21c205e84c16",
+      "code": "WI-509",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0e25c-390c-7c61-ab5e-0fd7b910ad1f",
+      "current_phase": "draft",
+      "depends_on": [
+        {
+          "id": "01a0e25d-8308-7453-a7b8-4829025e925d",
+          "kind": "blocks",
+          "state": "pending"
+        },
+        {
+          "id": "01a0e25d-844d-78f1-88a6-9d914a4e8037",
+          "kind": "blocks",
+          "state": "pending"
+        },
+        {
+          "id": "01a0e25d-8495-7a80-918f-6bd15ae97066",
+          "kind": "blocks",
+          "state": "pending"
+        }
+      ]
+    },
+    {
+      "slice": "A8",
+      "id": "01a0e25d-855c-79e1-ad0b-40bc8c6e7b54",
+      "code": "WI-510",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0e25c-390c-7c61-ab5e-0fd7b910ad1f",
+      "current_phase": "draft",
+      "depends_on": [
+        {
+          "id": "01a0e25d-83fc-7513-8434-a1b4452d9b19",
+          "kind": "blocks",
+          "state": "pending"
+        },
+        {
+          "id": "01a0e25d-844d-78f1-88a6-9d914a4e8037",
+          "kind": "blocks",
+          "state": "pending"
+        },
+        {
+          "id": "01a0e25d-8495-7a80-918f-6bd15ae97066",
+          "kind": "blocks",
+          "state": "pending"
+        },
+        {
+          "id": "01a0e25d-84df-7083-b27d-a55f14922728",
+          "kind": "blocks",
+          "state": "pending"
+        },
+        {
+          "id": "01a0e25d-8519-76d2-86ee-21c205e84c16",
+          "kind": "blocks",
+          "state": "pending"
+        }
+      ]
+    },
+    {
+      "slice": "A9",
+      "id": "01a0e25d-85d7-7123-a277-6c4e04731f7a",
+      "code": "WI-511",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0e25c-390c-7c61-ab5e-0fd7b910ad1f",
+      "current_phase": "draft",
+      "depends_on": [
+        {
+          "id": "01a0e25d-855c-79e1-ad0b-40bc8c6e7b54",
+          "kind": "blocks",
+          "state": "pending"
+        }
+      ]
+    }
+  ],
+  "related_work_item": {
+    "id": "01a0e1fa-b8e3-7171-a81c-948a66a1110a",
+    "code": "WI-500",
+    "current_phase": "draft",
+    "plan_id": "01a0e1f9-ca71-74a3-9baf-0552f96bf329",
+    "depends_on": [
+      {
+        "id": "01a0e1fa-9ce6-7a02-97d3-8f8effbc74b2",
+        "kind": "blocks",
+        "state": "pending"
+      },
+      {
+        "id": "01a0e25d-835a-7530-8d64-882d1ec22277",
+        "kind": "blocks",
+        "state": "pending"
+      },
+      {
+        "id": "01a0e25d-83b3-7681-984c-6a5c6381a591",
+        "kind": "blocks",
+        "state": "pending"
+      },
+      {
+        "id": "01a0e25d-83fc-7513-8434-a1b4452d9b19",
+        "kind": "blocks",
+        "state": "pending"
+      },
+      {
+        "id": "01a0d46a-0381-7290-9b73-6fd5b365f6a7",
+        "kind": "blocks",
+        "state": "pending"
+      }
+    ],
+    "added_edges": 4,
+    "preserved_existing_edges": 1
+  },
+  "limits": [
+    "Documentation and tracker publication only; no implementation dispatched.",
+    "No native oibuild acceptance or deployment performed.",
+    "Shared repository, Anima and Seshat availability verified; no claim every existing daemon has already retrieved the documents.",
+    "Historical source-gap table remains explicitly dated 2026-09-22.",
+    "Phase 53e WI-483 prerequisite retains its actual lifecycle state; no completion fabricated."
+  ]
+}
