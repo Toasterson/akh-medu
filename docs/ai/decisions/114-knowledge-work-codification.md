@@ -3,7 +3,7 @@
 > Date: 2026-09-26
 > Status: Proposed
 > Phase: 54
-> Anima: project `019d9844-ce74-7993-a9f0-c953b8f04a4e`; the phase umbrella is an Anima Plan (operator-created), slice WIs are listed in the plan doc
+> Anima: project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, Plan `01a0e1f9-ca71-74a3-9baf-0552f96bf329`; slice WIs are listed in the plan doc
 > Builds on: ADR 040 (procedural skills), ADR 041 (skill intelligence), ADR 091
 > (transcript capture), ADR 105 (run governance), ADR 113 (full akh always),
 > the 2026-09-22 typed-execution and akhpack proposal, Phase 11h chunking

@@ -4,7 +4,7 @@
 - **Status:** Planned. Items are drafts in Anima; the operator promotes them.
 - **ADR:** [114](../decisions/114-knowledge-work-codification.md)
 - **Research:** [AgentRun harvest](../research/2026-09-26-agentrun-harvest/README.md)
-- **Anima:** project `019d9844-ce74-7993-a9f0-c953b8f04a4e`. The phase umbrella is an **Anima Plan**, not a work item; no MCP tool creates Plans, so the operator creates it in Anima (suggested title "Phase 54 — Knowledge-work codification (the codifier)", description = the Goal and Slices sections below). Slice WIs, created 2026-09-26 without `plan_id` and to be recreated under the Plan once it exists: 54a `01a0df4f-77ab-7df0-9c98-32609da70a9b`, 54b `01a0df4f-93b0-73b0-accf-ca232373f868`, 54c `01a0df50-a267-7aa3-acbf-be9fad24c7a2`, 54d `01a0df50-dbea-7e03-a7ea-3aa321b38916`, 54e `01a0df50-f84d-77d0-9383-01d363e19864`, 54f `01a0df51-0ace-7111-b0e6-a238a0453d3a` (all draft, `source=architect-session`). A mistaken umbrella WI `01a0df4f-5d03` was cancelled 2026-09-27.
+- **Anima:** project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, **Plan `01a0e1f9-ca71-74a3-9baf-0552f96bf329`** (the phase umbrella; workflow Feature Development). Slice work items under the Plan, all draft, `source=architect-session`: 54a `01a0e1fa-173a-7e22-b6d1-40da7a8b1255`, 54b `01a0e1fa-320a-7a72-bde3-210ad96239f3`, 54c `01a0e1fa-80c3-7f40-a76e-38c6cc5a93af`, 54d `01a0e1fa-9ce6-7a02-97d3-8f8effbc74b2`, 54e `01a0e1fa-b8e3-7171-a81c-948a66a1110a`, 54f `01a0e1fa-cce7-7883-97ff-f9f26293c3e9`. (A first set created 2026-09-26 without `plan_id`, plus a mistaken umbrella WI `01a0df4f-5d03`, were cancelled 2026-09-27.)
 - **Depends on:** Phase 11h chunking (live), Phase 30/31 skillpacks (live), Phase 53c/53d/53e (landing), typed-execution slices A1–A3 (proposed, [plan](2026-09-22-typed-execution-and-akhpack-v1.md))
 
 ## Goal
@@ -41,7 +41,6 @@ tools deliver the cost saving without it.
 
 ## Operator touch points
 
-- Create the Phase 54 Plan in Anima, then tell the architect session its id so the six slice WIs are recreated under it.
 - Promote 54a/54b from draft when the 53d reactor admission PR is on main.
 - Set the per-akh codifier budget before 54c is promoted; the default is zero.
 - Choose the two jobs for 54f when 54d is in testing.
