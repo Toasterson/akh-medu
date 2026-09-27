@@ -113,7 +113,7 @@ pub fn run_training_worker(
     if config.kind != RuntimeKind::Internal
         || request.binding.kind != RuntimeKind::Internal
         || config.revision != request.binding.revision
-        || config.execution_mode != ExecutionMode::Brokered
+        || config.execution_mode() != ExecutionMode::Brokered
         || request.binding.execution_mode != ExecutionMode::Brokered
         || config.timeout_secs == 0
         || !config.working_dir.is_absolute()
