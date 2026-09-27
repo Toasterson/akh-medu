@@ -123,7 +123,7 @@ VESTA_OPS_SANDBOX = {
     "name": "ops",
     "profile": "vesta-ops",
     "description": "Homelab cluster access as ServiceAccount vesta (kubectl in-cluster) "
-                   "and the vesta/*-only GitOps push key",
+                   "and the talos GitOps push key (main and vesta/*, no force push)",
 }
 # Broker tools whose effects the sandboxes now carry: gitops_exec -> the
 # vesta-gitops [exec] tools; homelab_write and gitops_publish -> sandbox_exec
@@ -533,7 +533,7 @@ def render_exec(role: str, sandbox: dict | None) -> dict:
     configured sandbox (53g PR 8): `execd` against the credential-free
     `vesta-gitops` profile (shell_exec and the file tools), plus the `ops`
     sandbox that the `sandbox_exec` tool reaches (ServiceAccount `vesta`,
-    `vesta/*` deploy key). The cluster, not this file, decides what `ops` may do.
+    talos deploy key: main and vesta/*, no force push). The cluster, not this file, decides what `ops` may do.
     """
     if role != "vesta" or sandbox is None:
         return {"kind": "none"}
@@ -704,7 +704,7 @@ def render_workspace(existing: dict | None, role: str, prompt: str, servers: lis
 WORKSPACE_COMMENTS = {
     "exec": "Side effects stay disabled until an execd sandbox profile exists (ADR 113 53c).\n"
             "Vesta after the 53g PR 8 cutover: `execd` on the credential-free vesta-gitops\n"
-            "profile; [[exec.sandboxes]] `ops` (ServiceAccount vesta, vesta/* deploy key) is\n"
+            "profile; [[exec.sandboxes]] `ops` (ServiceAccount vesta, talos deploy key) is\n"
             "reached through the sandbox_exec tool. The cluster enforces what `ops` may do.",
     "board": "Per-akh Agent Board identity, per phase53/fixups (reactor report_thread posts,\n"
              "board replies). The token is resolved from the environment by daemon_credentials.py.",
