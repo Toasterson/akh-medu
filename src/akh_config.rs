@@ -3575,3 +3575,9 @@ profile = "vesta-ops"
         );
     }
 }
+
+// Lilith C2 (ADR 116): the workspace TOML that deploy/roman-mini renders for
+// Lilith, loaded through the real `AkhConfig::load_checked` path.
+#[cfg(test)]
+#[path = "akh_config_roman_fixture_tests.rs"]
+mod roman_fixture_tests;

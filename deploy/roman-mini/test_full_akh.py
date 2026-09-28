@@ -1250,8 +1250,13 @@ class RomanGoldenTests(RenderFixture):
     ROMAN_FILES = [f"core-config/akh-medu/workspaces/{r}.toml" for r in ROLES] + \
                   [f"config/reactor-seeds/{r}.json" for r in ROLES]
 
-    def assert_romans_golden(self, host=False):
+    def assert_romans_golden(self, host=False, lilith=False):
         files = self.ROMAN_FILES + (["core-config/akh-medu/config.toml"] if host else [])
+        # lilith.toml is also the fixture the Rust lib test
+        # `akh_config::roman_fixture_tests` loads through AkhConfig::load_checked
+        # (include_str!), so a renderer change that drops or misplaces a key
+        # fails either here or there.
+        files += ["core-config/akh-medu/workspaces/lilith.toml"] if lilith else []
         for rel in files:
             name = {"config.toml": "host-config.toml"}.get(Path(rel).name, Path(rel).name)
             name = name.replace(".json", ".reactor-seeds.json")
@@ -1268,8 +1273,17 @@ class RomanGoldenTests(RenderFixture):
     def test_with_lilith_the_romans_stay_byte_identical(self):
         lilith_fixture(self.root)
         self.render()
-        self.assert_romans_golden()
-        self.assertTrue((self.root / "core-config/akh-medu/workspaces/lilith.toml").exists())
+        self.assert_romans_golden(lilith=True)
+
+    def test_the_rust_loader_check_reads_these_fixtures(self):
+        # The other half of the chain: the lib test (run by CI's
+        # `cargo test --lib`) loads fixtures/golden/lilith.toml through
+        # AkhConfig::load_checked and fails on any dropped key.
+        rust = (SOURCE.parents[1] / "src/akh_config_roman_fixture_tests.rs").read_text()
+        for name in ("lilith.toml", "janus.toml", "minerva.toml", "vesta.toml"):
+            self.assertIn(f'include_str!("../deploy/roman-mini/fixtures/golden/{name}")', rust)
+        self.assertIn("#[path = \"akh_config_roman_fixture_tests.rs\"]",
+                      (SOURCE.parents[1] / "src/akh_config.rs").read_text())
 
 
 @NEEDS_TOMLLIB

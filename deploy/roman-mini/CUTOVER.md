@@ -587,6 +587,18 @@ holds before, for example Janus's broker hold:
 python3 deploy/roman-mini/configure_core.py --plan --root "$ROOT"   # writes nothing
 ```
 
+To prove that the rendered `lilith.toml` loads in Rust with no key dropped
+(through `AkhConfig::load_checked`, the loader akhomed uses, and with
+`GuardInstall` active), run this from the checkout after the render:
+
+```sh
+AKH_LILITH_WORKSPACE_TOML="$ROOT/core-config/akh-medu/workspaces/lilith.toml" \
+  cargo test --lib roman_fixture_tests::lilith
+```
+
+CI runs the same test on `fixtures/golden/lilith.toml`, and
+`test_full_akh.py` requires the renderer to reproduce that file byte for byte.
+
 `--plan` prints one line per file: `=` unchanged, `~` changed with a unified
 diff, or `+` new. Then it prints the resulting `daemon.auto_start`. Without
 `--repo`, it takes the host-config provenance from the installed
