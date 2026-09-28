@@ -34,14 +34,9 @@
 #                                 board.lab.home") so HTTP clients send the right Host header
 #                                 through the lab-gateway forward. Appended once if missing.
 #
-# NOTE on onetun's --private-key: the rendered onetun commands read the key
-# via ordinary shell expansion of $LILITH_WG_PRIVATE_KEY at the point this
-# script execs them, so the key appears in this pod's own argv for the
-# lifetime of the onetun process (visible only inside this single-tenant
-# container via ps/proc). Before first real use, check `onetun --help` for
-# a same-effect environment-variable flag that avoids this; that is a
-# hardening step to verify against the deployed onetun version, not
-# something this script can assume.
+# onetun's key: the rendered commands pass $LILITH_WG_PRIVATE_KEY to onetun as
+# ONETUN_PRIVATE_KEY in its environment, never as --private-key on argv
+# (onetun v0.3.10 reads the variable; verified in the C6a live run 2026-09-28).
 
 set -euo pipefail
 

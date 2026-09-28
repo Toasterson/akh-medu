@@ -1055,7 +1055,8 @@ def lilith_settings(root: Path) -> LilithSettings | None:
     if not url_file.is_file():
         raise RenderError(
             f"Lilith's endpoint URL file {url_file} does not exist. Write it (mode 0600) from 1Password: "
-            f"op-service-account read 'op://Homelab/lilith-serve-endpoint/base_url' > {url_file}; "
+            f"u=$(op-service-account read 'op://Homelab/lilith-serve-endpoint/base_url') && "
+            f"printf '%s/v1\\n' \"${{u%/}}\" > {url_file} (the item holds the proxy URL without /v1); "
             f"or remove {LILITH_CONFIG_FILE} to render the Romans only")
     base_url = url_file.read_text().strip()
     parsed = urlparse(base_url)

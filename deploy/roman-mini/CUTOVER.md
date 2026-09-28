@@ -557,7 +557,8 @@ Render inputs (all under `$ROOT`, mode 0600, written from a login session):
 
 ```sh
 umask 077
-op-service-account read 'op://Homelab/lilith-serve-endpoint/base_url' > "$ROOT/secrets/lilith-base-url"
+# the 1Password item holds the proxy URL without the /v1 segment the renderer requires
+u=$(op-service-account read 'op://Homelab/lilith-serve-endpoint/base_url') && printf '%s/v1\n' "${u%/}" > "$ROOT/secrets/lilith-base-url"
 printf '{"budget": {"minor_units": %s, "currency": "USD"}}\n' "$BUDGET_CENTS" > "$ROOT/config/lilith.json"
 git clone --bare https://code.aopc.cloud/toasterson/akh-medu.git "$ROOT/lilith/ancestry/akh-medu.git"
 git -C "$ROOT/lilith/ancestry/akh-medu.git" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'

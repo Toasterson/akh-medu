@@ -328,13 +328,17 @@ LILITH_WG_SERVICES
 Optional: `LILITH_WG_WIREPROXY_CONF`, `LILITH_WG_KERNEL_CONF` (needed only if
 `LILITH_WG_CLIENT` forces those modes, or `auto` falls into them).
 
-**Pre-flight check before first real use:** `pod-client.sh`'s onetun
-invocations pass the private key as `--private-key "$LILITH_WG_PRIVATE_KEY"`,
-which shell-expands into this process's own argv (visible via `ps` only
-*inside the pod's own single-tenant container*, not from outside it). Before
-running this against a real pod, check `onetun --help` on the deployed
-version for an environment-variable-only path that avoids even that — the
-script doesn't guess at an unconfirmed flag name.
+**The key never reaches argv.** `pod-client.sh`'s onetun invocations set
+`ONETUN_PRIVATE_KEY="$LILITH_WG_PRIVATE_KEY"` in onetun's environment instead of
+passing `--private-key`. onetun v0.3.10 reads that variable and warns when the key
+comes on the command line (seen in the first live run, 2026-09-28).
+
+**Run one WireGuard client per slot key at a time.** onetun and wireproxy (or a
+kernel interface) sharing a slot's key fight over the hub's endpoint for that peer:
+the last handshake wins, and the other client silently loses its path. The
+2026-09-28 live check therefore stops onetun before it starts wireproxy for the
+SOCKS negative tests, and counts a "blocked" result only when a SOCKS positive
+control in the same session passed.
 
 ## Service allowlist
 
