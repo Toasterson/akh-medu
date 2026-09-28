@@ -135,7 +135,7 @@ def test_changed_since_detects_new_and_updated():
 
 
 def test_changed_since_empty_when_unchanged():
-    previous = {"w1": {"updated_at": "t0"}}
+    previous = {"w1": {"id": "w1", "updated_at": "t0"}}
     current = [{"id": "w1", "updated_at": "t0"}]
     assert m._changed_since(current, previous) == []
 
@@ -216,7 +216,7 @@ def test_anima_collector_full_capture_first_run(tmp_path):
         assert "secret-token-abc" not in obj.read_text()
 
 
-def test_anima_collector_second_run_only_captures_changed_thread(tmp_path):
+def test_anima_collector_second_run_captures_live_threads_only(tmp_path):
     call_log = []
     transport = ScriptedTransport(make_anima_handler(call_log))
     collector = m.AnimaCollector(
@@ -226,7 +226,11 @@ def test_anima_collector_second_run_only_captures_changed_thread(tmp_path):
     ctx = m.SnapshotContext(root=tmp_path, timestamp="20260101T020000Z", previous_work_items=previous)
     result = collector.collect(ctx)
     assert result.extra["changed_item_count"] == 0
-    assert [n for n, _ in call_log].count("get_thread") == 0
+    # Unchanged list entries: no thread fetch for non-live items, but every live item's
+    # thread is still captured (new messages don't change the list entry).
+    live = [wi for wi in (WI1, WI2, WI3) if m._is_live(wi)]
+    assert result.extra["thread_target_count"] == len(live)
+    assert [n for n, _ in call_log].count("get_thread") == len(live)
 
 
 def test_anima_collector_pat_failure_is_fail_closed(tmp_path):
@@ -481,3 +485,18 @@ def test_main_run_writes_snapshot_and_prints_summary(tmp_path, capsys, monkeypat
     out = json.loads(capsys.readouterr().out)
     assert out["schema"] == "lilith/cos-snapshot@1"
     assert out["collectors"]["ok"]["status"] == "ok"
+
+
+def test_changed_since_detects_change_without_updated_at():
+    """Anima's list entries carry no updated_at; a phase change must still register."""
+    previous = {"a": {"id": "a", "current_phase": "ready"}}
+    current = [{"id": "a", "current_phase": "working"}]
+    assert m._changed_since(current, previous) == ["a"]
+
+
+def test_thread_targets_include_all_live_items_even_if_unchanged():
+    previous = {"a": {"id": "a", "current_phase": "working", "status": "open"},
+                "b": {"id": "b", "current_phase": "done", "status": "done"}}
+    current = [{"id": "a", "current_phase": "working", "status": "open"},
+               {"id": "b", "current_phase": "done", "status": "done"}]
+    assert m._thread_targets(current, previous) == ["a"]

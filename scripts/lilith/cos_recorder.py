@@ -331,6 +331,12 @@ def _is_live(work_item: dict) -> bool:
     return phase not in LIVE_PHASES_EXCLUDED and status not in LIVE_STATUS_EXCLUDED
 
 
+def _item_fingerprint(work_item: dict) -> str:
+    """Digest of the whole list entry. Anima's list has no ``updated_at``, so comparing
+    that field alone (None == None) never detected a change (C4 review, 2026-09-28)."""
+    return hashlib.sha256(json.dumps(work_item, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def _changed_since(current_items: list[dict], previous_map: dict[str, dict]) -> list[str]:
     changed = []
     for wi in current_items:
@@ -338,9 +344,18 @@ def _changed_since(current_items: list[dict], previous_map: dict[str, dict]) -> 
         if not wid:
             continue
         prev = previous_map.get(wid)
-        if prev is None or prev.get("updated_at") != wi.get("updated_at"):
+        if prev is None or _item_fingerprint(prev) != _item_fingerprint(wi):
             changed.append(wid)
     return changed
+
+
+def _thread_targets(current_items: list[dict], previous_map: dict[str, dict]) -> list[str]:
+    """Threads to capture: every live item (thread messages don't change the list entry,
+    so only a fetch sees them; the content-addressed store dedups unchanged responses)
+    plus any non-live item whose list entry changed since the previous snapshot."""
+    live = [wi["id"] for wi in current_items if wi.get("id") and _is_live(wi)]
+    changed = _changed_since(current_items, previous_map)
+    return list(dict.fromkeys(live + changed))
 
 
 # --- Anima collector -----------------------------------------------------------
@@ -404,7 +419,9 @@ class AnimaCollector:
 
         changed_items = _changed_since(work_items, ctx.previous_work_items)
         result.extra["changed_item_count"] = len(changed_items)
-        for wid in changed_items:
+        thread_targets = _thread_targets(work_items, ctx.previous_work_items)
+        result.extra["thread_target_count"] = len(thread_targets)
+        for wid in thread_targets:
             call("get_thread", {"work_item_id": wid})
 
         call("get_project_ci_status", {"project_id": self.project_id})
