@@ -196,6 +196,47 @@ def test_step_cap_keeps_rated_and_final_reply(tmp_path):
     assert seqs == sorted(seqs)  # order preserved; the middle of the turn is what goes
 
 
+def test_step_cap_is_pair_atomic(tmp_path):
+    """Parallel calls (call, call, result, result) plus an odd number of texts: no half pair survives."""
+    main = tmp_path / "-Users-alice-ws-proj" / f"{SESSION_ID}.jsonl"
+    docs = [_user("go"), _assistant({"type": "text", "text": "starting"})]
+    pairs = []  # (call line, result line) = seq, since every line yields one event
+    for i in range(0, 90, 2):
+        pairs += [(len(docs), len(docs) + 2), (len(docs) + 1, len(docs) + 3)]
+        docs += [_assistant({"type": "tool_use", "id": f"p{i}", "name": "Bash", "input": {"n": i}}),
+                 _assistant({"type": "tool_use", "id": f"p{i + 1}", "name": "Read", "input": {"n": i + 1}}),
+                 _tool_result(f"p{i}", "a"), _tool_result(f"p{i + 1}", "b")]
+        if i % 20 == 0:
+            docs.append(_assistant({"type": "text", "text": f"interim {i}"}))
+    docs += [_assistant({"type": "text", "text": "done"}), _user("next")]
+    _write_jsonl(main, docs)
+    rows, _ = t.admit_trajectories([t.load_local_session(main)], salt="s")
+    traj = rows[0]["trajectory"]
+    assert traj["steps_total"] > t.MAX_STEPS and len(traj["steps"]) <= t.MAX_STEPS
+    assert traj["steps_elided"] == traj["steps_total"] - len(traj["steps"])
+    calls = {s["args"] for s in traj["steps"] if s["kind"] == "tool_call"}
+    results = [s for s in traj["steps"] if s["kind"] == "tool_result"]
+    assert len(calls) == len(results) > 0
+    names = {"Bash": "a", "Read": "b"}
+    assert sorted(names[s["name"]] for s in traj["steps"] if s["kind"] == "tool_call") == \
+        sorted(s["result_text"] for s in results)
+    kept_seqs = {s["event_ref"]["seq"] for s in traj["steps"]}
+    assert any(call in kept_seqs for call, _ in pairs) and not all(call in kept_seqs for call, _ in pairs)
+    for call, result in pairs:
+        assert (call in kept_seqs) == (result in kept_seqs), (call, result)
+
+
+def test_validation_pins_require_a_recorded_decision(tmp_path):
+    args = argparse.Namespace(output=tmp_path / "o", manifest=tmp_path / "m", validation_sessions=["aaaaaaaa"],
+                              pin_decided_by=None, pin_decided_on=None)
+    try:
+        t.cos_export(args)
+    except SystemExit as error:
+        assert "--pin-decided-by" in str(error)
+    else:
+        raise AssertionError("pins without a recorded decision must be rejected")
+
+
 def test_record_budget_trims_longest_results_and_keeps_digests(tmp_path):
     row = _long_turn(tmp_path, 40, 20000)
     traj = row["trajectory"]
@@ -208,7 +249,9 @@ def test_record_budget_trims_longest_results_and_keeps_digests(tmp_path):
 
 def test_validation_pinning_and_prefixes():
     counts = {"a" * 64: 10, "b" * 64: 50, "c" * 64: 40}
-    assert t.validation_sessions(counts, "salt", pinned=frozenset({"b" * 64})) >= {"b" * 64}
+    default = t.validation_sessions(counts, "salt")
+    pinned = t.validation_sessions(counts, "salt", pinned=frozenset({"b" * 64, "z" * 64}))
+    assert pinned == default | {"b" * 64}  # pins add on top, never displace; unknown sessions ignored
     assert t.resolve_session_prefixes(["aaaaaaaa"], set(counts)) == frozenset({"a" * 64})
     for bad in (["aaaa"], ["dddddddd"]):
         try:
@@ -297,7 +340,7 @@ def test_cos_export_end_to_end_is_private_and_skips_mcp_without_token(tmp_path, 
     args = argparse.Namespace(panel=tmp_path / "panel.jsonl", admitted=tmp_path / "admitted.jsonl", projects_root=projects,
                               output=tmp_path / "out" / "c.jsonl", manifest=tmp_path / "out" / "m.json", salt="x",
                               mcp_url="https://mcp.invalid/mcp", mcp_token_env="AKH_TRANSCRIPTS_MCP_TOKEN", mcp_repo="r",
-                              validation_sessions=[])
+                              validation_sessions=[], pin_decided_by=None, pin_decided_on=None, pin_note="")
     manifest = t.cos_export(args)
     assert manifest["excluded_counts"]["missing_session_file"] == 1 and manifest["mcp_fallback"] == "not_configured"
     for path in (args.output, args.manifest):

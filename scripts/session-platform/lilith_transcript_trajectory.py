@@ -421,7 +421,11 @@ def _turn_events(window: list[Event], streams: dict[str, list[Event]], visited: 
 
 
 def _elide(events: list[Event], protected: set[int], own_stream: str) -> tuple[list[int], int]:
-    """Indices kept under ``MAX_STEPS``: rated/final reply, own text, own tool steps nearest the turn ends, subagent steps last."""
+    """Indices kept under ``MAX_STEPS``: rated/final reply, own text, own tool steps nearest the turn ends, subagent steps last.
+
+    Pair-atomic: a ``tool_call`` and the ``tool_result`` answering it (same
+    ``tool_call_id`` and stream) are kept or dropped together, never one alone.
+    """
     n = len(events)
     if n <= MAX_STEPS:
         return list(range(n)), 0
@@ -434,8 +438,23 @@ def _elide(events: list[Event], protected: set[int], own_stream: str) -> tuple[l
             return 3
         return 1 if event.kind == "reply" else 2
 
-    ranked = sorted(range(n), key=lambda i: (tier(i), min(i, n - 1 - i), i))
-    return sorted(ranked[:MAX_STEPS]), n - MAX_STEPS
+    call_at: dict[tuple[str, str], int] = {}
+    units: dict[int, list[int]] = {}
+    for i, event in enumerate(events):
+        key = (event.ref.stream_id, event.tool_call_id or "")
+        if event.kind == "tool_call" and event.tool_call_id:
+            call_at[key] = i
+        elif event.kind == "tool_result" and event.tool_call_id and key in call_at and call_at[key] in units:
+            units[call_at.pop(key)].append(i)
+            continue
+        units[i] = [i]
+    ranked = sorted(units.values(), key=lambda unit: (min(tier(i) for i in unit),
+                                                      min(min(i, n - 1 - i) for i in unit), unit[0]))
+    kept: list[int] = []
+    for unit in ranked:
+        if len(kept) + len(unit) <= MAX_STEPS:
+            kept.extend(unit)
+    return sorted(kept), n - len(kept)
 
 
 def _fit(record: dict[str, Any], drafts: list[_Draft]) -> int:
@@ -554,17 +573,21 @@ def session_cap(counts: dict[str, int], share: float = SESSION_SHARE_CAP) -> int
 def validation_sessions(
     counts: dict[str, int], salt: str, share: float = VALIDATION_SHARE, pinned: frozenset[str] = frozenset(),
 ) -> set[str]:
-    """Whole sessions: ``pinned`` first, then salted-hash order, filled up to ``share`` of the records."""
+    """Whole sessions in salted-hash order filled up to ``share`` of the records, plus ``pinned``.
+
+    Pins are added on top of the default selection and never displace it, so
+    pinning only ever grows validation relative to the unpinned policy.
+    """
     target = round(share * sum(counts.values()))
-    chosen: set[str] = {s for s in pinned if s in counts}
-    filled = sum(counts[s] for s in chosen)
+    chosen: set[str] = set()
+    filled = 0
     for session in sorted(counts, key=lambda s: sha({"salt": salt, "session": s})):
         if filled >= target:
             break
         if filled + counts[session] <= target or not chosen and counts[session] <= 2 * max(target, 1):
             chosen.add(session)
             filled += counts[session]
-    return chosen
+    return chosen | {s for s in pinned if s in counts}
 
 
 def _rank(record_id: str) -> str:
@@ -643,8 +666,8 @@ def select_cos_corpus(
         "trajectory_stats": {"candidates": step_stats(candidates), "admitted": step_stats(kept)},
         "cap_policy": {"max_session_share": SESSION_SHARE_CAP, "per_session_cap": cap,
                        "order": "sha256(record_id) ascending within session"},
-        "split_policy": "session-bound; pinned sessions first, then sha256(salt,session) order fills "
-                        f"validation up to {VALIDATION_SHARE:.0%} of records",
+        "split_policy": "session-bound; sha256(salt,session) order fills validation up to "
+                        f"{VALIDATION_SHARE:.0%} of records, then pinned sessions are added on top",
         "validation": {"sessions": sorted(s[:8] for s in validation),
                        "pinned": sorted(s[:8] for s in pinned_validation),
                        "share": round(sum(r["split"] == "validation" for r in kept) / len(kept), 4) if kept else 0.0,
@@ -685,6 +708,9 @@ def resolve_session_prefixes(prefixes: list[str], sessions: set[str]) -> frozens
 def cos_export(args: argparse.Namespace) -> dict[str, Any]:
     if args.output.exists() or args.manifest.exists():
         raise SystemExit("refusing to overwrite a C5 corpus artifact")
+    if args.validation_sessions and not (args.pin_decided_by and args.pin_decided_on):
+        raise SystemExit("--validation-sessions changes the split policy; record who decided it and when "
+                         "with --pin-decided-by and --pin-decided-on")
     panel = _read_jsonl(args.panel)
     admitted = _read_jsonl(args.admitted)
     record_sessions = {r["record_id"]: r["provenance"]["session_sha256"] for r in admitted}
@@ -712,6 +738,9 @@ def cos_export(args: argparse.Namespace) -> dict[str, Any]:
     pinned = resolve_session_prefixes(args.validation_sessions, wanted)
     kept, manifest = select_cos_corpus({r["record_id"]: r for r in rows}, panel, record_sessions, unresolved,
                                        salt=args.salt, pinned_validation=pinned)
+    if pinned:
+        manifest["validation"]["pin_decision"] = {"by": args.pin_decided_by, "date": args.pin_decided_on,
+                                                  "note": args.pin_note}
     body = "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in kept)
     manifest["dataset_sha256"] = hashlib.sha256(body.encode()).hexdigest()
     manifest["inputs"] = {"panel_sha256": hashlib.sha256(args.panel.read_bytes()).hexdigest(),
@@ -737,6 +766,9 @@ def main(argv: list[str] | None = None) -> None:
     cos.add_argument("--salt", required=True)
     cos.add_argument("--validation-sessions", default=[], type=lambda v: [p for p in v.split(",") if p],
                      help="comma-separated session_sha256 prefixes pinned to validation (default: none)")
+    cos.add_argument("--pin-decided-by", help="who decided the validation pins (required with --validation-sessions)")
+    cos.add_argument("--pin-decided-on", help="decision date, YYYY-MM-DD (required with --validation-sessions)")
+    cos.add_argument("--pin-note", default="", help="why the sessions were pinned")
     cos.add_argument("--mcp-url", default="http://transcripts.lab.home/mcp",
                      help="transcript MCP endpoint, used only for sessions not on disk and only with a token")
     cos.add_argument("--mcp-token-env", default="AKH_TRANSCRIPTS_MCP_TOKEN",
