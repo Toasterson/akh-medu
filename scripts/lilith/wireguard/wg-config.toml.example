@@ -9,9 +9,11 @@
 # (GitHub Toasterson/talos, clusters/archibald/lilith-wg — README there is
 # the hub runbook). The hub terminates on archibald and forwards only the
 # allowlisted services into wg-home (the home router's 3 WireGuard
-# credentials are fully allocated, and LAN -> archibald times out). The hub,
-# its allowlist and the slot public keys are GitOps state in talos; this
-# side renders pod clients and hands out slot keys. There is no SSH path.
+# credentials are fully allocated, and LAN -> archibald times out). The hub
+# and its allowlist are GitOps state in talos; the peer set (slot public keys
+# + enabled flags) is 1Password state the hub hot-reloads via ESO, so a slot
+# rotation needs no git change. This side renders pod clients and assigns,
+# releases and rotates slots. There is no SSH path.
 #
 # Variants A/B (hub + hephaistos gateway managed over SSH) are superseded;
 # see wg-config.variant-a.toml.example.
@@ -41,14 +43,18 @@ vault = "Homelab"
 op_command = "~/.local/bin/op-service-account"
 hub_item = "lilith-wg-hub"
 item_prefix = "lilith-wg-slot-"     # items lilith-wg-slot-1..4: private_key, public_key, address
-# Lease records (slot, run, pod id, public key; never key material). Must
-# resolve outside any repository checkout.
-lease_dir = "~/.config/akh-medu/lilith-wireguard/slots"
-# A talos checkout. Slot state and allowlist parity are read with
-# `git show <talos_ref>:<path>` — i.e. what is merged, not the work tree.
+# PUBLIC slot state the hub consumes via ESO (talos lilith-wg/peers.external.yaml):
+# slotN_public_key, slotN_enabled, slotN_run, slotN_assigned_at, slotN_rotated_at.
+state_item = "lilith-wg-slots"
+# 1Password write -> applied on the hub: ESO refresh 1m + kubelet volume
+# sync <=1m + hub pass 10s. Released slots read `rotating` for this long.
+propagation_seconds = 180
+# Local lock file only (never key material). Must resolve outside any repo.
+state_dir = "~/.config/akh-medu/lilith-wireguard/slots"
+# A talos checkout, for the allowlist parity check only
+# (`git show <talos_ref>:<path>` — what is merged, not the work tree).
 talos_repo = "~/ws/talos"
 talos_ref = "origin/main"
-talos_peers_path = "clusters/archibald/lilith-wg/peers.conf"
 talos_allowlist_path = "clusters/archibald/lilith-wg/allowlist.conf"
 
 # --- Services ----------------------------------------------------------

@@ -6,7 +6,8 @@ the `wg` binary is unavailable on the machine running this script.
 
 Variant C (chosen 2026-09-28): the hub is the Flux-managed `wg-lilith` pod on
 archibald's k0s cluster (talos repo `clusters/archibald/lilith-wg`), with a
-fixed pool of peer slots whose private keys live only in 1Password. For C
+fixed pool of peer slots whose private keys live only in 1Password and whose
+public state (key, enabled) reaches the hub from 1Password via ESO. For C
 this module renders only the pod-client side for one slot (`--slot N`); the
 hub and its allowlist are GitOps state in the talos repo, and `peer.py
 slot-assign/slot-release` hand slot keys to pods. Nothing in
@@ -137,11 +138,12 @@ class SlotsSection:
     vault: str
     op_command: str  # e.g. ~/.local/bin/op-service-account
     hub_item: str  # 1Password item holding the hub keypair
-    item_prefix: str  # slot n lives in item f"{item_prefix}{n}"
-    lease_dir: Path  # public lease records only (never key material)
+    item_prefix: str  # slot n's keypair lives in item f"{item_prefix}{n}"
+    state_item: str  # PUBLIC slot state ESO renders into the hub's peers
+    propagation_seconds: int  # 1Password write -> hub applied (ESO + kubelet + hub pass)
+    state_dir: Path  # local lock file only (never key material)
     talos_repo: Path | None
     talos_ref: str
-    talos_peers_path: str
     talos_allowlist_path: str
 
     def item(self, n: int) -> str:
@@ -262,10 +264,11 @@ def _load_variant_c(raw: dict, path: Path) -> Config:
             op_command=str(Path(str(s["op_command"])).expanduser()),
             hub_item=str(s["hub_item"]),
             item_prefix=str(s["item_prefix"]),
-            lease_dir=_assert_outside_repo(Path(str(s["lease_dir"])), what="[slots].lease_dir"),
+            state_item=str(s["state_item"]),
+            propagation_seconds=int(s.get("propagation_seconds", 180)),
+            state_dir=_assert_outside_repo(Path(str(s["state_dir"])), what="[slots].state_dir"),
             talos_repo=Path(str(talos_repo)).expanduser() if talos_repo else None,
             talos_ref=str(s.get("talos_ref", "origin/main")),
-            talos_peers_path=str(s.get("talos_peers_path", "clusters/archibald/lilith-wg/peers.conf")),
             talos_allowlist_path=str(s.get("talos_allowlist_path", "clusters/archibald/lilith-wg/allowlist.conf")),
         )
         services = tuple(Service.from_dict(d) for d in raw.get("services", []))
@@ -763,28 +766,6 @@ def render_slot_client(config: Config, slot: int, hub_pubkey: str) -> dict[str, 
         f"{prefix}.hosts": render_hosts(config),
         f"{prefix}.env.json": json.dumps(env, indent=2, sort_keys=True) + "\n",
     }
-
-
-@dataclass(frozen=True)
-class TalosPeer:
-    slot: str
-    public_key: str
-    address: str
-    enabled: bool
-
-
-def parse_talos_peers(text: str) -> dict[str, TalosPeer]:
-    """Parse talos clusters/archibald/lilith-wg/peers.conf."""
-    peers: dict[str, TalosPeer] = {}
-    for lineno, line in enumerate(text.splitlines(), 1):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        cols = stripped.split()
-        if len(cols) != 4 or cols[3] not in ("on", "off"):
-            raise ValueError(f"talos peers.conf:{lineno}: expected `slot public_key allowed_ip on|off`")
-        peers[cols[0]] = TalosPeer(slot=cols[0], public_key=cols[1], address=cols[2], enabled=cols[3] == "on")
-    return peers
 
 
 @dataclass(frozen=True)

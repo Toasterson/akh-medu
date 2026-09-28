@@ -17,7 +17,9 @@
 "archibald uses talos repo to configure k0s — use that to set up the
 WireGuard endpoint". Variants A/B below (SSH-managed hub + hephaistos
 gateway) are **superseded** and kept for the record. Nothing is live until
-the talos PR merges and the operator runs `k0sctl apply` (below).
+the talos PR merges and the operator runs `k0sctl apply` (below). Slot
+assignment and rotation afterwards are 1Password writes only; no git change
+is needed per run.
 
 ## What this buys
 
@@ -38,13 +40,16 @@ VM (`lilith_vm_executor`).
 | Hub | `wg-lilith` pod on archibald k0s (hostNetwork, Flux, talos repo) | archibald host, wg-quick over SSH | hephaistos, router port-forward |
 | Path to the LAN | archibald's existing `wg-home` (masquerade) | hephaistos gateway dials out | gateway == hub |
 | Home router changes | none (its 3 WireGuard credentials are all allocated) | none | one UDP port-forward |
-| Who changes the hub | a talos PR (GitOps only; no runtime kubectl/SSH) | `peer.py` over SSH | `peer.py` over SSH |
-| Pod identity | fixed pool of 4 slots, private keys only in 1Password | fresh keypair per pod | fresh keypair per pod |
+| Who changes the hub | talos PR for the hub itself and its allowlist; the peer set is 1Password state, hot-reloaded via ESO (no runtime kubectl/SSH) | `peer.py` over SSH | `peer.py` over SSH |
+| Pod identity | fixed pool of 4 slots, private keys only in 1Password, rotated after every run | fresh keypair per pod | fresh keypair per pod |
 
 Variant C needs no new host: archibald already reaches the LAN through
 `wg-home` (LAN to archibald times out, so a hephaistos gateway could not be
-dialled). Since there is no runtime kubectl access, peers cannot be added per
-pod. Instead a fixed slot pool is in git and each slot is rotated after its run.
+dialled). There is no runtime kubectl access, so peers cannot be pushed to the
+hub per pod. Instead there is a fixed slot pool whose public state lives in
+1Password. ESO delivers it to the hub every minute, and the hub hot-applies
+changes. Assign and release are therefore 1Password writes, with no git change
+per run.
 
 ## Variant C: archibald k0s hub (talos repo)
 
@@ -56,7 +61,8 @@ Summary:
 |---|---|
 | Endpoint | `95.216.66.53:51822` (`archibald.solstice-ci.org`), udp |
 | Hub | `wg-lilith` `10.201.0.1/24`, pubkey `L4EYWLhJwTI8JKLtikrdLw2+5iRaSI2xfT7N47+Pdio=` |
-| Slots | `slot-1..4` = `10.201.0.11..14/32`; 1Password Homelab `lilith-wg-slot-<n>` (`private_key`, `public_key`, `address`) |
+| Slots | `slot-1..4` = `10.201.0.11..14/32`; keypairs in 1Password Homelab `lilith-wg-slot-<n>` (`private_key`, `public_key`, `address`) |
+| Peer set | 1Password `lilith-wg-slots` (public only: `slotN_public_key`, `slotN_enabled`, `slotN_run`, `slotN_assigned_at`, `slotN_rotated_at`) → ESO `lilith-wg-peers` (1 min) → hub `wg set` diff (10 s), about 2 min end to end |
 | Hub key | 1Password `lilith-wg-hub`, delivered by ESO |
 | Filter | dedicated `inet lilith_wg` table; conntrack-original-destination allowlist; masquerade into `wg-home` only |
 | Image | `procustodibus/wireguard@sha256:e20f6b4b6451fc14b78fb92440d2fbc7d1be2ec603bb51ac72919bdaacc79ebd` |
@@ -80,48 +86,59 @@ allowlisted.
 
 ### One-time operator steps
 
-1. Merge the talos PR. Flux creates the namespace, the ExternalSecret and
-   the hub Deployment.
+1. Merge the talos PR. Flux creates the namespace, both ExternalSecrets and
+   the hub Deployment. All slots start disabled, so the hub has 0 peers.
 2. From a clean talos `main`, run `k0sctl apply --config k0sctl/archibald.yaml`.
    This opens udp/51822 in archibald's `fw_public` perimeter table. Until then
    the hub runs, but pods cannot reach it.
 3. Supervisor host: copy `scripts/lilith/wireguard/wg-config.toml.example` to
-   `wg-config.toml`. Set `[slots].talos_repo` to a talos clone (only `git show
-   origin/main:…` is read) and confirm `op_command` points to the
-   op-service-account wrapper.
+   `wg-config.toml`. Set `[slots].talos_repo` to a talos clone; it is used only
+   for the allowlist parity check, via `git show origin/main:…`. Confirm that
+   `op_command` points to the op-service-account wrapper. That service account
+   needs write access to the `lilith-wg-slots` and `lilith-wg-slot-<n>` items.
 
 ### Slot lifecycle (supervisor)
 
 ```sh
 cd scripts/lilith/wireguard
-python3 peer.py --config wg-config.toml slot-status --fetch        # free / leased / pending-rotation / disabled
+python3 peer.py --config wg-config.toml slot-status                 # assigned / free / rotating per slot
 python3 peer.py --config wg-config.toml slot-assign lilith-serve-<date> \
     --runpod-pod-id <id> --fetch                                    # bundle JSON on stdout: inject .env as Runpod secrets
 # ... run ...
-python3 peer.py --config wg-config.toml slot-release --run lilith-serve-<date> --write-talos
-# then commit talos clusters/archibald/lilith-wg/peers.conf, open a PR, merge
+python3 peer.py --config wg-config.toml slot-release --run lilith-serve-<date>
 ```
 
-- `slot-assign` checks allowlist parity against talos. It then picks a
-  **free** slot, meaning its 1Password `public_key` equals the one merged on
-  talos `origin/main` and it has no lease. It claims the slot with an atomic
-  lease file (public data only, outside the repo), reads the slot private key
-  from 1Password at call time, and verifies that the key derives to the
-  merged public key. The pod bundle (`lilith/wg-pod-client-bundle@1`) goes to
-  stdout once. Nothing secret is written to disk. Never capture the bundle
-  into a file; pipe it straight into the Runpod secret creation.
-- `slot-release` generates a new keypair and writes it into the 1Password
-  item as piped JSON, so the key never appears in argv. It prints the new
-  `peers.conf` line (`--write-talos` edits the talos work tree) and drops the
-  lease. The slot reads **pending-rotation** until the talos change is merged.
-  Flux then applies it, and within about a minute the hub `wg syncconf`s the
-  new key. The old key is dead from then on, and the other slots are not
-  interrupted.
-- Emergency revoke without waiting for a rotation: set the slot `off` in
-  talos `peers.conf` and merge.
+- **`slot-assign`**
+  - Checks allowlist parity against talos `origin/main`.
+  - Picks a **free** slot: not enabled, released more than
+    `propagation_seconds` (180) ago, and its keypair item agrees with
+    `lilith-wg-slots`.
+  - Reads the slot's private key from 1Password at call time, verifies that
+    it derives to the published public key, and sets `slotN_enabled=true`
+    (plus `slotN_run` and `slotN_assigned_at`).
+  - The hub adds the peer within about 2 min. The bundle sets
+    `LILITH_WG_HEALTHCHECK_RETRIES` so `pod-client.sh` waits out that delay.
+  - The bundle (`lilith/wg-pod-client-bundle@1`) goes to stdout once. Nothing
+    secret is written to disk, logs or argv. Never capture the bundle into a
+    file; pipe it straight into the Runpod secret creation.
+- **`slot-release`** runs after every run, and is also the **emergency
+  revoke**. It generates a fresh keypair in memory, then:
+  1. It writes the new public key to `lilith-wg-slots` with
+     `slotN_enabled=false` and `slotN_rotated_at`. This write kills the old
+     key: the hub removes it within about 2 min without restarting the
+     interface, and the other slots are untouched.
+  2. It stores the keypair in `lilith-wg-slot-N`.
+
+  Both writes are piped JSON, so no key appears in argv. The slot then reads
+  **rotating** until the propagation window has passed. If step 2 fails, the
+  old key is still revoked, and the slot stays **rotating**, because the two
+  items disagree, until `slot-release --slot N` is re-run.
+- **`slot-status`** lists each slot's state, run and timestamps.
+- A local flock serialises concurrent assign/release on one supervisor host.
+  Run only one supervisor host at a time: 1Password has no compare-and-swap.
 - On failure, errors print `error:` plus a `help:` line naming the next step.
   Examples: 1Password permission denied, pool exhausted, allowlist drift, or a
-  key that does not match the merged peer.
+  key that does not match the published one.
 
 Pod side: `pod-client.sh` is unchanged apart from `LILITH_WG_HOSTS` (it
 appends the `/etc/hosts` line). Onetun forwards `127.0.0.1:80 →
@@ -136,8 +153,11 @@ appends the `/etc/hosts` line). Onetun forwards `127.0.0.1:80 →
 Use the checklist in talos `clusters/archibald/lilith-wg/README.md`. In
 short: each allowlisted service answers from a test pod; everything else
 (`192.168.1.12:443`, other LAN hosts, `10.0.1.2:22`, the internet) is dropped;
-a rotated slot's old key can no longer handshake. The hermetic regression
-`sh clusters/archibald/lilith-wg/test/run.sh` (talos) must print `PASS`.
+within about 2 min of `slot-release`, the old key can no longer handshake and
+the other slots stay up. The hermetic regression
+`sh clusters/archibald/lilith-wg/test/run.sh` (talos) must print `PASS`. It
+covers live key rotation from the mounted secret: the old peer is removed,
+the new one added, and the interface is not restarted.
 
 ---
 
@@ -388,9 +408,9 @@ path and should be preferred over any table-level rollback.
 |---|---|
 | `scripts/lilith/wireguard/wg-config.toml.example` | **Variant C** template: endpoint, subnet, slot pool, 1Password items, talos paths, service allowlist (mirrors talos `allowlist.conf`). Copy to `wg-config.toml` (gitignored). |
 | `scripts/lilith/wireguard/wg-config.variant-a.toml.example` | Superseded A/B template (hub + hephaistos gateway over SSH). |
-| `scripts/lilith/wireguard/slots.py` | Variant C slot state machine: status from talos `origin/main` + 1Password + leases; assign (1Password read at call time, key/merged-peer check, allowlist parity); release (piped-JSON rotation). Injectable runner. |
-| `scripts/lilith/wireguard/test_slots.py` | Variant C tests with a fake `op`/`git`: states, assignment, exhaustion, tamper and drift refusals, rotation via stdin only, no key material on disk. |
-| `scripts/lilith/wireguard/render.py` | Variant C: `--slot N` renders one slot's pod client (no key material) plus talos `peers.conf`/`allowlist.conf` parsing and drift check. A/B: pure rendering: wg-quick configs, nftables rulesets, onetun/wireproxy pod-client artifacts. Generates/caches the hub and gateway's persistent keypairs under `[keys].dir` (asserted outside the repo). No network I/O. |
+| `scripts/lilith/wireguard/slots.py` | Variant C slot state machine over 1Password (`lilith-wg-slots` + `lilith-wg-slot-<n>`): status (assigned/free/rotating); assign (private key read at call time, derive-check, enable, allowlist parity against talos); release (publish-disabled-first rotation, piped JSON only). Injectable runner and clock. |
+| `scripts/lilith/wireguard/test_slots.py` | Variant C tests with a fake `op`/`git` and clock: states, assignment, exhaustion, tamper and drift refusals, publish-before-keypair ordering, interrupted-release repair, no key material on disk or in argv. |
+| `scripts/lilith/wireguard/render.py` | Variant C: `--slot N` renders one slot's pod client (no key material) plus talos `allowlist.conf` parsing and the drift check. A/B: pure rendering: wg-quick configs, nftables rulesets, onetun/wireproxy pod-client artifacts. Generates/caches the hub and gateway's persistent keypairs under `[keys].dir` (asserted outside the repo). No network I/O. |
 | `scripts/lilith/wireguard/peer.py` | Variant C: `slot-status` / `slot-assign` / `slot-release` (see above). Superseded A/B: `add` / `remove` / `list` pod peers on the hub over SSH (`wg set` live + persisted config + nft reload). Never writes a pod private key to disk; prints the pod-side bundle to stdout once. `--dry-run` everywhere. |
 | `scripts/lilith/wireguard/pod-client.sh` | Runs inside the pod: picks kernel/onetun/wireproxy, brings the tunnel up, health-checks the allowlist, fails closed. |
 | `scripts/lilith/wireguard/test_render.py` | Rendering determinism, allowlist→nft correctness (including a regression test for the hostname-vs-IP self/remote bug caught while building this), peer `/32` allocation/removal, and "no private key material ends up under the repo" checks. Runs `shellcheck` on `pod-client.sh` when available. |

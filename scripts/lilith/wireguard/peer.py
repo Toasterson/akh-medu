@@ -14,7 +14,7 @@ mode used for testing and for review.
 Usage (Variant C — chosen; hub = talos clusters/archibald/lilith-wg):
     peer.py slot-status [--fetch]
     peer.py slot-assign <run> [--runpod-pod-id ID] [--slot N] [--fetch]
-    peer.py slot-release (--slot N | --run RUN) [--no-rotate] [--write-talos]
+    peer.py slot-release (--slot N | --run RUN)
 
 Usage (Variants A/B — superseded; hub managed over SSH):
     peer.py add <name> [--runpod-pod-id ID] [--dry-run]
@@ -22,7 +22,9 @@ Usage (Variants A/B — superseded; hub managed over SSH):
     peer.py list [--live]
 
 Variant C slot keys are read from / rotated in 1Password at call time via
-the op-service-account wrapper and never written to disk; see slots.py.
+the op-service-account wrapper and never written to disk or logs. The hub
+hot-reloads the published peer set (1Password -> ESO), so assign/release
+need no git change; see slots.py.
 
 ADR: docs/ai/decisions/116-lilith-chief-of-staff-guided-rl.md (Decision 3)
 Plan: docs/ai/plans/2026-09-27-lilith-chief-of-staff-rl-runpod.md (C6a row)
@@ -212,8 +214,8 @@ def _warn(message: str) -> None:
     print(f"warning: {message}", file=sys.stderr)
 
 
-def cmd_slot_status(config: render.Config, *, fetch: bool) -> int:
-    views = slots.slot_status(config, _op(config), fetch=fetch)
+def cmd_slot_status(config: render.Config) -> int:
+    views = slots.slot_status(config, _op(config))
     print(json.dumps([v.to_dict() for v in views], indent=2))
     return 0
 
@@ -229,10 +231,8 @@ def cmd_slot_assign(config: render.Config, run: str, *, runpod_pod_id: str | Non
     return 0
 
 
-def cmd_slot_release(config: render.Config, *, slot: int | None, run: str | None, rotate: bool, write_talos: bool) -> int:
-    if not rotate:
-        _warn("--no-rotate: the slot key that was handed to the pod stays valid on the hub")
-    result = slots.release(config, _op(config), slot=slot, run=run, rotate=rotate, write_talos=write_talos)
+def cmd_slot_release(config: render.Config, *, slot: int | None, run: str | None) -> int:
+    result = slots.release(config, _op(config), slot=slot, run=run)
     print(json.dumps(result, indent=2))
     return 0
 
@@ -254,8 +254,7 @@ def main(argv: list[str] | None = None) -> int:
     p_list = sub.add_parser("list", help="list persisted (and optionally live) peers")
     p_list.add_argument("--live", action="store_true", help="also query the hub with `wg show ... dump`")
 
-    p_status = sub.add_parser("slot-status", help="variant C: state of every slot")
-    p_status.add_argument("--fetch", action="store_true", help="git fetch the talos checkout first")
+    sub.add_parser("slot-status", help="variant C: assigned / free / rotating per slot")
 
     p_assign = sub.add_parser("slot-assign", help="variant C: claim a free slot, print the pod bundle")
     p_assign.add_argument("run")
@@ -264,12 +263,10 @@ def main(argv: list[str] | None = None) -> int:
     p_assign.add_argument("--fetch", action="store_true", help="git fetch the talos checkout first")
     p_assign.add_argument("--ignore-allowlist-drift", action="store_true")
 
-    p_release = sub.add_parser("slot-release", help="variant C: rotate a finished slot and drop its lease")
+    p_release = sub.add_parser("slot-release", help="variant C: disable + rotate a slot (after a run, or to revoke)")
     target = p_release.add_mutually_exclusive_group(required=True)
     target.add_argument("--slot", type=int, default=None)
     target.add_argument("--run", default=None)
-    p_release.add_argument("--no-rotate", action="store_true", help="drop the lease without rotating (not recommended)")
-    p_release.add_argument("--write-talos", action="store_true", help="write the new public key into the talos work tree")
 
     args = parser.parse_args(argv)
     config = render.load_config(args.config)
@@ -277,15 +274,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command.startswith("slot-"):
         try:
             if args.command == "slot-status":
-                return cmd_slot_status(config, fetch=args.fetch)
+                return cmd_slot_status(config)
             if args.command == "slot-assign":
                 return cmd_slot_assign(
                     config, args.run, runpod_pod_id=args.runpod_pod_id, slot=args.slot,
                     fetch=args.fetch, ignore_allowlist_drift=args.ignore_allowlist_drift,
                 )
-            return cmd_slot_release(
-                config, slot=args.slot, run=args.run, rotate=not args.no_rotate, write_talos=args.write_talos,
-            )
+            return cmd_slot_release(config, slot=args.slot, run=args.run)
         except slots.SlotError as exc:
             print(f"error: {exc}\n  help: {exc.help}", file=sys.stderr)
             return 1
