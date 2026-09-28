@@ -16,7 +16,10 @@
 #   4. selection    serve_adapter.py: frozen parent by default; the LoRA adapter under
 #                   $ROOT/adapters/active/ only with a C4b-certified active.json
 #   5. vLLM         OpenAI server on :$LILITH_SERVE_PORT (8000), served model name `lilith`,
-#                   32K context, bf16, KV cache dtype LILITH_SERVE_KV_CACHE_DTYPE (auto)
+#                   32K context, bf16, KV cache dtype LILITH_SERVE_KV_CACHE_DTYPE (auto), native
+#                   tool calling: --enable-auto-tool-choice --tool-call-parser <serve_tools.py
+#                   resolve: LILITH_SERVE_TOOL_PARSER, default auto = the registered gemma4 parser>
+#                   --chat-template <the parent's pinned chat_template.jinja>. No parser, no serving.
 #   6. health       /health 200, /v1/models lists `lilith` with the key AND answers 401
 #                   without it (the key is enforced), then status.json state=ready
 #   7. backstop     after LILITH_SERVE_POD_HARD_CAP_SECONDS (7800 = 2 h 10 min) the pod stops
@@ -35,6 +38,7 @@
 #     dtype; int8 / TurboQuant-class KV belongs to the local-card lane (C6b), not this pod.
 #   LILITH_SERVE_GPU_MEMORY_UTILIZATION (0.90)     LILITH_SERVE_ADAPTER auto|parent (auto)
 #   LILITH_SERVE_HEALTH_TIMEOUT_SECONDS (1500)     LILITH_SERVE_POD_HARD_CAP_SECONDS (7800; 0 = off)
+#   LILITH_SERVE_TOOL_PARSER (auto)                LILITH_SERVE_CHAT_TEMPLATE ($ROOT/parent/chat_template.jinja)
 #   LILITH_EXPECTED_MAIN_SHA (overrides current.json)  LILITH_ALLOW_UNMERGED=1 (recorded deviation)
 #   Numerics: LILITH_NUMERICS_SDPA_BACKEND (efficient) / LILITH_NUMERICS_SDPA_MATH_FALLBACK (1),
 #     the recorded CUDA default (C6 round 3). They govern torch SDPA only; vLLM picks its own
@@ -203,9 +207,25 @@ sel() { "$PY" -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2
 MODE="$(sel mode)"
 
 # ------------------------------------------------------------------ 5. vLLM
+HELP_FILE="$SESSION_DIR/vllm-serve-help.txt"
+"$VLLM" serve --help=all > "$HELP_FILE" 2>/dev/null || "$VLLM" serve --help > "$HELP_FILE" 2>/dev/null || true
+HELP="$(cat "$HELP_FILE")"
+# Tool calling is mandatory: the parser is resolved against the installed vLLM's registry.
+if ! "$PY" "$SCRIPT_DIR/serve_tools.py" resolve --requested "${LILITH_SERVE_TOOL_PARSER:-auto}" \
+     --help-file "$HELP_FILE" --chat-template "${LILITH_SERVE_CHAT_TEMPLATE:-$ROOT/parent/chat_template.jinja}" \
+     > "$SESSION_DIR/tools.json" 2> "$SESSION_DIR/tools.err"; then
+  first="$(head -n1 "$SESSION_DIR/tools.err")"
+  code="${first#\[}"; code="${code%%\]*}"
+  die "${code:-lilith::serve::tool_parser}" "${first#*] }" "$(sed -n 's/^  help: //p' "$SESSION_DIR/tools.err" | head -n1)"
+fi
+tool() { "$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$SESSION_DIR/tools.json" "$1"; }
+TOOL_PARSER="$(tool parser)"
+CHAT_TEMPLATE="$(tool chat_template)"
+log "tool calling: parser $TOOL_PARSER ($(tool reason)); chat template $CHAT_TEMPLATE"
 ARGS=(serve "$ROOT/parent" --tokenizer "$ROOT/parent" --host 0.0.0.0 --port "$PORT"
       --dtype bfloat16 --max-model-len "$MAX_LEN" --gpu-memory-utilization "$GPU_UTIL"
-      --kv-cache-dtype "$KV_DTYPE" --limit-mm-per-prompt '{"image": 0, "audio": 0}')
+      --kv-cache-dtype "$KV_DTYPE" --limit-mm-per-prompt '{"image": 0, "audio": 0}'
+      --enable-auto-tool-choice --tool-call-parser "$TOOL_PARSER" --chat-template "$CHAT_TEMPLATE")
 if [[ "$MODE" == adapter ]]; then
   ARGS+=(--served-model-name "$SERVED_NAME-parent" --enable-lora --max-loras 1
          --max-lora-rank "$(sel max_lora_rank)" --lora-modules "$SERVED_NAME=$(sel adapter_dir)")
@@ -214,7 +234,6 @@ else
 fi
 # Request bodies stay out of the logs: vLLM >= 0.10 logs requests only with
 # --enable-log-requests (never passed); older releases need --disable-log-requests.
-HELP="$("$VLLM" serve --help=all 2>/dev/null || "$VLLM" serve --help 2>/dev/null || true)"
 if grep -q -- '--enable-log-requests' <<<"$HELP"; then
   REQUEST_LOGGING="off (vLLM default; --enable-log-requests not passed)"
 elif grep -q -- '--disable-log-requests' <<<"$HELP"; then
@@ -232,7 +251,7 @@ out, session, mode, kv, max_len, port, logging, boot, cap, sdir, *args = sys.arg
 sdir = Path(sdir)
 load = lambda name: json.loads((sdir / name).read_text()) if (sdir / name).is_file() else None
 record = {'schema': 'lilith/serve-session@1', 'session': session, 'served_model_name': 'lilith', 'mode': mode,
-          'selection': load('selection.json'), 'provenance': {k: (load('provenance.json') or {}).get(k)
+          'selection': load('selection.json'), 'tool_calling': load('tools.json'), 'provenance': {k: (load('provenance.json') or {}).get(k)
           for k in ('status', 'expected_main_sha', 'manifest_sha256', 'problems')},
           'bootstrap': {'action': boot, 'check': load('bootstrap-check.json')},
           'kv_cache_dtype': kv, 'max_model_len': int(max_len), 'port': int(port), 'request_logging': logging,

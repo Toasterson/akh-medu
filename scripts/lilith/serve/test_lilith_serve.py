@@ -98,6 +98,8 @@ class MockCloud:
         self.success_total = 0.0
         self.running = 0.0
         self.fail_stop = False
+        self.chat_mode = "tool"  # tool | text | malformed | unparsed | refused
+        self.chat_requests: list[dict] = []
         self.requests: list[dict] = []
         self.counter = 0
         cloud = self
@@ -156,6 +158,9 @@ class MockCloud:
                 if parts[:1] == ["proxy"]:
                     pod_id = parts[1].rsplit("-", 1)[0]
                     running = cloud.pods.get(pod_id, {}).get("desiredStatus") == "RUNNING"
+                    if parts[2:] == ["v1", "chat", "completions"] and self.command == "POST":
+                        cloud.chat_requests.append({"auth": self.headers.get("Authorization"), "body": body})
+                        return self._reply(*cloud.chat_reply())
                     if parts[2:] == ["health"]:
                         return self._reply(200 if running and cloud.healthy else 502, b"")
                     if parts[2:] == ["metrics"]:
@@ -177,6 +182,24 @@ class MockCloud:
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+
+    def chat_reply(self) -> tuple[int, dict]:
+        def completion(message: dict, finish: str) -> dict:
+            return {"id": "chatcmpl-x", "object": "chat.completion", "model": "lilith",
+                    "choices": [{"index": 0, "message": {"role": "assistant", **message}, "finish_reason": finish}]}
+        call = {"id": "chatcmpl-tool-1", "type": "function",
+                "function": {"name": "get_time", "arguments": json.dumps({"timezone": "UTC"})}}
+        if self.chat_mode == "tool":
+            return 200, completion({"content": None, "tool_calls": [call]}, "tool_calls")
+        if self.chat_mode == "text":
+            return 200, completion({"content": "It is noon."}, "stop")
+        if self.chat_mode == "malformed":
+            bad = {**call, "function": {"name": "get_time", "arguments": "timezone=UTC"}}
+            return 200, completion({"content": None, "tool_calls": [bad]}, "tool_calls")
+        if self.chat_mode == "unparsed":
+            return 200, completion({"content": "<|tool_call>call:get_time{timezone:UTC}<tool_call|>"}, "stop")
+        return 400, {"error": {"message": '"auto" tool choice requires --enable-auto-tool-choice and '
+                                          "--tool-call-parser to be set"}}
 
     @property
     def base(self) -> str:
@@ -532,6 +555,71 @@ class IdleWatchTests(Harness):
             ls.parse_metrics("process_cpu_seconds_total 3\n")
 
 
+# ------------------------------------------------------------------ tool-calling readiness
+class ToolReadinessTests(Harness):
+    def test_start_verifies_a_well_formed_tool_call(self):
+        ctx = self.created()
+        result = ls.cmd_start(ctx, wait_seconds=60)
+        self.assertEqual(result["tool_calling"]["status"], "verified")
+        self.assertEqual(result["tool_calling"]["finish_reason"], "tool_calls")
+        (request,) = self.cloud.chat_requests
+        self.assertEqual(request["auth"], f"Bearer {self.op_db()[ls.API_KEY_ITEM]['credential']}")
+        self.assertEqual(request["body"]["model"], "lilith")
+        self.assertEqual(request["body"]["tool_choice"], "auto")
+        self.assertEqual(request["body"]["tools"][0]["function"]["name"], "get_time")
+        state = ctx.state()
+        self.assertEqual(state.session.tool_calling["status"], "verified")
+        evidence = json.loads((self.state_dir / "readiness" / f"{state.session.id}.json").read_text())
+        self.assertEqual((evidence["status"], evidence["pod_id"]), ("verified", state.pod_id))
+
+    def test_plain_text_answer_is_recorded_unverified_with_the_finish_reason(self):
+        ctx = self.created()
+        self.cloud.chat_mode = "text"
+        result = ls.cmd_start(ctx, wait_seconds=60)
+        self.assertEqual(result["tool_calling"]["status"], "unverified")
+        self.assertEqual(result["tool_calling"]["finish_reason"], "stop")
+        self.assertEqual(self.cloud.pods[result["pod_id"]]["desiredStatus"], "RUNNING")
+
+    def test_broken_tool_calling_fails_start_and_stops_the_pod(self):
+        for mode in ("malformed", "unparsed", "refused"):
+            with self.subTest(mode=mode):
+                ctx = self.created() if mode == "malformed" else ctx
+                self.cloud.chat_mode = mode
+                with self.assertRaises(ls.ToolCallingBroken) as caught:
+                    ls.cmd_start(ctx, wait_seconds=60)
+                self.assertEqual(caught.exception.exit_code, 6)
+                self.assertIn("pod stopped", str(caught.exception))
+                self.assertEqual(self.cloud.pods[ctx.state().pod_id]["desiredStatus"], "EXITED")
+                self.assertEqual(self.ledger_events()[-1]["reason"], "tool_calling_broken")
+
+    def test_wait_ready_reports_but_does_not_stop(self):
+        ctx = self.created()
+        self.cloud.pods[ctx.state().pod_id]["desiredStatus"] = "RUNNING"
+        self.cloud.chat_mode = "malformed"
+        with self.assertRaises(ls.ToolCallingBroken):
+            ls.wait_ready(ctx, ctx.state(), 60, stop_on_failure=False)
+        self.assertEqual(self.cloud.pods[ctx.state().pod_id]["desiredStatus"], "RUNNING")
+
+    def test_check_tool_calls_shapes(self):
+        now = WEDNESDAY_NOON
+        good = {"choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "get_time", "arguments": "{}"}}]}}]}
+        self.assertEqual(ls.check_tool_calls(200, good, now).status, "verified")
+        for bad in ({"choices": []},
+                    {"choices": [{"message": {"tool_calls": [{"id": "c1", "type": "function",
+                                                               "function": {"name": "other", "arguments": "{}"}}]}}]},
+                    {"choices": [{"message": {"tool_calls": [{"type": "function",
+                                                               "function": {"name": "get_time", "arguments": "{}"}}]}}]},
+                    {"choices": [{"message": {"tool_calls": [{"id": "c", "type": "function",
+                                                               "function": {"name": "get_time", "arguments": "[]"}}]}}]}):
+            with self.assertRaises(ls.ToolCallingBroken):
+                ls.check_tool_calls(200, bad, now)
+        with self.assertRaises(ls.ToolCallingBroken):
+            ls.check_tool_calls(500, {"error": "x"}, now)
+        plain = ls.check_tool_calls(200, {"choices": [{"finish_reason": "length", "message": {"content": "hi"}}]}, now)
+        self.assertEqual((plain.status, plain.finish_reason), ("unverified", "length"))
+
+
 # ------------------------------------------------------------------ secrets
 class SecretLeakTests(Harness):
     def run_cli(self, *args: str) -> subprocess.CompletedProcess:
@@ -672,6 +760,10 @@ import http.server, json, os, sys
 args = sys.argv[1:]
 if "--help" in args or "--help=all" in args:
     print("--enable-log-requests  Enable logging requests.")
+    parsers = os.environ.get("FAKE_VLLM_PARSERS", "gemma4,hermes,pythonic")
+    if parsers:
+        print("--tool-call-parser {%s}" % parsers)
+        print("                        Select the tool call parser depending on the model.")
     sys.exit(0)
 with open(os.environ["FAKE_VLLM_ARGV"], "w") as out:
     json.dump(args, out)
@@ -712,6 +804,7 @@ class ServePodTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.root = self.tmp / "lilith"
         (self.root / "parent").mkdir(parents=True)
+        (self.root / "parent" / "chat_template.jinja").write_text("{{ bos_token }}{% for m in messages %}{% endfor %}")
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
         self.bootstrap = bin_dir / "bootstrap.sh"
@@ -813,11 +906,68 @@ class ServePodTests(unittest.TestCase):
             self.assertIn(f"lilith::serve::{code}", result.stderr)
             self.assertFalse((self.tmp / "vllm-argv.json").exists())
 
+    def test_tool_calling_is_on_with_the_gemma4_parser_and_the_pinned_template(self):
+        process = self.launch()
+        self.assertEqual(self.wait_state(process, "ready", "failed")["state"], "ready")
+        argv = json.loads((self.tmp / "vllm-argv.json").read_text())
+        self.assertIn("--enable-auto-tool-choice", argv)
+        self.assertEqual(argv[argv.index("--tool-call-parser") + 1], "gemma4")
+        template = self.root / "parent" / "chat_template.jinja"
+        self.assertEqual(argv[argv.index("--chat-template") + 1], str(template))
+        session = json.loads(next((self.root / "serve" / "sessions").glob("*/session.json")).read_text())
+        tools = session["tool_calling"]
+        self.assertEqual((tools["parser"], tools["requested"]), ("gemma4", "auto"))
+        self.assertEqual(tools["chat_template_sha256"], hashlib.sha256(template.read_bytes()).hexdigest())
+        self.assertIn("--help", tools["registry_source"])
+        self.assertEqual(tools["available"], ["gemma4", "hermes", "pythonic"])
+
+    def test_explicit_parser_must_be_registered(self):
+        process = self.launch(LILITH_SERVE_TOOL_PARSER="hermes")
+        self.assertEqual(self.wait_state(process, "ready", "failed")["state"], "ready")
+        argv = json.loads((self.tmp / "vllm-argv.json").read_text())
+        self.assertEqual(argv[argv.index("--tool-call-parser") + 1], "hermes")
+
+    def test_no_fitting_parser_is_a_refusal_listing_the_available_ones(self):
+        cases = (({"FAKE_VLLM_PARSERS": "hermes,pythonic"}, "lilith::serve::tool_parser", "hermes, pythonic"),
+                 ({"LILITH_SERVE_TOOL_PARSER": "nope"}, "lilith::serve::tool_parser", "gemma4, hermes, pythonic"),
+                 ({"FAKE_VLLM_PARSERS": ""}, "lilith::serve::tool_parser_registry", "cannot list"),
+                 ({"LILITH_SERVE_CHAT_TEMPLATE": str(self.tmp / "missing.jinja")}, "lilith::serve::chat_template",
+                  "does not exist"))
+        for extra, code, needle in cases:
+            with self.subTest(extra=extra):
+                result = subprocess.run(["bash", str(HERE / "serve_pod.sh")], env=self.env(**extra),
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"error[{code}]", result.stderr)
+                self.assertIn(needle, result.stderr)
+                self.assertIn("help:", result.stderr)
+                self.assertFalse((self.tmp / "vllm-argv.json").exists(), "vLLM must not start without tools")
+                status = json.loads((self.root / "serve" / "status.json").read_text())
+                self.assertEqual(status["state"], "failed")
+
+    def test_the_registry_is_read_from_tool_parser_manager_when_vllm_imports(self):
+        fake = self.tmp / "site"
+        (fake / "vllm" / "tool_parsers").mkdir(parents=True)
+        (fake / "vllm" / "__init__.py").write_text("")
+        (fake / "vllm" / "tool_parsers" / "__init__.py").write_text(
+            "class ToolParserManager:\n    tool_parsers = {'hermes': object}\n"
+            "    lazy_parsers = {'gemma4': ('gemma4_engine_tool_parser', 'Gemma4EngineToolParser')}\n")
+        help_file = self.tmp / "empty-help.txt"
+        help_file.write_text("")
+        result = subprocess.run([sys.executable, str(HERE / "serve_tools.py"), "resolve", "--help-file",
+                                 str(help_file), "--chat-template", str(self.root / "parent" / "chat_template.jinja")],
+                                env={**os.environ, "PYTHONPATH": str(fake)}, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selection = json.loads(result.stdout)
+        self.assertEqual(selection["parser"], "gemma4")
+        self.assertEqual(selection["registry_source"], "vllm.tool_parsers.ToolParserManager")
+        self.assertEqual(selection["available"], ["gemma4", "hermes"])
+
     def test_the_payload_ships_every_serving_file(self):
         sys.path.insert(0, str(LILITH / "runpod"))
         import verify_payload
         payload = set(verify_payload.PAYLOAD_FILES)
-        for name in ("serve_pod.sh", "serve_adapter.py", "log_redact.py"):
+        for name in ("serve_pod.sh", "serve_adapter.py", "log_redact.py", "serve_tools.py"):
             self.assertIn(f"scripts/lilith/serve/{name}", payload)
         closure = subprocess.run(
             [sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import exam.certify, os; "

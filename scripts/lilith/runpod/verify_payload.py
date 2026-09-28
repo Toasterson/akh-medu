@@ -47,6 +47,7 @@ PAYLOAD_FILES = (
     'scripts/lilith/serve/serve_pod.sh',
     'scripts/lilith/serve/serve_adapter.py',
     'scripts/lilith/serve/log_redact.py',
+    'scripts/lilith/serve/serve_tools.py',
     'scripts/lilith/exam/__init__.py',
     'scripts/lilith/exam/certify.py',
     'scripts/lilith/exam/errors.py',

@@ -154,6 +154,34 @@ training are billed separately.
   `active.json` aside, or start once with `LILITH_SERVE_ADAPTER=parent` (recorded in
   `session.json`).
 
+## Tool calling
+
+The `lilith` akh uses native OpenAI `tool_calls`, so the pod never serves without them.
+
+- **Start-up (`serve_pod.sh` → `serve_tools.py resolve`).** Runs `--enable-auto-tool-choice
+  --tool-call-parser <p> --chat-template <t>`. The parser is resolved against the installed
+  vLLM: `ToolParserManager` (`vllm.tool_parsers`, or `vllm.entrypoints.openai.tool_parsers` on
+  older releases; eager plus lazy names). If that module can't be imported, the parser comes from
+  the `--tool-call-parser {…}` choices in `vllm serve --help`.
+  - `LILITH_SERVE_TOOL_PARSER=auto` (the default) picks `gemma4`, vLLM's Gemma 4 parser
+    (`Gemma4EngineToolParser`, native `<|tool_call>call:…` syntax), when it is registered.
+  - An explicit name is used only if it is registered.
+  - Anything else is a refusal (`lilith::serve::tool_parser`) listing the available parsers.
+    `pythonic` (vLLM's Gemma 3 choice) is **never auto-selected**: it only parses calls produced
+    by a pythonic template, which the pinned parent template is not.
+- **Chat template.** `--chat-template` is the parent's pinned `chat_template.jinja`
+  (`LILITH_SERVE_CHAT_TEMPLATE` overrides it); it must exist. The parser, how it was chosen, the
+  registry source, the available names, and the template path and sha256 are recorded under
+  `session.json` → `tool_calling`.
+- **Readiness (`start`, `wait-ready`).** After `/health`, one chat request with a trivial
+  `get_time` tool (`tool_choice: auto`, temperature 0):
+  - a well-formed `tool_calls` entry records `tool_calling: verified`;
+  - a plain-text answer records `unverified` with the raw `finish_reason`;
+  - an HTTP error, a malformed call, or native call syntax left unparsed in `content` is exit 6
+    (`lilith::serve::tool_calling`). Under `start` the pod is stopped.
+
+  The record is in `state.json` and `~/lilith-private/serve/readiness/<session>.json`.
+
 ## KV cache dtype
 
 `auto` (the default) is bf16. Gemma 4's KV is small: 0.60 GB per sequence at 32K (local GPU
@@ -185,6 +213,7 @@ cache control; `session.json` records this.
 |---|---|---|
 | `start` exit 3 `lilith::serve::budget` | A limit binds (message names it and the reset) | Wait for the reset, ask the operator to top up, or serve locally (C6b) |
 | `start` exit 4 `lilith::serve::zero_gpu` | The pod's machine has no free H100; the pod was stopped again | Retry later, or `recreate --yes --confirm-terminate <podId>` (operator-approved; new URL) |
+| `start`/`wait-ready` exit 6 `lilith::serve::tool_calling` | The tools request failed, or returned a malformed or unparsed call; `start` stops the pod | Check `session.json` → `tool_calling` and the vLLM log; select another parser/template pair via `LILITH_SERVE_TOOL_PARSER` / `LILITH_SERVE_CHAT_TEMPLATE` in the pod env |
 | `start`/`wait-ready` exit 5 `lilith::serve::health_timeout` | vLLM not healthy in 30 min; `start` stops the pod | `ssh` in, read `serve/status.json` and `serve/sessions/<latest>/` and the vLLM log |
 | `status.json` `failed` with `lilith::serve::bootstrap` | Parent/driver/CUDA check failed (not auto-repaired) | Fix the volume, or recreate on a CUDA 13 host |
 | `status.json` `failed` with `lilith::serve::auth` | `/v1/models` answered without the key | Never serve like that (the proxy is public); check vLLM's `VLLM_API_KEY` handling |
@@ -215,7 +244,7 @@ conflict.
 ## Tests
 
 ```sh
-python3 -m unittest scripts/lilith/serve/test_lilith_serve.py   # 37 tests, ~40 s, CPU only
+python3 -m unittest scripts/lilith/serve/test_lilith_serve.py   # 46 tests, ~60 s, CPU only
 python3 -m unittest scripts/lilith/runpod/test_runpod_scripts.py
 ```
 

@@ -35,8 +35,14 @@ Local state (non-secret) lives in ``~/lilith-private/serve/`` (``LILITH_SERVE_ST
 ``state.json`` (pod id, base URL, the open session), ``ledger.jsonl`` (session start/stop
 events: the GPU-hour and spend ledger) and ``logs/supervisor.log``.
 
+Readiness (``start`` and ``wait-ready``) is /health plus one OpenAI chat request carrying a
+trivial ``get_time`` tool: a well-formed ``tool_calls`` entry records ``tool_calling: verified``;
+a plain-text answer records ``unverified`` with the raw finish reason; a refused request, a
+malformed call or native call syntax left unparsed in ``content`` is a failure (exit 6; under
+``start`` the pod is stopped). The record lands in ``state.json`` and ``readiness/<session>.json``.
+
 Exit codes: 0 ok, 1 error, 2 usage/confirmation, 3 budget refusal, 4 zero GPUs on start,
-5 vLLM not healthy in time.
+5 vLLM not healthy in time, 6 tool calling broken.
 """
 from __future__ import annotations
 
@@ -178,6 +184,13 @@ class ProbeError(ServeError):
 
 class ProvenanceError(ServeError):
     code = "lilith::serve::provenance"
+
+
+class ToolCallingBroken(ServeError):
+    code = "lilith::serve::tool_calling"
+    exit_code = 6
+    help = ("check session.json `tool_calling` on the pod (parser, chat template) and the vLLM log; "
+            "LILITH_SERVE_TOOL_PARSER / LILITH_SERVE_CHAT_TEMPLATE in the pod env select another pair")
 
 
 # ----------------------------------------------------------------- redaction + logging
@@ -486,6 +499,85 @@ class Vllm:
             raise ProbeError(f"/metrics -> HTTP {status}")
         return parse_metrics(raw.decode(errors="replace"))
 
+    def chat(self, request: Mapping[str, Any]) -> tuple[int, Any]:
+        try:
+            status, raw = http("POST", f"{self.base_url}/v1/chat/completions", headers=self._headers(),
+                               body=request, timeout=180)
+        except (urllib.error.URLError, OSError, TimeoutError) as error:
+            raise ToolCallingBroken(f"/v1/chat/completions unreachable: {type(error).__name__}") from error
+        try:
+            return status, json.loads(raw)
+        except json.JSONDecodeError:
+            return status, REDACTOR.scrub(raw.decode(errors="replace"))[:400]
+
+
+# ----------------------------------------------------------------- tool-calling readiness
+PROBE_TOOL_NAME = "get_time"
+PROBE_TOOL = {"type": "function", "function": {
+    "name": PROBE_TOOL_NAME, "description": "Return the current time as an ISO-8601 string.",
+    "parameters": {"type": "object", "properties": {"timezone": {"type": "string",
+                                                                 "description": "IANA timezone, e.g. UTC"}}}}}
+# Gemma 4's native call syntax; seeing it in `content` means vLLM did not parse the call.
+NATIVE_CALL_MARKERS = ("<|tool_call>", "<tool_call|>")
+
+
+@dataclasses.dataclass(frozen=True)
+class ToolProbe:
+    """Readiness evidence: `verified` (a well-formed tool call came back) or `unverified`
+    (the model answered in plain text; the raw finish reason is kept)."""
+
+    status: str
+    finish_reason: str | None
+    tool_calls: int
+    detail: str
+    checked_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"schema": "lilith/serve-tool-probe@1"} | dataclasses.asdict(self)
+
+
+def probe_request() -> dict[str, Any]:
+    return {"model": SERVED_MODEL, "tools": [PROBE_TOOL], "tool_choice": "auto", "temperature": 0,
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": f"Call the {PROBE_TOOL_NAME} tool for UTC."}]}
+
+
+def check_tool_calls(status: int, response: Any, now: dt.datetime) -> ToolProbe:
+    """Pure check of one chat completion. Raises ToolCallingBroken when the server refuses the
+    tools request or returns a malformed / unparsed call; plain text is `unverified`."""
+    if status != 200 or not isinstance(response, Mapping):
+        raise ToolCallingBroken(f"tools request -> HTTP {status}: {str(response)[:300]}")
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
+        raise ToolCallingBroken("tools request returned no choices")
+    choice = choices[0]
+    finish = choice.get("finish_reason")
+    message = choice.get("message") if isinstance(choice.get("message"), Mapping) else {}
+    calls = message.get("tool_calls") or []
+    content = message.get("content") or ""
+    if not calls:
+        if any(marker in content for marker in NATIVE_CALL_MARKERS):
+            raise ToolCallingBroken("the model emitted a native tool call that vLLM left unparsed in `content` "
+                                    "(tool-call parser and chat template do not match)")
+        return ToolProbe("unverified", finish, 0, "the model answered in plain text; no tool_calls", iso(now))
+    problems = []
+    for index, call in enumerate(calls if isinstance(calls, list) else [calls]):
+        function = call.get("function") if isinstance(call, Mapping) else None
+        if not isinstance(call, Mapping) or not call.get("id") or call.get("type") != "function":
+            problems.append(f"call {index}: missing id or type != function")
+        if not isinstance(function, Mapping) or function.get("name") != PROBE_TOOL_NAME:
+            problems.append(f"call {index}: function name is not {PROBE_TOOL_NAME}")
+            continue
+        try:
+            arguments = json.loads(function.get("arguments") or "")
+        except (TypeError, json.JSONDecodeError):
+            arguments = None
+        if not isinstance(arguments, dict):
+            problems.append(f"call {index}: arguments are not a JSON object")
+    if problems:
+        raise ToolCallingBroken("malformed tool_calls: " + "; ".join(problems))
+    return ToolProbe("verified", finish, len(calls), f"{len(calls)} well-formed {PROBE_TOOL_NAME} call(s)", iso(now))
+
 
 # ----------------------------------------------------------------- ledger + budget
 @dataclasses.dataclass(frozen=True)
@@ -634,6 +726,7 @@ class Session:
     last_activity: list[float] | None = None
     metrics_misses: int = 0
     last_pod_check_at: str | None = None
+    tool_calling: dict[str, Any] | None = None
 
 
 @dataclasses.dataclass
@@ -814,24 +907,44 @@ def cmd_create(ctx: Context, *, yes: bool, key_source: str, kv_cache_dtype: str,
                      "keep lilith_serve.py idle-watch running (LaunchAgent it.akh.lilith-serve-idle)"]}
 
 
-def wait_ready(ctx: Context, state: State, timeout_s: int, stop_on_timeout: bool) -> None:
-    probe = Vllm(state.base_url or "")
+def wait_ready(ctx: Context, state: State, timeout_s: int, stop_on_failure: bool) -> dict[str, Any]:
+    """Health, then one tools request: readiness evidence includes tool calling.
+
+    Returns the tool probe record. A refused or malformed tools response raises
+    ToolCallingBroken (and stops the pod when `stop_on_failure`, i.e. under `start`)."""
+    probe = Vllm(state.base_url or "", ctx.serve_key)
     deadline = ctx.clock.now() + dt.timedelta(seconds=timeout_s)
     while not probe.healthy():
         if ctx.clock.now() >= deadline:
-            if stop_on_timeout:
+            if stop_on_failure:
                 stop_pod(ctx, state, "health_timeout")
             raise HealthTimeout(f"vLLM at {state.base_url} not healthy after {timeout_s}s"
-                                + (" (pod stopped)" if stop_on_timeout else ""),
+                                + (" (pod stopped)" if stop_on_failure else ""),
                                 help="ssh in and read /workspace/lilith/serve/status.json and serve/logs/; a lock "
                                      "change rebuilds the env (~5 min) before the ~8 min model load")
         ctx.clock.sleep(10)
+    ctx.log(f"vLLM healthy at {state.base_url} (model {SERVED_MODEL}); checking tool calling")
+    try:
+        status, response = probe.chat(probe_request())
+        tool_probe = check_tool_calls(status, response, ctx.clock.now())
+    except ToolCallingBroken as error:
+        if stop_on_failure:
+            stop_pod(ctx, ctx.state(), "tool_calling_broken")
+            error.args = (f"{error.args[0]} (pod stopped)",)
+        raise
+    record = tool_probe.to_dict()
     state = ctx.state()
-    if state.session is not None and state.session.ready_at is None:
-        now = iso(ctx.clock.now())
-        state.session.ready_at = state.session.last_activity_at = now
+    if state.session is not None:
+        if state.session.ready_at is None:
+            state.session.ready_at = state.session.last_activity_at = iso(ctx.clock.now())
+        state.session.tool_calling = record
         state.save(ctx.state_path)
-    ctx.log(f"vLLM healthy at {state.base_url} (model {SERVED_MODEL})")
+        evidence = ctx.state_dir / "readiness" / f"{state.session.id}.json"
+        evidence.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        evidence.write_text(json.dumps(record | {"session": state.session.id, "pod_id": state.pod_id,
+                                                  "base_url": state.base_url}, indent=2) + "\n")
+    ctx.log(f"tool calling {tool_probe.status}: {tool_probe.detail} (finish_reason={tool_probe.finish_reason})")
+    return record
 
 
 def cmd_start(ctx: Context, *, wait_seconds: int) -> dict[str, Any]:
@@ -862,10 +975,10 @@ def cmd_start(ctx: Context, *, wait_seconds: int) -> dict[str, Any]:
                       help=f"options: (1) retry `start` later; (2) `recreate --yes --confirm-terminate {pod.id}` "
                            "(new pod on the same volume, NEW proxy URL: update the lilith akh's base_url); "
                            "(3) serve locally once a local card qualifies (C6b)")
-    wait_ready(ctx, ctx.state(), wait_seconds, stop_on_timeout=True)
+    tool_calling = wait_ready(ctx, ctx.state(), wait_seconds, stop_on_failure=True)
     state = ctx.state()
     stop_by = parse_iso(state.session.started_at) + dt.timedelta(seconds=state.session.cap_seconds)
-    return {"pod_id": pod.id, "base_url": state.base_url, "model": SERVED_MODEL,
+    return {"pod_id": pod.id, "base_url": state.base_url, "model": SERVED_MODEL, "tool_calling": tool_calling,
             "session": state.session.id, "session_cap_seconds": state.session.cap_seconds,
             "stop_by": iso(stop_by), "idle_stop_minutes": ctx.policy.idle_s // 60, "budget": decision.to_dict()}
 
@@ -1175,8 +1288,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(result, indent=2))
                 result = {"idle_watch": cmd_idle_watch(ctx, daemon=False, once=False, serve_key=ctx.serve_key).value}
         elif args.command == "wait-ready":
-            wait_ready(ctx, require_pod(ctx), args.wait_seconds, stop_on_timeout=False)
-            result = {"base_url": ctx.state().base_url, "healthy": True}
+            tool_calling = wait_ready(ctx, require_pod(ctx), args.wait_seconds, stop_on_failure=False)
+            result = {"base_url": ctx.state().base_url, "healthy": True, "tool_calling": tool_calling}
         elif args.command == "stop":
             result = cmd_stop(ctx, args.reason)
         elif args.command == "status":
