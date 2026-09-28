@@ -22,6 +22,7 @@ SSH=(ssh -i "$IDENTITY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout
 log() { printf '%s watchdog[%s] %s\n' "$(date -u +%FT%TZ)" "$RUN" "$*"; }
 
 probe() {
+  # shellcheck disable=SC2016  # the single-quoted part expands on the pod, by design
   "${SSH[@]}" "RUNDIR=$ROOT/runs/$RUN; INTERVAL=$INTERVAL; "'
     if [ -f "$RUNDIR/smoke-result.json" ]; then echo state=done; exit 0; fi
     pid=""; [ -f "$RUNDIR/smoke.pid" ] && pid=$(cat "$RUNDIR/smoke.pid")
@@ -32,9 +33,9 @@ probe() {
     echo "state=probe alive=$alive pid=${pid:-none} progress_age=$age gpu_util=${gpu:-?}"'
 }
 
-collect() { mkdir -p "$DEST"; scp -q -r -i "$IDENTITY" -o IdentitiesOnly=yes \
+collect() { mkdir -p "$DEST"; if scp -q -r -i "$IDENTITY" -o IdentitiesOnly=yes \
   -o UserKnownHostsFile="$KNOWN" -P "$PORT" \
-  "root@$HOST:$ROOT/runs/$RUN" "$DEST/" && log "collected $DEST/$RUN" || log "collect failed"; }
+  "root@$HOST:$ROOT/runs/$RUN" "$DEST/"; then log "collected $DEST/$RUN"; else log "collect failed"; fi; }
 
 terminate() {
   local key code
@@ -49,17 +50,17 @@ while :; do
   out=$(probe); rc=$?
   if [ $rc -eq 255 ] || [ -z "$out" ]; then
     misses=$((misses+1)); log "unreachable ($misses/2)"
-    if [ $misses -ge 2 ]; then terminate unreachable; exit 4; fi
+    if [ $misses -ge 2 ]; then terminate "unreachable"; exit 4; fi
     sleep "$INTERVAL"; continue
   fi
   misses=0; log "$out"
   case "$out" in
-    *state=done*) collect; terminate done; cat "$DEST/$RUN/smoke-result.json" 2>/dev/null; exit 0 ;;
+    *state=done*) collect; terminate "done"; cat "$DEST/$RUN/smoke-result.json" 2>/dev/null; exit 0 ;;
   esac
   alive=$(sed -n 's/.*alive=\([a-z]*\).*/\1/p' <<<"$out")
   age=$(sed -n 's/.*progress_age=\([0-9-]*\).*/\1/p' <<<"$out")
   gpu=$(sed -n 's/.*gpu_util=\([0-9?]*\).*/\1/p' <<<"$out")
-  if [ "$alive" != yes ]; then collect; terminate dead; exit 2; fi
-  if [ "${age:-0}" -ge "$INTERVAL" ] && [ "$gpu" = 0 ]; then collect; terminate stalled; exit 3; fi
+  if [ "$alive" != yes ]; then collect; terminate "dead"; exit 2; fi
+  if [ "${age:-0}" -ge "$INTERVAL" ] && [ "$gpu" = 0 ]; then collect; terminate "stalled"; exit 3; fi
   sleep "$INTERVAL"
 done
