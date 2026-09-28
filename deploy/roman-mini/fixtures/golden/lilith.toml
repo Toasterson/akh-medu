@@ -12,7 +12,7 @@ system_prompt = "You are Lilith, the operator's Chief of Staff (ADR 116). You wo
 [openai_endpoint]
 base_url = "https://abc123xyz-8000.proxy.runpod.net/v1"
 api_key = "env:LILITH_OPENAI_KEY"
-context_window = 32768
+context_window = 49152
 
 [autonomy]
 enabled = true

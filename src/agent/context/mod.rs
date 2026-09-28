@@ -42,6 +42,7 @@ pub mod policy;
 pub mod retention;
 pub mod safety;
 pub mod selecting;
+pub mod tool_budget;
 pub mod types;
 pub mod virtual_ctx;
 
@@ -54,6 +55,9 @@ pub use policy::{
 };
 pub use retention::{ProvenanceRetentionClassifier, Retention};
 pub use safety::SafetyEnforced;
+pub use tool_budget::{
+    ToolResultBound, TruncationRecord, bound_tool_result, estimate_running_tokens,
+};
 pub use types::{
     AssembledContext, ContextSection, ContextWindowStats, DEFAULT_CONTEXT_WINDOW,
     DEFAULT_RESERVED_OUTPUT, DeferredReason, DeferredToolGroup, DropReason, DroppedSpan,

@@ -16,7 +16,7 @@
 #   4. selection    serve_adapter.py: frozen parent by default; the LoRA adapter under
 #                   $ROOT/adapters/active/ only with a C4b-certified active.json
 #   5. vLLM         OpenAI server on :$LILITH_SERVE_PORT (8000), served model name `lilith`,
-#                   32K context, bf16, KV cache dtype LILITH_SERVE_KV_CACHE_DTYPE (auto), native
+#                   64K context, bf16, KV cache dtype LILITH_SERVE_KV_CACHE_DTYPE (auto), native
 #                   tool calling: --enable-auto-tool-choice --tool-call-parser <serve_tools.py
 #                   resolve: LILITH_SERVE_TOOL_PARSER, default auto = the registered gemma4 parser>
 #                   --chat-template <the parent's pinned chat_template.jinja>. No parser, no serving.
@@ -36,7 +36,7 @@
 #
 # Environment (all optional except the key):
 #   LILITH_SERVE_API_KEY (required, >= 32 chars)   LILITH_ROOT (/workspace/lilith)
-#   LILITH_SERVE_PORT (8000)                       LILITH_SERVE_MAX_MODEL_LEN (32768)
+#   LILITH_SERVE_PORT (8000)                       LILITH_SERVE_MAX_MODEL_LEN (65536)
 #   LILITH_SERVE_KV_CACHE_DTYPE auto|fp8|fp8_e4m3|fp8_e5m2 (auto = the model dtype, bf16).
 #     fp8 halves KV memory; Gemma 4's KV is small (0.60 GB/sequence at 32K bf16, see the local
 #     GPU qualification plan §2a), so auto is right on the H100. int8 is not a vLLM KV cache
@@ -73,7 +73,7 @@ ROOT="${LILITH_ROOT:-/workspace/lilith}"
 SERVE="$ROOT/serve"
 LOGS="$SERVE/logs"
 PORT="${LILITH_SERVE_PORT:-8000}"
-MAX_LEN="${LILITH_SERVE_MAX_MODEL_LEN:-32768}"
+MAX_LEN="${LILITH_SERVE_MAX_MODEL_LEN:-65536}"
 KV_DTYPE="${LILITH_SERVE_KV_CACHE_DTYPE:-auto}"
 GPU_UTIL="${LILITH_SERVE_GPU_MEMORY_UTILIZATION:-0.90}"
 ADAPTER_MODE="${LILITH_SERVE_ADAPTER:-auto}"
@@ -98,7 +98,7 @@ if [[ "$ROOT" != /workspace/* && "${LILITH_ALLOW_NON_WORKSPACE:-0}" != 1 ]]; the
     "a pod stop wipes everything else; set LILITH_ROOT under /workspace"
 fi
 [[ "$PORT" =~ ^[0-9]{2,5}$ ]] || die lilith::serve::usage "LILITH_SERVE_PORT '$PORT' is not a port" "use 8000"
-[[ "$MAX_LEN" =~ ^[1-9][0-9]*$ ]] || die lilith::serve::usage "LILITH_SERVE_MAX_MODEL_LEN '$MAX_LEN' is not a positive integer" "use 32768"
+[[ "$MAX_LEN" =~ ^[1-9][0-9]*$ ]] || die lilith::serve::usage "LILITH_SERVE_MAX_MODEL_LEN '$MAX_LEN' is not a positive integer" "use 65536"
 case "$KV_DTYPE" in
   auto | fp8 | fp8_e4m3 | fp8_e5m2) ;;
   *) die lilith::serve::kv_dtype "KV cache dtype '$KV_DTYPE' is not supported here" \

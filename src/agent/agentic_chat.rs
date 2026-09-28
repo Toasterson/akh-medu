@@ -1036,6 +1036,22 @@ impl Agent {
         // Turn-level metrics: track total prompt size and request count for diagnosing
         // pathological latency (work item "turns die quietly", ask 2).
         let mut turn_metrics = super::llm_metrics::TurnMetrics::new();
+        // In-turn tool-result budget (Lilith C2, ADR 116, Anima WI
+        // 01a0e270-314e): `ContextManager::assemble` above sizes the prompt
+        // once, at the top of the turn, but a tool result arrives mid-turn —
+        // nothing re-checks the running request against the akh's real
+        // `context_window` before the next model round. Same window +
+        // reserve the assembly step used, so a low-window backend (e.g. a
+        // 32768-token self-hosted vLLM) never sees a request that overshoots
+        // it just because a chatty tool (an MCP call returning tens of KB of
+        // JSON) ran mid-turn.
+        let token_budget = match backend.capabilities().context_window {
+            Some(window) => {
+                super::context::TokenBudget::new(window, super::context::DEFAULT_RESERVED_OUTPUT)
+            }
+            None => super::context::TokenBudget::default(),
+        };
+        let token_counter = super::context::HeuristicTokenCounter;
         let stop: TurnStop = loop {
             if let Some(stop) = budget.exhausted() {
                 break stop;
@@ -1387,7 +1403,44 @@ impl Agent {
                 if let Some(controller) = &mut completion_controller {
                     controller.observe(&outcome.exec_name, &outcome.exec_args, outcome.success);
                 }
-                conversation.push(json!({"role": "tool", "content": outcome.result}));
+                // Bound this result against what's left of the window before
+                // it joins the conversation the next model round is built
+                // from — the tool already ran; a request rejected afterwards
+                // for being too large would throw that work away for
+                // nothing. `used` measures everything already committed to
+                // the next request (system prompt + tool schemas +
+                // conversation so far, including any earlier tool result
+                // from this same round).
+                let used = super::context::estimate_running_tokens(
+                    &token_counter,
+                    prepared_chat.system_prompt(),
+                    &tools,
+                    &conversation,
+                );
+                let tool_schema = full_catalog
+                    .iter()
+                    .find(|t| t["function"]["name"].as_str() == Some(outcome.exec_name.as_str()));
+                let bound = super::context::bound_tool_result(
+                    &outcome.exec_name,
+                    tool_schema,
+                    &outcome.result,
+                    used,
+                    &token_budget,
+                    &token_counter,
+                );
+                if let Some(record) = &bound.truncation {
+                    tracing::warn!(
+                        agent_id,
+                        tool = %outcome.exec_name,
+                        original_bytes = record.original_bytes,
+                        kept_bytes = record.kept_bytes,
+                        original_tokens_est = record.original_tokens_est,
+                        kept_tokens_est = record.kept_tokens_est,
+                        narrowing_params = ?record.narrowing_params,
+                        "tool result exceeded remaining turn budget; truncated before appending to conversation"
+                    );
+                }
+                conversation.push(json!({"role": "tool", "content": bound.content}));
             }
         };
 
