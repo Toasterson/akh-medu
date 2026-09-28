@@ -1,0 +1,413 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://akh-medu.dev/schemas/lilith/cos-declaration@1",
+  "title": "Lilith CoS tool-call declaration v1",
+  "description": "The `cos_declaration` argument of a T2/T3 tool call (refs inlined so it can be advertised in a tool catalog). The runtime strips it before the tool runs.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tier",
+        "receipts"
+      ],
+      "properties": {
+        "tier": {
+          "const": "coordination"
+        },
+        "receipts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "reference",
+              "observed_at"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "tool-call",
+                  "work-item",
+                  "pull-request",
+                  "commit",
+                  "board-message",
+                  "run-record",
+                  "ancestry-check",
+                  "digest",
+                  "document"
+                ]
+              },
+              "reference": {
+                "type": "string",
+                "minLength": 1
+              },
+              "observed_at": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Seconds since the Unix epoch."
+              },
+              "digest": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "Honesty: at least one receipt read in this episode."
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tier",
+        "action",
+        "receipts",
+        "reason",
+        "rollback"
+      ],
+      "properties": {
+        "tier": {
+          "const": "operator-class"
+        },
+        "action": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "artifact_sha",
+                "target"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "deploy"
+                },
+                "artifact_sha": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{7,64}$"
+                },
+                "target": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "service",
+                "artifact_sha"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "restart"
+                },
+                "service": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "artifact_sha": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{7,64}$"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "change"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "merge"
+                },
+                "change": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "operation",
+                "target"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "tracker"
+                },
+                "operation": {
+                  "enum": [
+                    "promote-draft",
+                    "unpark",
+                    "create-work-item",
+                    "cancel-work-item",
+                    "create-plan",
+                    "cancel-plan"
+                  ]
+                },
+                "target": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "amount",
+                "purpose"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "spend"
+                },
+                "amount": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "minor_units",
+                    "currency"
+                  ],
+                  "properties": {
+                    "minor_units": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "currency": {
+                      "type": "string",
+                      "pattern": "^[A-Z]{3}$"
+                    }
+                  }
+                },
+                "purpose": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "target",
+                "reversibility",
+                "observed_digest"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "delete"
+                },
+                "target": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Absolute path (or a path relative to the scratch directory) the runtime can read and digest."
+                },
+                "reversibility": {
+                  "enum": [
+                    "reversible",
+                    "irreversible"
+                  ]
+                },
+                "observed_digest": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The sha256 you observed when you looked at the target (`sha256:<hex>` or bare hex); the runtime recomputes it."
+                },
+                "copy": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Where a copy of the target lives; required when irreversible; the runtime digests it."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "target",
+                "reversibility",
+                "observed_digest"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "overwrite"
+                },
+                "target": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Absolute path (or a path relative to the scratch directory) the runtime can read and digest."
+                },
+                "reversibility": {
+                  "enum": [
+                    "reversible",
+                    "irreversible"
+                  ]
+                },
+                "observed_digest": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The sha256 you observed when you looked at the target (`sha256:<hex>` or bare hex); the runtime recomputes it."
+                },
+                "copy": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Where a copy of the target lives; required when irreversible; the runtime digests it."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "destination"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "outward"
+                },
+                "destination": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "adapter"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "activate-adapter"
+                },
+                "adapter": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          ]
+        },
+        "receipts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "reference",
+              "observed_at"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "tool-call",
+                  "work-item",
+                  "pull-request",
+                  "commit",
+                  "board-message",
+                  "run-record",
+                  "ancestry-check",
+                  "digest",
+                  "document"
+                ]
+              },
+              "reference": {
+                "type": "string",
+                "minLength": 1
+              },
+              "observed_at": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Seconds since the Unix epoch."
+              },
+              "digest": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "Honesty: at least one receipt read in this episode."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rollback": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "steps"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "revert"
+                },
+                "steps": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "location"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "restore-from-copy"
+                },
+                "location": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "mitigation"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "irreversible"
+                },
+                "mitigation": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

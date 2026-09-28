@@ -1,0 +1,397 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://akh-medu.dev/schemas/lilith/cos-proposal@1",
+  "title": "Lilith CoS proposal v1",
+  "description": "An operator-class action proposed instead of taken: her own choice when unsure, or the way through a gated tier or an action outside her grant.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "language",
+    "motive",
+    "action",
+    "receipts",
+    "reason",
+    "rollback"
+  ],
+  "properties": {
+    "contract": {
+      "const": "lilith/cos-proposal@1"
+    },
+    "language": {
+      "$ref": "#/$defs/language"
+    },
+    "motive": {
+      "enum": [
+        "unsure",
+        "tier-gated",
+        "outside-grant"
+      ]
+    },
+    "action": {
+      "$ref": "#/$defs/operatorAction"
+    },
+    "receipts": {
+      "$ref": "#/$defs/receipts"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rollback": {
+      "$ref": "#/$defs/rollback"
+    }
+  },
+  "$defs": {
+    "commitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,64}$"
+    },
+    "language": {
+      "type": "string",
+      "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+      "description": "BCP 47 tag of the operator's (or recipient's) language, detected structurally."
+    },
+    "money": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minor_units",
+        "currency"
+      ],
+      "properties": {
+        "minor_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        }
+      }
+    },
+    "operatorAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "artifact_sha",
+            "target"
+          ],
+          "properties": {
+            "kind": {
+              "const": "deploy"
+            },
+            "artifact_sha": {
+              "$ref": "#/$defs/commitSha"
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "service",
+            "artifact_sha"
+          ],
+          "properties": {
+            "kind": {
+              "const": "restart"
+            },
+            "service": {
+              "type": "string",
+              "minLength": 1
+            },
+            "artifact_sha": {
+              "$ref": "#/$defs/commitSha"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "change"
+          ],
+          "properties": {
+            "kind": {
+              "const": "merge"
+            },
+            "change": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "operation",
+            "target"
+          ],
+          "properties": {
+            "kind": {
+              "const": "tracker"
+            },
+            "operation": {
+              "enum": [
+                "promote-draft",
+                "unpark",
+                "create-work-item",
+                "cancel-work-item",
+                "create-plan",
+                "cancel-plan"
+              ]
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "amount",
+            "purpose"
+          ],
+          "properties": {
+            "kind": {
+              "const": "spend"
+            },
+            "amount": {
+              "$ref": "#/$defs/money"
+            },
+            "purpose": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "target",
+            "reversibility",
+            "observed_digest"
+          ],
+          "properties": {
+            "kind": {
+              "const": "delete"
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Absolute path (or a path relative to the scratch directory) the runtime can read and digest."
+            },
+            "reversibility": {
+              "enum": [
+                "reversible",
+                "irreversible"
+              ]
+            },
+            "observed_digest": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The sha256 you observed when you looked at the target (`sha256:<hex>` or bare hex); the runtime recomputes it."
+            },
+            "copy": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Where a copy of the target lives; required when irreversible; the runtime digests it."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "target",
+            "reversibility",
+            "observed_digest"
+          ],
+          "properties": {
+            "kind": {
+              "const": "overwrite"
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Absolute path (or a path relative to the scratch directory) the runtime can read and digest."
+            },
+            "reversibility": {
+              "enum": [
+                "reversible",
+                "irreversible"
+              ]
+            },
+            "observed_digest": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The sha256 you observed when you looked at the target (`sha256:<hex>` or bare hex); the runtime recomputes it."
+            },
+            "copy": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Where a copy of the target lives; required when irreversible; the runtime digests it."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "destination"
+          ],
+          "properties": {
+            "kind": {
+              "const": "outward"
+            },
+            "destination": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "adapter"
+          ],
+          "properties": {
+            "kind": {
+              "const": "activate-adapter"
+            },
+            "adapter": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "reference",
+        "observed_at"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/receiptKind"
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed_at": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "digest": {
+          "type": "string"
+        }
+      }
+    },
+    "receiptKind": {
+      "enum": [
+        "tool-call",
+        "work-item",
+        "pull-request",
+        "commit",
+        "board-message",
+        "run-record",
+        "ancestry-check",
+        "digest",
+        "document"
+      ]
+    },
+    "receipts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/receipt"
+      },
+      "description": "Honesty: at least one receipt read in this episode."
+    },
+    "rollback": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "steps"
+          ],
+          "properties": {
+            "kind": {
+              "const": "revert"
+            },
+            "steps": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "location"
+          ],
+          "properties": {
+            "kind": {
+              "const": "restore-from-copy"
+            },
+            "location": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "mitigation"
+          ],
+          "properties": {
+            "kind": {
+              "const": "irreversible"
+            },
+            "mitigation": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "unixSeconds": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Seconds since the Unix epoch."
+    }
+  }
+}

@@ -23,6 +23,7 @@ pub mod channel;
 pub mod channel_message;
 pub mod chat;
 pub mod chat_backend;
+pub mod chief_of_staff;
 pub mod chunking;
 pub mod cli_tool;
 pub mod communicative;
@@ -133,7 +134,7 @@ pub use affect::{
     AffectiveState, AffectiveSystem, Appraisal, AppraisalTrigger, MoodState, SomaticMarker,
     SomaticMarkerRegistry, emotional_salience, mood_congruence_bias,
 };
-pub use agent::{Agent, AgentConfig, AgentPredicates, ExecToolWiring};
+pub use agent::{Agent, AgentConfig, AgentPredicates, ExecToolWiring, file_write_roots};
 pub use calendar::{
     AllenRelation, CalendarError, CalendarEvent, CalendarManager, CalendarPredicates,
     CalendarResult, CalendarRoleVectors,
