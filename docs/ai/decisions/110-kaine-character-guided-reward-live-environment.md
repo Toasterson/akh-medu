@@ -59,7 +59,7 @@ the "engineer under fire" subset of the crew and the first belt this ADR trains 
 Captaining stays engine-side by default (ADR 099). A standalone Kaine may internalize a captain at the Brown belt; that remains dojo
 open question 5 and is not decided here.
 
-**2026-09-27 naming note.** The operator named the slots and belts, with Egyptian names primary and Jung, Anishinaabe and element cross-references. See [dojo manual §2a and §5](../manuals/2026-09-01-babyllm-dojo-curriculum.md): Sekhmet, Sia, Khonsu, Wepwawet, Isis, Bes, Geb, Hu; captain Maat; belts Ren → Ka → Ib → Ba → Akh.
+**2026-09-27 naming note.** The operator named the slots and belts, with Egyptian names primary; English first-principles names (Maker, Truthkeeper, Seeker, Challenger, Guardian, Sacred Clown, Steward, Weaver; the Center) and Jung, Anishinaabe, Lakota (heyókȟa in the Mirror slot) and element cross-references. See [dojo manual §2a and §5](../manuals/2026-09-01-babyllm-dojo-curriculum.md): Sekhmet, Sia, Khonsu, Wepwawet, Isis, Bes, Geb, Hu; captain Maat; belts Ren → Ka → Ib → Ba → Akh.
 
 ## Decision 2 — Guided, fine-grained reward: seven rules
 
