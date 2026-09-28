@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for a macOS LaunchAgent that runs the Lilith Chief-of-Staff
+  read-only tracker recorder (scripts/lilith/cos_recorder.py) every 2 hours.
+
+  This file is a template, not installed automatically. See
+  scripts/lilith/README-recorder.md for the substitution + install steps.
+  It MUST be a LaunchAgent (~/Library/LaunchAgents), not a LaunchDaemon:
+  the recorder reads the Anima PAT through `anima-pat get`, which reads the
+  login Keychain and only works in the logged-in user's session.
+
+  Placeholders to substitute before installing:
+    __HOME__            e.g. /Users/toasty
+    __REPO_ROOT__        e.g. /Users/toasty/ws/akh-medu
+    __PYTHON_BIN__        e.g. /usr/bin/python3 (must be 3.11+)
+    __SNAPSHOT_ROOT__     e.g. /Volumes/akh-medu-runs/lilith/cos-snapshots
+    __LOG_DIR__           e.g. /Users/toasty/Library/Logs/akh-medu
+-->
+<plist version="1.0"><dict>
+<key>Label</key><string>it.akh.lilith-recorder</string>
+<key>ProgramArguments</key><array>
+  <string>__PYTHON_BIN__</string>
+  <string>__REPO_ROOT__/scripts/lilith/cos_recorder.py</string>
+  <string>run</string>
+</array>
+<key>WorkingDirectory</key><string>__REPO_ROOT__</string>
+<key>EnvironmentVariables</key><dict>
+  <key>HOME</key><string>__HOME__</string>
+  <key>PATH</key><string>__HOME__/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  <key>LILITH_SNAPSHOT_ROOT</key><string>__SNAPSHOT_ROOT__</string>
+</dict>
+<key>RunAtLoad</key><true/>
+<key>StartInterval</key><integer>7200</integer>
+<key>KeepAlive</key><false/>
+<key>ThrottleInterval</key><integer>60</integer>
+<key>ExitTimeOut</key><integer>120</integer>
+<key>ProcessType</key><string>Background</string>
+<key>StandardOutPath</key><string>__LOG_DIR__/lilith-recorder.log</string>
+<key>StandardErrorPath</key><string>__LOG_DIR__/lilith-recorder.log</string>
+</dict></plist>
