@@ -30,6 +30,7 @@ import os
 from pathlib import Path
 import platform
 import random
+import shutil
 import subprocess
 import sys
 import time
@@ -179,6 +180,18 @@ class Report:
         temporary.replace(self.path)
 
 
+def env_bin_first_on_path() -> str:
+    """Put this interpreter's bin dir first on PATH and return it.
+
+    vLLM/flashinfer JIT-compile kernels by running ``ninja`` from PATH; the round-2
+    smoke fell back to HF because the env's ninja was not on PATH. run_smoke.sh
+    exports it too; this keeps the generate subprocess right however it is launched."""
+    env_bin = str(Path(sys.executable).parent)
+    rest = [entry for entry in os.environ.get('PATH', '').split(os.pathsep) if entry and entry != env_bin]
+    os.environ['PATH'] = os.pathsep.join([env_bin, *rest])
+    return env_bin
+
+
 def environment_record() -> dict[str, Any]:
     versions = {}
     for package in ('torch', 'transformers', 'peft', 'trl', 'bitsandbytes', 'vllm', 'accelerate',
@@ -189,6 +202,7 @@ def environment_record() -> dict[str, Any]:
             versions[package] = None
     record: dict[str, Any] = {'python': sys.version, 'platform': platform.platform(), 'versions': versions,
                               'argv': sys.argv, 'reference_sha256': REFERENCE_SHA256,
+                              'ninja': shutil.which('ninja'),
                               'source_sha256': {name: trainer.sha256_file(Path(__file__).parent / name)
                                                 for name in ('lilith_lora_trainer.py', 'reference_microrun.py')}}
     import torch
@@ -587,6 +601,7 @@ def parse_args(argv: Sequence[str] | None = None):
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     os.environ.setdefault('HF_HUB_OFFLINE', '1')
+    env_bin_first_on_path()
     mode = {'microrun': run_microrun, 'memory-probe': run_memory_probe,
             'generate': run_generate, 'cold-reload': run_cold_reload}[args.mode]
     return mode(args)

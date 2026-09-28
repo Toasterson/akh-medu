@@ -21,8 +21,9 @@
 # unreceipted parent directory, a uv tarball whose sha256 differs from the pin,
 # no GPU / NVIDIA driver < 580 / driver CUDA < 13.0 / no torch CUDA device (unless
 # LILITH_ALLOW_NO_CUDA=1), a root outside /workspace (unless LILITH_ALLOW_NON_WORKSPACE=1).
-# Readiness (driver, driver CUDA version, torch CUDA runtime) is printed first, so a
-# wrong host shows up immediately. Create pods with allowedCudaVersions >= 13.0.
+# Readiness (driver, driver CUDA version, torch CUDA runtime, the env's ninja) is printed
+# first, so a wrong host shows up immediately. env/bin is put first on PATH: vLLM and
+# flashinfer JIT-compile kernels by running `ninja` from PATH (round-2 smoke failure). Create pods with allowedCudaVersions >= 13.0.
 set -euo pipefail
 umask 077
 
@@ -66,6 +67,7 @@ sha256_of() {
 }
 LOCK_SHA256="$(sha256_of "$LOCK")"
 ENV_PY="$ROOT/env/bin/python"
+export PATH="$ROOT/env/bin:$PATH"
 export UV_PYTHON_INSTALL_DIR="$ROOT/bin/python"
 export UV_NO_MODIFY_PATH=1
 export HF_HOME="$ROOT/.hf-home"
@@ -182,12 +184,24 @@ require_cuda() {
       "the lock uses CUDA 13 wheels (driver >= $MIN_DRIVER_MAJOR); pick a pod host with a newer driver"
 }
 
+require_ninja() {  # the env's own ninja must be the one on PATH, and it must run
+  local found version
+  found="$(command -v ninja || true)"
+  [[ "$found" == "$ROOT/env/bin/ninja" ]] ||
+    die lilith::bootstrap::ninja "ninja on PATH is '${found:-missing}', not $ROOT/env/bin/ninja" \
+      "the lock pins ninja (requirements-cuda.in); rebuild the env: mv $ROOT/env $ROOT/env.old-\$(date +%s) and rerun"
+  version="$(ninja --version 2>&1)" ||
+    die lilith::bootstrap::ninja "$found --version failed: $version" "rebuild the env from the lock"
+  log "readiness: ninja $version ($found)"
+}
+
 gpu_readiness
 
 # --------------------------------------------------------------------- check
 if [[ "$MODE" == check ]]; then
   check_env
   require_cuda
+  require_ninja
   [[ -f "$ROOT/parent/receipt.json" ]] || die lilith::bootstrap::parent_missing "no parent receipt" \
     "run bootstrap.sh with HF_TOKEN set to download the pinned parent"
   verify_parent "$ROOT/parent" >/dev/null ||
@@ -249,6 +263,7 @@ else
   printf '%s\n' "$LOCK_SHA256" > "$ROOT/env/.lilith-lock-sha256"
 fi
 require_cuda
+require_ninja
 
 # 3. Pinned parent.
 if [[ -f "$ROOT/parent/receipt.json" ]]; then

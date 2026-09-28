@@ -18,3 +18,7 @@ accelerate==1.15.0
 safetensors==0.8.0
 huggingface_hub==1.33.0
 jsonschema==4.26.0
+# vLLM/flashinfer JIT-compile sampler kernels at warmup and exec the `ninja` console
+# script from PATH (round-2 smoke: FileNotFoundError 'ninja'); pinned explicitly so the
+# binary is a declared requirement, and run_smoke.sh puts env/bin first on PATH.
+ninja==1.13.2

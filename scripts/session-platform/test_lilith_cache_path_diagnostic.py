@@ -247,5 +247,97 @@ class DiagnosticRunTests(unittest.TestCase):
         self.assertFalse(any(case.variation.name == "sdpa_flash" for case in planner.queue))
 
 
+class Round3Tests(unittest.TestCase):
+    """Information order, per-pass deadline, provisional verdict, offline verdict."""
+
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+
+    def test_sweep_order_is_the_repeat_floor_then_a_d_b_c(self):
+        planner = diagnostic.Planner([diagnostic.PrefixMode.CHUNKED], diagnostic.VARIATIONS, 1e9)
+        keys = [case.key for case in planner.queue]
+        self.assertEqual(keys[:3], ["chunked/baseline/resident", "chunked/baseline/resident#2",
+                                    "chunked/baseline/offload"])
+        order = []
+        for case in list(planner.queue)[3:]:
+            if case.variation.name not in order:
+                order.append(case.variation.name)
+        self.assertEqual(order[:4], ["tf32_off", "deterministic", "sdpa_math", "contiguous"])
+        self.assertNotIn("chunked/baseline/offload#2", keys)
+
+    def test_tokenwise_estimate_scales_by_the_chunked_cost(self):
+        planner = diagnostic.Planner([diagnostic.PrefixMode.CHUNKED, diagnostic.PrefixMode.TOKENWISE],
+                                     diagnostic.VARIATIONS, 1e9)
+        deterministic = next(v for v in diagnostic.VARIATIONS if v.name == "deterministic")
+        chunked, tokenwise = diagnostic.PrefixMode.CHUNKED, diagnostic.PrefixMode.TOKENWISE
+        for case, seconds in ((diagnostic.Case(chunked, diagnostic.BASELINE, "resident"), 2.0),
+                              (diagnostic.Case(chunked, deterministic, "offload"), 24.0),
+                              (diagnostic.Case(tokenwise, diagnostic.BASELINE, "resident"), 60.0)):
+            planner.record(diagnostic.PassResult(case=case, status="ok", seconds=seconds))
+        estimate = planner.estimate(diagnostic.Case(tokenwise, deterministic, "offload"))
+        self.assertAlmostEqual(estimate, 60.0 * 12.0 * 1.1)
+
+    def test_pass_stops_at_the_deadline(self):
+        engine = tiny_engine()
+        case = diagnostic.Case(diagnostic.PrefixMode.TOKENWISE, diagnostic.BASELINE, "resident")
+        result = diagnostic.run_pass(engine, case, (7, 8, 9), 2, deadline=0.0, clock=lambda: 1.0)
+        self.assertEqual(result.status, "timeout")
+        self.assertIn("PassDeadlineExceeded", result.error)
+
+    def test_every_case_leaves_a_provisional_verdict_on_disk(self):
+        engine = tiny_engine()
+        real = diagnostic.run_pass
+        calls = []
+
+        def interrupted(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 4:
+                raise KeyboardInterrupt("step timeout")
+            return real(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "d.json"
+            with mock.patch.object(diagnostic, "run_pass", side_effect=interrupted):
+                with self.assertRaises(KeyboardInterrupt):
+                    diagnostic.run_diagnostic(engine, output, positions=(7, 8, 9), tail_tokens=2,
+                                              budget_seconds=600)
+            report = json.loads(output.read_text())
+            self.assertEqual(len(report["passes"]), 3)
+            self.assertFalse(report["verdict"]["final"])
+            self.assertEqual(report["verdict"]["cause"], "not_reproduced")
+            self.assertTrue(report["initial_policy_identity_restored"])
+            offline = diagnostic.verdict_from_report(report)
+            self.assertTrue(offline["recomputed_from_report"])
+            self.assertEqual(offline["cause"], "not_reproduced")
+            self.assertEqual(diagnostic.main(["--from-report", str(output)]), 0)
+
+    def test_finished_report_has_a_final_verdict(self):
+        engine = tiny_engine()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "d.json"
+            diagnostic.run_diagnostic(engine, output, positions=(7, 8, 9), tail_tokens=2, budget_seconds=600,
+                                      variations=diagnostic.VARIATIONS[:1])
+            report = json.loads(output.read_text())
+        self.assertEqual(report["status"], "finished")
+        self.assertTrue(report["verdict"]["final"])
+
+    def test_offline_verdict_of_a_round_two_shaped_report(self):
+        report = {"status": "running", "passes": {"x": {}},
+                  "modes_summary": {"chunked": _mode(0.81, 0.94, 0.97, sdpa_math=_entry(0.0, 0.0),
+                                                     tf32_off=_entry(0.87, 0.75)),
+                                    "tokenwise": {"baseline": {"resident_vs_offload": None,
+                                                               "resident_vs_resident_repeat": _comparison(1.0),
+                                                               "offload_vs_offload_repeat": None,
+                                                               "layout_differences": []},
+                                                  "variations": {}}}}
+        result = diagnostic.verdict_from_report(report)
+        self.assertEqual(result["cause"], "run_to_run_nondeterminism")
+        self.assertEqual(result["restoring_variations_chunked_only"], ["sdpa_math"])
+        self.assertFalse(result["final"])
+        with self.assertRaises(ValueError):
+            diagnostic.verdict_from_report({"status": "running"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # Lilith C6 H100 smoke (Anima WI 01a0e270-6021): one-shot, fail-closed, <= 2 GPU-hours.
 #
-#   LILITH_EXPECTED_MAIN_SHA=<40-hex main commit> bash <payload>/scripts/lilith/runpod/run_smoke.sh <run-id>
+#   LILITH_EXPECTED_MAIN_SHA=<40-hex main commit> bash <payload>/scripts/lilith/runpod/run_smoke.sh \
+#       [--only <step>[,<step>...]] <run-id>
+#
+# --only runs the gates plus the named steps (data-pin always runs; it is cheap):
+#   cache-control, cache-diagnostic, memory-probe, microrun, cold-reload, vllm-generation
+# e.g. --only cache-control,cache-diagnostic,vllm-generation skips the 58-minute micro-run.
+# Still fail-closed: a named step whose prerequisite is not ok (or not selected) is
+# recorded as skipped_dependency and fails the run; unselected steps get no row and
+# smoke-result.json records the selection under "only".
 #
 # The pod receives only the payload built by make_payload.sh (never the whole
 # repository). Steps, each started only when the global budget has >= 120s left
@@ -14,6 +22,10 @@
 #   memory-probe 8K/16K/32K                      (independent of cache-control)
 #   microrun 8K/16K (+ generation tok/s)         (needs data-pin)
 #   cold-reload of the 8K adapter, fresh process (needs microrun)
+#   vllm-generation: strict vLLM LoRA generation check, no HF fallback (needs an adapter:
+#     this run's microrun, or LILITH_GENERATION_ADAPTER_DIR)
+# Every step runs with $LILITH_ROOT/env/bin first on PATH, so console scripts of the
+# env (ninja for the vLLM/flashinfer JIT, and the rest) resolve to the pinned env.
 # A failed non-gate step does not stop the independent steps after it; a step whose
 # prerequisite failed is recorded as skipped_dependency. The overall status is
 # FAILED when any step is not ok, and smoke-result.json lists every failed step.
@@ -31,7 +43,9 @@
 #   LILITH_SMOKE_SYNTHETIC=1 (no private subset: recorded deviation),
 #   LILITH_SMOKE_ALLOW_GPU=1 (non-H100),
 #   LILITH_ALLOW_UNMERGED=1 (provenance failures recorded as unverified_allowed instead of stopping),
-#   LILITH_DIAGNOSTIC_BUDGET_SECONDS (480; pass budget of the cache diagnostic, model load excluded).
+#   LILITH_DIAGNOSTIC_BUDGET_SECONDS (1800; pass budget of the cache diagnostic, model load excluded;
+#     the step is capped at budget + 300 s),
+#   LILITH_GENERATION_ADAPTER_DIR (adapter for vllm-generation when microrun is not selected).
 # Cache-control numerics (lilith_numerics.py; unset = qualified default, recorded in
 # cache-control.json "numerics" and in smoke-result.json knobs):
 #   LILITH_NUMERICS_SDPA_BACKEND=default|math|efficient|flash|cudnn,
@@ -44,11 +58,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"   # payload root (or a full checkout)
 ROOT="${LILITH_ROOT:-/workspace/lilith}"
 BUDGET="${LILITH_SMOKE_BUDGET_SECONDS:-7200}"
-RUN_ID="${1:-}"
 
 die() {
   printf 'run_smoke: error[%s]: %s\n  help: %s\n' "$1" "$2" "$3" >&2
   exit 1
+}
+
+SELECTABLE="cache-control cache-diagnostic memory-probe microrun cold-reload vllm-generation"
+ONLY=""
+if [[ "${1:-}" == --only ]]; then
+  ONLY="${2:-}"
+  shift 2 || die lilith::smoke::usage "--only needs a step list" "e.g. --only cache-control,cache-diagnostic"
+  [[ -n "$ONLY" ]] || die lilith::smoke::usage "--only needs a step list" "choose from: $SELECTABLE"
+  IFS=, read -r -a ONLY_STEPS <<< "$ONLY"
+  for wanted in "${ONLY_STEPS[@]}"; do
+    [[ " $SELECTABLE " == *" $wanted "* ]] ||
+      die lilith::smoke::usage "--only step '$wanted' is unknown" "choose from: $SELECTABLE"
+  done
+fi
+RUN_ID="${1:-}"
+selected() {  # selected <step>: true in a full run, or when named in --only
+  [[ -z "$ONLY" || ",$ONLY," == *",$1,"* ]]
 }
 
 [[ "$RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] ||
@@ -65,6 +95,8 @@ mkdir "$RUN" || die lilith::smoke::exists "could not claim $RUN" "another smoke 
 # ------------------------------------------------------------- claimed run dir
 unset HF_TOKEN
 PY="$ROOT/env/bin/python"
+# Console scripts of the pinned env (ninja for the vLLM/flashinfer JIT) come first.
+export PATH="$ROOT/env/bin:$PATH"
 export PYTHONNOUSERSITE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_HOME="$ROOT/.hf-home"
 export CUBLAS_WORKSPACE_CONFIG=":4096:8" PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 MARKER="lilith-c6-smoke:$RUN_ID"
@@ -89,7 +121,7 @@ finish() {
   set +e
   local py="$PY"; [[ -x "$py" ]] || py=python3
   mkdir -p "$STAGE"
-  "$py" - "$RUN" "$RUN_ID" "$rc" "$START" "$BUDGET" "$STAGE/smoke-result.json" <<'PY'
+  LILITH_SMOKE_ONLY="$ONLY" "$py" - "$RUN" "$RUN_ID" "$rc" "$START" "$BUDGET" "$STAGE/smoke-result.json" <<'PY'
 import csv, json, os, sys, time
 from pathlib import Path
 run, run_id, rc, start, budget = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
@@ -112,10 +144,14 @@ result = {'schema': 'lilith/c6-smoke-result@1', 'run_id': run_id,
           'budget_seconds': budget, 'quality_claim': False, 'release_selected': False,
           'completion_marker': 'smoke-result.json is written last; SHA256SUMS covers it',
           'tarball': f'results-{run_id}.tar.gz',
+          'only': os.environ.get('LILITH_SMOKE_ONLY') or None,
+          'vllm_generation': {f: (load('vllm-generation.json') or {}).get(f)
+                              for f in ('status', 'backend', 'tokens_per_second', 'vllm_error', 'error')},
           'knobs': {k: os.environ.get(k) for k in ('LILITH_EXPECTED_MAIN_SHA', 'LILITH_SOURCE_MANIFEST',
                                                    'LILITH_SMOKE_SYNTHETIC', 'LILITH_SMOKE_ALLOW_GPU',
                                                    'LILITH_ALLOW_UNMERGED', 'LILITH_SMOKE_BUDGET_SECONDS',
                                                    'LILITH_DIAGNOSTIC_BUDGET_SECONDS',
+                                                   'LILITH_GENERATION_ADAPTER_DIR',
                                                    'LILITH_NUMERICS_SDPA_BACKEND',
                                                    'LILITH_NUMERICS_SDPA_MATH_FALLBACK', 'LILITH_NUMERICS_TF32',
                                                    'LILITH_NUMERICS_BF16_REDUCTION',
@@ -274,9 +310,10 @@ NUMERICS_ARGS=()
 [[ -z "${LILITH_NUMERICS_BF16_REDUCTION:-}" ]] ||
   NUMERICS_ARGS+=(--numerics-bf16-reduced-precision-reduction "$LILITH_NUMERICS_BF16_REDUCTION")
 [[ "${LILITH_NUMERICS_DETERMINISTIC:-0}" != 1 ]] || NUMERICS_ARGS+=(--numerics-deterministic)
-DIAGNOSTIC_BUDGET="${LILITH_DIAGNOSTIC_BUDGET_SECONDS:-480}"
+DIAGNOSTIC_BUDGET="${LILITH_DIAGNOSTIC_BUDGET_SECONDS:-1800}"
 [[ "$DIAGNOSTIC_BUDGET" =~ ^[0-9]+$ ]] ||
   die lilith::smoke::usage "LILITH_DIAGNOSTIC_BUDGET_SECONDS='$DIAGNOSTIC_BUDGET' is not a whole number" "unset it or pass seconds"
+[[ -z "$ONLY" ]] || echo "$MARKER --only $ONLY (gates and data-pin always run)"
 
 # Gates: nothing after them is meaningful without them.
 step provenance provenance || exit 1
@@ -284,29 +321,52 @@ step bootstrap-check bash -c "bash '$SCRIPT_DIR/bootstrap.sh' --check > '$RUN/bo
 step gpu gpu_identity || exit 1
 
 step data-pin data_pin || true
-step cache-control "$PY" "$REPO/scripts/session-platform/lilith_training_cache_control.py" \
-  --parent "$ROOT/parent" --output "$RUN/cache-control.json" --cache-offloading false \
-  ${NUMERICS_ARGS[@]+"${NUMERICS_ARGS[@]}"} || true
-if [[ "$(step_status cache-control)" != ok ]]; then
-  # <= 10 minutes on an H100: pass budget plus model load/hashing headroom.
-  step --cap $(( DIAGNOSTIC_BUDGET + 120 )) cache-diagnostic \
+if selected cache-control; then
+  step cache-control "$PY" "$REPO/scripts/session-platform/lilith_training_cache_control.py" \
+    --parent "$ROOT/parent" --output "$RUN/cache-control.json" --cache-offloading false \
+    ${NUMERICS_ARGS[@]+"${NUMERICS_ARGS[@]}"} || true
+fi
+# The diagnostic follows a failed control; named alone in --only it runs unconditionally.
+if selected cache-diagnostic && { [[ -n "$ONLY" ]] && ! selected cache-control ||
+                                  [[ "$(step_status cache-control)" != ok ]]; }; then
+  # The report carries a provisional verdict after every case, so even the cap leaves one.
+  step --cap $(( DIAGNOSTIC_BUDGET + 300 )) cache-diagnostic \
     "$PY" "$REPO/scripts/session-platform/lilith_cache_path_diagnostic.py" \
     --parent "$ROOT/parent" --output "$RUN/cache-diagnostic.json" \
     --budget-seconds "$DIAGNOSTIC_BUDGET" || true
 fi
-step memory-probe "$PY" "$SCRIPT_DIR/reference_microrun.py" --mode memory-probe \
-  --parent "$ROOT/parent" --output "$RUN/memory-probe.json" || true
+if selected memory-probe; then
+  step memory-probe "$PY" "$SCRIPT_DIR/reference_microrun.py" --mode memory-probe \
+    --parent "$ROOT/parent" --output "$RUN/memory-probe.json" || true
+fi
 # Leave 15 minutes for generation measurement, cold reload and packaging.
 MICRO_WALL=$(( $(remaining) - 900 ))
-if needs microrun data-pin; then
+if selected microrun && needs microrun data-pin; then
   step microrun "$PY" "$SCRIPT_DIR/reference_microrun.py" --mode microrun --parent "$ROOT/parent" \
     "${DATA_ARGS[@]}" --adapter-root "$RUN/adapters" --output "$RUN/microrun.json" \
     --max-wall-seconds "$MICRO_WALL" || true
 fi
-if needs cold-reload microrun; then
+if selected cold-reload && needs cold-reload microrun; then
   step cold-reload "$PY" "$SCRIPT_DIR/reference_microrun.py" --mode cold-reload --parent "$ROOT/parent" \
     --adapter-dir "$RUN/adapters/ctx-8192" --probe "$RUN/adapters/ctx-8192.probe.json" \
     --output "$RUN/cold-reload.json" || true
+fi
+if selected vllm-generation; then
+  GENERATION_ADAPTER="${LILITH_GENERATION_ADAPTER_DIR:-}"
+  if [[ -n "$GENERATION_ADAPTER" ]]; then
+    if [[ -d "$GENERATION_ADAPTER" ]]; then
+      step vllm-generation "$PY" "$SCRIPT_DIR/reference_microrun.py" --mode generate --parent "$ROOT/parent" \
+        --adapter-dir "$GENERATION_ADAPTER" --generation-backend vllm \
+        --output "$RUN/vllm-generation.json" || true
+    else
+      record_step vllm-generation skipped_dependency - 0
+      echo "== step vllm-generation skipped: LILITH_GENERATION_ADAPTER_DIR=$GENERATION_ADAPTER is not a directory"
+    fi
+  elif needs vllm-generation microrun; then
+    step vllm-generation "$PY" "$SCRIPT_DIR/reference_microrun.py" --mode generate --parent "$ROOT/parent" \
+      --adapter-dir "$RUN/adapters/ctx-8192" --generation-backend vllm \
+      --output "$RUN/vllm-generation.json" || true
+  fi
 fi
 
 FAILED_STEPS="$(awk -F'\t' 'NR > 1 && $2 != "ok" { printf "%s%s", sep, $1; sep = " " }' "$STEPS")"

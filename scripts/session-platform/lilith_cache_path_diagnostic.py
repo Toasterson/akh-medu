@@ -21,19 +21,28 @@ variation, the max_abs at every probe position:
   d  torch.use_deterministic_algorithms(True) with CUBLAS_WORKSPACE_CONFIG=:4096:8;
      a strict failure names the nondeterministic op and is retried warn-only
 
-Two prefix modes keep the whole run inside ~10 minutes on an H100:
-  chunked    one no-grad prefill up to ``--tail-tokens`` before the first probe,
-             then tokenwise; every variation (with a resident repeat) runs here first
+Two prefix modes keep the whole run inside ``--budget-seconds`` (default 1800):
+  chunked    one no-grad prefill up to ``--tail-tokens`` (default 8) before the first
+             probe, then tokenwise; every variation (with a resident repeat) runs here
+             first, in information order: e (resident twice, then offload), a TF32 off,
+             d deterministic, b SDPA MATH, c contiguous, then a2 and the other backends
   tokenwise  exactly the control's path (every token a separate forward): resident
              twice, the best chunked-restoring variation, the baseline offload pass,
              then the other variations, until ``--budget-seconds`` is spent
-Cases that do not fit the remaining budget are recorded as ``skipped_budget``.
+Cases whose estimated cost does not fit the remaining budget are recorded as
+``skipped_budget``; a pass that overruns the deadline stops at the next token and is
+recorded as ``timeout``, so the sweep always ends inside the budget.
 
-The JSON output (``lilith/cache-path-diagnostic@1``) is persisted after every case
-and ends with a ``verdict``: the cause class, which variations restore equivalence
-(confirmed on the tokenwise path or chunked-only), and the numerics configuration
+The JSON output (``lilith/cache-path-diagnostic@1``) is rewritten after every case,
+including ``modes_summary`` and a provisional ``verdict`` (``"final": false``), so a
+step timeout or kill still leaves a verdict on disk. The final ``verdict`` gives the
+cause class, which variations restore equivalence (confirmed on the tokenwise path or
+chunked-only), and the numerics configuration
 to try (``lilith_numerics`` flags) when the fix is configuration-only. The 1e-4
 tolerance is the control's and is never loosened here.
+
+``--from-report FILE`` recomputes the verdict from a saved report without a GPU or
+model (for reports cut short before the provisional verdict existed).
 
 Exit status: 0 when the diagnostic completed (whatever the verdict), 1 on error.
 """
@@ -66,8 +75,14 @@ SCHEMA = "lilith/cache-path-diagnostic@1"
 TOLERANCE = 1e-4          # the cache control's tolerance; never loosened
 DEFAULT_POSITIONS = (1023, 1024, 1025)
 SELECTED_TOKEN = 101      # the control's scored token
+DEFAULT_BUDGET_SECONDS = 1800.0
+DEFAULT_TAIL_TOKENS = 8
 # Initial per-case duration guesses (seconds) until a case of the mode has run.
 INITIAL_ESTIMATE = {"chunked": 20.0, "tokenwise": 150.0}
+
+
+class PassDeadlineExceeded(RuntimeError):
+    """A pass reached the diagnostic deadline; recorded as ``timeout``."""
 
 
 class DiagnosticError(RuntimeError):
@@ -99,18 +114,19 @@ class Variation:
     configuration_only: bool = True
 
 
-BASELINE = Variation("baseline", "e", "qualified defaults; resident and offload each run twice")
+BASELINE = Variation("baseline", "e", "qualified defaults; resident twice (the repeat floor), then offload")
+# Information order (round-3 request): a, d, b MATH, c first, then the rest.
 VARIATIONS: tuple[Variation, ...] = (
-    Variation("deterministic", "d", "torch.use_deterministic_algorithms(True), CUBLAS_WORKSPACE_CONFIG=:4096:8",
-              NumericsConfig(deterministic=True)),
     Variation("tf32_off", "a", "torch.backends.cuda.matmul.allow_tf32=False, cudnn.allow_tf32=False",
               NumericsConfig(tf32=Toggle.OFF)),
-    Variation("bf16_reduction_off", "a2", "matmul.allow_bf16_reduced_precision_reduction=False",
-              NumericsConfig(bf16_reduced_precision_reduction=Toggle.OFF)),
+    Variation("deterministic", "d", "torch.use_deterministic_algorithms(True), CUBLAS_WORKSPACE_CONFIG=:4096:8",
+              NumericsConfig(deterministic=True)),
+    Variation("sdpa_math", "b", "sdpa_kernel(MATH)", NumericsConfig(sdpa_backend=SdpaBackend.MATH)),
     Variation("contiguous", "c", "stored K/V contiguous in both variants (engine change if it is the fix)",
               resident=CacheKind.RESIDENT_CONTIGUOUS, offload=CacheKind.OFFLOAD_CONTIGUOUS,
               configuration_only=False),
-    Variation("sdpa_math", "b", "sdpa_kernel(MATH)", NumericsConfig(sdpa_backend=SdpaBackend.MATH)),
+    Variation("bf16_reduction_off", "a2", "matmul.allow_bf16_reduced_precision_reduction=False",
+              NumericsConfig(bf16_reduced_precision_reduction=Toggle.OFF)),
     Variation("sdpa_efficient", "b", "sdpa_kernel(EFFICIENT_ATTENTION)",
               NumericsConfig(sdpa_backend=SdpaBackend.EFFICIENT)),
     Variation("sdpa_flash", "b", "sdpa_kernel(FLASH_ATTENTION); head_dim 512 global layers have no flash kernel",
@@ -304,8 +320,14 @@ def chunked_prefix_length(positions: Sequence[int], tail_tokens: int) -> int:
     return max(1, positions[0] - 1 - tail_tokens)
 
 
-def run_pass(engine: Any, case: Case, positions: Sequence[int], tail_tokens: int) -> PassResult:
+def run_pass(engine: Any, case: Case, positions: Sequence[int], tail_tokens: int,
+             deadline: float | None = None, clock: Callable[[], float] = time.monotonic) -> PassResult:
+    """One pass; stops at the next token once ``deadline`` (on ``clock``) has passed."""
     import torch
+
+    def check_deadline() -> None:
+        if deadline is not None and clock() > deadline:
+            raise PassDeadlineExceeded("diagnostic budget exhausted inside the pass")
 
     model = engine.model
     tokens = probe_tokens(positions)
@@ -326,6 +348,7 @@ def run_pass(engine: Any, case: Case, positions: Sequence[int], tail_tokens: int
                     start = chunked_prefix_length(positions, tail_tokens)
                     engine._forward(tokens[:start], cache, 0, grad=False)
                 for index in range(start, len(tokens)):
+                    check_deadline()
                     position = index + 1
                     selected = position in positions
                     current = engine._forward([tokens[index]], cache, index, grad=selected)
@@ -346,6 +369,9 @@ def run_pass(engine: Any, case: Case, positions: Sequence[int], tail_tokens: int
         result.warnings = sorted({str(item.message)[:400] for item in caught
                                   if "deterministic" in str(item.message).lower()})
         result.status = "ok"
+    except PassDeadlineExceeded as error:
+        result.status = "timeout"
+        result.error = f"{type(error).__name__}: {error}"
     except Exception as error:  # recorded per case; the sweep continues
         result.error = f"{type(error).__name__}: {error}"[:2000]
     finally:
@@ -447,7 +473,8 @@ def verdict(modes: dict[str, dict[str, Any]], variations: Sequence[Variation]) -
     elif not any(reproduced):
         cause = "not_reproduced"
         explanation = "resident and offloaded caches matched within tolerance in every mode that ran"
-    elif primary.get("resident_repeatable") is False or primary.get("offload_repeatable") is False:
+    elif any(value.get("resident_repeatable") is False or value.get("offload_repeatable") is False
+             for value in per_mode.values()):
         cause = "run_to_run_nondeterminism"
         explanation = ("the same cache path run twice already differs beyond tolerance, so the offload "
                        "copy is not the cause; the CUDA kernels are not repeatable at this tolerance")
@@ -512,6 +539,27 @@ def _next_step(cause: str, recommended: Variation | None, engine_change: bool, c
     return "no variation restored equivalence; escalate (kernel-level investigation, or accept offload off)"
 
 
+def known_variations() -> list[Variation]:
+    """Every variation a report can contain: the sweep plus each scheduled fallback."""
+    known = list(VARIATIONS)
+    for variation in VARIATIONS:
+        fallback = fallback_for(variation)
+        while fallback is not None:
+            known.append(fallback)
+            fallback = fallback_for(fallback)
+    return known
+
+
+def verdict_from_report(report: dict[str, Any]) -> dict[str, Any]:
+    """The verdict of a saved report's ``modes_summary`` (e.g. one cut short by a step timeout)."""
+    summary = report.get("modes_summary")
+    if not summary:
+        raise ValueError("the report has no modes_summary (no case finished)")
+    return {**verdict(summary, known_variations()), "final": report.get("status") == "finished",
+            "recomputed_from_report": True, "report_status": report.get("status"),
+            "passes_recorded": len(report.get("passes", {}))}
+
+
 class Planner:
     """Budget-aware case queue: chunked sweep first, then tokenwise confirmation."""
 
@@ -523,6 +571,8 @@ class Planner:
         self.deadline = clock() + budget_seconds
         self.queue: collections.deque[Case] = collections.deque()
         self.durations: dict[PrefixMode, list[float]] = collections.defaultdict(list)
+        # Observed seconds per (mode, variation name, role), for per-case estimates.
+        self.case_seconds: dict[tuple[PrefixMode, str, str], float] = {}
         # (mode, failed variation name) pairs whose fallback has been scheduled.
         self.scheduled_fallbacks: set[tuple[PrefixMode, str]] = set()
         self.all_variations: list[Variation] = list(variations)
@@ -532,20 +582,40 @@ class Planner:
             self._schedule_sweep(PrefixMode.TOKENWISE, self.variations, repeat=False)
 
     def _schedule_sweep(self, mode: PrefixMode, variations: Iterable[Variation], repeat: bool) -> None:
-        self.queue.extend(variation_cases(mode, BASELINE, resident_repeat=True, offload_repeat=repeat))
+        # e first: resident twice is the nondeterminism floor, then the offload pass.
+        self.queue.extend([Case(mode, BASELINE, "resident"), Case(mode, BASELINE, "resident", 1),
+                           Case(mode, BASELINE, "offload")])
         for variation in variations:
             self.queue.extend(variation_cases(mode, variation, resident_repeat=repeat))
 
-    def estimate(self, mode: PrefixMode) -> float:
-        observed = self.durations[mode]
-        return max(observed[-3:]) * 1.1 if observed else INITIAL_ESTIMATE[mode.value]
+    def estimate(self, case: Case) -> float:
+        """Seconds a case is expected to take.
+
+        Same (mode, variation, role) observed: that. Tokenwise with a chunked observation
+        of the same variation/role: the tokenwise baseline resident time scaled by that
+        case's chunked cost relative to the chunked baseline resident (offload and
+        deterministic passes are several times slower). Otherwise the recent maximum of
+        the mode, or the initial guess."""
+        key = (case.mode, case.variation.name, case.role)
+        if key in self.case_seconds:
+            return self.case_seconds[key] * 1.1
+        if case.mode is PrefixMode.TOKENWISE:
+            chunked = self.case_seconds.get((PrefixMode.CHUNKED, case.variation.name, case.role))
+            chunked_base = self.case_seconds.get((PrefixMode.CHUNKED, BASELINE.name, "resident"))
+            tokenwise_base = self.case_seconds.get((PrefixMode.TOKENWISE, BASELINE.name, "resident"))
+            if chunked and chunked_base and tokenwise_base:
+                return tokenwise_base * max(1.0, chunked / chunked_base) * 1.1
+        observed = self.durations[case.mode]
+        return max(observed[-3:]) * 1.1 if observed else INITIAL_ESTIMATE[case.mode.value]
 
     def fits(self, case: Case) -> bool:
-        return self.clock() + self.estimate(case.mode) <= self.deadline
+        return self.clock() + self.estimate(case) <= self.deadline
 
     def record(self, result: PassResult) -> None:
-        if result.status == "ok":
+        if result.status in ("ok", "timeout"):
             self.durations[result.case.mode].append(result.seconds)
+            key = (result.case.mode, result.case.variation.name, result.case.role)
+            self.case_seconds[key] = max(self.case_seconds.get(key, 0.0), result.seconds)
         elif result.status == "error" and result.case.role == "resident" and result.case.repeat == 0:
             fallback = fallback_for(result.case.variation)
             marker = (result.case.mode, result.case.variation.name)
@@ -572,8 +642,15 @@ class Planner:
         order: list[str] = []
         if chunked_summary is not None:
             entries = chunked_summary["variations"]
+
+            def rank(name: str) -> tuple[float, float]:
+                # Closest match first; among equals, the cheapest offload pass (a
+                # deterministic offload pass ran ~6x slower than a plain one in round 2).
+                cost = self.case_seconds.get((PrefixMode.CHUNKED, name, "offload"), float("inf"))
+                return entries[name]["resident_vs_offload"]["max_abs"], cost
+
             order = sorted((name for name, entry in entries.items() if entry["restores_equivalence"]),
-                           key=lambda name: entries[name]["resident_vs_offload"]["max_abs"])
+                           key=rank)
         by_name = {variation.name: variation for variation in self.all_variations}
         # A variation that could not run chunked is represented by its fallback.
         runnable = [variation for variation in self.all_variations
@@ -604,8 +681,9 @@ def model_summary(engine: Any) -> dict[str, Any]:
 
 def run_diagnostic(engine: Any, output: Path | str, *, positions: Sequence[int] = DEFAULT_POSITIONS,
                    modes: Sequence[PrefixMode] = (PrefixMode.CHUNKED, PrefixMode.TOKENWISE),
-                   variations: Sequence[Variation] = VARIATIONS, tail_tokens: int = 32,
-                   budget_seconds: float = 480.0, clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
+                   variations: Sequence[Variation] = VARIATIONS, tail_tokens: int = DEFAULT_TAIL_TOKENS,
+                   budget_seconds: float = DEFAULT_BUDGET_SECONDS,
+                   clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """Run the sweep; the report is rewritten after every case so a timeout keeps evidence."""
     import torch
     import transformers
@@ -676,13 +754,18 @@ def run_diagnostic(engine: Any, output: Path | str, *, positions: Sequence[int] 
             else:
                 print(f"diagnostic: {case.key} (remaining {planner.deadline - clock():.0f}s)",
                       file=sys.stderr, flush=True)
-                results[case.key] = run_pass(engine, case, positions, tail_tokens)
+                results[case.key] = run_pass(engine, case, positions, tail_tokens,
+                                             deadline=planner.deadline, clock=clock)
                 planner.record(results[case.key])
             report["passes"][case.key] = results[case.key].summary()
             report["modes_summary"] = {mode.value: summarize_mode(mode, results, planner.all_variations)
                                        for mode in modes}
+            # Provisional after every case: a killed run still leaves a verdict.
+            report["verdict"] = {**verdict(report["modes_summary"], planner.all_variations), "final": False}
             persist()
-        report["verdict"] = verdict(report["modes_summary"], planner.all_variations)
+        report["modes_summary"] = {mode.value: summarize_mode(mode, results, planner.all_variations)
+                                   for mode in modes}
+        report["verdict"] = {**verdict(report["modes_summary"], planner.all_variations), "final": True}
         report["status"] = "finished"
         return report
     except BaseException as error:
@@ -701,18 +784,30 @@ def run_diagnostic(engine: Any, output: Path | str, *, positions: Sequence[int] 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--parent", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--from-report", type=Path,
+                        help="recompute the verdict from a saved report (no GPU, no model) and print it")
+    parser.add_argument("--parent", type=Path)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--positions", type=int, nargs="+", default=list(DEFAULT_POSITIONS))
     parser.add_argument("--modes", default="chunked,tokenwise",
                         help="comma list of chunked,tokenwise (order is fixed: chunked sweep first)")
-    parser.add_argument("--tail-tokens", type=int, default=32,
+    parser.add_argument("--tail-tokens", type=int, default=DEFAULT_TAIL_TOKENS,
                         help="tokenwise steps before the first probe in chunked mode")
-    parser.add_argument("--budget-seconds", type=float, default=480.0,  # + ~80s load/hash: <= 10 min
+    parser.add_argument("--budget-seconds", type=float, default=DEFAULT_BUDGET_SECONDS,
                         help="wall budget for the passes (model load excluded); unrun cases are recorded")
     parser.add_argument("--only", default="",
                         help="comma list of variation names to run (default: all)")
     args = parser.parse_args(argv)
+    if args.from_report is not None:
+        try:
+            print(json.dumps(verdict_from_report(json.loads(args.from_report.read_text())), indent=2))
+        except (OSError, ValueError, KeyError) as error:
+            print(f"diagnostic: error: cannot read a verdict from {args.from_report}: "
+                  f"{type(error).__name__}: {error}", file=sys.stderr)
+            return 1
+        return 0
+    if args.parent is None or args.output is None:
+        parser.error("--parent and --output are required unless --from-report is given")
     try:
         modes = [PrefixMode(value.strip()) for value in args.modes.split(",") if value.strip()]
     except ValueError as error:
