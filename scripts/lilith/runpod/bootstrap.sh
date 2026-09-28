@@ -21,6 +21,17 @@
 # unreceipted parent directory, a uv tarball whose sha256 differs from the pin,
 # no GPU / NVIDIA driver < 580 / driver CUDA < 13.0 / no torch CUDA device (unless
 # LILITH_ALLOW_NO_CUDA=1), a root outside /workspace (unless LILITH_ALLOW_NON_WORKSPACE=1).
+#
+# "A complete env built from a different lock" is NOT auto-moved (unlike the
+# never-finished-building case above): a network volume can carry an env/ from an
+# earlier payload whose requirements-cuda.txt has since changed (e.g. the ninja pin
+# added for the round-3 fix). This is unattended-billable: the run_smoke.sh watchdog
+# does not distinguish "bootstrap is still installing" from "bootstrap is stuck
+# retrying", so a launch against a stale env costs pod time before anyone notices
+# (one aborted C6 round-3 launch, 2026-09-28). If a fresh pod's first bootstrap
+# --check reports env_lock, move the old env aside yourself before the real run:
+#   mv "$ROOT/env" "$ROOT/env.old-$(date +%s)" && bash scripts/lilith/runpod/bootstrap.sh
+# then re-check, rather than launching the smoke and finding out from its log.
 # Readiness (driver, driver CUDA version, torch CUDA runtime, the env's ninja) is printed
 # first, so a wrong host shows up immediately. env/bin is put first on PATH: vLLM and
 # flashinfer JIT-compile kernels by running `ninja` from PATH (round-2 smoke failure). Create pods with allowedCudaVersions >= 13.0.

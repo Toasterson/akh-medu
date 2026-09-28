@@ -5,12 +5,23 @@ The training engine (``lilith_training_engine.py``) is qualified by its sha256 a
 its arithmetic is never edited without a new qualification. The knobs here are
 process-global PyTorch settings applied *around* the engine: SDPA backend
 selection, TF32, bf16 reduced-precision GEMM reductions, and deterministic
-algorithms. Every knob defaults to ``default`` (leave PyTorch untouched), which is
-the behaviour the first C6 smoke ran with, and every run records the requested and
-the observed settings in its manifest (``NumericsConfig.manifest``).
+algorithms. A bare ``NumericsConfig()`` is ``default`` (leave PyTorch untouched),
+which is the behaviour the first C6 smoke ran with; every run records the
+requested and the observed settings in its manifest (``NumericsConfig.manifest``).
 
-Choosing a non-default value is an operator decision informed by
-``lilith_cache_path_diagnostic.py``; see its verdict for which setting restored
+The *recorded default* (``platform_default()``, what every caller resolves to when
+no ``--numerics-*`` flag or ``LILITH_NUMERICS_*`` variable is given) is
+EFFICIENT SDPA with MATH fallback on CUDA (not ROCm), and ``default`` (untouched)
+everywhere else. C6 round 2 (2026-09-28) found the default CUDA SDPA dispatch
+(cuDNN attention on H100, torch 2.13.0+cu130) run-to-run nondeterministic: a
+resident-cache control run repeated twice differed as much as resident vs.
+offloaded did. C6 round 3 confirmed EFFICIENT+MATH restores bit-exact
+resident-vs-offload equivalence (logits 0.0/0.0/0.0 at 1023/1024/1025, LoRA grad
+diffs 1.4e-8/1.5e-7, tolerance 1e-4). ROCm and CPU are unmeasured on this finding
+and keep PyTorch's own default; see ``platform_default`` and ``cuda_default``.
+
+Choosing a value other than the recorded default is an operator decision informed
+by ``lilith_cache_path_diagnostic.py``; see its verdict for which setting restored
 resident-versus-offloaded equivalence on the measured stack.
 """
 from __future__ import annotations
@@ -133,13 +144,24 @@ class NumericsConfig:
         return config
 
     @classmethod
-    def from_args(cls, args: argparse.Namespace) -> "NumericsConfig":
+    def from_args(cls, args: argparse.Namespace, *, cuda: bool | None = None) -> "NumericsConfig":
+        """Explicit ``--numerics-*`` flags always win; with none given, ``platform_default()``.
+
+        ``cuda`` is forwarded to ``platform_default`` unchanged: leave it ``None`` when
+        this process runs on the host being measured (it detects locally), pass it
+        explicitly when authoring a config for a *different* host.
+        """
+        explicit = any(value not in (None, False) for value in (
+            args.numerics_sdpa_backend, args.numerics_sdpa_math_fallback, args.numerics_tf32,
+            args.numerics_bf16_reduced_precision_reduction, args.numerics_deterministic))
+        if not explicit:
+            return platform_default(cuda=cuda)
         return cls.from_mapping({
-            "sdpa_backend": args.numerics_sdpa_backend,
-            "sdpa_math_fallback": args.numerics_sdpa_math_fallback,
-            "tf32": args.numerics_tf32,
-            "bf16_reduced_precision_reduction": args.numerics_bf16_reduced_precision_reduction,
-            "deterministic": args.numerics_deterministic,
+            "sdpa_backend": args.numerics_sdpa_backend or SdpaBackend.DEFAULT.value,
+            "sdpa_math_fallback": bool(args.numerics_sdpa_math_fallback),
+            "tf32": args.numerics_tf32 or Toggle.DEFAULT.value,
+            "bf16_reduced_precision_reduction": args.numerics_bf16_reduced_precision_reduction or Toggle.DEFAULT.value,
+            "deterministic": bool(args.numerics_deterministic),
             "deterministic_warn_only": False,
         })
 
@@ -193,6 +215,42 @@ class NumericsConfig:
             yield self
 
 
+def cuda_default() -> "NumericsConfig":
+    """The recorded default on CUDA (not ROCm): EFFICIENT SDPA with MATH fallback.
+
+    See the module docstring for the C6 round 2/round 3 finding this encodes.
+    """
+    return NumericsConfig(sdpa_backend=SdpaBackend.EFFICIENT, sdpa_math_fallback=True)
+
+
+def detect_cuda() -> bool:
+    """True for a real (non-ROCm) CUDA build with a device visible to this process.
+
+    Never raises: an absent torch, or a CUDA-less build, both mean False. Correct
+    only for the process's own host; a caller authoring a config for a *different*
+    host must not rely on this (see ``platform_default``).
+    """
+    try:
+        import torch
+    except ImportError:
+        return False
+    return bool(torch.cuda.is_available()) and torch.version.hip is None
+
+
+def platform_default(*, cuda: bool | None = None) -> "NumericsConfig":
+    """The recorded default for this platform: ``cuda_default()`` on CUDA, else ``NumericsConfig()``.
+
+    ``cuda=None`` detects the local process's own CUDA visibility via ``detect_cuda()``
+    (correct for code that runs on the GPU host itself, e.g. the smoke harness or a
+    runtime worker). A caller preparing a *pinned* config for a different host (e.g.
+    an operator machine authoring a frozen worker config for a remote H100 pod) must
+    pass ``cuda`` explicitly instead: local detection would silently record the
+    wrong platform's default.
+    """
+    is_cuda = detect_cuda() if cuda is None else cuda
+    return cuda_default() if is_cuda else NumericsConfig()
+
+
 def observed_state() -> dict[str, Any]:
     """The process-global numerics state as PyTorch reports it right now."""
     state: dict[str, Any] = {
@@ -229,14 +287,16 @@ def observed_state() -> dict[str, Any]:
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    """CLI flags; every default reproduces the qualified (untouched) behaviour."""
-    group = parser.add_argument_group("numerics (recorded in the run manifest; defaults = qualified behaviour)")
-    group.add_argument("--numerics-sdpa-backend", choices=[item.value for item in SdpaBackend],
-                       default=SdpaBackend.DEFAULT.value)
-    group.add_argument("--numerics-sdpa-math-fallback", action="store_true",
+    """CLI flags; with none given, ``NumericsConfig.from_args`` resolves ``platform_default()``
+    (EFFICIENT SDPA + MATH fallback on CUDA, untouched on ROCm/CPU)."""
+    group = parser.add_argument_group(
+        "numerics (recorded in the run manifest; unset = platform_default(), see lilith_numerics.py)")
+    group.add_argument("--numerics-sdpa-backend", choices=[item.value for item in SdpaBackend], default=None,
+                       help="unset = platform_default()'s choice (efficient on CUDA, default elsewhere)")
+    group.add_argument("--numerics-sdpa-math-fallback", action="store_true", default=None,
                        help="allow MATH where the forced SDPA backend has no kernel")
-    group.add_argument("--numerics-tf32", choices=[item.value for item in Toggle], default=Toggle.DEFAULT.value)
+    group.add_argument("--numerics-tf32", choices=[item.value for item in Toggle], default=None)
     group.add_argument("--numerics-bf16-reduced-precision-reduction", choices=[item.value for item in Toggle],
-                       default=Toggle.DEFAULT.value)
-    group.add_argument("--numerics-deterministic", action="store_true",
+                       default=None)
+    group.add_argument("--numerics-deterministic", action="store_true", default=None,
                        help="torch.use_deterministic_algorithms(True); needs CUBLAS_WORKSPACE_CONFIG=:4096:8")

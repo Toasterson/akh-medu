@@ -667,46 +667,60 @@ def _clip_and_step(model, optimizer, config: TrainerConfig) -> float:
     return norm
 
 
-def sft_step(model, optimizer, examples: Sequence[SftExample], config: TrainerConfig, step: int) -> StepReceipt:
+def sft_step(model, optimizer, examples: Sequence[SftExample], config: TrainerConfig, step: int,
+            numerics: Any = None) -> StepReceipt:
+    """``numerics`` (a ``lilith_numerics.NumericsConfig``) wraps this step's compute; the
+    caller resolves the recorded default (see ``lilith_numerics.platform_default``) and
+    passes it explicitly. Unset means untouched PyTorch, matching every call site that
+    predates numerics wiring."""
     import time
-    model.train()
-    _synchronize()
-    started = time.perf_counter()
-    with _activation_context(config):
-        loss, tokens = weighted_sft_loss(model, examples, config)
-        loss.backward()
-    norm = _clip_and_step(model, optimizer, config)
-    _synchronize()
+    import lilith_numerics
+    numerics = lilith_numerics.NumericsConfig() if numerics is None else numerics
+    with numerics.applied():
+        model.train()
+        _synchronize()
+        started = time.perf_counter()
+        with _activation_context(config):
+            loss, tokens = weighted_sft_loss(model, examples, config)
+            loss.backward()
+        norm = _clip_and_step(model, optimizer, config)
+        _synchronize()
     return StepReceipt('weighted_sft', step, float(loss.detach()), sum(len(e.input_ids) for e in examples),
                        norm, time.perf_counter() - started, {'supervised_tokens': tokens})
 
 
 def preference_step(model, optimizer, pairs: Sequence[PreferencePair], config: TrainerConfig,
-                    step: int) -> StepReceipt:
-    """One DPO-style step; the reference is the frozen parent (adapter disabled)."""
+                    step: int, numerics: Any = None) -> StepReceipt:
+    """One DPO-style step; the reference is the frozen parent (adapter disabled).
+
+    See ``sft_step`` for ``numerics``.
+    """
     import time
+    import lilith_numerics
     torch = _torch()
-    model.train()
-    _synchronize()
-    started = time.perf_counter()
-    references = []
-    with torch.no_grad(), model.disable_adapter():
-        for pair in pairs:
-            references.append((sequence_logp(model, pair.chosen(), config),
-                               sequence_logp(model, pair.rejected(), config)))
-    total = 0.0
-    margins = []
-    with _activation_context(config):
-        for pair, (ref_chosen, ref_rejected) in zip(pairs, references):
-            chosen = sequence_logp(model, pair.chosen(), config)
-            rejected = sequence_logp(model, pair.rejected(), config)
-            loss = preference_loss(chosen, rejected, ref_chosen, ref_rejected,
-                                   beta=config.preference_beta, weight=pair.weight) / len(pairs)
-            loss.backward()
-            total += float(loss.detach())
-            margins.append(float(((chosen - ref_chosen) - (rejected - ref_rejected)).detach()))
-    norm = _clip_and_step(model, optimizer, config)
-    _synchronize()
+    numerics = lilith_numerics.NumericsConfig() if numerics is None else numerics
+    with numerics.applied():
+        model.train()
+        _synchronize()
+        started = time.perf_counter()
+        references = []
+        with torch.no_grad(), model.disable_adapter():
+            for pair in pairs:
+                references.append((sequence_logp(model, pair.chosen(), config),
+                                   sequence_logp(model, pair.rejected(), config)))
+        total = 0.0
+        margins = []
+        with _activation_context(config):
+            for pair, (ref_chosen, ref_rejected) in zip(pairs, references):
+                chosen = sequence_logp(model, pair.chosen(), config)
+                rejected = sequence_logp(model, pair.rejected(), config)
+                loss = preference_loss(chosen, rejected, ref_chosen, ref_rejected,
+                                       beta=config.preference_beta, weight=pair.weight) / len(pairs)
+                loss.backward()
+                total += float(loss.detach())
+                margins.append(float(((chosen - ref_chosen) - (rejected - ref_rejected)).detach()))
+        norm = _clip_and_step(model, optimizer, config)
+        _synchronize()
     tokens = sum(len(p.prompt_ids) * 2 + len(p.chosen_ids) + len(p.rejected_ids) for p in pairs)
     return StepReceipt('sibling_preference', step, total, tokens, norm, time.perf_counter() - started,
                        {'margins': margins, 'beta': config.preference_beta})

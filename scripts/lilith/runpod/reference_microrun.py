@@ -40,6 +40,7 @@ from typing import Any, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import lilith_lora_trainer as trainer  # noqa: E402
+import lilith_numerics  # noqa: E402  (on sys.path via lilith_lora_trainer's session-platform insert)
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 SUBSET_MANIFEST = REPOSITORY / 'training/lilith/transcripts-20260922/sft-subset-v1-manifest.json'
@@ -214,6 +215,23 @@ def environment_record() -> dict[str, Any]:
     return record
 
 
+def resolve_numerics(args) -> lilith_numerics.NumericsConfig:
+    """This process runs on the host being measured, so local CUDA detection is correct
+    (unlike ``lilith_runtime_training_config.py``, which authors a config for a
+    possibly different host and must pass ``cuda`` explicitly)."""
+    try:
+        return lilith_numerics.NumericsConfig.from_args(args)
+    except lilith_numerics.NumericsError as error:
+        raise trainer.LilithTrainerError('lilith::microrun::numerics', str(error),
+                                         'pass a valid --numerics-* combination or leave them all unset')
+
+
+def numerics_manifest_under(numerics: lilith_numerics.NumericsConfig) -> dict[str, Any]:
+    """The requested/observed manifest, captured while ``numerics`` is actually applied."""
+    with numerics.applied():
+        return numerics.manifest()
+
+
 def trainer_config(args) -> trainer.TrainerConfig:
     return trainer.TrainerConfig(rank=args.rank, base_precision=args.base_precision,
                                  learning_rate=REFERENCE['trainer']['learning_rate'],
@@ -291,12 +309,14 @@ def _data(args, parent: Path) -> tuple[list[Record], dict[str, Any]]:
 def run_microrun(args) -> int:
     import torch
     config = trainer_config(args)
+    numerics = resolve_numerics(args)
     report = Report(args.output, {'schema': 'lilith/reference-microrun-result@1', 'status': 'starting',
                                   'reference': REFERENCE, 'reference_sha256': REFERENCE_SHA256,
                                   'quality_claim': False, 'release_selected': False})
     try:
         report.data['environment'] = environment_record()
         report.data['trainer_config'] = config.to_record()
+        report.data['numerics'] = numerics_manifest_under(numerics)
         report.data['phase'] = 'loading'
         report.persist()
         seed_everything(args.seed)
@@ -335,7 +355,7 @@ def run_microrun(args) -> int:
                     entry['status'] = 'budget_exhausted'
                     break
                 example = pack_example(records, context, step, source=data['kind'])
-                receipt = trainer.sft_step(model, optimizer, [example], config, step)
+                receipt = trainer.sft_step(model, optimizer, [example], config, step, numerics=numerics)
                 entry['loss_curve'].append(asdict(receipt))
                 if step % 10 == 0 or step == args.steps - 1:
                     report.persist()
@@ -343,7 +363,8 @@ def run_microrun(args) -> int:
                 for step in range(REFERENCE['preference_steps']):
                     pair = mechanics_pair(records, step, source=data['kind'])
                     entry.setdefault('preference', []).append(
-                        asdict(trainer.preference_step(model, optimizer, [pair], config, args.steps + step)))
+                        asdict(trainer.preference_step(model, optimizer, [pair], config, args.steps + step,
+                                                        numerics=numerics)))
                 entry['status'] = 'completed'
             timed = entry['loss_curve'][1:] or entry['loss_curve']
             entry['train_tokens_per_second'] = (sum(r['tokens'] for r in timed) / sum(r['seconds'] for r in timed)
@@ -405,11 +426,13 @@ def run_memory_probe(args) -> int:
         raise trainer.LilithTrainerError('lilith::microrun::no_cuda', 'the memory probe measures CUDA memory',
                                          'run it on the GPU pod; CPU tests cover the micro-run path instead')
     config = trainer_config(args)
+    numerics = resolve_numerics(args)
     report = Report(args.output, {'schema': 'lilith/memory-probe@1', 'status': 'starting',
                                   'reference_sha256': REFERENCE_SHA256, 'contexts': {}})
     try:
         report.data['environment'] = environment_record()
         report.data['trainer_config'] = config.to_record()
+        report.data['numerics'] = numerics_manifest_under(numerics)
         seed_everything(args.seed)
         model, load_receipt = trainer.load_training_model(args.parent, config, device=args.device)
         report.data['load'] = load_receipt
@@ -425,10 +448,10 @@ def run_memory_probe(args) -> int:
             try:
                 # Step 1 includes allocator/kernel warm-up and first Adam state allocation;
                 # step 2 is the steady-state measurement.
-                first = trainer.sft_step(model, optimizer, [example], config, 0)
+                first = trainer.sft_step(model, optimizer, [example], config, 0, numerics=numerics)
                 entry['first_step_including_warmup'] = {
                     'seconds': first.seconds, 'tokens_per_second': first.tokens / first.seconds}
-                steady = trainer.sft_step(model, optimizer, [example], config, 1)
+                steady = trainer.sft_step(model, optimizer, [example], config, 1, numerics=numerics)
                 total = torch.cuda.mem_get_info()[1]
                 entry.update(status='fits', steady_state_seconds=steady.seconds, loss=steady.loss,
                              steady_state_tokens_per_second=steady.tokens / steady.seconds,
@@ -475,21 +498,26 @@ def _generate_vllm(args, prompt_ids: list[int], max_new: int) -> dict[str, Any]:
             'tokens_per_second': generated / seconds, 'lora_applied': True}
 
 
-def _generate_hf(args, prompt_ids: list[int], max_new: int) -> dict[str, Any]:
+def _generate_hf(args, prompt_ids: list[int], max_new: int,
+                 numerics: lilith_numerics.NumericsConfig) -> dict[str, Any]:
+    """The HF fallback path: real ``attn_implementation='sdpa'``, so ``numerics`` (unlike
+    for the custom chunked-attention training path) can change its generated logits,
+    not just its numeric noise floor."""
     import torch
     from peft import PeftModel
     from transformers import Gemma4UnifiedForConditionalGeneration
-    base = Gemma4UnifiedForConditionalGeneration.from_pretrained(
-        args.parent, local_files_only=True, dtype=torch.bfloat16, attn_implementation='sdpa',
-        device_map={'': args.device})
-    model = PeftModel.from_pretrained(base, args.adapter_dir, is_trainable=False).eval()
-    ids = torch.tensor([prompt_ids], device=args.device)
-    with torch.no_grad():
-        model.generate(input_ids=ids, max_new_tokens=8, min_new_tokens=8, do_sample=False)
-        trainer._synchronize()
-        started = time.perf_counter()
-        output = model.generate(input_ids=ids, max_new_tokens=max_new, min_new_tokens=max_new, do_sample=False)
-        trainer._synchronize()
+    with numerics.applied():
+        base = Gemma4UnifiedForConditionalGeneration.from_pretrained(
+            args.parent, local_files_only=True, dtype=torch.bfloat16, attn_implementation='sdpa',
+            device_map={'': args.device})
+        model = PeftModel.from_pretrained(base, args.adapter_dir, is_trainable=False).eval()
+        ids = torch.tensor([prompt_ids], device=args.device)
+        with torch.no_grad():
+            model.generate(input_ids=ids, max_new_tokens=8, min_new_tokens=8, do_sample=False)
+            trainer._synchronize()
+            started = time.perf_counter()
+            output = model.generate(input_ids=ids, max_new_tokens=max_new, min_new_tokens=max_new, do_sample=False)
+            trainer._synchronize()
     seconds = time.perf_counter() - started
     generated = output.shape[1] - ids.shape[1]
     return {'backend': 'hf', 'generated_tokens': generated, 'seconds': seconds,
@@ -498,10 +526,12 @@ def _generate_hf(args, prompt_ids: list[int], max_new: int) -> dict[str, Any]:
 
 def run_generate(args) -> int:
     from transformers import AutoTokenizer
+    numerics = resolve_numerics(args)
     report = Report(args.output, {'schema': 'lilith/generation-throughput@1', 'status': 'starting',
                                   'adapter_dir': str(args.adapter_dir), 'streams': 1})
     try:
         report.data['environment'] = environment_record()
+        report.data['numerics'] = numerics_manifest_under(numerics)
         tokenizer = AutoTokenizer.from_pretrained(args.parent, local_files_only=True)
         prompt_ids = _generation_prompt_ids(tokenizer)
         max_new = REFERENCE['generation']['max_new_tokens']
@@ -509,6 +539,8 @@ def run_generate(args) -> int:
         result = None
         if args.generation_backend in ('auto', 'vllm'):
             try:
+                # vLLM manages its own kernels (flashinfer); the recorded numerics knobs
+                # target torch's own SDPA dispatch and do not apply to this backend.
                 result = _generate_vllm(args, prompt_ids, max_new)
             except Exception as error:   # recorded, never hidden
                 report.data['vllm_error'] = f'{type(error).__name__}: {error}'[:4000]
@@ -516,7 +548,7 @@ def run_generate(args) -> int:
                 if args.generation_backend == 'vllm':
                     raise
         if result is None:
-            result = _generate_hf(args, prompt_ids, max_new)
+            result = _generate_hf(args, prompt_ids, max_new, numerics)
         report.data.update(result)
         report.data['status'] = 'completed'
         report.persist()
@@ -529,6 +561,7 @@ def run_generate(args) -> int:
 
 def run_cold_reload(args) -> int:
     import torch
+    numerics = resolve_numerics(args)
     probe_file = json.loads(Path(args.probe).read_text())
     config = trainer.TrainerConfig(**{key: value for key, value in probe_file['trainer_config'].items()
                                       if key not in ('lora_alpha', 'target_modules')})
@@ -536,12 +569,14 @@ def run_cold_reload(args) -> int:
                                   'adapter_dir': str(args.adapter_dir), 'probe': str(args.probe)})
     try:
         report.data['environment'] = environment_record()
+        report.data['numerics'] = numerics_manifest_under(numerics)
         report.data['parent_pins'] = trainer.verify_parent(args.parent)
         # Like with like: the adapter's own training precision (bf16, or an NF4 base).
         report.data['base_precision'] = config.base_precision
         base, _ = trainer.load_parent_base(args.parent, config, device=args.device)
         model, tensor_sha = trainer.reload_adapter(base, args.adapter_dir, probe_file['adapter'])
-        observed = probe_logits(model, probe_file['probe']['input_ids'])
+        with numerics.applied():
+            observed = probe_logits(model, probe_file['probe']['input_ids'])
         recorded = logits_record(observed)
         expected_sample = torch.tensor(probe_file['probe']['sample'])
         max_abs = float((observed[:, :8] - expected_sample).abs().max())
@@ -583,6 +618,7 @@ def parse_args(argv: Sequence[str] | None = None):
     parser.add_argument('--max-wall-seconds', type=float)
     parser.add_argument('--logit-tolerance', type=float, default=1e-3)
     parser.add_argument('--device', default='cuda:0')
+    lilith_numerics.add_arguments(parser)
     args = parser.parse_args(argv)
     if args.contexts is None:
         args.contexts = list(REFERENCE['memory_probe_contexts'] if args.mode == 'memory-probe'

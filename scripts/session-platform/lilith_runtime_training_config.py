@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from adam_kaine_code_rl_tasks import verifier_identity
+import lilith_numerics
 from lilith_adapter_mechanics import PARENT_SHA256, PARENT_CONFIG_SHA256, TARGET
 from lilith_paths import resolve as resolve_paths
 from lilith_runtime_training_worker import TRAINING_SOURCES, digest, write
@@ -25,9 +26,19 @@ def main():
                        help='synchronous CPU KV offload (24 GB cards)')
     cache.add_argument('--resident-cache', dest='cache_offloading', action='store_false',
                        help='GPU-resident KV (H100 80GB)')
+    lilith_numerics.add_arguments(parser)
     args = parser.parse_args()
     paths = resolve_paths(args.paths_config)
     cache_offloading = paths.cache_offloading if args.cache_offloading is None else args.cache_offloading
+    # This script authors a config for a possibly *different* host (the operator
+    # machine may have no CUDA at all), so the platform signal is the same one the
+    # operator already gives cache_offloading: resident KV (False) means CUDA/H100,
+    # offloaded KV (True, the ROCm/24 GB default) means not. Local torch detection
+    # would be wrong here; see lilith_numerics.platform_default.
+    try:
+        numerics = lilith_numerics.NumericsConfig.from_args(args, cuda=not cache_offloading)
+    except lilith_numerics.NumericsError as error:
+        parser.error(str(error))
     if args.config_output.exists():
         raise ValueError('refuse to overwrite frozen worker configuration')
     if args.stack_output.exists():
@@ -57,6 +68,12 @@ def main():
         'artifact_path':'clamp_u8.py', 'max_context_tokens':32768, 'max_output_tokens':16384,
         'max_iterations':16, 'online_banks':3, 'learning_rate':1e-4, 'beta':0.1,
         'cache_offloading':cache_offloading, 'paths':paths.to_record(),
+        # Pinned numerics (lilith_numerics.py): the worker applies this exact config
+        # around the qualified engine's compute and records the observed state in its
+        # own manifest at run time. Absent in configs written before this field
+        # existed; the worker treats that as NumericsConfig() (untouched), matching
+        # what those historical runs actually did. Never rewritten after the fact.
+        'numerics':numerics.requested(),
         'reasoning':{'enabled':True, 'efficiency_experiment':False,
                      'truncation_is_resource_limit':True, 'context_discarding':False},
         'arms':['base', 'sft_distill', 'klpo_online', 'adapter_blend_0p5'],
