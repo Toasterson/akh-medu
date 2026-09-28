@@ -895,7 +895,7 @@ class ServePodTests(unittest.TestCase):
         joined = " ".join(argv)
         self.assertNotIn(self.KEY, joined, "the key never goes on argv")
         self.assertIn("--served-model-name lilith", joined)
-        self.assertIn("--max-model-len 32768", joined)
+        self.assertIn("--max-model-len 65536", joined)
         self.assertIn("--kv-cache-dtype auto", joined)
         self.assertNotIn("--enable-log-requests", argv)
         self.assertNotIn("--enable-lora", argv)

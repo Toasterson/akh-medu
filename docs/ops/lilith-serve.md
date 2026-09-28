@@ -123,7 +123,8 @@ model = "lilith"
 [openai_endpoint]
 base_url = "https://<podId>-8000.proxy.runpod.net/v1"   # 1Password lilith-serve-endpoint base_url + /v1
 api_key = "env:LILITH_SERVE_API_KEY"                     # from 1Password lilith-serve-api-key
-context_window = 32768
+context_window = 49152   # headroom below the pod's 65536 (LILITH_SERVE_MAX_MODEL_LEN) for
+                          # output + estimation error; see src/agent/context/tool_budget.rs
 ```
 
 Keep all scalars above the first `[table]` (akh TOML table ordering).

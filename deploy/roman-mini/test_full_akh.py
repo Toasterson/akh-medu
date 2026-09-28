@@ -1302,7 +1302,7 @@ class LilithRenderTests(RenderFixture):
         ws = self.toml(self.WS)
         self.assertEqual((ws["name"], ws["backend"], ws["model"]), ("lilith", "openai", "lilith"))
         self.assertEqual(ws["openai_endpoint"], {"base_url": LILITH_URL, "api_key": "env:LILITH_OPENAI_KEY",
-                                                 "context_window": 32768})
+                                                 "context_window": 49152})
         self.assertNotIn("ollama_endpoint", ws)
         self.assertNotIn(LILITH_URL, (SOURCE / "full_akh.py").read_text(), "the URL is a render input")
         self.assertEqual(ws["exec"], {"kind": "none"})

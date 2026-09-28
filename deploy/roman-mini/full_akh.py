@@ -151,7 +151,15 @@ MAX_PROCEDURES_BYTES = 64 * 1024
 # byte-identical to the Roman-only deployment.
 LILITH = "lilith"
 LILITH_MODEL = "lilith"  # vLLM --served-model-name
-LILITH_CONTEXT_WINDOW = 32768
+# vLLM now serves 65536 (serve_pod.sh LILITH_SERVE_MAX_MODEL_LEN default,
+# raised from 32768 2026-09-28 after a live 96 KB `list_plans` tool result
+# overshot the old window — see the in-turn tool-result budget in
+# src/agent/context/tool_budget.rs). This akh-side default stays below that:
+# 65536 - 49152 = 16384 tokens of headroom for the model's own output reserve
+# (DEFAULT_RESERVED_OUTPUT) plus the chars/4 heuristic counter's estimation
+# error against the server's real BPE tokenizer, so a request the akh
+# believes fits is never rejected by vLLM for actually being larger.
+LILITH_CONTEXT_WINDOW = 49152
 LILITH_CONFIG_FILE = "config/lilith.json"
 LILITH_CONFIG_KEYS = {"budget", "base_url_file", "context_window"}
 # The Runpod proxy URL (1Password item `lilith-serve-endpoint`, field
@@ -1068,7 +1076,9 @@ def lilith_settings(root: Path) -> LilithSettings | None:
       (1Password item `lilith-serve-endpoint`, field `base_url`). The URL is
       read here, at render time, because `[openai_endpoint] base_url` takes no
       `env:` indirection.
-    - `context_window` (optional, default 32768).
+    - `context_window` (optional, default 49152; headroom below vLLM's 65536
+      serving window for output + estimation error — see
+      `LILITH_CONTEXT_WINDOW`).
 
     Absent file: None, and nothing about Lilith is rendered. A present but
     malformed file (or a missing/invalid base URL) fails the whole render
