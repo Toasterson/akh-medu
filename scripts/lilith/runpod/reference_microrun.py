@@ -7,8 +7,10 @@ Modes (each writes one exclusively created JSON file and refuses an existing one
                    steps + 1 sibling-preference step from the same seeded adapter;
                    records loss curve, adapter hashes, peak memory, train tok/s,
                    wall clock, then measures generation tok/s in a fresh process.
-* ``memory-probe`` one full optimizer step per context (8K/16K/32K by default);
-                   records peak allocated/reserved memory, or the OOM, per context.
+* ``memory-probe`` per context (8K/16K/32K by default) one warm-up optimizer step
+                   (``first_step_including_warmup``) and one steady-state step; records
+                   peak allocated/reserved memory and steady tok/s, or the OOM. Exits 3
+                   and lists ``oom_contexts`` if any requested context does not fit.
 * ``generate``     generation tok/s for a saved adapter (vLLM if importable, else HF).
 * ``cold-reload``  fresh process: reload a saved adapter onto a re-verified parent and
                    prove file hashes, tensor identity and probe-logit identity.
@@ -366,6 +368,12 @@ def run_microrun(args) -> int:
         raise
 
 
+def memory_probe_verdict(contexts: dict[str, dict[str, Any]]) -> tuple[str, list[int]]:
+    """'completed' only if every requested context fits; otherwise name the OOM contexts."""
+    oom = sorted(int(context) for context, entry in contexts.items() if entry.get('status') != 'fits')
+    return ('completed' if not oom else 'oom'), oom
+
+
 def run_memory_probe(args) -> int:
     import torch
     if not torch.cuda.is_available():
@@ -388,12 +396,17 @@ def run_memory_probe(args) -> int:
             report.data['contexts'][str(context)] = entry
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
+            example = pack_example(records, context, 0, source='synthetic')
             try:
-                receipt = trainer.sft_step(model, optimizer, [pack_example(records, context, 0, source='synthetic')],
-                                           config, 0)
+                # Step 1 includes allocator/kernel warm-up and first Adam state allocation;
+                # step 2 is the steady-state measurement.
+                first = trainer.sft_step(model, optimizer, [example], config, 0)
+                entry['first_step_including_warmup'] = {
+                    'seconds': first.seconds, 'tokens_per_second': first.tokens / first.seconds}
+                steady = trainer.sft_step(model, optimizer, [example], config, 1)
                 total = torch.cuda.mem_get_info()[1]
-                entry.update(status='fits', seconds=receipt.seconds, loss=receipt.loss,
-                             tokens_per_second=receipt.tokens / receipt.seconds,
+                entry.update(status='fits', steady_state_seconds=steady.seconds, loss=steady.loss,
+                             steady_state_tokens_per_second=steady.tokens / steady.seconds,
                              peak_allocated_bytes=torch.cuda.max_memory_allocated(),
                              peak_reserved_bytes=torch.cuda.max_memory_reserved(), device_total_bytes=total)
                 entry['headroom_fraction'] = 1 - entry['peak_reserved_bytes'] / total
@@ -403,9 +416,10 @@ def run_memory_probe(args) -> int:
                 entry.update(status='oom', error=str(error)[:2000],
                              peak_allocated_bytes=torch.cuda.max_memory_allocated())
             report.persist()
-        report.data['status'] = 'completed'
+        status, oom = memory_probe_verdict(report.data['contexts'])
+        report.data.update(status=status, oom_contexts=oom)
         report.persist()
-        return 0
+        return 0 if status == 'completed' else 3
     except BaseException as error:
         report.data.update(status='failed', error=f'{type(error).__name__}: {error}', traceback=traceback.format_exc())
         report.persist()
@@ -490,7 +504,6 @@ def run_generate(args) -> int:
 
 def run_cold_reload(args) -> int:
     import torch
-    from transformers import Gemma4UnifiedForConditionalGeneration
     probe_file = json.loads(Path(args.probe).read_text())
     config = trainer.TrainerConfig(**{key: value for key, value in probe_file['trainer_config'].items()
                                       if key not in ('lora_alpha', 'target_modules')})
@@ -499,10 +512,9 @@ def run_cold_reload(args) -> int:
     try:
         report.data['environment'] = environment_record()
         report.data['parent_pins'] = trainer.verify_parent(args.parent)
-        implementation = trainer.register_chunked_attention(config.attention_query_chunk)
-        base = Gemma4UnifiedForConditionalGeneration.from_pretrained(
-            args.parent, local_files_only=True, dtype=trainer._dtype(config), attn_implementation=implementation,
-            device_map={'': args.device})
+        # Like with like: the adapter's own training precision (bf16, or an NF4 base).
+        report.data['base_precision'] = config.base_precision
+        base, _ = trainer.load_parent_base(args.parent, config, device=args.device)
         model, tensor_sha = trainer.reload_adapter(base, args.adapter_dir, probe_file['adapter'])
         observed = probe_logits(model, probe_file['probe']['input_ids'])
         recorded = logits_record(observed)

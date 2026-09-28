@@ -14,8 +14,11 @@
 # never written to disk, echoed, or passed on the command line.
 #
 # Refusals (fail closed): pin mismatch, an env built from a different lock, an
-# unreceipted parent directory, no CUDA device (unless LILITH_ALLOW_NO_CUDA=1),
-# a root outside /workspace (unless LILITH_ALLOW_NON_WORKSPACE=1).
+# unreceipted parent directory, a uv tarball whose sha256 differs from the pin,
+# no GPU / NVIDIA driver < 580 / driver CUDA < 13.0 / no torch CUDA device (unless
+# LILITH_ALLOW_NO_CUDA=1), a root outside /workspace (unless LILITH_ALLOW_NON_WORKSPACE=1).
+# Readiness (driver, driver CUDA version, torch CUDA runtime) is printed first, so a
+# wrong host shows up immediately. Create pods with allowedCudaVersions >= 13.0.
 set -euo pipefail
 umask 077
 
@@ -23,6 +26,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ROOT="${LILITH_ROOT:-/workspace/lilith}"
 UV_VERSION="0.12.8"
+UV_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz"
+UV_SHA256="2e2b37e9811e17675a9e70bed5e1a58fc8c0388be63d751d72cc735188c149ff"
+MIN_DRIVER_MAJOR=580
+MIN_CUDA_MAJOR=13
 PYTHON_VERSION="3.12"
 LOCK="$SCRIPT_DIR/requirements-cuda.txt"
 PARENT_REPO="google/gemma-4-12B-it"
@@ -127,12 +134,36 @@ print(json.dumps({'cuda_available': record['cuda_available'], 'torch_cuda': reco
 PY
 }
 
+gpu_readiness() {  # printed before anything else; refuses an old driver early
+  local allow="${LILITH_ALLOW_NO_CUDA:-0}"
+  if ! command -v nvidia-smi >/dev/null; then
+    [[ "$allow" == 1 ]] && { log "readiness: no nvidia-smi (LILITH_ALLOW_NO_CUDA=1)"; return 0; }
+    die lilith::bootstrap::no_gpu "nvidia-smi not found" \
+      "run on a GPU pod created with allowedCudaVersions >= $MIN_CUDA_MAJOR.0"
+  fi
+  local name driver cuda
+  name="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n1)"
+  driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1)"
+  cuda="$(nvidia-smi | sed -n 's/.*CUDA Version: *\([0-9][0-9.]*\).*/\1/p' | head -n1)"
+  log "readiness: gpu='$name' driver=$driver driver_cuda=${cuda:-unknown} (lock needs driver >= $MIN_DRIVER_MAJOR, CUDA >= $MIN_CUDA_MAJOR.0)"
+  if [[ "$allow" != 1 ]] && { [[ ! "$driver" =~ ^[0-9]+ || ! "$cuda" =~ ^[0-9]+ ]] ||
+                             (( ${driver%%.*} < MIN_DRIVER_MAJOR )) || (( ${cuda%%.*} < MIN_CUDA_MAJOR )); }; then
+    die lilith::bootstrap::cuda_version "driver $driver / CUDA ${cuda:-unknown} is too old for the CUDA 13 wheels" \
+      "stop this pod and recreate it with allowedCudaVersions >= $MIN_CUDA_MAJOR.0"
+  fi
+}
+
 require_cuda() {
+  local runtime
+  runtime="$("$ENV_PY" -c 'import torch; print(torch.__version__, "cuda_runtime=" + str(torch.version.cuda), "available=" + str(torch.cuda.is_available()))')"
+  log "readiness: torch $runtime"
   if [[ "${LILITH_ALLOW_NO_CUDA:-0}" == 1 ]]; then return; fi
   "$ENV_PY" -c 'import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)' ||
-    die lilith::bootstrap::no_cuda "torch $("$ENV_PY" -c 'import torch; print(torch.__version__)') sees no CUDA device" \
-      "the lock uses CUDA 13 wheels (driver >= 580); pick a pod host with a newer driver"
+    die lilith::bootstrap::no_cuda "torch sees no CUDA device ($runtime)" \
+      "the lock uses CUDA 13 wheels (driver >= $MIN_DRIVER_MAJOR); pick a pod host with a newer driver"
 }
+
+gpu_readiness
 
 # --------------------------------------------------------------------- check
 if [[ "$MODE" == check ]]; then
@@ -157,13 +188,24 @@ fi
 mkdir -p "$ROOT"/{gguf,data,bin,adapters,runs,private}
 chmod 700 "$ROOT/private"
 
-# 1. uv (pinned) into the volume.
+# 1. uv from the pinned release tarball, verified against its sha256 (never piped into a shell).
 UV="$ROOT/bin/uv"
 if [[ ! -x "$UV" ]] || ! "$UV" --version | grep -q " $UV_VERSION"; then
-  log "installing uv $UV_VERSION into $ROOT/bin"
-  curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | env UV_INSTALL_DIR="$ROOT/bin" sh >&2
+  [[ "$(uname -m)" == x86_64 ]] || die lilith::bootstrap::arch "uv pin is for x86_64, host is $(uname -m)" \
+    "add the matching release tarball and sha256 pin"
+  log "installing uv $UV_VERSION into $ROOT/bin (sha256 $UV_SHA256)"
+  UV_TMP="$(mktemp -d)"
+  curl -fsSL -o "$UV_TMP/uv.tar.gz" "$UV_URL" ||
+    { rm -rf "$UV_TMP"; die lilith::bootstrap::uv "download of $UV_URL failed" "check network access to github.com"; }
+  if [[ "$(sha256_of "$UV_TMP/uv.tar.gz")" != "$UV_SHA256" ]]; then
+    rm -rf "$UV_TMP"
+    die lilith::bootstrap::uv_pin "uv $UV_VERSION tarball sha256 differs from the pin" "do not install it; investigate the download"
+  fi
+  tar -xzf "$UV_TMP/uv.tar.gz" -C "$UV_TMP"
+  install -m 755 "$UV_TMP/uv-x86_64-unknown-linux-gnu/uv" "$UV"
+  rm -rf "$UV_TMP"
   "$UV" --version | grep -q " $UV_VERSION" || die lilith::bootstrap::uv "uv $UV_VERSION did not install" \
-    "check network access to astral.sh"
+    "inspect $ROOT/bin/uv"
 fi
 
 # 2. Pinned CUDA venv; never mutated in place once built.

@@ -458,11 +458,10 @@ def prepare_lora_model(base, config: TrainerConfig):
                                  'the parent is not a Gemma4Unified model or module names changed')
     for parameter in base.parameters():
         parameter.requires_grad_(False)
-    if config.base_precision == 'nf4':
-        from peft import prepare_model_for_kbit_training
-        base = prepare_model_for_kbit_training(
-            base, use_gradient_checkpointing=config.gradient_checkpointing,
-            gradient_checkpointing_kwargs={'use_reentrant': False})
+    # peft.prepare_model_for_kbit_training is deliberately NOT used: it upcasts every
+    # non-quantized tensor (embeddings, tied LM head) to fp32, which breaks the NF4
+    # memory budget (plan §2: 7.8 GB). Freezing + non-reentrant checkpointing is all
+    # the NF4 base needs; assert_base_dtypes() below enforces bf16.
     torch.manual_seed(config.seed)
     model = get_peft_model(base, LoraConfig(
         r=config.rank, lora_alpha=config.lora_alpha, lora_dropout=0.0, bias='none',
@@ -472,7 +471,35 @@ def prepare_lora_model(base, config: TrainerConfig):
         model.config.use_cache = False
         model.get_base_model().config.get_text_config().use_cache = False
     surface = assert_trainable_surface(model, targets)
+    surface['base_dtypes'] = assert_base_dtypes(model.get_base_model(), config)
     return model, surface
+
+
+def assert_base_dtypes(model, config: TrainerConfig) -> dict[str, int]:
+    """Frozen floating tensors stay in the base dtype (bf16 for bf16/NF4); norms may be fp32.
+
+    Quantized NF4 storage (uint8) is skipped; LoRA factors (fp32 masters) are skipped.
+    Returns a dtype histogram for the receipt.
+    """
+    torch = _torch()
+    expected = _dtype(config)
+    histogram: dict[str, int] = {}
+    offenders = []
+    for name, parameter in model.named_parameters():
+        if '.lora_' in name or not parameter.is_floating_point():
+            continue
+        histogram[str(parameter.dtype)] = histogram.get(str(parameter.dtype), 0) + parameter.numel()
+        if parameter.dtype == expected:
+            continue
+        if parameter.dtype == torch.float32 and 'norm' in name.rsplit('.', 2)[-2]:
+            continue
+        offenders.append(f'{name}:{parameter.dtype}')
+    if offenders:
+        raise LilithTrainerError('lilith::trainer::dtype', f'{len(offenders)} base tensors left {expected}: '
+                                 f'{offenders[:5]}',
+                                 'something upcast the frozen base (e.g. prepare_model_for_kbit_training); '
+                                 'keep embeddings/head/activations in bf16')
+    return histogram
 
 
 def _strip_adapter_prefix(name: str) -> str:
@@ -504,24 +531,34 @@ def load_tokenizer(parent: Path):
     return AutoTokenizer.from_pretrained(parent, local_files_only=True)
 
 
-def load_training_model(parent: Path, config: TrainerConfig, *, device: str = 'cuda:0'):
-    """Verify the pins, load the parent with chunked attention and attach the LoRA surface.
+def load_parent_base(parent: Path, config: TrainerConfig, *, device: str = 'cuda:0'):
+    """The frozen parent exactly as training sees it (bf16, or NF4 blocks + bf16 rest).
 
-    Returns (model, receipt). The receipt records pins, surface size and trainer config.
+    Cold reload uses this too, so an NF4-trained adapter is checked on an NF4 base.
+    Pins are verified by the caller.
     """
     torch = _torch()
-    from transformers import Gemma4UnifiedForConditionalGeneration
-    pins = verify_parent(parent)
+    import transformers
     implementation = register_chunked_attention(config.attention_query_chunk)
     kwargs: dict[str, Any] = {'local_files_only': True, 'dtype': _dtype(config),
                               'attn_implementation': implementation, 'low_cpu_mem_usage': True,
                               'device_map': {'': device}}
     spec = quantization_spec(config)
     if spec is not None:
-        from transformers import BitsAndBytesConfig
-        kwargs['quantization_config'] = BitsAndBytesConfig(
+        kwargs['quantization_config'] = transformers.BitsAndBytesConfig(
             **{**spec, 'bnb_4bit_compute_dtype': torch.bfloat16})
-    base = Gemma4UnifiedForConditionalGeneration.from_pretrained(parent, **kwargs)
+    base = transformers.Gemma4UnifiedForConditionalGeneration.from_pretrained(parent, **kwargs)
+    assert_base_dtypes(base, config)
+    return base, implementation
+
+
+def load_training_model(parent: Path, config: TrainerConfig, *, device: str = 'cuda:0'):
+    """Verify the pins, load the parent with chunked attention and attach the LoRA surface.
+
+    Returns (model, receipt). The receipt records pins, surface size and trainer config.
+    """
+    pins = verify_parent(parent)
+    base, implementation = load_parent_base(parent, config, device=device)
     model, surface = prepare_lora_model(base, config)
     return model, {'parent_pins': pins, 'surface': surface, 'config': config.to_record(),
                               'attention_implementation': implementation}

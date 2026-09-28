@@ -229,6 +229,71 @@ class LoraSurfaceTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_STACK, 'torch/transformers/peft not installed')
+class Nf4PrecisionTests(unittest.TestCase):
+    """Plan §2 NF4 budget: nothing in the frozen base (embeddings, tied head, activations) leaves bf16."""
+
+    def bf16_base(self):
+        return tiny_base(0, trainer.register_chunked_attention(3)).to(torch.bfloat16)
+
+    def test_nf4_preparation_keeps_embeddings_head_and_activations_bf16(self):
+        from unittest import mock
+        import importlib
+        config = trainer.TrainerConfig(base_precision='nf4', ce_chunk_tokens=5, attention_query_chunk=3)
+        with mock.patch.object(importlib.import_module('peft'), 'prepare_model_for_kbit_training',
+                               side_effect=AssertionError('k-bit helper upcasts to fp32')):
+            model, surface = trainer.prepare_lora_model(self.bf16_base(), config)
+        base = model.get_base_model()
+        self.assertEqual(base.model.language_model.embed_tokens.weight.dtype, torch.bfloat16)
+        self.assertEqual(base.lm_head.weight.dtype, torch.bfloat16)
+        self.assertEqual(set(surface['base_dtypes']), {'torch.bfloat16'})
+        activations = []
+        hook = base.model.language_model.layers[3].register_forward_hook(
+            lambda module, inputs, output: activations.append(output.dtype))
+        model.train()
+        loss, _ = trainer.weighted_sft_loss(model, [random_example(2)], config)
+        loss.backward()
+        hook.remove()
+        self.assertTrue(activations)
+        self.assertTrue(all(dtype == torch.bfloat16 for dtype in activations))
+
+    def test_dtype_assertion_rejects_an_upcast_base_but_allows_fp32_norms(self):
+        config = trainer.TrainerConfig(base_precision='nf4')
+        base = self.bf16_base()
+        base.model.language_model.layers[0].input_layernorm.float()
+        trainer.assert_base_dtypes(base, config)                       # fp32 norms are fine
+        base.model.language_model.embed_tokens.float()
+        with self.assertRaises(trainer.LilithTrainerError) as raised:
+            trainer.assert_base_dtypes(base, config)
+        self.assertEqual(raised.exception.code, 'lilith::trainer::dtype')
+
+    def test_parent_loader_quantizes_only_for_nf4_and_cold_reload_uses_it(self):
+        from unittest import mock
+        import importlib
+        # Patch the live module: the lazy `transformers` bound at import time is not
+        # the sys.modules entry the trainer resolves later.
+        live = importlib.import_module('transformers')
+        calls = []
+
+        def fake_from_pretrained(parent, **kwargs):
+            calls.append(kwargs)
+            return self.bf16_base()
+
+        fake_model = mock.Mock(from_pretrained=fake_from_pretrained)
+        with mock.patch.object(live, 'Gemma4UnifiedForConditionalGeneration', fake_model), \
+                mock.patch.object(live, 'BitsAndBytesConfig', lambda **spec: ('bnb', spec)):
+            trainer.load_parent_base(Path('/parent'), trainer.TrainerConfig(base_precision='nf4'), device='cpu')
+            trainer.load_parent_base(Path('/parent'), trainer.TrainerConfig(base_precision='bf16'), device='cpu')
+        nf4, bf16 = calls
+        self.assertEqual(nf4['quantization_config'][1]['bnb_4bit_quant_type'], 'nf4')
+        self.assertEqual(nf4['quantization_config'][1]['bnb_4bit_compute_dtype'], torch.bfloat16)
+        self.assertEqual(nf4['dtype'], torch.bfloat16)
+        self.assertNotIn('quantization_config', bf16)
+        source = Path(microrun.__file__).read_text()
+        cold = source[source.index('def run_cold_reload'):source.index('def parse_args')]
+        self.assertIn('trainer.load_parent_base(args.parent, config', cold)   # adapter's own precision
+
+
+@unittest.skipUnless(HAVE_STACK, 'torch/transformers/peft not installed')
 class LossTests(unittest.TestCase):
     def test_weight_zero_contributes_zero_gradient(self):
         model, config, _ = lora_model()
@@ -275,7 +340,7 @@ class LossTests(unittest.TestCase):
                                         torch.zeros(1), beta=0.1)
         self.assertGreater(float(worse), math.log(2.0))
         silent = trainer.preference_loss(chosen, rejected, torch.zeros(1), torch.zeros(1), beta=0.1, weight=0.0)
-        self.assertEqual(float(silent), 0.0)
+        self.assertEqual(float(silent.detach()), 0.0)
         with self.assertRaises(trainer.LilithTrainerError):
             trainer.preference_loss(chosen, rejected, torch.zeros(1), torch.zeros(1), beta=0.1, weight=-1.0)
 
@@ -381,6 +446,7 @@ class MicrorunEndToEndTests(unittest.TestCase):
             self.assertEqual(code, 0)
             reload = json.loads((root / 'cold-reload.json').read_text())
             self.assertEqual(reload['status'], 'passed')
+            self.assertEqual(reload['base_precision'], 'fp32')    # the adapter's own training precision
             self.assertTrue(reload['probe_sha256_identical'])
             self.assertEqual(reload['tensor_sha256'], report['contexts']['24']['adapter']['tensor_sha256'])
 
@@ -420,6 +486,12 @@ class MicrorunDataTests(unittest.TestCase):
                                     '--adapter-root', '/a', '--synthetic-data', '--base-precision', 'nf4'])
         found = microrun.deviations(args, 'synthetic')
         self.assertEqual(set(found), {'base_precision', 'data'})
+
+    def test_memory_probe_verdict_names_oom_contexts(self):
+        fits = {'status': 'fits'}
+        self.assertEqual(microrun.memory_probe_verdict({'8192': fits, '16384': fits}), ('completed', []))
+        self.assertEqual(microrun.memory_probe_verdict({'8192': fits, '32768': {'status': 'oom'},
+                                                        '16384': {'status': 'oom'}}), ('oom', [16384, 32768]))
 
     def test_memory_probe_defaults_to_three_contexts(self):
         args = microrun.parse_args(['--mode', 'memory-probe', '--parent', '/p', '--output', '/o.json'])

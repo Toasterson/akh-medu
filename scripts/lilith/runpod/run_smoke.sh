@@ -1,27 +1,30 @@
 #!/usr/bin/env bash
 # Lilith C6 H100 smoke (Anima WI 01a0e270-6021): one-shot, fail-closed, <= 2 GPU-hours.
 #
-#   bash scripts/lilith/runpod/run_smoke.sh <run-id>
+#   LILITH_EXPECTED_MAIN_SHA=<40-hex main commit> bash <payload>/scripts/lilith/runpod/run_smoke.sh <run-id>
 #
-# Sequence (each step bounded by the remaining budget):
-#   provenance -> bootstrap --check -> GPU identity -> data pin
+# The pod receives only the payload built by make_payload.sh (never the whole
+# repository). Sequence, each step bounded by the remaining budget:
+#   provenance (payload files vs source-manifest.json vs LILITH_EXPECTED_MAIN_SHA)
+#   -> bootstrap --check -> GPU identity -> data pin
 #   -> lilith_training_cache_control.py on CUDA with resident KV
 #   -> memory probe 8K/16K/32K -> reference micro-run 8K/16K (+ generation tok/s)
 #   -> cold reload of the 8K adapter in a fresh process
-#   -> SHA256SUMS + results tarball under /workspace/lilith/runs/<run-id>/
+#   -> smoke-result.json, then SHA256SUMS (last), then the results tarball.
 #
 # Refuses an existing run directory (one-shot; resuming is a new run id). The EXIT
-# trap always writes smoke-result.json and the tarball, including on failure.
-# Environment knobs (all recorded in smoke-result.json):
+# trap always writes the result, sums and tarball, including on failure.
+# Environment (recorded in smoke-result.json):
+#   LILITH_EXPECTED_MAIN_SHA (required), LILITH_SOURCE_MANIFEST (default <payload>/source-manifest.json),
 #   LILITH_ROOT (default /workspace/lilith), LILITH_SMOKE_BUDGET_SECONDS (7200),
 #   LILITH_SMOKE_SYNTHETIC=1 (no private subset: recorded deviation),
-#   LILITH_SMOKE_ALLOW_GPU=1 (non-H100), LILITH_ALLOW_DIRTY=1 (dirty checkout),
-#   LILITH_ALLOW_UNMERGED=1 (HEAD not on origin/main; e.g. validating this PR before merge).
+#   LILITH_SMOKE_ALLOW_GPU=1 (non-H100),
+#   LILITH_ALLOW_UNMERGED=1 (provenance failures recorded as unverified_allowed instead of stopping).
 set -euo pipefail
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"   # payload root (or a full checkout)
 ROOT="${LILITH_ROOT:-/workspace/lilith}"
 BUDGET="${LILITH_SMOKE_BUDGET_SECONDS:-7200}"
 RUN_ID="${1:-}"
@@ -53,7 +56,9 @@ STEPS="$RUN/steps.tsv"
 printf '%s\n' "$$" > "$RUN/smoke.pid"
 printf '%s\n' "$MARKER" > "$RUN/smoke.marker"
 printf 'step\tstatus\texit_code\tseconds\n' > "$STEPS"
+exec 3>&1 4>&2                                   # original stdout/stderr for after the log closes
 exec > >(tee -a "$RUN/smoke.log") 2>&1
+TEE_PID=$!
 echo "$MARKER started $(date -u +%FT%TZ) budget=${BUDGET}s"
 
 DATA="$ROOT/data/sft-subset-v1.jsonl"
@@ -76,15 +81,20 @@ def load(name):
     except json.JSONDecodeError:
         return {'unreadable': name}
 micro = load('microrun.json') or {}
+provenance = load('provenance.json') or {}
 result = {'schema': 'lilith/c6-smoke-result@1', 'run_id': run_id,
           'status': 'passed' if rc == 0 and all(s['status'] == 'ok' for s in steps) else 'failed',
           'exit_code': rc, 'steps': steps, 'wall_clock_seconds': time.time() - start,
           'budget_seconds': budget, 'quality_claim': False, 'release_selected': False,
-          'knobs': {k: os.environ.get(k) for k in ('LILITH_SMOKE_SYNTHETIC', 'LILITH_SMOKE_ALLOW_GPU',
-                                                   'LILITH_ALLOW_DIRTY', 'LILITH_ALLOW_UNMERGED',
-                                                   'LILITH_SMOKE_BUDGET_SECONDS')},
-          'provenance': load('provenance.json'), 'cache_control_status': (load('cache-control.json') or {}).get('status'),
-          'memory_probe': {k: {f: v.get(f) for f in ('status', 'peak_reserved_bytes', 'headroom_fraction')}
+          'knobs': {k: os.environ.get(k) for k in ('LILITH_EXPECTED_MAIN_SHA', 'LILITH_SOURCE_MANIFEST',
+                                                   'LILITH_SMOKE_SYNTHETIC', 'LILITH_SMOKE_ALLOW_GPU',
+                                                   'LILITH_ALLOW_UNMERGED', 'LILITH_SMOKE_BUDGET_SECONDS')},
+          'provenance': {k: provenance.get(k) for k in ('status', 'expected_main_sha', 'manifest_sha256',
+                                                        'allow_unmerged', 'problems')},
+          'cache_control_status': (load('cache-control.json') or {}).get('status'),
+          'memory_probe_status': (load('memory-probe.json') or {}).get('status'),
+          'memory_probe': {k: {f: v.get(f) for f in ('status', 'peak_reserved_bytes', 'headroom_fraction',
+                                                      'steady_state_tokens_per_second')}
                            for k, v in ((load('memory-probe.json') or {}).get('contexts') or {}).items()},
           'microrun_status': micro.get('status'), 'microrun_is_reference': micro.get('is_reference'),
           'microrun_contexts': {k: {f: v.get(f) for f in ('status', 'train_tokens_per_second', 'peak_reserved_bytes',
@@ -97,12 +107,18 @@ result = {'schema': 'lilith/c6-smoke-result@1', 'run_id': run_id,
 (run / 'smoke-result.json').write_text(json.dumps(result, indent=2) + '\n')
 print(json.dumps({'status': result['status'], 'exit_code': rc}))
 PY
+  echo "$MARKER finished rc=$rc; packaging $RUN/results-$RUN_ID.tar.gz"
+  rm -f "$RUN/smoke.pid"
+  # Close the log so its last line is on disk before it is hashed.
+  exec 1>&3 2>&4
+  local waited=0
+  while kill -0 "$TEE_PID" 2>/dev/null && (( waited < 50 )); do sleep 0.2; waited=$(( waited + 1 )); done
+  # SHA256SUMS is the last file written inside the run dir; only the tarball follows.
   (cd "$RUN" && find . -type f ! -name 'results-*.tar.gz' ! -name SHA256SUMS -print0 | sort -z |
     xargs -0 sha256sum > SHA256SUMS)
   tar -C "$ROOT/runs" -czf "$RUN/results-$RUN_ID.tar.gz" \
     --exclude="$RUN_ID/results-$RUN_ID.tar.gz" --exclude='*/adapter_model.safetensors' "$RUN_ID"
-  echo "$MARKER finished rc=$rc results=$RUN/results-$RUN_ID.tar.gz"
-  rm -f "$RUN/smoke.pid"
+  printf '%s results=%s rc=%s\n' "$MARKER" "$RUN/results-$RUN_ID.tar.gz" "$rc"
 }
 trap finish EXIT
 
@@ -119,47 +135,31 @@ step() {  # step <name> <command...>; external commands are bounded by the remai
   local t0; t0="$(date +%s)"
   local rc=0
   if declare -F "$1" >/dev/null; then
-    "$@" || rc=$?          # short in-shell checks (provenance, GPU identity, data pin)
+    # In-shell checks run with set -e suspended (|| context): every command in
+    # them carries an explicit `|| return 1`, so nothing can pass by falling through.
+    "$@" || rc=$?
   else
     timeout --signal=TERM --kill-after=60 "$left" "$@" || rc=$?
   fi
-  local status=ok; (( rc == 0 )) || status=failed; (( rc == 124 )) && status=timeout
+  local status=ok
+  if (( rc == 124 )); then status=timeout; elif (( rc != 0 )); then status=failed; fi
   printf '%s\t%s\t%s\t%s\n' "$name" "$status" "$rc" "$(( $(date +%s) - t0 ))" >> "$STEPS"
-  (( rc == 0 )) || { echo "step $name $status (exit $rc)"; exit 1; }
+  if (( rc != 0 )); then echo "step $name $status (exit $rc)"; exit 1; fi
 }
 
 provenance() {
-  local sha dirty ancestor
-  sha="$(git -C "$REPO" rev-parse HEAD)"
-  dirty="$(git -C "$REPO" status --porcelain --untracked-files=no | wc -l | tr -d ' ')"
-  if [[ "$dirty" != 0 && "${LILITH_ALLOW_DIRTY:-0}" != 1 ]]; then
-    echo "checkout $REPO is dirty ($dirty files); smoke code must be a clean origin/main commit" >&2
-    return 1
-  fi
-  if git -C "$REPO" rev-parse --verify -q origin/main >/dev/null; then
-    if git -C "$REPO" merge-base --is-ancestor "$sha" origin/main; then ancestor=true; else ancestor=false; fi
-    if [[ "$ancestor" == false && "${LILITH_ALLOW_UNMERGED:-0}" != 1 ]]; then
-      echo "HEAD $sha is not on origin/main; pod code runs from main SHAs (ADR 116 provenance)" >&2
-      return 1
-    fi
-  else
-    ancestor=unverifiable
-  fi
-  "$PY" - "$RUN/provenance.json" "$sha" "$dirty" "$ancestor" "$SCRIPT_DIR" "$REPO" <<'PY'
-import hashlib, json, sys
-from pathlib import Path
-out, sha, dirty, ancestor, scripts, repo = sys.argv[1:7]
-names = ['bootstrap.sh', 'run_smoke.sh', 'lilith_lora_trainer.py', 'reference_microrun.py', 'requirements-cuda.txt']
-sources = {name: hashlib.sha256((Path(scripts) / name).read_bytes()).hexdigest() for name in names}
-for name in ('lilith_training_engine.py', 'lilith_training_cache_control.py', 'lilith_rl.py'):
-    sources[name] = hashlib.sha256((Path(repo) / 'scripts/session-platform' / name).read_bytes()).hexdigest()
-Path(out).write_text(json.dumps({'git_sha': sha, 'dirty_tracked_files': int(dirty),
-                                 'ancestor_of_origin_main': ancestor, 'sources_sha256': sources}, indent=2) + '\n')
-PY
+  local manifest="${LILITH_SOURCE_MANIFEST:-$REPO/source-manifest.json}"
+  local py="$PY"; [[ -x "$py" ]] || py=python3          # verify_payload.py is stdlib-only
+  local allow=()
+  if [[ "${LILITH_ALLOW_UNMERGED:-0}" == 1 ]]; then allow=(--allow-unmerged); fi
+  "$py" "$SCRIPT_DIR/verify_payload.py" verify --root "$REPO" --manifest "$manifest" \
+    --expected-sha "${LILITH_EXPECTED_MAIN_SHA:-}" --output "$RUN/provenance.json" \
+    ${allow[@]+"${allow[@]}"} || return 1
 }
 
 gpu_identity() {
-  nvidia-smi --query-gpu=name,driver_version,memory.total,uuid --format=csv,noheader | tee "$RUN/gpu.csv"
+  nvidia-smi --query-gpu=name,driver_version,memory.total,uuid --format=csv,noheader > "$RUN/gpu.csv" || return 1
+  cat "$RUN/gpu.csv" || return 1
   if ! grep -q 'H100' "$RUN/gpu.csv" && [[ "${LILITH_SMOKE_ALLOW_GPU:-0}" != 1 ]]; then
     echo "not an H100; the C6 reference is defined on 1x H100 80GB (LILITH_SMOKE_ALLOW_GPU=1 to override)" >&2
     return 1
@@ -170,7 +170,7 @@ data_pin() {
   if [[ "${LILITH_SMOKE_SYNTHETIC:-0}" == 1 ]]; then
     echo "synthetic data requested: recorded deviation, loss curve not comparable"; return 0
   fi
-  "$PY" - "$DATA" "$REPO/training/lilith/transcripts-20260922/sft-subset-v1-manifest.json" <<'PY'
+  "$PY" - "$DATA" "$REPO/training/lilith/transcripts-20260922/sft-subset-v1-manifest.json" <<'PY' || return 1
 import hashlib, json, sys
 from pathlib import Path
 data, manifest = Path(sys.argv[1]), json.loads(Path(sys.argv[2]).read_text())
