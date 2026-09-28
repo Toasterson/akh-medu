@@ -994,6 +994,114 @@ class ServePodTests(unittest.TestCase):
         self.assertEqual(selection["registry_source"], "vllm.tool_parsers.ToolParserManager")
         self.assertEqual(selection["available"], ["gemma4", "hermes"])
 
+    # ── reasoning parser (Lilith C3: gemma4's thinking channel leaks into
+    # `content` without one; unlike tool calling this is non-fatal — see the
+    # serve_tools.py module docstring). ────────────────────────────────────
+
+    def _fake_reasoning_registry(self, names: dict[str, str]) -> Path:
+        """A fake `vllm.reasoning.ReasoningParserManager` on its own site dir,
+        `{name: module_path}` becoming `lazy_parsers`."""
+        fake = self.tmp / "reasoning-site"
+        (fake / "vllm" / "reasoning").mkdir(parents=True)
+        (fake / "vllm" / "__init__.py").write_text("")
+        lazy = ", ".join(f"'{n}': ('{m}', 'X')" for n, m in names.items())
+        (fake / "vllm" / "reasoning" / "__init__.py").write_text(
+            f"class ReasoningParserManager:\n    reasoning_parsers = {{}}\n    lazy_parsers = {{{lazy}}}\n")
+        return fake
+
+    def test_reasoning_capture_is_disabled_by_default_when_vllm_is_not_importable(self):
+        # The sandboxed test env has no real vLLM installed (FAKE_VLLM is a
+        # stub binary, not an importable Python package), so `vllm.reasoning`
+        # genuinely doesn't import — exactly like an off-pod dev checkout.
+        # `auto` must degrade to disabled rather than refuse: reasoning
+        # capture is an enhancement, not a requirement to serve.
+        process = self.launch()
+        self.assertEqual(self.wait_state(process, "ready", "failed")["state"], "ready")
+        argv = json.loads((self.tmp / "vllm-argv.json").read_text())
+        self.assertNotIn("--reasoning-parser", argv)
+        session = json.loads(next((self.root / "serve" / "sessions").glob("*/session.json")).read_text())
+        reasoning = session["reasoning"]
+        self.assertEqual(reasoning["schema"], "lilith/serve-reasoning@1")
+        self.assertEqual((reasoning["parser"], reasoning["enabled"], reasoning["requested"]),
+                         (None, False, "auto"))
+
+    def test_reasoning_parser_none_explicitly_disables_it(self):
+        process = self.launch(LILITH_SERVE_REASONING_PARSER="none")
+        self.assertEqual(self.wait_state(process, "ready", "failed")["state"], "ready")
+        argv = json.loads((self.tmp / "vllm-argv.json").read_text())
+        self.assertNotIn("--reasoning-parser", argv)
+        session = json.loads(next((self.root / "serve" / "sessions").glob("*/session.json")).read_text())
+        self.assertEqual(session["reasoning"]["requested"], "none")
+        self.assertFalse(session["reasoning"]["enabled"])
+
+    def test_reasoning_parser_auto_picks_gemma4_when_registered(self):
+        fake = self._fake_reasoning_registry({"gemma4": "gemma4_reasoning_parser",
+                                               "deepseek_r1": "deepseek_r1_reasoning_parser"})
+        process = self.launch(PYTHONPATH=str(fake))
+        self.assertEqual(self.wait_state(process, "ready", "failed")["state"], "ready")
+        argv = json.loads((self.tmp / "vllm-argv.json").read_text())
+        self.assertEqual(argv[argv.index("--reasoning-parser") + 1], "gemma4")
+        session = json.loads(next((self.root / "serve" / "sessions").glob("*/session.json")).read_text())
+        reasoning = session["reasoning"]
+        self.assertEqual((reasoning["parser"], reasoning["enabled"]), ("gemma4", True))
+        self.assertEqual(reasoning["registry_source"], "vllm.reasoning.ReasoningParserManager")
+        self.assertEqual(reasoning["available"], ["deepseek_r1", "gemma4"])
+
+    def test_reasoning_parser_explicit_name_is_honored_when_registered(self):
+        fake = self._fake_reasoning_registry({"gemma4": "x", "deepseek_r1": "y"})
+        process = self.launch(PYTHONPATH=str(fake), LILITH_SERVE_REASONING_PARSER="deepseek_r1")
+        self.assertEqual(self.wait_state(process, "ready", "failed")["state"], "ready")
+        argv = json.loads((self.tmp / "vllm-argv.json").read_text())
+        self.assertEqual(argv[argv.index("--reasoning-parser") + 1], "deepseek_r1")
+
+    def test_reasoning_parser_explicit_name_not_registered_is_a_refusal(self):
+        fake = self._fake_reasoning_registry({"gemma4": "x"})
+        result = subprocess.run(["bash", str(HERE / "serve_pod.sh")],
+                                env=self.env(PYTHONPATH=str(fake), LILITH_SERVE_REASONING_PARSER="nope"),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("error[lilith::serve::reasoning_parser]", result.stderr)
+        self.assertIn("gemma4", result.stderr)
+        self.assertIn("help:", result.stderr)
+        self.assertFalse((self.tmp / "vllm-argv.json").exists(), "vLLM must not start after an explicit refusal")
+        status = json.loads((self.root / "serve" / "status.json").read_text())
+        self.assertEqual(status["state"], "failed")
+
+    def test_reasoning_auto_with_nothing_registered_does_not_refuse(self):
+        # A registry that exists but has no gemma4 entry: still non-fatal,
+        # unlike the equivalent tool-parser case.
+        fake = self._fake_reasoning_registry({"deepseek_r1": "y"})
+        process = self.launch(PYTHONPATH=str(fake))
+        self.assertEqual(self.wait_state(process, "ready", "failed")["state"], "ready")
+        argv = json.loads((self.tmp / "vllm-argv.json").read_text())
+        self.assertNotIn("--reasoning-parser", argv)
+        session = json.loads(next((self.root / "serve" / "sessions").glob("*/session.json")).read_text())
+        reasoning = session["reasoning"]
+        self.assertFalse(reasoning["enabled"])
+        self.assertEqual(reasoning["available"], ["deepseek_r1"])
+
+    def test_the_registry_is_read_from_reasoning_parser_manager_when_vllm_imports(self):
+        fake = self._fake_reasoning_registry({"gemma4": "gemma4_reasoning_parser"})
+        result = subprocess.run([sys.executable, str(HERE / "serve_tools.py"), "resolve-reasoning",
+                                 "--requested", "auto"],
+                                env={**os.environ, "PYTHONPATH": str(fake)}, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selection = json.loads(result.stdout)
+        self.assertEqual(selection["schema"], "lilith/serve-reasoning@1")
+        self.assertEqual(selection["parser"], "gemma4")
+        self.assertTrue(selection["enabled"])
+        self.assertEqual(selection["registry_source"], "vllm.reasoning.ReasoningParserManager")
+
+    def test_resolve_reasoning_none_never_imports_vllm(self):
+        # No PYTHONPATH override and no real vLLM installed: if `none` still
+        # tried a registry lookup it would either raise or hang on import;
+        # it must short-circuit before that.
+        result = subprocess.run([sys.executable, str(HERE / "serve_tools.py"), "resolve-reasoning",
+                                 "--requested", "none"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selection = json.loads(result.stdout)
+        self.assertEqual((selection["parser"], selection["enabled"]), (None, False))
+
     def test_the_payload_ships_every_serving_file(self):
         sys.path.insert(0, str(LILITH / "runpod"))
         import verify_payload

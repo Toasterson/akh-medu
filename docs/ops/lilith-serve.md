@@ -182,6 +182,37 @@ The `lilith` akh uses native OpenAI `tool_calls`, so the pod never serves withou
 
   The record is in `state.json` and `~/lilith-private/serve/readiness/<session>.json`.
 
+### Reasoning parser
+
+Gemma 4's pinned chat template opens a `<|channel>thought` block whenever tools or a system
+message are present — which is always, for Lilith. Without `--reasoning-parser`, vLLM has nowhere
+to route that channel except into the answer's `content`, so the raw `<|channel>thought\n…\n
+<channel|>` markers leak straight into what the akh sees and shows.
+
+- **Start-up (`serve_pod.sh` → `serve_tools.py resolve-reasoning`).** Resolved the same way as the
+  tool-call parser, against `ReasoningParserManager` (`vllm.reasoning`, or
+  `vllm.entrypoints.openai.reasoning_parsers` on older releases; eager plus lazy names) — there is
+  no help-text fallback here, since `vllm serve --help` prints `--reasoning-parser
+  REASONING_PARSER` with no enumerable choice set.
+  - `LILITH_SERVE_REASONING_PARSER=auto` (the default) picks `gemma4` when it is registered.
+  - An explicit name is used only if it is registered; otherwise a refusal
+    (`lilith::serve::reasoning_parser`) listing the available parsers.
+  - `LILITH_SERVE_REASONING_PARSER=none` disables reasoning-channel capture outright, with no
+    registry lookup at all.
+- **Non-fatal, unlike tool calling.** `auto` with nothing registered (including the common
+  off-pod case where `vllm.reasoning` isn't importable at all) quietly disables reasoning capture
+  instead of refusing to serve: a leaked thinking channel is ugly, not a broken response, so the
+  pod still comes up without `--reasoning-parser`. Only an *explicit* unregistered name refuses —
+  a stated request that can't be honored is a misconfiguration worth failing loudly on.
+- **Record.** The parser (or `null` when disabled), how it was chosen, the registry source and the
+  available names are recorded under `session.json` → `reasoning`.
+- **akhomed side.** The `openai` backend already routes a streamed `delta.reasoning_content` to
+  the reasoning/thinking channel (`src/agent/openai_backend.rs`, `chat_stream`); the non-streaming
+  path does not currently read `message.reasoning_content` from `choices[0].message`, so a
+  non-streaming turn on a pod with the reasoning parser enabled still gets clean `content` (the
+  parser strips the channel out of `content` either way) but drops the separated reasoning text
+  rather than surfacing it as a thinking step.
+
 ## KV cache dtype
 
 `auto` (the default) is bf16. Gemma 4's KV is small: 0.60 GB per sequence at 32K (local GPU
@@ -214,6 +245,7 @@ cache control; `session.json` records this.
 | `start` exit 3 `lilith::serve::budget` | A limit binds (message names it and the reset) | Wait for the reset, ask the operator to top up, or serve locally (C6b) |
 | `start` exit 4 `lilith::serve::zero_gpu` | The pod's machine has no free H100; the pod was stopped again | Retry later, or `recreate --yes --confirm-terminate <podId>` (operator-approved; new URL) |
 | `start`/`wait-ready` exit 6 `lilith::serve::tool_calling` | The tools request failed, or returned a malformed or unparsed call; `start` stops the pod | Check `session.json` → `tool_calling` and the vLLM log; select another parser/template pair via `LILITH_SERVE_TOOL_PARSER` / `LILITH_SERVE_CHAT_TEMPLATE` in the pod env |
+| `serve_pod.sh` fails with `lilith::serve::reasoning_parser` | An *explicit* `LILITH_SERVE_REASONING_PARSER=<name>` isn't registered in this vLLM | Pick a listed name, `auto` (best-effort), or `none` (disable it outright) |
 | `start`/`wait-ready` exit 5 `lilith::serve::health_timeout` | vLLM not healthy in 30 min; `start` stops the pod | `ssh` in, read `serve/status.json` and `serve/sessions/<latest>/` and the vLLM log |
 | `status.json` `failed` with `lilith::serve::bootstrap` | Parent/driver/CUDA check failed (not auto-repaired) | Fix the volume, or recreate on a CUDA 13 host |
 | `status.json` `failed` with `lilith::serve::auth` | `/v1/models` answered without the key | Never serve like that (the proxy is public); check vLLM's `VLLM_API_KEY` handling |
