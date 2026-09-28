@@ -2,7 +2,14 @@
 """Render WireGuard + nftables + userspace-client artifacts for Lilith C6a.
 
 Pure stdlib except for the optional `cryptography` fallback used only when
-the `wg` binary is unavailable on the machine running this script. Nothing in
+the `wg` binary is unavailable on the machine running this script.
+
+Variant C (chosen 2026-09-28): the hub is the Flux-managed `wg-lilith` pod on
+archibald's k0s cluster (talos repo `clusters/archibald/lilith-wg`), with a
+fixed pool of peer slots whose private keys live only in 1Password. For C
+this module renders only the pod-client side for one slot (`--slot N`); the
+hub and its allowlist are GitOps state in the talos repo, and `peer.py
+slot-assign/slot-release` hand slot keys to pods. Nothing in
 this module talks to a network or a remote host — it is pure rendering over
 a `wg-config.toml` (see `wg-config.toml.example`) plus a persisted peer-state
 JSON file. `peer.py` is the only piece that opens an SSH connection.
@@ -54,6 +61,12 @@ class Service:
     bypass_gateway: bool
     description: str = ""
     local_port: int | None = None
+    # False keeps a documented entry (e.g. a placeholder) out of every
+    # rendered forward — mirrors `off` in the talos allowlist.conf.
+    enabled: bool = True
+    # Names the pod maps to 127.0.0.1 (/etc/hosts) so HTTP clients send the
+    # right Host header through a forward, e.g. seshat.lab.home.
+    hostnames: tuple[str, ...] = ()
 
     def effective_local_port(self) -> int:
         return self.local_port if self.local_port is not None else self.port
@@ -71,6 +84,8 @@ class Service:
             bypass_gateway=bool(d.get("bypass_gateway", False)),
             description=str(d.get("description", "")),
             local_port=int(d["local_port"]) if "local_port" in d else None,
+            enabled=bool(d.get("enabled", True)),
+            hostnames=tuple(str(h) for h in d.get("hostnames", [])),
         )
 
 
@@ -87,11 +102,14 @@ class HubSection:
     host: str
     public_endpoint: str
     tunnel_address: str
-    ssh_user: str
-    ssh_target: str
-    wg_interface: str
-    config_path: str
+    ssh_user: str = ""
+    ssh_target: str = ""
+    wg_interface: str = ""
+    config_path: str = ""
     ssh_port: int = 22
+    # Variant C: the hub's public key as committed in the talos repo. The
+    # supervisor re-reads it from 1Password at slot-assign time (truth).
+    public_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -111,24 +129,53 @@ class PodsSection:
 
 
 @dataclass(frozen=True)
+class SlotsSection:
+    """Variant C peer-slot pool (talos clusters/archibald/lilith-wg)."""
+
+    count: int
+    first_address: str  # slot 1's tunnel address; slot n = first + (n - 1)
+    vault: str
+    op_command: str  # e.g. ~/.local/bin/op-service-account
+    hub_item: str  # 1Password item holding the hub keypair
+    item_prefix: str  # slot n lives in item f"{item_prefix}{n}"
+    lease_dir: Path  # public lease records only (never key material)
+    talos_repo: Path | None
+    talos_ref: str
+    talos_peers_path: str
+    talos_allowlist_path: str
+
+    def item(self, n: int) -> str:
+        return f"{self.item_prefix}{n}"
+
+    def address(self, n: int) -> str:
+        if not 1 <= n <= self.count:
+            raise ValueError(f"slot {n} is outside the pool 1..{self.count}")
+        return f"{ipaddress.ip_address(self.first_address) + (n - 1)}/32"
+
+
+@dataclass(frozen=True)
 class Config:
     tunnel: TunnelSection
     hub: HubSection
-    gateway: GatewaySection
-    pods: PodsSection
+    gateway: GatewaySection | None
+    pods: PodsSection | None
     services: tuple[Service, ...]
-    keys_dir: Path
+    keys_dir: Path | None
     nft_table: str
     source_path: Path | None = None
+    slots: SlotsSection | None = None
 
     def allow_services(self) -> list[Service]:
-        return [s for s in self.services if not s.bypass_gateway]
+        return [s for s in self.services if s.enabled and not s.bypass_gateway]
 
     def bypass_services(self) -> list[Service]:
         return [s for s in self.services if s.bypass_gateway]
 
     def is_variant_b(self) -> bool:
         return self.tunnel.variant.strip().upper() == "B"
+
+    def is_variant_c(self) -> bool:
+        return self.tunnel.variant.strip().upper() == "C"
 
 
 def _assert_outside_repo(path: Path, *, what: str) -> Path:
@@ -144,6 +191,9 @@ def _assert_outside_repo(path: Path, *, what: str) -> Path:
 
 def load_config(path: Path) -> Config:
     raw = tomllib.loads(Path(path).read_text())
+    variant = str(raw.get("tunnel", {}).get("variant", "")).strip().upper()
+    if variant == "C":
+        return _load_variant_c(raw, Path(path))
     try:
         tunnel = TunnelSection(
             variant=str(raw["tunnel"]["variant"]),
@@ -178,7 +228,7 @@ def load_config(path: Path) -> Config:
         raise ValueError(f"wg-config.toml missing required key: {exc}") from exc
 
     if tunnel.variant.strip().upper() not in ("A", "B"):
-        raise ValueError(f"tunnel.variant must be 'A' or 'B', got {tunnel.variant!r}")
+        raise ValueError(f"tunnel.variant must be 'A', 'B' or 'C', got {tunnel.variant!r}")
 
     _validate_local_port_collisions(services)
 
@@ -188,10 +238,71 @@ def load_config(path: Path) -> Config:
     )
 
 
+def _load_variant_c(raw: dict, path: Path) -> Config:
+    """Variant C: hub = Flux-managed wg-lilith on archibald (talos repo)."""
+    try:
+        tunnel = TunnelSection(
+            variant="C",
+            subnet=str(raw["tunnel"]["subnet"]),
+            listen_port=int(raw["tunnel"]["listen_port"]),
+            dns=list(raw["tunnel"].get("dns", [])),
+        )
+        hub = HubSection(
+            host=str(raw["hub"]["host"]),
+            public_endpoint=str(raw["hub"]["public_endpoint"]),
+            tunnel_address=str(raw["hub"]["tunnel_address"]),
+            public_key=str(raw["hub"].get("public_key", "")),
+        )
+        s = raw["slots"]
+        talos_repo = s.get("talos_repo")
+        slots = SlotsSection(
+            count=int(s["count"]),
+            first_address=str(s["first_address"]),
+            vault=str(s["vault"]),
+            op_command=str(Path(str(s["op_command"])).expanduser()),
+            hub_item=str(s["hub_item"]),
+            item_prefix=str(s["item_prefix"]),
+            lease_dir=_assert_outside_repo(Path(str(s["lease_dir"])), what="[slots].lease_dir"),
+            talos_repo=Path(str(talos_repo)).expanduser() if talos_repo else None,
+            talos_ref=str(s.get("talos_ref", "origin/main")),
+            talos_peers_path=str(s.get("talos_peers_path", "clusters/archibald/lilith-wg/peers.conf")),
+            talos_allowlist_path=str(s.get("talos_allowlist_path", "clusters/archibald/lilith-wg/allowlist.conf")),
+        )
+        services = tuple(Service.from_dict(d) for d in raw.get("services", []))
+    except KeyError as exc:
+        raise ValueError(f"wg-config.toml (variant C) missing required key: {exc}") from exc
+
+    subnet = ipaddress.ip_network(tunnel.subnet)
+    hub_ip = ipaddress.ip_interface(hub.tunnel_address).ip
+    if hub_ip not in subnet:
+        raise ValueError(f"hub.tunnel_address {hub.tunnel_address} is outside tunnel.subnet {tunnel.subnet}")
+    if slots.count < 1:
+        raise ValueError("slots.count must be at least 1")
+    for n in range(1, slots.count + 1):
+        ip = ipaddress.ip_interface(slots.address(n)).ip
+        if ip not in subnet or ip == hub_ip:
+            raise ValueError(f"slot {n} address {ip} must be inside {tunnel.subnet} and not the hub")
+    for svc in services:
+        if svc.enabled and not svc.bypass_gateway:
+            try:
+                ipaddress.ip_address(svc.host)
+            except ValueError as exc:
+                raise ValueError(
+                    f"service {svc.name!r}: tunnelled hosts must be literal IPv4 addresses "
+                    f"(the hub allowlist is IP:port), got {svc.host!r}"
+                ) from exc
+    _validate_local_port_collisions(services)
+
+    return Config(
+        tunnel=tunnel, hub=hub, gateway=None, pods=None, services=services,
+        keys_dir=None, nft_table="lilith_wg", source_path=path, slots=slots,
+    )
+
+
 def _validate_local_port_collisions(services: tuple[Service, ...]) -> None:
     seen: dict[tuple[int, str], str] = {}
     for svc in services:
-        if svc.bypass_gateway:
+        if svc.bypass_gateway or not svc.enabled:
             continue
         key = (svc.effective_local_port(), svc.protocol)
         if key in seen:
@@ -255,6 +366,24 @@ def generate_keypair() -> KeyPair:
         encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw
     )
     return KeyPair(private=base64.b64encode(priv_bytes).decode(), public=base64.b64encode(pub_bytes).decode())
+
+
+def derive_public_key(private: str) -> str:
+    """Public key for a WireGuard private key (to verify 1Password items)."""
+    wg = _wg_binary()
+    if wg:
+        return subprocess.run(
+            [wg, "pubkey"], input=private, capture_output=True, check=True, text=True
+        ).stdout.strip()
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    except ImportError as exc:
+        raise RuntimeError("cannot derive a WireGuard public key: install wireguard-tools or `cryptography`") from exc
+    sk = X25519PrivateKey.from_private_bytes(base64.b64decode(private))
+    return base64.b64encode(
+        sk.public_key().public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
+    ).decode()
 
 
 def load_or_create_keypair(keys_dir: Path, name: str) -> KeyPair:
@@ -385,11 +514,26 @@ def render_gateway_conf(config: Config, gateway_keys: KeyPair, hub_pubkey: str) 
     return "\n".join(lines).rstrip() + "\n"
 
 
+def pod_allowed_ips(config: Config) -> str:
+    """AllowedIPs of the hub peer on the pod side.
+
+    Variants A/B route the tunnel subnet only. Variant C forwards to real
+    LAN / archibald addresses, so the pod routes exactly the hub's tunnel
+    address (health ping) plus each enabled tunnelled service host as /32 —
+    never a default route.
+    """
+    if not config.is_variant_c():
+        return config.tunnel.subnet
+    hosts = {ipaddress.ip_interface(config.hub.tunnel_address).ip}
+    hosts |= {ipaddress.ip_address(s.host) for s in config.allow_services()}
+    return ", ".join(f"{h}/32" for h in sorted(hosts))
+
+
 def render_pod_conf(config: Config, pod_keys: KeyPair, hub_pubkey: str, pod_address: str) -> str:
     """Kernel-WireGuard fallback config for a pod, used only when /dev/net/tun
     and NET_ADMIN are actually available inside the pod (rare on Runpod).
-    AllowedIPs is scoped to the tunnel subnet only — this is a service
-    tunnel, never a default-route VPN.
+    AllowedIPs is scoped to the tunnel subnet (A/B) or the allowlisted
+    hosts (C) — this is a service tunnel, never a default-route VPN.
     """
     lines = [_HEADER, "[Interface]"]
     lines += [f"PrivateKey = {pod_keys.private}", f"Address = {pod_address}"]
@@ -399,7 +543,7 @@ def render_pod_conf(config: Config, pod_keys: KeyPair, hub_pubkey: str, pod_addr
     lines += [
         "[Peer]",
         f"PublicKey = {hub_pubkey}",
-        f"AllowedIPs = {config.tunnel.subnet}",
+        f"AllowedIPs = {pod_allowed_ips(config)}",
         f"Endpoint = {config.hub.public_endpoint}",
         "PersistentKeepalive = 25",
         "",
@@ -465,7 +609,7 @@ def render_wireproxy_conf(config: Config, hub_pubkey: str, pod_address: str) -> 
         "[Peer]",
         f"PublicKey = {hub_pubkey}",
         f"Endpoint = {config.hub.public_endpoint}",
-        f"AllowedIPs = {config.tunnel.subnet}",
+        f"AllowedIPs = {pod_allowed_ips(config)}",
         "PersistentKeepalive = 25",
         "",
     ]
@@ -577,6 +721,116 @@ def render_gateway_nft(config: Config) -> str:
 
 
 # --------------------------------------------------------------------------
+# Variant C — pod client for one slot, and the talos GitOps state it mirrors
+# --------------------------------------------------------------------------
+
+
+def services_env(config: Config) -> str:
+    """`name local_port protocol` lines pod-client.sh health-checks."""
+    return "\n".join(f"{s.name} {s.effective_local_port()} {s.protocol}" for s in config.allow_services())
+
+
+def render_hosts(config: Config) -> str:
+    """/etc/hosts line mapping forwarded HTTP virtual hosts to 127.0.0.1."""
+    names = [h for s in config.allow_services() for h in s.hostnames]
+    return f"127.0.0.1 {' '.join(names)}\n" if names else ""
+
+
+def render_slot_client(config: Config, slot: int, hub_pubkey: str) -> dict[str, str]:
+    """Pod-client artifacts for one Variant C slot, WITHOUT key material.
+
+    The private key stays a `$LILITH_WG_PRIVATE_KEY` placeholder: the real
+    value only ever reaches a pod as a Runpod secret from `peer.py
+    slot-assign`, which reads it from 1Password at call time.
+    """
+    if not config.is_variant_c() or config.slots is None:
+        raise ValueError("render_slot_client needs a variant C config with a [slots] table")
+    address = config.slots.address(slot)
+    placeholder = KeyPair(private="$LILITH_WG_PRIVATE_KEY", public="")
+    env = {
+        "LILITH_WG_ADDRESS": address,
+        "LILITH_WG_HUB_PUBKEY": hub_pubkey,
+        "LILITH_WG_HUB_ENDPOINT": config.hub.public_endpoint,
+        "LILITH_WG_TUNNEL_SUBNET": config.tunnel.subnet,
+        "LILITH_WG_SERVICES": services_env(config),
+        "LILITH_WG_HOSTS": render_hosts(config).strip(),
+    }
+    prefix = f"slot-{slot}"
+    return {
+        f"{prefix}.onetun.sh": "#!/bin/sh\n" + "\n".join(render_onetun_commands(config, hub_pubkey, address)) + "\n",
+        f"{prefix}.wireproxy.conf": render_wireproxy_conf(config, hub_pubkey, address),
+        f"{prefix}.kernel.conf.template": render_pod_conf(config, placeholder, hub_pubkey, address),
+        f"{prefix}.hosts": render_hosts(config),
+        f"{prefix}.env.json": json.dumps(env, indent=2, sort_keys=True) + "\n",
+    }
+
+
+@dataclass(frozen=True)
+class TalosPeer:
+    slot: str
+    public_key: str
+    address: str
+    enabled: bool
+
+
+def parse_talos_peers(text: str) -> dict[str, TalosPeer]:
+    """Parse talos clusters/archibald/lilith-wg/peers.conf."""
+    peers: dict[str, TalosPeer] = {}
+    for lineno, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        cols = stripped.split()
+        if len(cols) != 4 or cols[3] not in ("on", "off"):
+            raise ValueError(f"talos peers.conf:{lineno}: expected `slot public_key allowed_ip on|off`")
+        peers[cols[0]] = TalosPeer(slot=cols[0], public_key=cols[1], address=cols[2], enabled=cols[3] == "on")
+    return peers
+
+
+@dataclass(frozen=True)
+class TalosAllow:
+    name: str
+    path: str
+    protocol: str
+    ip: str
+    port: int
+    enabled: bool
+
+
+def parse_talos_allowlist(text: str) -> list[TalosAllow]:
+    """Parse talos clusters/archibald/lilith-wg/allowlist.conf."""
+    entries = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        cols = stripped.split()
+        if len(cols) != 6 or cols[5] not in ("on", "off"):
+            raise ValueError(f"talos allowlist.conf:{lineno}: expected `name path proto ip port on|off`")
+        entries.append(TalosAllow(cols[0], cols[1], cols[2], cols[3], int(cols[4]), cols[5] == "on"))
+    return entries
+
+
+def allowlist_drift(config: Config, talos: list[TalosAllow]) -> list[str]:
+    """Differences between the pod's forwards and the hub's allowlist.
+
+    Empty means every forward the pod opens is allowed by the hub, and every
+    destination the hub allows has a forward on the pod.
+    """
+    ours = {(s.host, s.protocol, s.port): s.name for s in config.allow_services()}
+    theirs = {(e.ip, e.protocol, e.port): e.name for e in talos if e.enabled}
+    drift = [
+        f"pod forwards {name} ({ip}:{port}/{proto}) but the hub allowlist does not allow it"
+        for (ip, proto, port), name in sorted(ours.items()) if (ip, proto, port) not in theirs
+    ]
+    drift += [
+        f"hub allows {name} ({ip}:{port}/{proto}) but wg-config.toml has no enabled service for it"
+        for (ip, proto, port), name in sorted(theirs.items()) if (ip, proto, port) not in ours
+    ]
+    return drift
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -621,9 +875,30 @@ def main(argv: list[str] | None = None) -> int:
         "--peers-state", type=Path, default=None,
         help="peers.json to include already-added pod peers (default: sibling of [keys].dir)",
     )
+    parser.add_argument("--slot", type=int, default=None, help="variant C: render the pod client for this slot")
+    parser.add_argument(
+        "--hub-public-key", default=None,
+        help="variant C: hub public key (default: [hub].public_key from the config)",
+    )
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
+    if config.is_variant_c():
+        if args.slot is None:
+            parser.error("variant C renders one pod client per slot: pass --slot N (the hub is GitOps state in talos)")
+        hub_pubkey = args.hub_public_key or config.hub.public_key
+        if not hub_pubkey:
+            parser.error("variant C needs the hub public key: set [hub].public_key or pass --hub-public-key")
+        _assert_outside_repo(args.out_dir, what="--out-dir")
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        for name, text in render_slot_client(config, args.slot, hub_pubkey).items():
+            path = args.out_dir / name
+            path.write_text(text)
+            if name.endswith(".sh"):
+                path.chmod(0o755)
+            print(f"wrote {path}", file=sys.stderr)
+        return 0
+
     peers_state = args.peers_state or default_peers_state(config)
     peers = load_peers(peers_state)
     rendered = render_all(config, args.out_dir, peers)
