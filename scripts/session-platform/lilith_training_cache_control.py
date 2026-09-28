@@ -62,8 +62,23 @@ def _seed_nonzero_adapter(engine: Any, seed: int = 73) -> list[str]:
 
 
 def run_control(engine: Any, output: Path | str,
-                positions: Sequence[int] = (1023, 1024, 1025)) -> dict[str, Any]:
-    """Run the cache control without changing adapter weights or taking an optimizer step."""
+                positions: Sequence[int] = (1023, 1024, 1025),
+                numerics: Any = None) -> dict[str, Any]:
+    """Run the cache control without changing adapter weights or taking an optimizer step.
+
+    ``numerics`` (a ``lilith_numerics.NumericsConfig``; default = untouched PyTorch
+    globals, the qualified behaviour) is applied around the whole control and its
+    requested and observed settings are recorded under ``report["numerics"]``.
+    """
+    from lilith_numerics import NumericsConfig
+
+    numerics = NumericsConfig() if numerics is None else numerics
+    with numerics.applied():
+        return _run_control(engine, output, positions, numerics.manifest())
+
+
+def _run_control(engine: Any, output: Path | str, positions: Sequence[int],
+                 numerics_manifest: dict[str, Any]) -> dict[str, Any]:
     import torch
     import transformers
     import lilith_training_engine as engine_module
@@ -104,6 +119,7 @@ def run_control(engine: Any, output: Path | str,
         "initial_policy_identity": {**asdict(initial_policy), "digest": initial_policy.digest},
         "contract": engine.contract(),
         "configured_cache_offloading": engine.cache_offloading,
+        "numerics": numerics_manifest,
         "variants": {},
     }
 
@@ -295,6 +311,7 @@ def run_control(engine: Any, output: Path | str,
 
 def main() -> None:
     from lilith_adapter_mechanics import PARENT_CONFIG_SHA256, PARENT_SHA256, TARGET
+    import lilith_numerics
     from lilith_training_engine import GemmaTrainingEngine
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -303,7 +320,12 @@ def main() -> None:
     parser.add_argument("--positions", type=int, nargs="+", default=[1023, 1024, 1025])
     parser.add_argument("--cache-offloading", choices=("true", "false"), default="true",
                         help="configured KV placement for generate/replay; false = GPU-resident (H100)")
+    lilith_numerics.add_arguments(parser)
     args = parser.parse_args()
+    try:
+        numerics = lilith_numerics.NumericsConfig.from_args(args)
+    except lilith_numerics.NumericsError as error:
+        parser.error(str(error))
     engine = GemmaTrainingEngine.load(
         args.parent,
         expected_parent_sha256=PARENT_SHA256,
@@ -312,7 +334,7 @@ def main() -> None:
         target_module=TARGET,
     )
     engine.cache_offloading = args.cache_offloading == "true"
-    result = run_control(engine, args.output, args.positions)
+    result = run_control(engine, args.output, args.positions, numerics)
     print(json.dumps(result, sort_keys=True))
     if result["status"] != "passed":
         raise SystemExit(1)
