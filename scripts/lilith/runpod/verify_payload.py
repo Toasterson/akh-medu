@@ -42,6 +42,28 @@ PAYLOAD_FILES = (
     'scripts/session-platform/lilith_numerics.py',
     'scripts/session-platform/lilith_rl.py',
     'training/lilith/transcripts-20260922/sft-subset-v1-manifest.json',
+    # Lilith C2 serving (Anima WI 01a0e270-314e): the serve entrypoint and the C4b
+    # certification closure serve_adapter.py imports to accept an active adapter.
+    'scripts/lilith/serve/serve_pod.sh',
+    'scripts/lilith/serve/serve_adapter.py',
+    'scripts/lilith/serve/log_redact.py',
+    'scripts/lilith/serve/serve_tools.py',
+    'scripts/lilith/exam/__init__.py',
+    'scripts/lilith/exam/certify.py',
+    'scripts/lilith/exam/errors.py',
+    'scripts/lilith/exam/manifest.py',
+    'scripts/lilith/dojo/__init__.py',
+    'scripts/lilith/dojo/contracts.py',
+    'scripts/lilith/dojo/episode.py',
+    'scripts/lilith/dojo/errors.py',
+    'scripts/lilith/dojo/exam-floors-v1.json',
+    'scripts/lilith/dojo/families.py',
+    'scripts/lilith/dojo/floors.py',
+    'scripts/lilith/dojo/hindsight.py',
+    'scripts/lilith/dojo/language.py',
+    'scripts/lilith/dojo/replay_server.py',
+    'scripts/lilith/dojo/reward.py',
+    'scripts/lilith/dojo/snapshot.py',
 )
 _SHA = re.compile(r'^[0-9a-f]{40}$')
 
