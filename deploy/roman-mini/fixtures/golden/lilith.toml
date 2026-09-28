@@ -32,6 +32,7 @@ kind = "none"
 # board replies). The token is resolved from the environment by daemon_credentials.py.
 [board]
 url = "http://127.0.0.1:18089"
+agent_id = "01a0abc4-90b1-7f43-8b13-2f7c9e6a1d44"
 auth = { token_env = "ROMAN_BOARD_LILITH" }
 
 # ADR 116: the CosGuard around every tool call. The log lies outside every root she

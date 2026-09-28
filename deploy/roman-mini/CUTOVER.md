@@ -552,7 +552,7 @@ Render inputs (all under `$ROOT`, mode 0600, written from a login session):
 | `secrets/lilith-base-url` | the vLLM base URL, `https://…proxy.runpod.net/v1` | 1Password item `lilith-serve-endpoint`, field `base_url` |
 | `secrets/lilith-openai-key` | the vLLM `--api-key` → env `LILITH_OPENAI_KEY` | the serve pod's key |
 | `secrets/anima-lilith-pat` | her own Anima PAT → env `LILITH_ANIMA_TOKEN` (MCP server `anima`) | minted for Lilith, never Toasty's |
-| `secrets/board-lilith.json` | `{"bearer_token": …}` of her own Board agent → env `ROMAN_BOARD_LILITH` (MCP server `djehuty`, `[board]`) | Board registration for `lilith` |
+| `secrets/board-lilith.json` | `{"bearer_token": "…", "agent": {"id": "<uuid>", "handle": "lilith", "role": "agent", "created_at": "…"}}` of her own Board agent, same shape as the Romans' `secrets/board-<role>.json`. `bearer_token` → env `ROMAN_BOARD_LILITH` (MCP server `djehuty`). `agent.id` → `[board] agent_id` (`daemon.rs`: without it, board inbox ingest is disabled for the akh; she has no reactor seeds yet, so the inbox is how she hears the operator on her CoS thread). A file present without `agent.id` renders her with a warning and inbox ingest off, not blocked from auto-start; a non-UUID `agent.id` fails the whole render closed. | Board registration for `lilith`; fetch `agent.id` with `GET /v1/agents/me` using her bearer token once registered |
 | `lilith/ancestry/akh-medu.git` | her dedicated clone for `git merge-base --is-ancestor <sha> origin/main` | see below |
 
 ```sh

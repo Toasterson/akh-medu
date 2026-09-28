@@ -160,11 +160,15 @@ LILITH_BASE_URL_FILE = "secrets/lilith-base-url"
 LILITH_OPENAI_KEY_ENV = "LILITH_OPENAI_KEY"
 LILITH_ANIMA_TOKEN_ENV = "LILITH_ANIMA_TOKEN"
 LILITH_BOARD_TOKEN_ENV = "ROMAN_BOARD_LILITH"
+# `{"bearer_token": "...", "agent": {"id": "<uuid>", ...}}`, the same shape as
+# the Romans' `secrets/board-<role>.json`. `bearer_token` -> LILITH_BOARD_TOKEN_ENV
+# below; `agent.id` -> `[board] agent_id` (lilith_board_agent_id).
+LILITH_BOARD_SECRETS_FILE = "secrets/board-lilith.json"
 # Secret files daemon_credentials.py maps into the core's environment. Any
 # one missing: Lilith is rendered but left out of `daemon.auto_start`.
 LILITH_SECRETS = {
     "secrets/lilith-openai-key": LILITH_OPENAI_KEY_ENV,
-    "secrets/board-lilith.json": LILITH_BOARD_TOKEN_ENV,
+    LILITH_BOARD_SECRETS_FILE: LILITH_BOARD_TOKEN_ENV,
     "secrets/anima-lilith-pat": LILITH_ANIMA_TOKEN_ENV,
 }
 COS_SKILL = "chief-of-staff"
@@ -175,6 +179,9 @@ LILITH_REPOSITORY = "lilith/ancestry/akh-medu.git"
 LILITH_ANNOUNCEMENTS = "state/lilith/cos-announcements.jsonl"
 CURRENCY = re.compile(r"^[A-Z]{3}$")
 SESHAT_MCP_URL = "http://seshat.lab.home/mcp"
+# Any UUID representation the Rust `uuid` crate's Deserialize accepts (the
+# lowercase/uppercase hex 8-4-4-4-12 form; version bits are not checked here).
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
 class RenderError(RuntimeError):
@@ -682,6 +689,47 @@ def board_identity(events: dict, role: str) -> dict:
     auth = (Inline(token_env=endpoint["token_env"]) if "token_env" in endpoint
             else Inline(token_file=endpoint["token_file"]))
     return {"url": endpoint["url"], "auth": auth}
+
+
+def lilith_board_agent_id(root: Path) -> tuple[str | None, list[str]]:
+    """Lilith's own Board agent id, for `[board] agent_id` (daemon.rs ~2275:
+    without it, board inbox ingest is disabled for the akh). Lilith has no
+    reactor seeds yet, so the inbox is how she hears the operator on her CoS
+    thread.
+
+    Read from `secrets/board-lilith.json`, the same
+    `{"bearer_token": "...", "agent": {"id": "<uuid>", "handle": ..., ...}}`
+    shape as the Romans' `secrets/board-<role>.json`. `bearer_token` is never
+    read or returned here.
+
+    Only the Romans' `board_identity()` above stays untouched: their board
+    events already arrive through akheventd routes, so turning on inbox
+    ingest for them risks handling a message twice. That is a separate
+    operator decision, out of scope for Lilith's C2 wiring.
+
+    Returns `(agent_id, warnings)`. A missing file or a file without
+    `agent.id` is a warning, not a RenderError: `lilith_missing_inputs`
+    already keeps Lilith out of `daemon.auto_start` until the secrets file
+    exists, and this must not block that auto-start once it does. A
+    non-UUID `agent.id` is a RenderError: that is corrupt input, not a
+    step the operator has simply not reached yet.
+    """
+    path = root / LILITH_BOARD_SECRETS_FILE
+    if not path.is_file():
+        return None, []
+    try:
+        identity = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        identity = None
+    agent = identity.get("agent") if isinstance(identity, dict) else None
+    agent_id = agent.get("id") if isinstance(agent, dict) else None
+    fix = (f"{path} needs `agent.id` (a UUID) from `GET /v1/agents/me` using her board token; "
+           "board inbox ingest for lilith stays off until then")
+    if agent_id is None:
+        return None, [fix]
+    if not isinstance(agent_id, str) or not _UUID.match(agent_id):
+        raise RenderError(f"{path}: `agent.id` {agent_id!r} is not a UUID; {fix}")
+    return agent_id, []
 
 
 MCP_SERVERS_PLACEHOLDER = "{mcp_servers}"
