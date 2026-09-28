@@ -152,6 +152,54 @@ A device qualifies for serving when it:
 The supervisor still runs every local window under ADR 105: a run WI, an exit condition, and a RESULT
 doc. Local spend is reported as kWh.
 
+## 4a. Measured: RX 7900 XTX on hephaistos (C6b, 2026-09-28)
+
+Source: `~/lilith-private/c6b/c6b-findings-20260928.json` and `SUMMARY-20260928.md` (private; raw
+result JSONs, GPU telemetry and scripts under `results-20260928/`).
+
+- **Environment:** ROCm venv on gfx1100; the parent's three sha256 pins verified on every load; GPU
+  idle (36 MB) before each launch.
+
+**NF4 QLoRA, training**
+
+| Measure | 7900 XTX (NF4) | H100 (bf16) reference |
+|---|---|---|
+| 8K fits? | yes: 18.36 GB allocated, 21.71 GB reserved (15.7% headroom) | 34.6 GB allocated |
+| 16K / 32K | **out of memory** | fit |
+| Steady training speed at 8K | **411.5 tok/s** | 1,723.6 tok/s |
+| Micro-run (200 SFT steps + preference step, admitted subset) | completed in 3,988 s; loss 1.889 → 0.941 at step 10, tracking the H100 run (1.918 → 0.917) | completed |
+| Power | about 303 W at 75 °C | n/a |
+
+- `expandable_segments` is unsupported on this ROCm build.
+- `--offload-activations` hung the GPU: the driver reset it twice. One run was also OOM-killed on the
+  31 GB host.
+
+**Cold reload: failed the gate** (tolerance 1e-3)
+- The adapter reloads byte-identically, and the argmax tokens are identical.
+- The probe logits drifted by 0.678 max-abs, then 0.364 on a rerun of the same reload.
+- The drift differs between reloads, so this is ROCm NF4 **forward nondeterminism**, not an adapter
+  I/O fault. It is the same class as the CUDA finding (C6 round 2).
+- Next: test the equivalents of the CUDA fix, forced MATH/EFFICIENT SDPA or deterministic mode.
+
+**Generation**
+- bitsandbytes' fast ROCm kernel for inputs of 8 rows or fewer (the single-token decode path) is
+  **numerically wrong** on gfx1100: relative error 0.065, against 0.0017 for the dequant fallback.
+  Stock generation produced garbage at 7.42 tok/s; with the dequant workaround it was coherent but
+  only 2.77 tok/s.
+- Serving on this card should use the proven Vulkan GGUF path (23–26 tok/s), which needs a
+  full-depth-LoRA → GGUF export step that does not exist yet.
+
+**Verdict (§4 rules)**
+- **Long training: not qualified yet.** It fits 8K only, fails the cold-reload identity gate, and
+  trains at about 24% of H100 speed.
+- **Serving: not qualified via HF/bitsandbytes.** The Vulkan GGUF route needs the adapter export.
+- **To requalify:**
+  - fix ROCm determinism;
+  - add the LoRA → GGUF export plus the Vulkan adapter-as-served parity check;
+  - long runs capped at 8K context on this card.
+
+The RTX 3090 is not installed yet (operator, 2026-09-27).
+
 ## 5. Open inputs
 
 - **RTX 3090: not installed yet (operator, 2026-09-27).** C6b qualifies the 7900 XTX first and the 3090
