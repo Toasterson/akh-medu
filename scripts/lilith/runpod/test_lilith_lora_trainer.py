@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -22,6 +23,7 @@ except ImportError:  # pragma: no cover - environment without the training stack
     HAVE_STACK = False
 
 import lilith_lora_trainer as trainer  # noqa: E402
+import lilith_numerics as numerics  # noqa: E402
 import reference_microrun as microrun  # noqa: E402
 
 TINY_TEXT = dict(vocab_size=512, hidden_size=64, intermediate_size=128, num_hidden_layers=4,
@@ -361,6 +363,60 @@ class LossTests(unittest.TestCase):
         with torch.no_grad(), model.disable_adapter():
             reference = trainer.sequence_logp(model, pair.chosen(), config)
         self.assertNotEqual(float(trainer.sequence_logp(model, pair.chosen(), config)), float(reference))
+
+    def test_sft_step_applies_the_given_numerics_during_compute_and_restores_after(self):
+        # sft_step's own attention (ATTENTION_IMPLEMENTATION = 'lilith_chunked', raw
+        # matmul + softmax) never calls torch's SDPA, so this checks the knob that
+        # IS observable from here: TF32, a real process-global matmul setting.
+        config = fp32_config()
+        trainer.register_chunked_attention(config.attention_query_chunk)
+        model, _ = trainer.prepare_lora_model(tiny_base(0, trainer.ATTENTION_IMPLEMENTATION), config)
+        optimizer = trainer.make_optimizer(model, config)
+        before = torch.backends.cuda.matmul.allow_tf32
+        seen = {}
+        real_loss = trainer.weighted_sft_loss
+
+        def spy(*args, **kwargs):
+            seen['tf32_inside'] = torch.backends.cuda.matmul.allow_tf32
+            return real_loss(*args, **kwargs)
+
+        custom = numerics.NumericsConfig(tf32=numerics.Toggle.OFF)
+        with mock.patch.object(trainer, 'weighted_sft_loss', side_effect=spy):
+            trainer.sft_step(model, optimizer, [random_example(9)], config, 0, numerics=custom)
+        self.assertFalse(seen['tf32_inside'])
+        self.assertEqual(torch.backends.cuda.matmul.allow_tf32, before)
+
+    def test_preference_step_applies_the_given_numerics_during_compute_and_restores_after(self):
+        config = fp32_config()
+        trainer.register_chunked_attention(config.attention_query_chunk)
+        model, _ = trainer.prepare_lora_model(tiny_base(0, trainer.ATTENTION_IMPLEMENTATION), config)
+        optimizer = trainer.make_optimizer(model, config)
+        pair = trainer.PreferencePair(tuple(range(10, 17)), tuple(range(20, 30)), tuple(range(40, 45)))
+        before = torch.backends.cuda.matmul.allow_tf32
+        seen = {}
+        real_logp = trainer.sequence_logp
+
+        def spy(*args, **kwargs):
+            seen['tf32_inside'] = torch.backends.cuda.matmul.allow_tf32
+            return real_logp(*args, **kwargs)
+
+        custom = numerics.NumericsConfig(tf32=numerics.Toggle.OFF)
+        with mock.patch.object(trainer, 'sequence_logp', side_effect=spy):
+            trainer.preference_step(model, optimizer, [pair], config, 0, numerics=custom)
+        self.assertFalse(seen['tf32_inside'])
+        self.assertEqual(torch.backends.cuda.matmul.allow_tf32, before)
+
+    def test_sft_step_and_preference_step_default_to_untouched_numerics(self):
+        # No numerics= given at all: sft_step/preference_step must behave exactly as
+        # every pre-existing call site above (none of them pass numerics=), i.e.
+        # NumericsConfig() (the qualified default), never the CUDA platform default.
+        config = fp32_config()
+        trainer.register_chunked_attention(config.attention_query_chunk)
+        model, _ = trainer.prepare_lora_model(tiny_base(0, trainer.ATTENTION_IMPLEMENTATION), config)
+        optimizer = trainer.make_optimizer(model, config)
+        before = torch.backends.cuda.matmul.allow_tf32
+        trainer.sft_step(model, optimizer, [random_example(9)], config, 0)
+        self.assertEqual(torch.backends.cuda.matmul.allow_tf32, before)
 
     def test_gradient_checkpointing_matches_plain_backward(self):
         grads = []

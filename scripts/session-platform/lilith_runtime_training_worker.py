@@ -30,6 +30,22 @@ def configured_cache_offloading(config):
     return value
 
 
+def configured_numerics(config):
+    """The pinned numerics config; absent means ``NumericsConfig()`` (untouched PyTorch).
+
+    Configs written before this field existed have no ``numerics`` key: absence must
+    mean the literal untouched default, not today's ``platform_default()``, because
+    that is what those historical runs actually ran with. Needs no torch import
+    (``NumericsConfig.from_mapping`` is pure data), so this is unit-testable without
+    the training stack installed.
+    """
+    from lilith_numerics import NumericsConfig, NumericsError
+    try:
+        return NumericsConfig.from_mapping(config.get('numerics') or {})
+    except NumericsError as error:
+        raise ValueError(f'invalid pinned numerics configuration: {error}') from error
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
 
@@ -412,9 +428,13 @@ def run(transport, config):
         # from the pinned configuration (False = GPU-resident, e.g. H100 80GB).
         engine.cache_offloading = configured_cache_offloading(config)
         write(output / 'engine-contract.json', engine.contract())
+        numerics = configured_numerics(config)
         if config['mode'] == 'train':
-            report = experiment(engine, transport, config, output)
+            with numerics.applied():
+                write(output / 'numerics.json', numerics.manifest())
+                report = experiment(engine, transport, config, output)
         else:
+            write(output / 'numerics.json', numerics.manifest())
             from peft import set_peft_model_state_dict
             from safetensors.torch import load_file
             prior = Path(config['reload'])

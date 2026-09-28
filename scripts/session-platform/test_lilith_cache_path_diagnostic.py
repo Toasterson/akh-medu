@@ -51,10 +51,16 @@ class NumericsTests(unittest.TestCase):
         self.assertEqual(manifest["requested"]["sdpa_backend"], "default")
         self.assertIn("matmul_allow_tf32", manifest["observed"])
 
-    def test_cli_defaults_select_the_default_config(self):
+    def test_cli_defaults_select_the_recorded_platform_default(self):
+        # Unset flags now resolve lilith_numerics.platform_default() for *this* host
+        # (EFFICIENT+MATH on CUDA, untouched elsewhere), not a hardcoded NumericsConfig().
+        # See test_lilith_numerics.py for the CPU-only resolution-logic coverage.
         parser = argparse.ArgumentParser()
         numerics.add_arguments(parser)
-        self.assertEqual(numerics.NumericsConfig.from_args(parser.parse_args([])), numerics.NumericsConfig())
+        no_flags = parser.parse_args([])
+        self.assertEqual(numerics.NumericsConfig.from_args(no_flags), numerics.platform_default())
+        self.assertEqual(numerics.NumericsConfig.from_args(no_flags, cuda=True), numerics.cuda_default())
+        self.assertEqual(numerics.NumericsConfig.from_args(no_flags, cuda=False), numerics.NumericsConfig())
         args = parser.parse_args(["--numerics-sdpa-backend", "efficient", "--numerics-sdpa-math-fallback",
                                   "--numerics-tf32", "off", "--numerics-deterministic",
                                   "--numerics-bf16-reduced-precision-reduction", "off"])

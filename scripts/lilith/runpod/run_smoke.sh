@@ -46,8 +46,16 @@
 #   LILITH_DIAGNOSTIC_BUDGET_SECONDS (1800; pass budget of the cache diagnostic, model load excluded;
 #     the step is capped at budget + 300 s),
 #   LILITH_GENERATION_ADAPTER_DIR (adapter for vllm-generation when microrun is not selected).
-# Cache-control numerics (lilith_numerics.py; unset = qualified default, recorded in
-# cache-control.json "numerics" and in smoke-result.json knobs):
+# Numerics (lilith_numerics.py; applies to every step below that runs GPU compute:
+# cache-control, memory-probe, microrun, cold-reload, vllm-generation's HF fallback).
+# Unset (the recorded default, lilith_numerics.platform_default()) = EFFICIENT SDPA
+# with MATH fallback on CUDA — this smoke always runs on CUDA, so that is what
+# "unset" now means; ROCm/CPU callers of lilith_numerics elsewhere keep PyTorch's
+# own default. C6 round 2/3 (2026-09-28) found the true CUDA default
+# nondeterministic on the cache control and confirmed EFFICIENT+MATH restores
+# bit-exact resident-vs-offload equivalence; see lilith_numerics.py and
+# training/results/lilith-c6-smoke-20260928-RESULT.md. Every run records the
+# requested and observed settings under "numerics" in its result JSON.
 #   LILITH_NUMERICS_SDPA_BACKEND=default|math|efficient|flash|cudnn,
 #   LILITH_NUMERICS_SDPA_MATH_FALLBACK=1, LILITH_NUMERICS_TF32=default|on|off,
 #   LILITH_NUMERICS_BF16_REDUCTION=default|on|off, LILITH_NUMERICS_DETERMINISTIC=1.
@@ -337,19 +345,20 @@ if selected cache-diagnostic && { [[ -n "$ONLY" ]] && ! selected cache-control |
 fi
 if selected memory-probe; then
   step memory-probe "$PY" "$SCRIPT_DIR/reference_microrun.py" --mode memory-probe \
-    --parent "$ROOT/parent" --output "$RUN/memory-probe.json" || true
+    --parent "$ROOT/parent" --output "$RUN/memory-probe.json" \
+    ${NUMERICS_ARGS[@]+"${NUMERICS_ARGS[@]}"} || true
 fi
 # Leave 15 minutes for generation measurement, cold reload and packaging.
 MICRO_WALL=$(( $(remaining) - 900 ))
 if selected microrun && needs microrun data-pin; then
   step microrun "$PY" "$SCRIPT_DIR/reference_microrun.py" --mode microrun --parent "$ROOT/parent" \
     "${DATA_ARGS[@]}" --adapter-root "$RUN/adapters" --output "$RUN/microrun.json" \
-    --max-wall-seconds "$MICRO_WALL" || true
+    --max-wall-seconds "$MICRO_WALL" ${NUMERICS_ARGS[@]+"${NUMERICS_ARGS[@]}"} || true
 fi
 if selected cold-reload && needs cold-reload microrun; then
   step cold-reload "$PY" "$SCRIPT_DIR/reference_microrun.py" --mode cold-reload --parent "$ROOT/parent" \
     --adapter-dir "$RUN/adapters/ctx-8192" --probe "$RUN/adapters/ctx-8192.probe.json" \
-    --output "$RUN/cold-reload.json" || true
+    --output "$RUN/cold-reload.json" ${NUMERICS_ARGS[@]+"${NUMERICS_ARGS[@]}"} || true
 fi
 if selected vllm-generation; then
   GENERATION_ADAPTER="${LILITH_GENERATION_ADAPTER_DIR:-}"
@@ -357,7 +366,7 @@ if selected vllm-generation; then
     if [[ -d "$GENERATION_ADAPTER" ]]; then
       step vllm-generation "$PY" "$SCRIPT_DIR/reference_microrun.py" --mode generate --parent "$ROOT/parent" \
         --adapter-dir "$GENERATION_ADAPTER" --generation-backend vllm \
-        --output "$RUN/vllm-generation.json" || true
+        --output "$RUN/vllm-generation.json" ${NUMERICS_ARGS[@]+"${NUMERICS_ARGS[@]}"} || true
     else
       record_step vllm-generation skipped_dependency - 0
       echo "== step vllm-generation skipped: LILITH_GENERATION_ADAPTER_DIR=$GENERATION_ADAPTER is not a directory"
@@ -365,7 +374,7 @@ if selected vllm-generation; then
   elif needs vllm-generation microrun; then
     step vllm-generation "$PY" "$SCRIPT_DIR/reference_microrun.py" --mode generate --parent "$ROOT/parent" \
       --adapter-dir "$RUN/adapters/ctx-8192" --generation-backend vllm \
-      --output "$RUN/vllm-generation.json" || true
+      --output "$RUN/vllm-generation.json" ${NUMERICS_ARGS[@]+"${NUMERICS_ARGS[@]}"} || true
   fi
 fi
 
