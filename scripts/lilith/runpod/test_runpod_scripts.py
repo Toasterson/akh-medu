@@ -267,3 +267,35 @@ class MakePayloadTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ChatTemplatePinConventionTest(unittest.TestCase):
+    """The admission manifest pins the template as sha256(json.dumps(text)); the file pin is bytes."""
+
+    def _setup(self, text, pin):
+        import tempfile, json as _json
+        d = Path(tempfile.mkdtemp())
+        (d / 'chat_template.jinja').write_text(text, encoding='utf-8')
+        m = d / 'manifest.json'
+        m.write_text(_json.dumps({'chat_template_sha256': pin}))
+        return d, m
+
+    def test_json_string_convention_matches(self):
+        import hashlib, json as _json
+        import reference_microrun as rm
+        text = '{{ bos_token }}{% for m in messages %}{{ m.content }}{% endfor %}\n'
+        d, m = self._setup(text, hashlib.sha256(_json.dumps(text).encode()).hexdigest())
+        self.assertEqual(rm.check_chat_template(d, m)['pin_convention'], 'json_string')
+
+    def test_file_bytes_convention_matches(self):
+        import hashlib
+        import reference_microrun as rm
+        text = 'template'
+        d, m = self._setup(text, hashlib.sha256(text.encode()).hexdigest())
+        self.assertEqual(rm.check_chat_template(d, m)['pin_convention'], 'file_bytes')
+
+    def test_other_template_refused(self):
+        import reference_microrun as rm
+        d, m = self._setup('template', '0' * 64)
+        with self.assertRaises(Exception):
+            rm.check_chat_template(d, m)

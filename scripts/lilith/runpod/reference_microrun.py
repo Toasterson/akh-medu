@@ -139,13 +139,24 @@ def load_subset_records(path: Path, tokenizer, manifest_path: Path = SUBSET_MANI
 
 
 def check_chat_template(parent: Path, manifest_path: Path = SUBSET_MANIFEST) -> dict[str, Any]:
+    """Match the parent's chat template against the pin the subset was admitted under.
+
+    The admission manifest (``sft-subset-v1-manifest.json``) recorded the template as
+    ``sha256(json.dumps(template_text))``, the digest of the JSON-encoded string, while
+    the parent receipt pins file bytes. Both conventions identify the same template, so
+    either may match. The one that matched is recorded; nothing else is accepted.
+    """
     manifest = json.loads(Path(manifest_path).read_text())
-    observed = trainer.sha256_file(parent / 'chat_template.jinja')
-    if observed != manifest['chat_template_sha256']:
+    template = parent / 'chat_template.jinja'
+    file_digest = trainer.sha256_file(template)
+    text_digest = hashlib.sha256(json.dumps(template.read_text(encoding='utf-8')).encode()).hexdigest()
+    pinned = manifest['chat_template_sha256']
+    convention = {file_digest: 'file_bytes', text_digest: 'json_string'}.get(pinned)
+    if convention is None:
         raise trainer.LilithTrainerError(
             'lilith::microrun::template_pin', 'chat template differs from the one the subset was admitted under',
             'use the pinned parent revision; the rendered prompts would otherwise drift')
-    return {'chat_template_sha256': observed}
+    return {'chat_template_sha256': file_digest, 'manifest_pin': pinned, 'pin_convention': convention}
 
 
 # ------------------------------------------------------------------------- recording
