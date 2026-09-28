@@ -1187,19 +1187,38 @@ def check_on_main(repo: Path, sha: str) -> None:
                                    "origin/main checkout (make_payload.sh), then install that")
 
 
+SSH_MAPPING_WAIT_S = 300
+
+
+def wait_for_ssh(ctx: Context, pod_id: str, timeout_s: int = SSH_MAPPING_WAIT_S) -> PodInfo:
+    """The pod's public ssh mapping, waiting while a RUNNING pod has not published it yet.
+
+    Runpod reports RUNNING a few seconds before `publicIp` and the 22/tcp mapping appear, so
+    `create` followed directly by `install-payload` would otherwise race. A pod that is not
+    RUNNING is refused at once; a RUNNING pod without a mapping after `timeout_s` is refused.
+    """
+    deadline = ctx.clock.now() + dt.timedelta(seconds=timeout_s)
+    while True:
+        pod = ctx.runpod.get_pod(pod_id)
+        if pod.desired_status == "RUNNING" and pod.public_ip and "22" in pod.port_mappings:
+            return pod
+        if pod.desired_status != "RUNNING" or ctx.clock.now() >= deadline:
+            raise UsageError(f"pod {pod.id} is {pod.desired_status} without public ssh",
+                             help="the pod must be running (create, or start) with 22/tcp exposed; "
+                                  "a RUNNING pod publishes ssh within a minute or two, retry install-payload")
+        ctx.clock.sleep(10)
+
+
 def cmd_install_payload(ctx: Context, tarball: Path, *, launch: bool, identity: str | None) -> dict[str, Any]:
     state = require_pod(ctx)
     sha = payload_main_sha(tarball)
     check_on_main(ctx.repo, sha)
-    pod = ctx.runpod.get_pod(state.pod_id)
-    if pod.desired_status != "RUNNING" or not pod.public_ip or "22" not in pod.port_mappings:
-        raise UsageError(f"pod {pod.id} is {pod.desired_status} without public ssh",
-                         help="the pod must be running (create, or start) with 22/tcp exposed")
+    pod = wait_for_ssh(ctx, state.pod_id)
     short = sha[:12]
     target = f"{POD_ROOT}/serve/payloads/main-{short}"
     remote = (
         f"set -euo pipefail; mkdir -p {POD_ROOT}/serve/payloads {POD_ROOT}/serve/logs; T={target}; "
-        'if [ ! -d "$T" ]; then rm -rf "$T.partial"; mkdir -p "$T.partial"; tar -xzf - -C "$T.partial"; '
+        'if [ ! -d "$T" ]; then rm -rf "$T.partial"; mkdir -p "$T.partial"; tar --no-same-owner -xzf - -C "$T.partial"; '
         'mv "$T.partial" "$T"; else cat > /dev/null; fi; '
         f'python3 "$T/scripts/lilith/runpod/verify_payload.py" verify --root "$T" --manifest "$T/source-manifest.json" '
         f'--expected-sha {sha} --output "$T/provenance-$(date -u +%Y%m%dT%H%M%SZ).json"; '

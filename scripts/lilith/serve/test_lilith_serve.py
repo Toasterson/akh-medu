@@ -408,6 +408,29 @@ class StableUrlTests(Harness):
         self.assertEqual(self.ledger_events()[-1]["reason"], "zero_gpu")
         self.assertIsNone(ctx.state().session)
 
+    def test_install_waits_for_the_ssh_mapping_then_refuses_after_the_deadline(self):
+        ctx = self.created()
+        ls.cmd_start(ctx, wait_seconds=60)
+        pod_id = ctx.state().pod_id
+        self.assertEqual(ls.wait_for_ssh(ctx, pod_id).port_mappings["22"], 40022)
+        self.cloud.pods[pod_id]["portMappings"] = {}
+        before = self.clock.now()
+        with self.assertRaises(ls.UsageError) as caught:
+            ls.wait_for_ssh(ctx, pod_id)
+        self.assertIn("without public ssh", str(caught.exception))
+        self.assertGreaterEqual((self.clock.now() - before).total_seconds(), ls.SSH_MAPPING_WAIT_S)
+
+    def test_install_refuses_a_stopped_pod_without_waiting(self):
+        ctx = self.created()
+        before = self.clock.now()
+        with self.assertRaises(ls.UsageError):
+            ls.wait_for_ssh(ctx, ctx.state().pod_id)
+        self.assertEqual(self.clock.now(), before)
+
+    def test_payload_extraction_does_not_chown_on_the_network_volume(self):
+        source = Path(ls.__file__).read_text()
+        self.assertIn('tar --no-same-owner -xzf - -C "$T.partial"', source)
+
     def test_health_timeout_stops_the_pod(self):
         ctx = self.created()
         self.cloud.healthy = False
