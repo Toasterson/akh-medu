@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for a macOS LaunchAgent that keeps the Lilith serve idle-watch running
+  (scripts/lilith/serve/lilith_serve.py idle-watch --daemon; Anima WI 01a0e270-314e, Lilith C2).
+
+  While a serve session is open it reads vLLM's /metrics through the Runpod proxy every
+  60 s and stops the pod after 20 min without requests or at the session cap (<= 2 h,
+  shorter when the weekly / monthly budget is nearly used). Between sessions it only
+  reads local state, plus one Runpod pod-status call every 15 min so a pod started from
+  the console is adopted and supervised too.
+
+  This file is a template, not installed automatically. See docs/ops/lilith-serve.md
+  for the substitution + install steps. It MUST be a LaunchAgent (~/Library/LaunchAgents),
+  not a LaunchDaemon: op-service-account and ~/lilith-private live in the user session.
+
+  Placeholders to substitute before installing:
+    __HOME__          e.g. /Users/toasty
+    __REPO_ROOT__     a clean origin/main checkout, e.g. /Users/toasty/ws/akh-medu
+    __PYTHON_BIN__    Python 3.11+ (NOT /usr/bin/python3, which is 3.9), e.g. /opt/homebrew/bin/python3
+    __LOG_DIR__       e.g. /Users/toasty/Library/Logs/akh-medu
+-->
+<plist version="1.0"><dict>
+<key>Label</key><string>it.akh.lilith-serve-idle</string>
+<key>ProgramArguments</key><array>
+  <string>__PYTHON_BIN__</string>
+  <string>__REPO_ROOT__/scripts/lilith/serve/lilith_serve.py</string>
+  <string>idle-watch</string>
+  <string>--daemon</string>
+  <string>--interval</string>
+  <string>60</string>
+</array>
+<key>WorkingDirectory</key><string>__REPO_ROOT__</string>
+<key>EnvironmentVariables</key><dict>
+  <key>HOME</key><string>__HOME__</string>
+  <key>PATH</key><string>__HOME__/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  <key>LILITH_SERVE_STATE_DIR</key><string>__HOME__/lilith-private/serve</string>
+</dict>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+<key>ThrottleInterval</key><integer>60</integer>
+<key>ExitTimeOut</key><integer>60</integer>
+<key>ProcessType</key><string>Background</string>
+<key>StandardOutPath</key><string>__LOG_DIR__/lilith-serve-idle.log</string>
+<key>StandardErrorPath</key><string>__LOG_DIR__/lilith-serve-idle.log</string>
+</dict></plist>
