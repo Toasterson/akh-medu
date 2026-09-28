@@ -1144,8 +1144,15 @@ def cmd_recreate(ctx: Context, *, yes: bool, confirm: str | None, key_source: st
     old, old_url = state.pod_id, state.base_url
     if state.session is not None:
         close_session(ctx, state, "recreate", ctx.clock.now())
-    ctx.runpod.delete_pod(old)
-    ctx.log(f"terminated pod {old} (the network volume {NETWORK_VOLUME_ID} keeps /workspace)")
+    try:
+        ctx.runpod.delete_pod(old)
+        ctx.log(f"terminated pod {old} (the network volume {NETWORK_VOLUME_ID} keeps /workspace)")
+    except RunpodApiError as error:
+        # A recreate whose create step failed (no H100 in stock) has already terminated the old
+        # pod; retrying the same recreate must go straight to the create.
+        if error.status != 404:
+            raise
+        ctx.log(f"pod {old} is already gone (HTTP 404); creating its replacement")
     result = cmd_create(ctx, yes=True, key_source=key_source, kv_cache_dtype=kv_cache_dtype, source="recreate")
     ctx.log(f"BASE URL CHANGED: {old_url} -> {result['base_url']}; update the lilith akh's chat base_url")
     return result | {"old_pod_id": old, "old_base_url": old_url, "base_url_changed": True}

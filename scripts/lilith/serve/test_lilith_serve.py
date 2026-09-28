@@ -453,6 +453,14 @@ class StableUrlTests(Harness):
         self.assertEqual((endpoint["pod_id"], endpoint["base_url"]), (result["pod_id"], result["base_url"]))
         self.assertEqual(self.op_db()[ls.API_KEY_ITEM]["credential"], key_before, "recreate reuses the key")
 
+    def test_a_recreate_whose_create_failed_can_be_retried(self):
+        ctx = self.created()
+        old = ctx.state().pod_id
+        del self.cloud.pods[old]          # terminated by the failed recreate, still in the local state
+        result = ls.cmd_recreate(ctx, yes=True, confirm=old, key_source="env", kv_cache_dtype="auto")
+        self.assertNotEqual(result["pod_id"], old)
+        self.assertEqual(ctx.state().pod_id, result["pod_id"])
+
     def test_runpod_secret_key_source_keeps_the_value_out_of_the_create_body(self):
         ctx = self.context()
         result = ls.cmd_create(ctx, yes=True, key_source="runpod-secret", kv_cache_dtype="fp8")
