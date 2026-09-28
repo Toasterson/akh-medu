@@ -92,7 +92,8 @@ def run_control(engine: Any, output: Path | str,
         "engine_sha256": _sha256(Path(engine_module.__file__)),
         "control_sha256": _sha256(Path(__file__)),
         "versions": {"python": sys.version, "torch": torch.__version__,
-                     "transformers": transformers.__version__, "hip": torch.version.hip},
+                     "transformers": transformers.__version__, "hip": torch.version.hip,
+                     "cuda": torch.version.cuda},
         "runtime": {
             "device": str(first_parameter.device),
             "device_name": (torch.cuda.get_device_name(first_parameter.device)
@@ -102,6 +103,7 @@ def run_control(engine: Any, output: Path | str,
         },
         "initial_policy_identity": {**asdict(initial_policy), "digest": initial_policy.digest},
         "contract": engine.contract(),
+        "configured_cache_offloading": engine.cache_offloading,
         "variants": {},
     }
 
@@ -218,7 +220,8 @@ def run_control(engine: Any, output: Path | str,
             persist()
 
         report["phase"] = "generate_replay"
-        engine.cache_offloading = True
+        # Sampler/replay identity is checked on the configured placement (resident on H100).
+        engine.cache_offloading = original_offloading
         model.zero_grad(set_to_none=True)
         trajectory = engine.generate(
             prompt_ids=[2] + list(range(100, 116)), max_new_tokens=4,
@@ -298,6 +301,8 @@ def main() -> None:
     parser.add_argument("--parent", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--positions", type=int, nargs="+", default=[1023, 1024, 1025])
+    parser.add_argument("--cache-offloading", choices=("true", "false"), default="true",
+                        help="configured KV placement for generate/replay; false = GPU-resident (H100)")
     args = parser.parse_args()
     engine = GemmaTrainingEngine.load(
         args.parent,
@@ -306,6 +311,7 @@ def main() -> None:
         expected_tokenizer_sha256=PINNED_TOKENIZER_SHA256,
         target_module=TARGET,
     )
+    engine.cache_offloading = args.cache_offloading == "true"
     result = run_control(engine, args.output, args.positions)
     print(json.dumps(result, sort_keys=True))
     if result["status"] != "passed":

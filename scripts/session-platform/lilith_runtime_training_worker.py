@@ -18,7 +18,16 @@ TRAINING_SOURCES = (
     'lilith_runtime_training_config.py', 'lilith_training_engine.py', 'lilith_deferred_review.py',
     'lilith_training_transport.py', 'lilith_gemma_tool_frames.py', 'lilith_rl.py',
     'adam_kaine_code_rl_tasks.py', 'adam_kaine_code_environment.py',
-    'lilith_rl_tasks_v2.py', 'lilith_rl_tasks.py', 'lilith_adapter_mechanics.py')
+    'lilith_rl_tasks_v2.py', 'lilith_rl_tasks.py', 'lilith_adapter_mechanics.py',
+    'lilith_paths.py')
+
+
+def configured_cache_offloading(config):
+    """Explicit KV placement from the frozen config; absent means the historical offload default."""
+    value = config.get('cache_offloading', True)
+    if type(value) is not bool:
+        raise ValueError('cache_offloading must be a JSON boolean in the worker configuration')
+    return value
 
 
 def canonical(value):
@@ -399,6 +408,9 @@ def run(transport, config):
         engine = GemmaTrainingEngine.load(Path(config['parent']),
             context_tokens=config['max_context_tokens'], max_new_tokens=config['max_output_tokens'],
             **config['parent_pins'])
+        # The qualified engine source stays untouched: KV placement is set after load
+        # from the pinned configuration (False = GPU-resident, e.g. H100 80GB).
+        engine.cache_offloading = configured_cache_offloading(config)
         write(output / 'engine-contract.json', engine.contract())
         if config['mode'] == 'train':
             report = experiment(engine, transport, config, output)

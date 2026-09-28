@@ -1,0 +1,20 @@
+# Lilith C6 CUDA training + serving environment (1x H100 80GB, Runpod EU-FR-1).
+# Regenerate the lock with:
+#   uv pip compile --python-platform x86_64-manylinux_2_28 --python-version 3.12 \
+#     --generate-hashes scripts/lilith/runpod/requirements-cuda.in \
+#     -o scripts/lilith/runpod/requirements-cuda.txt
+#
+# transformers is pinned to 5.10.4: it is the floor vLLM 0.30 accepts and the
+# newest release whose DynamicSlidingWindowLayer(config=...) constructor the
+# qualified lilith_training_engine.py cache code uses (5.17 changed it).
+# torch 2.13.0 is the exact build vLLM 0.30 pins (CUDA 13 wheels: driver >= 580).
+torch==2.13.0
+transformers==5.10.4
+peft==0.21.0
+trl==1.14.0
+bitsandbytes==0.50.2
+vllm==0.30.0
+accelerate==1.15.0
+safetensors==0.8.0
+huggingface_hub==1.33.0
+jsonschema==4.26.0

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from adam_kaine_code_rl_tasks import verifier_identity
 from lilith_adapter_mechanics import PARENT_SHA256, PARENT_CONFIG_SHA256, TARGET
+from lilith_paths import resolve as resolve_paths
 from lilith_runtime_training_worker import TRAINING_SOURCES, digest, write
 from lilith_training_transport import digest_file
 
@@ -17,14 +18,27 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--stack-output', type=Path, required=True)
     parser.add_argument('--config-output', type=Path, required=True)
+    parser.add_argument('--paths-config', type=Path,
+                        help='lilith/paths@1 JSON; else LILITH_* env, else hephaistos defaults')
+    cache = parser.add_mutually_exclusive_group()
+    cache.add_argument('--cache-offloading', dest='cache_offloading', action='store_true', default=None,
+                       help='synchronous CPU KV offload (24 GB cards)')
+    cache.add_argument('--resident-cache', dest='cache_offloading', action='store_false',
+                       help='GPU-resident KV (H100 80GB)')
     args = parser.parse_args()
-    parent = Path.home() / '.local/share/akh-medu/lilith-training/parent-5926caa4'
-    subset = Path.home() / '.local/share/akh-medu/lilith-training/transcripts-20260922/sft-subset-v1.jsonl'
+    paths = resolve_paths(args.paths_config)
+    cache_offloading = paths.cache_offloading if args.cache_offloading is None else args.cache_offloading
+    if args.config_output.exists():
+        raise ValueError('refuse to overwrite frozen worker configuration')
+    if args.stack_output.exists():
+        raise ValueError('refuse to reuse an existing stack output; historical runs stay frozen')
+    parent = paths.parent_dir
+    subset = paths.transcript_dataset
     manifest_path = ROOT / 'training/lilith/transcripts-20260922/sft-subset-v1-manifest.json'
     manifest = json.loads(manifest_path.read_text())
     if digest_file(subset) != manifest['private_subset_sha256']:
         raise ValueError('frozen harvested transcript subset changed')
-    profile_path = Path.home() / '.local/share/akh-medu/lilith-dev-vulkan-20260921/akhsessd.json'
+    profile_path = paths.templates_dir / 'akhsessd.json'
     profile = json.loads(profile_path.read_text())['akhs']['lilith']
     task_manifest = ROOT / 'training/lilith/adam-kaine-code-env-20260922/rl-tasks.json'
     sources = [SCRIPTS / name for name in TRAINING_SOURCES]
@@ -42,6 +56,7 @@ def main():
         'transcript_dataset_sha256':manifest['private_subset_sha256'],
         'artifact_path':'clamp_u8.py', 'max_context_tokens':32768, 'max_output_tokens':16384,
         'max_iterations':16, 'online_banks':3, 'learning_rate':1e-4, 'beta':0.1,
+        'cache_offloading':cache_offloading, 'paths':paths.to_record(),
         'reasoning':{'enabled':True, 'efficiency_experiment':False,
                      'truncation_is_resource_limit':True, 'context_discarding':False},
         'arms':['base', 'sft_distill', 'klpo_online', 'adapter_blend_0p5'],
@@ -54,8 +69,6 @@ def main():
         'eligible_negative':'complete invalid tool plans receive zero reward; incomplete generations are excluded',
         'transcripts':'eight frozen train records for supervised imitation only; validation sessions never fit',
         'required_runtime':'akhrtd-managed worker through unchanged Lilith inference tool catalog'}
-    if args.config_output.exists():
-        raise ValueError('refuse to overwrite frozen worker configuration')
     args.config_output.parent.mkdir(parents=True, exist_ok=True)
     write(args.config_output, config)
     print(json.dumps({'config':str(args.config_output), 'sha256':digest_file(args.config_output),

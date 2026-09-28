@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 
 from lilith_training_transport import digest_file
+from lilith_paths import resolve as resolve_paths
 from lilith_runtime_training_worker import canonical, digest, write
 from lilith_deferred_review import DeferredReviewQueue, reconcile_with_reviewer
 
@@ -57,10 +58,13 @@ def main():
     parser.add_argument('--worker-config', type=Path)
     parser.add_argument('--timeout', type=int, default=180)
     parser.add_argument('--base-port', type=int, default=18620)
+    parser.add_argument('--paths-config', type=Path,
+                        help='lilith/paths@1 JSON; else LILITH_* env, else hephaistos defaults')
     args = parser.parse_args()
+    paths = resolve_paths(args.paths_config)
     output = args.output.resolve(); output.mkdir(parents=True, exist_ok=False)
-    prior = Path.home() / '.local/share/akh-medu/lilith-dev-vulkan-20260921'
-    private = Path.home() / '.local/share/akh-medu' / ('lilith-runtime-training-' + uuid.uuid4().hex)
+    prior = paths.templates_dir
+    private = paths.private_root / ('lilith-runtime-training-' + uuid.uuid4().hex)
     private.mkdir(mode=0o700)
     (private / 'credentials').mkdir(mode=0o700)
     (private / 'workspaces').mkdir(mode=0o700)
@@ -95,7 +99,7 @@ def main():
     review_queue = DeferredReviewQueue(output / 'review-queue',
         review_tool['input_schema']['properties']['path']['enum'], tools_hash)
     reviewer_name = 'ptah-deferred-reviewer'
-    python = Path.home() / '.local/share/akh-medu/lilith-training/venv310/bin/python'
+    python = paths.venv_python
     worker_script = SCRIPTS / 'lilith_runtime_training_worker.py'
     if args.worker_config:
         worker = json.loads(args.worker_config.read_text())
@@ -142,12 +146,12 @@ def main():
             principal['akhs'] = ['lilith-training', reviewer_name]
     for principal in reviewer_runtime_config['principals']:
         principal['akhs'] = ['lilith-training', reviewer_name]
-    binaries = {name:ROOT / 'target/release' / name for name in names}
+    binaries = {name:paths.runtime_binary(name) for name in names}
     binaries['akhrtd'] = args.runtime_binary.resolve()
     for name, config in configs.items():
         write(private / (name + '.json'), config)
     write(private / 'akhrtd-review.json', reviewer_runtime_config)
-    reviewer_binary = (ROOT / 'target/release/akhrtd').resolve(strict=True)
+    reviewer_binary = paths.reviewer_runtime_binary.resolve(strict=True)
     reviewer_binary_sha256 = digest_file(reviewer_binary)
     write(output / 'protocol.json', {'schema':'lilith/managed-training-stack@1',
         'driver_sha256':digest_file(__file__), 'worker_config_sha256':digest_file(worker_path),
@@ -162,7 +166,7 @@ def main():
         'reviewer_tokenizer_sha256':ptah_runtime['native_candle']['tokenizer_sha256'],
         'inference_tools_sha256':tools_hash, 'training_tools_sha256':digest(inference['tools']),
         'approval_policy':inference['approval_policy'], 'private_root':str(private),
-        'mode':worker['mode'], 'timeout_seconds':args.timeout,
+        'mode':worker['mode'], 'timeout_seconds':args.timeout, 'paths':paths.to_record(),
         'session_stall_threshold_ms':session_stall_threshold_ms,
         'retirement_cancel_grace_ms':configs['akhsessd']['retirement_cancel_grace_ms'],
         'scope':'Actual runtime-managed worker and session/executor callbacks; fixture mode performs no model update.'})
