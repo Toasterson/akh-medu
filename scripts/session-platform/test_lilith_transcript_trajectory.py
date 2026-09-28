@@ -46,6 +46,9 @@ def make_session(root, big_result="ok"):
         _assistant({"type": "tool_use", "id": "c2", "name": "Agent", "input": {"prompt": "check logs"}}),
         _tool_result("c2", [{"type": "text", "text": "launched"}], agent=AGENT),
         _assistant({"type": "text", "text": "Run 7 is at step 400 on host 10.0.0.5."}),
+        _assistant({"type": "tool_use", "id": "c3", "name": "Bash", "input": {"command": "tail log"}}),
+        _tool_result("c3", "step 401"),
+        _assistant({"type": "text", "text": "Now at 401; next checkpoint at 500."}),
         _user([{"type": "image", "source": {}}]),
         _assistant({"type": "text", "text": "an image arrived"}),
     ])
@@ -112,10 +115,11 @@ def test_local_adapter_seq_subseq_and_kinds(tmp_path):
     session = t.load_local_session(make_session(tmp_path))
     assert list(session.streams) == ["main", f"agent-{AGENT}"]
     main = session.streams["main"]
-    assert [e.kind for e in main] == ["prompt", "tool_call", "tool_result", "tool_call", "tool_result", "reply", "prompt", "reply"]
+    assert [e.kind for e in main] == ["prompt", "tool_call", "tool_result", "tool_call", "tool_result", "reply",
+                                      "tool_call", "tool_result", "reply", "prompt", "reply"]
     assert main[0].ref == t.EventRef("main", 1, 0)  # seq counts the noise line, thinking yields no event
     assert main[4].spawned_agent == AGENT
-    assert main[6].text is None  # degraded image block still resets the pending prompt
+    assert main[9].text is None  # degraded image block still resets the pending prompt
     assert session.accounts == frozenset({"alice"})
 
 
@@ -123,12 +127,21 @@ def test_trajectory_steps_splice_subagent_after_spawn(tmp_path):
     session, rows, _ = _admit(tmp_path)
     first = next(r for r in rows if r["input"] == "status of run 7?")
     steps = first["trajectory"]["steps"]
-    assert [(s["kind"], s["name"], s["event_ref"]["stream_id"]) for s in steps] == [
-        ("tool_call", "Bash", "main"), ("tool_result", "Bash", "main"),
-        ("tool_call", "Agent", "main"), ("tool_result", "Agent", "main"),
-        ("tool_call", "Read", f"agent-{AGENT}"), ("tool_result", "Read", f"agent-{AGENT}")]
+    assert [(s["kind"], s["name"], s["event_ref"]["stream_id"], s["train"]) for s in steps] == [
+        ("tool_call", "Bash", "main", True), ("tool_result", "Bash", "main", False),
+        ("tool_call", "Agent", "main", True), ("tool_result", "Agent", "main", False),
+        ("tool_call", "Read", f"agent-{AGENT}", False), ("tool_result", "Read", f"agent-{AGENT}", False),
+        ("assistant_text", None, "main", True),
+        ("tool_call", "Bash", "main", True), ("tool_result", "Bash", "main", False),
+        ("assistant_text", None, "main", True)]
     assert first["trajectory"]["subagent_streams"] == [f"agent-{AGENT}"]
-    assert "192.168" not in json.dumps(first) and "10.0.0.5" not in first["output"]
+    assert first["rated_reply"]["step_index"] == 6 and first["rated_reply"]["text"].startswith("Run 7 is")
+    assert first["turn_final_reply"]["step_index"] == 9 and first["turn_extended"] is True
+    assert first["output"] == "Now at 401; next checkpoint at 500." == steps[9]["text"]
+    assert first["turn_final_reply"]["event_ref"] == {"stream_id": "main", "seq": 10, "subseq": 0}
+    assert "192.168" not in json.dumps(first) and "10.0.0.5" not in json.dumps(first)
+    image_turn = next(r for r in rows if r["output"] == "an image arrived")
+    assert image_turn["turn_extended"] is False and image_turn["trajectory"]["steps_total"] == 1
     assert "alice" not in json.dumps(rows)
     assert steps[0]["args"] and steps[0]["result_text"] is None and steps[1]["args"] is None
     assert first["schema"] == t.SCHEMA and first["provenance"]["redaction_version"] == t.REDACTION_VERSION
@@ -157,7 +170,52 @@ def test_record_ids_match_admission_v1_for_the_same_turns(tmp_path):
     assert {r["record_id"] for r in v1} == {r["record_id"] for r in rows}
     via_mcp, _ = t.admit_trajectories([t.events_from_mcp_session(mcp)], salt="s")
     assert {r["record_id"] for r in via_mcp} == {r["record_id"] for r in rows}
-    assert all(s.get("upstream_truncated") for r in via_mcp for s in r["trajectory"]["steps"])
+    assert all(s.get("upstream_truncated") for r in via_mcp for s in r["trajectory"]["steps"]
+               if s["kind"] != "assistant_text")
+
+
+def _long_turn(root, calls, result_bytes):
+    main = root / "-Users-alice-ws-proj" / f"{SESSION_ID}.jsonl"
+    docs = [_user("go"), _assistant({"type": "text", "text": "starting"})]
+    for i in range(calls):
+        docs += [_assistant({"type": "tool_use", "id": f"k{i}", "name": "Bash", "input": {"n": i}}),
+                 _tool_result(f"k{i}", f"{i}:" + "r" * result_bytes)]
+    docs += [_assistant({"type": "text", "text": "done"}), _user("next")]
+    _write_jsonl(main, docs)
+    rows, _ = t.admit_trajectories([t.load_local_session(main)], salt="s")
+    return rows[0]
+
+
+def test_step_cap_keeps_rated_and_final_reply(tmp_path):
+    row = _long_turn(tmp_path, 100, 10)
+    traj = row["trajectory"]
+    assert traj["steps_total"] == 202 and len(traj["steps"]) == t.MAX_STEPS == 128 and traj["steps_elided"] == 74
+    assert traj["steps"][row["rated_reply"]["step_index"]]["text"] == "starting"
+    assert traj["steps"][row["turn_final_reply"]["step_index"]]["text"] == "done" == row["output"]
+    seqs = [s["event_ref"]["seq"] for s in traj["steps"]]
+    assert seqs == sorted(seqs)  # order preserved; the middle of the turn is what goes
+
+
+def test_record_budget_trims_longest_results_and_keeps_digests(tmp_path):
+    row = _long_turn(tmp_path, 40, 20000)
+    traj = row["trajectory"]
+    assert len(json.dumps(row, sort_keys=True, ensure_ascii=False).encode()) <= t.RECORD_BUDGET_BYTES
+    assert traj["bytes_trimmed"] > 0 and traj["over_budget"] is False and traj["steps_elided"] == 0
+    result = traj["steps"][2]
+    assert result["kind"] == "tool_result" and result["truncated"] and result["full_bytes"] == 20002
+    assert result["full_sha256"] == admission.sha(("0:" + "r" * 20000).encode())
+
+
+def test_validation_pinning_and_prefixes():
+    counts = {"a" * 64: 10, "b" * 64: 50, "c" * 64: 40}
+    assert t.validation_sessions(counts, "salt", pinned=frozenset({"b" * 64})) >= {"b" * 64}
+    assert t.resolve_session_prefixes(["aaaaaaaa"], set(counts)) == frozenset({"a" * 64})
+    for bad in (["aaaa"], ["dddddddd"]):
+        try:
+            t.resolve_session_prefixes(bad, set(counts))
+        except SystemExit:
+            continue
+        raise AssertionError(f"{bad} must be rejected")
 
 
 def test_resolver_maps_session_hash_to_file(tmp_path):
@@ -187,8 +245,9 @@ def test_validation_split_is_session_bound_and_near_ten_percent():
 
 
 def _row(record_id, session):
-    return {"record_id": record_id, "split": "train", "provenance": {"session_sha256": session},
-            "trajectory": {"steps": [{"kind": "tool_call"}], "steps_elided": 0, "subagent_streams": []}}
+    return {"record_id": record_id, "split": "train", "provenance": {"session_sha256": session}, "turn_extended": False,
+            "trajectory": {"steps": [{"kind": "tool_call"}], "steps_elided": 0, "bytes_trimmed": 0,
+                           "over_budget": False, "subagent_streams": []}}
 
 
 def test_selection_excludes_with_reasons_and_caps_per_session():
@@ -237,9 +296,10 @@ def test_cos_export_end_to_end_is_private_and_skips_mcp_without_token(tmp_path, 
     monkeypatch.delenv("AKH_TRANSCRIPTS_MCP_TOKEN", raising=False)
     args = argparse.Namespace(panel=tmp_path / "panel.jsonl", admitted=tmp_path / "admitted.jsonl", projects_root=projects,
                               output=tmp_path / "out" / "c.jsonl", manifest=tmp_path / "out" / "m.json", salt="x",
-                              mcp_url="https://mcp.invalid/mcp", mcp_token_env="AKH_TRANSCRIPTS_MCP_TOKEN", mcp_repo="r")
+                              mcp_url="https://mcp.invalid/mcp", mcp_token_env="AKH_TRANSCRIPTS_MCP_TOKEN", mcp_repo="r",
+                              validation_sessions=[])
     manifest = t.cos_export(args)
-    assert manifest["excluded_counts"]["missing_session_file"] == 1
+    assert manifest["excluded_counts"]["missing_session_file"] == 1 and manifest["mcp_fallback"] == "not_configured"
     for path in (args.output, args.manifest):
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     assert manifest["dataset_sha256"] == admission.sha(args.output.read_bytes())

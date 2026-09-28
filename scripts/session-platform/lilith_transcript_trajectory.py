@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 """Lilith C5: transcript admission with tool trajectories, and the CoS corpus export.
 
-Schema ``akh/lilith-transcript-trajectory@1`` extends
+Schema ``akh/lilith-transcript-trajectory@2`` extends
 ``akh/lilith-transcript-admission@1`` (``lilith_transcript_admission.py``, left
-unchanged): every prompt->reply record also carries the ordered ``tool_call`` /
-``tool_result`` steps between the prompt and the reply, so a reply's status
-claims keep their receipts (C5a finding 4, Anima WI 01a0e270-7792,
+unchanged). The unit is the **whole assistant turn**: from the prompt through
+every ``tool_call`` / ``tool_result`` / interim ``assistant_text`` step up to the
+last assistant text before the next prompt (``turn_final_reply``), so a reply's
+status claims keep their receipts (C5a finding 4, Anima WI 01a0e270-7792,
 ``docs/ai/research/2026-09-27-lilith-c5a-transcript-role-fit.md``).
 
 Pairing is the v@1 rule applied to the transcript MCP's ``get_session``
-``order="spliced"`` event order, so a trajectory record's ``record_id`` is
-exactly the v@1 ``record_id`` of the same turn and the C5a panel decisions join
-on it. Steps are then collected in *deep* spliced order: a subagent stream is
-inserted right after the ``tool_result`` that spawned it
-(``toolUseResult.agentId``), recursively.
+``order="spliced"`` event order: the first reply after the prompt is the one the
+C5a panel rated (``rated_reply``, with its ``step_index``), so ``record_id`` is
+exactly the v@1 ``record_id`` and the panel decisions join on it. Steps are
+collected in *deep* spliced order: a subagent stream's tool steps are inserted
+right after the ``tool_result`` that spawned it (``toolUseResult.agentId``),
+recursively. The training target is the steps with ``train: true`` (her own
+tool calls and assistant text); tool results and subagent work are context.
+
+Bounds: tool args/results 8 KB each (head+tail, ``full_sha256`` of the full
+redacted text kept), at most ``MAX_STEPS`` steps (rated/final reply and own
+assistant text kept first, then own tool steps nearest the turn's ends,
+subagent steps last; ``steps_elided``), and a per-record budget of
+``RECORD_BUDGET_BYTES`` met by halving the longest tool results first, then
+args (``bytes_trimmed``; ``over_budget`` if still above).
 
 Sources:
 
@@ -55,13 +65,15 @@ from lilith_transcript_admission import (  # noqa: E402
     sha,
 )
 
-SCHEMA = "akh/lilith-transcript-trajectory@1"
+SCHEMA = "akh/lilith-transcript-trajectory@2"
 MANIFEST_SCHEMA = "lilith/cos-corpus-manifest@1"
 REDACTION_VERSION = "lilith-redact@2"
 SOURCE = "claude_code"
 RESULT_CAP_BYTES = 8192
 ARGS_CAP_BYTES = 8192
-MAX_STEPS = 256
+MAX_STEPS = 128
+RECORD_BUDGET_BYTES = 128 * 1024
+MIN_TRIM_BYTES = 512
 SESSION_SHARE_CAP = 0.25
 VALIDATION_SHARE = 0.10
 
@@ -350,47 +362,115 @@ def fetch_mcp_sessions(url: str, token: str, repo: str, wanted: set[str], limit:
 # ── trajectory admission ─────────────────────────────────────────────────────
 
 
-def _step(event: Event, names: dict[str, str], accounts: frozenset[str]) -> dict[str, Any]:
+@dataclasses.dataclass
+class _Draft:
+    """A step under construction; ``full`` is the redacted, unbounded text (never serialized)."""
+
+    step: dict[str, Any]
+    full: str
+    field: str | None  # "args" | "result_text" | None (assistant text is never trimmed)
+    cap: int = 0
+
+
+def _draft(event: Event, names: dict[str, str], accounts: frozenset[str], own_stream: str) -> _Draft:
     full = redact(event.text or "", accounts)
-    if event.kind == "tool_call":
-        args, truncated = bound(full, ARGS_CAP_BYTES)
-        result_text = None
-        name = event.tool_name
-    else:
-        args = None
-        result_text, truncated = bound(full, RESULT_CAP_BYTES)
-        name = names.get(event.tool_call_id or "", event.tool_name)
-    step: dict[str, Any] = {
-        "kind": event.kind, "name": name, "args": args, "result_text": result_text,
-        "event_ref": event.ref.as_json(), "full_sha256": sha(full.encode()),
-        "full_bytes": len(full.encode()), "truncated": truncated,
-    }
+    own = event.ref.stream_id == own_stream
+    step: dict[str, Any] = {"kind": "assistant_text" if event.kind == "reply" else event.kind,
+                            "name": None, "args": None, "result_text": None, "text": None,
+                            "event_ref": event.ref.as_json(),
+                            # Her output: own-stream tool calls and assistant text. Tool results and
+                            # delegated subagent work are context, never a training target.
+                            "train": own and event.kind in ("tool_call", "reply"),
+                            "full_sha256": sha(full.encode()), "full_bytes": len(full.encode()),
+                            "truncated": False}
     if event.upstream_truncated:
         step["upstream_truncated"] = True
-    return step
+    if event.kind == "reply":
+        step["text"] = full
+        return _Draft(step, full, None)
+    if event.kind == "tool_call":
+        step["name"] = event.tool_name
+        draft = _Draft(step, full, "args", ARGS_CAP_BYTES)
+    else:
+        step["name"] = names.get(event.tool_call_id or "", event.tool_name)
+        draft = _Draft(step, full, "result_text", RESULT_CAP_BYTES)
+    _apply_cap(draft, draft.cap)
+    return draft
 
 
-def _deep_steps(window: list[Event], streams: dict[str, list[Event]], visited: set[str]) -> list[Event]:
-    """Tool events of ``window`` with spawned subagent streams spliced in after their spawn result."""
+def _apply_cap(draft: _Draft, cap: int) -> int:
+    """Re-bound ``draft`` to ``cap`` bytes from its full text; returns bytes removed."""
+    before = len((draft.step[draft.field] or "").encode())
+    text, truncated = bound(draft.full, cap)
+    draft.cap, draft.step[draft.field], draft.step["truncated"] = cap, text, truncated
+    return before - len(text.encode())
+
+
+def _turn_events(window: list[Event], streams: dict[str, list[Event]], visited: set[str]) -> list[Event]:
+    """Turn events with spawned subagent streams' tool steps spliced in after their spawn result."""
     out: list[Event] = []
     for event in window:
-        if event.kind not in ("tool_call", "tool_result"):
+        if event.kind not in ("tool_call", "tool_result", "reply"):
             continue
         out.append(event)
         child = f"agent-{event.spawned_agent}" if event.spawned_agent else None
         if child and child in streams and child not in visited and event.kind == "tool_result":
             visited.add(child)
-            out.extend(_deep_steps(streams[child], streams, visited))
+            out.extend(e for e in _turn_events(streams[child], streams, visited) if e.kind != "reply")
     return out
+
+
+def _elide(events: list[Event], protected: set[int], own_stream: str) -> tuple[list[int], int]:
+    """Indices kept under ``MAX_STEPS``: rated/final reply, own text, own tool steps nearest the turn ends, subagent steps last."""
+    n = len(events)
+    if n <= MAX_STEPS:
+        return list(range(n)), 0
+
+    def tier(i: int) -> int:
+        event = events[i]
+        if i in protected:
+            return 0
+        if event.ref.stream_id != own_stream:
+            return 3
+        return 1 if event.kind == "reply" else 2
+
+    ranked = sorted(range(n), key=lambda i: (tier(i), min(i, n - 1 - i), i))
+    return sorted(ranked[:MAX_STEPS]), n - MAX_STEPS
+
+
+def _fit(record: dict[str, Any], drafts: list[_Draft]) -> int:
+    """Trim the longest tool results (then args) until the record fits ``RECORD_BUDGET_BYTES``."""
+    trimmed = 0
+
+    def size() -> int:
+        return len(json.dumps(record, sort_keys=True, ensure_ascii=False).encode())
+
+    current = size()
+    for field in ("result_text", "args"):
+        while current > RECORD_BUDGET_BYTES:
+            pool = [d for d in drafts if d.field == field and d.cap > MIN_TRIM_BYTES]
+            if not pool:
+                break
+            largest = max(pool, key=lambda d: (len((d.step[field] or "").encode()), -drafts.index(d)))
+            removed = _apply_cap(largest, max(MIN_TRIM_BYTES, len((largest.step[field] or "").encode()) // 2))
+            trimmed += removed
+            current -= removed
+            if removed <= 0:
+                current = size()
+    record["trajectory"]["over_budget"] = size() > RECORD_BUDGET_BYTES
+    return trimmed
 
 
 def admit_trajectories(
     sessions: list[SessionEvents], *, salt: str,
     deny_sessions: frozenset[str] = frozenset(), eval_fingerprints: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Admit sessions into trajectory@1 rows.
+    """Admit sessions into trajectory@2 rows: one row per whole assistant turn.
 
-    Pairing, dedup and eval exclusion follow ``lilith_transcript_admission.admit``.
+    Pairing (prompt -> first reply = ``rated_reply``), dedup and eval exclusion
+    follow ``lilith_transcript_admission.admit``, so ``record_id`` is the v@1 id.
+    The turn then runs on to the last assistant text before the next prompt in
+    the same stream (``turn_final_reply``).
     """
     rows: list[dict[str, Any]] = []
     rejected: Counter[str] = Counter()
@@ -411,9 +491,9 @@ def admit_trajectories(
             if event.kind != "reply" or pending is None:
                 continue
             prompt_event = ordered[pending]
-            prompt, reply = redact(prompt_event.text or "", accounts), redact(event.text or "", accounts)
-            content_hash = sha({"input": normalized(prompt), "output": normalized(reply)})
-            window = ordered[pending + 1:index]
+            prompt, rated = redact(prompt_event.text or "", accounts), redact(event.text or "", accounts)
+            content_hash = sha({"input": normalized(prompt), "output": normalized(rated)})
+            start = pending + 1
             pending = None
             if content_hash in seen:
                 rejected["duplicate_content"] += 1
@@ -422,22 +502,39 @@ def admit_trajectories(
                 rejected["eval_content_collision"] += 1
                 continue
             seen.add(content_hash)
+            own = event.ref.stream_id
+            end = index + 1
+            while end < len(ordered) and ordered[end].kind != "prompt" and ordered[end].ref.stream_id == own:
+                end += 1
+            turn = _turn_events(ordered[start:end], streams, set())
+            rated_at = turn.index(event)
+            final_at = max(i for i, e in enumerate(turn) if e.kind == "reply" and e.ref.stream_id == own)
+            keep, elided = _elide(turn, {rated_at, final_at}, own)
+            drafts = [_draft(turn[i], names, accounts, own) for i in keep]
+            steps = [d.step for d in drafts]
+            final_event = turn[final_at]
             refs = [prompt_event.ref.as_json(), event.ref.as_json()]
-            spliced = _deep_steps(window, streams, set())
-            steps = [_step(step, names, accounts) for step in spliced[:MAX_STEPS]]
             split_bucket = int(sha({"salt": salt, "session": session_hash})[:8], 16) % 10
-            rows.append({
+            record = {
                 "schema": SCHEMA,
                 "record_id": sha({"session": session_hash, "event_refs": refs}),
                 "split": "validation" if split_bucket == 0 else "train",
-                "training_kind": "supervised_imitation", "input": prompt, "output": reply,
-                "trajectory": {"steps": steps, "steps_elided": max(0, len(spliced) - MAX_STEPS),
-                               "subagent_streams": sorted({s.ref.stream_id for s in spliced} - {event.ref.stream_id})},
+                "training_kind": "supervised_imitation", "input": prompt,
+                "output": steps[keep.index(final_at)]["text"],
+                "rated_reply": {"text": rated, "step_index": keep.index(rated_at), "event_ref": refs[1]},
+                "turn_final_reply": {"text": steps[keep.index(final_at)]["text"], "step_index": keep.index(final_at),
+                                     "event_ref": final_event.ref.as_json()},
+                "turn_extended": final_at > rated_at,
+                "trajectory": {"steps": steps, "steps_total": len(turn), "steps_elided": elided,
+                               "bytes_trimmed": 0, "over_budget": False,
+                               "subagent_streams": sorted({e.ref.stream_id for e in turn} - {own})},
                 "provenance": {"source": SOURCE, "session_sha256": session_hash, "event_refs": refs,
                                "content_sha256": content_hash, "adapter": adapter,
                                "redaction_version": REDACTION_VERSION},
                 "family_tags": [], "evidence": {"kind": "none"},
-            })
+            }
+            record["trajectory"]["bytes_trimmed"] = _fit(record, drafts)
+            rows.append(record)
     rows.sort(key=lambda row: row["record_id"])
     return rows, dict(sorted(rejected.items()))
 
@@ -454,11 +551,13 @@ def session_cap(counts: dict[str, int], share: float = SESSION_SHARE_CAP) -> int
     return best
 
 
-def validation_sessions(counts: dict[str, int], salt: str, share: float = VALIDATION_SHARE) -> set[str]:
-    """Whole sessions, in salted-hash order, filled up to ``share`` of the records."""
+def validation_sessions(
+    counts: dict[str, int], salt: str, share: float = VALIDATION_SHARE, pinned: frozenset[str] = frozenset(),
+) -> set[str]:
+    """Whole sessions: ``pinned`` first, then salted-hash order, filled up to ``share`` of the records."""
     target = round(share * sum(counts.values()))
-    chosen: set[str] = set()
-    filled = 0
+    chosen: set[str] = {s for s in pinned if s in counts}
+    filled = sum(counts[s] for s in chosen)
     for session in sorted(counts, key=lambda s: sha({"salt": salt, "session": s})):
         if filled >= target:
             break
@@ -475,6 +574,7 @@ def _rank(record_id: str) -> str:
 def select_cos_corpus(
     rows_by_id: dict[str, dict[str, Any]], panel: list[dict[str, Any]],
     record_sessions: dict[str, str], unresolved: dict[str, str], *, salt: str,
+    pinned_validation: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Join panel CoS decisions onto trajectory rows, cap per session, re-split, and describe it."""
     excluded: list[dict[str, str]] = []
@@ -501,7 +601,7 @@ def select_cos_corpus(
         kept.extend(mine[:cap])
         excluded.extend({"record_id": r["record_id"], "session": session[:8], "reason": "session_cap"} for r in mine[cap:])
     kept_counts = Counter(r["provenance"]["session_sha256"] for r in kept)
-    validation = validation_sessions(dict(kept_counts), salt)
+    validation = validation_sessions(dict(kept_counts), salt, pinned=pinned_validation)
     for row in kept:
         row["split"] = "validation" if row["provenance"]["session_sha256"] in validation else "train"
     kept.sort(key=lambda r: r["record_id"])
@@ -509,11 +609,17 @@ def select_cos_corpus(
 
     def step_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         counts = [len(r["trajectory"]["steps"]) for r in rows]
-        calls = [sum(s["kind"] == "tool_call" for s in r["trajectory"]["steps"]) for r in rows]
-        return {"records": len(rows), "non_empty": sum(c > 0 for c in counts),
+        tools = [sum(s["kind"] != "assistant_text" for s in r["trajectory"]["steps"]) for r in rows]
+        non_empty = [n for n in tools if n]
+        return {"records": len(rows), "non_empty_tool_steps": len(non_empty),
+                "turn_extended": sum(r["turn_extended"] for r in rows),
                 "steps_median": statistics.median(counts) if counts else 0, "steps_max": max(counts, default=0),
-                "tool_calls_median": statistics.median(calls) if calls else 0, "tool_calls_max": max(calls, default=0),
+                "tool_steps_median": statistics.median(tools) if tools else 0,
+                "tool_steps_median_non_empty": statistics.median(non_empty) if non_empty else 0,
+                "tool_steps_max": max(tools, default=0),
                 "records_with_elided_steps": sum(r["trajectory"]["steps_elided"] > 0 for r in rows),
+                "records_trimmed": sum(r["trajectory"]["bytes_trimmed"] > 0 for r in rows),
+                "records_over_budget": sum(r["trajectory"]["over_budget"] for r in rows),
                 "records_with_subagent_steps": sum(bool(r["trajectory"]["subagent_streams"]) for r in rows)}
 
     manifest = {
@@ -522,7 +628,10 @@ def select_cos_corpus(
         "source_admission_schema": ADMISSION_SCHEMA,
         "redaction_version": REDACTION_VERSION,
         "redaction_patterns": [name for name, _, _ in REDACTIONS] + [ACCOUNT_RULE],
-        "bounds": {"result_text_bytes": RESULT_CAP_BYTES, "args_bytes": ARGS_CAP_BYTES, "max_steps": MAX_STEPS},
+        "bounds": {"result_text_bytes": RESULT_CAP_BYTES, "args_bytes": ARGS_CAP_BYTES, "max_steps": MAX_STEPS,
+                   "record_budget_bytes": RECORD_BUDGET_BYTES, "min_trim_bytes": MIN_TRIM_BYTES},
+        "training_target": "steps with train=true (own-stream tool_call + assistant_text); "
+                           "tool_result and subagent steps are context",
         "records": len(kept),
         "panel_cos_records": len(cos),
         "operator_corrections": sum(r["labels"]["operator_correction"] for r in kept),
@@ -534,7 +643,12 @@ def select_cos_corpus(
         "trajectory_stats": {"candidates": step_stats(candidates), "admitted": step_stats(kept)},
         "cap_policy": {"max_session_share": SESSION_SHARE_CAP, "per_session_cap": cap,
                        "order": "sha256(record_id) ascending within session"},
-        "split_policy": f"session-bound; sessions in sha256(salt,session) order fill validation up to {VALIDATION_SHARE:.0%} of records",
+        "split_policy": "session-bound; pinned sessions first, then sha256(salt,session) order fills "
+                        f"validation up to {VALIDATION_SHARE:.0%} of records",
+        "validation": {"sessions": sorted(s[:8] for s in validation),
+                       "pinned": sorted(s[:8] for s in pinned_validation),
+                       "share": round(sum(r["split"] == "validation" for r in kept) / len(kept), 4) if kept else 0.0,
+                       "target_share": VALIDATION_SHARE},
         "excluded_counts": dict(sorted(Counter(e["reason"] for e in excluded).items())),
         "excluded": excluded,
     }
@@ -554,6 +668,18 @@ def _write_private(path: Path, text: str) -> None:
     with os.fdopen(fd, "w") as handle:
         handle.write(text)
     os.chmod(path, 0o600)
+
+
+def resolve_session_prefixes(prefixes: list[str], sessions: set[str]) -> frozenset[str]:
+    """Expand ``--validation-sessions`` hash prefixes; each must name exactly one session."""
+    out = set()
+    for prefix in prefixes:
+        matches = [s for s in sessions if s.startswith(prefix.lower())]
+        if len(prefix) < 8 or len(matches) != 1:
+            raise SystemExit(f"--validation-sessions {prefix!r}: needs >=8 hex chars matching exactly one "
+                             f"session (matched {len(matches)})")
+        out.add(matches[0])
+    return frozenset(out)
 
 
 def cos_export(args: argparse.Namespace) -> dict[str, Any]:
@@ -583,13 +709,17 @@ def cos_export(args: argparse.Namespace) -> dict[str, Any]:
     for session in missing - covered:
         unresolved[session] = "missing_session_file"
     rows, rejected = admit_trajectories(sessions, salt=args.salt)
-    kept, manifest = select_cos_corpus({r["record_id"]: r for r in rows}, panel, record_sessions, unresolved, salt=args.salt)
+    pinned = resolve_session_prefixes(args.validation_sessions, wanted)
+    kept, manifest = select_cos_corpus({r["record_id"]: r for r in rows}, panel, record_sessions, unresolved,
+                                       salt=args.salt, pinned_validation=pinned)
     body = "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in kept)
     manifest["dataset_sha256"] = hashlib.sha256(body.encode()).hexdigest()
     manifest["inputs"] = {"panel_sha256": hashlib.sha256(args.panel.read_bytes()).hexdigest(),
                           "admitted_sha256": hashlib.sha256(args.admitted.read_bytes()).hexdigest()}
     manifest["session_adapters"] = {s.session_sha256[:8]: s.adapter for s in sorted(sessions, key=lambda s: s.session_sha256)}
     manifest["admission_rejected"] = rejected
+    manifest["mcp_fallback"] = ("used" if any(s.adapter == "transcript_mcp" for s in sessions)
+                                else "not_needed" if not missing else "not_configured")
     _write_private(args.output, body)
     _write_private(args.manifest, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest
@@ -605,13 +735,17 @@ def main(argv: list[str] | None = None) -> None:
     cos.add_argument("--output", type=Path, required=True)
     cos.add_argument("--manifest", type=Path, required=True)
     cos.add_argument("--salt", required=True)
-    cos.add_argument("--mcp-url", help="transcript MCP endpoint, used only for sessions not on disk")
+    cos.add_argument("--validation-sessions", default=[], type=lambda v: [p for p in v.split(",") if p],
+                     help="comma-separated session_sha256 prefixes pinned to validation (default: none)")
+    cos.add_argument("--mcp-url", default="http://transcripts.lab.home/mcp",
+                     help="transcript MCP endpoint, used only for sessions not on disk and only with a token")
     cos.add_argument("--mcp-token-env", default="AKH_TRANSCRIPTS_MCP_TOKEN",
                      help="env var holding the MCP bearer token; unset means no MCP call")
     cos.add_argument("--mcp-repo", default="akh-medu")
     args = parser.parse_args(argv)
     manifest = cos_export(args)
-    summary = {key: manifest[key] for key in ("records", "panel_cos_records", "by_split", "excluded_counts", "trajectory_stats", "dataset_sha256")}
+    summary = {key: manifest[key] for key in ("records", "panel_cos_records", "by_split", "validation", "by_session",
+                                              "excluded_counts", "trajectory_stats", "mcp_fallback", "dataset_sha256")}
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 
