@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for a macOS System LaunchDaemon that runs
+  scripts/lilith/cos_announce_relay.py every 2 minutes, relaying each new
+  `lilith/cos-announcement@1` line in the Chief-of-Staff log to the
+  operator's Agent Board Chief-of-Staff thread (ADR 116 Decision 1
+  revision 4).
+
+  This is a LaunchDaemon, not a LaunchAgent, matching how the Roman
+  deployment runs its other secrets-file-backed helpers (see
+  deploy/roman-mini/CUTOVER.md and daemon_credentials.py: 'sessions',
+  'events' and 'core' are all System LaunchDaemons with a `UserName`, not
+  root, because they read a plain `secrets/board-<identity>.json` file --
+  they never need the login Keychain the way `anima-pat get` does).
+
+  This file is a template, not installed automatically. See
+  docs/ops/lilith-announcements.md for the substitution + install steps.
+
+  Placeholders to substitute before installing:
+    __RUN_AS_USER__      e.g. toasty (the deployment owner, NOT root)
+    __HOME__              e.g. /Users/toasty
+    __REPO_ROOT__          e.g. /Users/toasty/ws/akh-medu
+    __PYTHON_BIN__          e.g. /usr/bin/python3 (must be 3.11+)
+    __COS_LOG__              the Chief-of-Staff JSONL log
+                              (`[chief_of_staff].announcements` in the akh's
+                              config -- the same path the runtime guard writes)
+    __THREAD_ID__             the operator's CoS thread UUID on the Agent Board
+    __DEPLOY_ROOT__           e.g. /Users/toasty/Library/Application Support/roman-akhs
+                              (holds secrets/board-<identity>.json)
+    __BOARD_IDENTITY__        e.g. lilith
+    __LOG_DIR__               e.g. /Users/toasty/Library/Logs/akh-medu
+-->
+<plist version="1.0"><dict>
+<key>Label</key><string>it.akh.lilith-cos-announce-relay</string>
+<key>UserName</key><string>__RUN_AS_USER__</string>
+<key>ProgramArguments</key><array>
+  <string>__PYTHON_BIN__</string>
+  <string>__REPO_ROOT__/scripts/lilith/cos_announce_relay.py</string>
+  <string>run</string>
+  <string>--log</string>
+  <string>__COS_LOG__</string>
+  <string>--thread-id</string>
+  <string>__THREAD_ID__</string>
+  <string>--root</string>
+  <string>__DEPLOY_ROOT__</string>
+  <string>--identity</string>
+  <string>__BOARD_IDENTITY__</string>
+</array>
+<key>WorkingDirectory</key><string>__REPO_ROOT__</string>
+<key>EnvironmentVariables</key><dict>
+  <key>HOME</key><string>__HOME__</string>
+  <key>PATH</key><string>__HOME__/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+</dict>
+<key>RunAtLoad</key><true/>
+<key>StartInterval</key><integer>120</integer>
+<key>KeepAlive</key><false/>
+<key>ThrottleInterval</key><integer>30</integer>
+<key>ExitTimeOut</key><integer>90</integer>
+<key>ProcessType</key><string>Background</string>
+<key>StandardOutPath</key><string>__LOG_DIR__/lilith-cos-announce-relay.log</string>
+<key>StandardErrorPath</key><string>__LOG_DIR__/lilith-cos-announce-relay.log</string>
+</dict></plist>

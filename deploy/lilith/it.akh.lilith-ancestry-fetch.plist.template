@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for a macOS System LaunchDaemon that runs
+  scripts/lilith/ancestry_fetch.sh every 5 minutes, keeping the Chief-of-Staff
+  guard's dedicated ancestry clone's `refs/remotes/origin/main` current.
+
+  `GitAncestry` (src/agent/chief_of_staff/policy.rs) runs
+  `git -C <repository> merge-base --is-ancestor <sha> main` against whatever
+  refs already exist in that clone -- it never fetches on its own. Without
+  this scheduled fetch, a legitimately main-landed deploy/restart SHA can
+  look like a non-ancestor and every such T3 action is refused.
+
+  This is a LaunchDaemon (like it.akh.lilith-cos-announce-relay), running as
+  the deployment owner via `UserName`, not root. The repository
+  (https://code.aopc.cloud/toasterson/akh-medu.git) is fetched read-only over
+  plain HTTPS with no credential, the same way cos_recorder.py's git
+  collector already does `git ls-remote` against it unauthenticated.
+
+  This file is a template, not installed automatically. See
+  docs/ops/lilith-announcements.md for the substitution + install steps.
+
+  Placeholders to substitute before installing:
+    __RUN_AS_USER__      e.g. toasty (the deployment owner, NOT root)
+    __HOME__              e.g. /Users/toasty
+    __ANCESTRY_CLONE__     e.g. /Users/toasty/Library/Application Support/roman-akhs/state/lilith/ancestry.git
+                            (must match `[chief_of_staff].repository` in the
+                            akh's config -- a dedicated clone, bootstrapped by
+                            the script itself on first run if missing)
+    __SCRIPT_PATH__        e.g. /Users/toasty/ws/akh-medu/scripts/lilith/ancestry_fetch.sh
+    __LOG_DIR__            e.g. /Users/toasty/Library/Logs/akh-medu
+-->
+<plist version="1.0"><dict>
+<key>Label</key><string>it.akh.lilith-ancestry-fetch</string>
+<key>UserName</key><string>__RUN_AS_USER__</string>
+<key>ProgramArguments</key><array>
+  <string>__SCRIPT_PATH__</string>
+  <string>__ANCESTRY_CLONE__</string>
+</array>
+<key>EnvironmentVariables</key><dict>
+  <key>HOME</key><string>__HOME__</string>
+  <key>PATH</key><string>__HOME__/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+</dict>
+<key>RunAtLoad</key><true/>
+<key>StartInterval</key><integer>300</integer>
+<key>KeepAlive</key><false/>
+<key>ThrottleInterval</key><integer>30</integer>
+<key>ExitTimeOut</key><integer>120</integer>
+<key>ProcessType</key><string>Background</string>
+<key>StandardOutPath</key><string>__LOG_DIR__/lilith-ancestry-fetch.log</string>
+<key>StandardErrorPath</key><string>__LOG_DIR__/lilith-ancestry-fetch.log</string>
+</dict></plist>
