@@ -13,7 +13,11 @@
 # HF_TOKEN is read from the environment for the gated parent download only. It is
 # never written to disk, echoed, or passed on the command line.
 #
-# Refusals (fail closed): pin mismatch, an env built from a different lock, an
+# An env/ that exists but never finished building (no env/bin/python or no lock
+# marker, e.g. a pod stopped mid-install) is not an env: install mode moves it aside
+# to env.incomplete-<UTC timestamp> and rebuilds; --check reports env_incomplete.
+#
+# Refusals (fail closed): pin mismatch, a complete env built from a different lock, an
 # unreceipted parent directory, a uv tarball whose sha256 differs from the pin,
 # no GPU / NVIDIA driver < 580 / driver CUDA < 13.0 / no torch CUDA device (unless
 # LILITH_ALLOW_NO_CUDA=1), a root outside /workspace (unless LILITH_ALLOW_NON_WORKSPACE=1).
@@ -96,8 +100,23 @@ print(json.dumps({'artifacts': artifacts, 'pins': pins}))
 PY
 }
 
+env_state() {  # absent | incomplete | complete (python + lock marker; the marker is written last)
+  if [[ ! -e "$ROOT/env" && ! -L "$ROOT/env" ]]; then
+    echo absent
+  elif [[ -d "$ROOT/env" && ! -L "$ROOT/env" && -x "$ENV_PY" && -f "$ROOT/env/.lilith-lock-sha256" ]]; then
+    echo complete
+  else
+    echo incomplete
+  fi
+}
+
 check_env() {
-  [[ -x "$ENV_PY" ]] || die lilith::bootstrap::env_missing "$ENV_PY does not exist" "run bootstrap.sh without --check"
+  case "$(env_state)" in
+    absent) die lilith::bootstrap::env_missing "$ENV_PY does not exist" "run bootstrap.sh without --check" ;;
+    incomplete) die lilith::bootstrap::env_incomplete \
+      "$ROOT/env exists but never finished building (no python or no lock marker)" \
+      "run bootstrap.sh without --check: it moves the partial env aside and rebuilds" ;;
+  esac
   [[ -f "$ROOT/env/.lilith-lock-sha256" && "$(cat "$ROOT/env/.lilith-lock-sha256")" == "$LOCK_SHA256" ]] ||
     die lilith::bootstrap::env_lock "env was not built from $LOCK (sha $LOCK_SHA256)" \
       "move it aside (mv $ROOT/env $ROOT/env.old-\$(date +%s)) and rerun bootstrap.sh"
@@ -209,7 +228,14 @@ if [[ ! -x "$UV" ]] || ! "$UV" --version | grep -q " $UV_VERSION"; then
 fi
 
 # 2. Pinned CUDA venv; never mutated in place once built.
-if [[ -d "$ROOT/env" ]]; then
+if [[ "$(env_state)" == incomplete ]]; then
+  ASIDE="$ROOT/env.incomplete-$(date -u +%Y%m%dT%H%M%SZ)"
+  [[ ! -e "$ASIDE" ]] || ASIDE="$ASIDE-$$"
+  log "env: $ROOT/env never finished building (no python or no lock marker); moving it to $ASIDE and rebuilding"
+  mv "$ROOT/env" "$ASIDE" || die lilith::bootstrap::env_incomplete "could not move $ROOT/env aside" \
+    "move it by hand (mv $ROOT/env $ROOT/env.incomplete-\$(date +%s)) and rerun"
+fi
+if [[ "$(env_state)" == complete ]]; then
   check_env
   log "env already built from lock $LOCK_SHA256; reusing"
 else

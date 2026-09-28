@@ -38,6 +38,8 @@ PAYLOAD_FILES = (
     'scripts/session-platform/lilith_adapter_mechanics.py',
     'scripts/session-platform/lilith_training_engine.py',
     'scripts/session-platform/lilith_training_cache_control.py',
+    'scripts/session-platform/lilith_cache_path_diagnostic.py',
+    'scripts/session-platform/lilith_numerics.py',
     'scripts/session-platform/lilith_rl.py',
     'training/lilith/transcripts-20260922/sft-subset-v1-manifest.json',
 )

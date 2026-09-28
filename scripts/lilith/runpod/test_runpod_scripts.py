@@ -180,6 +180,7 @@ class VerifyPayloadTests(unittest.TestCase):
 
     def test_payload_names_every_module_the_smoke_imports(self):
         required = {'lilith_training_engine.py', 'lilith_training_cache_control.py', 'lilith_rl.py',
+                    'lilith_cache_path_diagnostic.py', 'lilith_numerics.py',
                     'lilith_adapter_mechanics.py', 'lilith_lora_trainer.py', 'reference_microrun.py',
                     'verify_payload.py', 'bootstrap.sh', 'run_smoke.sh', 'requirements-cuda.txt'}
         self.assertTrue(required <= {Path(name).name for name in verify_payload.PAYLOAD_FILES})
@@ -239,13 +240,7 @@ class MakePayloadTests(unittest.TestCase):
             self.assertEqual(result['knobs']['LILITH_ALLOW_UNMERGED'], '1')
 
     def assert_sums_are_last(self, run_dir: Path):
-        self.assertFalse((run_dir / 'smoke.pid').exists())
-        sums = dict(reversed(line.split(maxsplit=1)) for line in (run_dir / 'SHA256SUMS').read_text().splitlines())
-        self.assertIn('./smoke.log', sums)
-        self.assertNotIn('./smoke.pid', sums)
-        for name, digest in sums.items():
-            self.assertEqual(hashlib.sha256((run_dir / name).read_bytes()).hexdigest(), digest, name)
-        self.assertIn('finished rc=', (run_dir / 'smoke.log').read_text().splitlines()[-1])
+        assert_packaging(self, run_dir)
 
     def test_refuses_a_dirty_tree_and_a_head_not_on_main(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -265,8 +260,204 @@ class MakePayloadTests(unittest.TestCase):
             self.assertFalse((base / 'out').exists())
 
 
-if __name__ == '__main__':
-    unittest.main()
+
+def assert_packaging(test: unittest.TestCase, run_dir: Path):
+    """smoke-result.json is the completion marker: last written, covered by SHA256SUMS and the tarball."""
+    test.assertFalse((run_dir / 'smoke.pid').exists())
+    test.assertFalse((run_dir.parent / f'.stage-{run_dir.name}').exists())
+    sums = dict(reversed(line.split(maxsplit=1)) for line in (run_dir / 'SHA256SUMS').read_text().splitlines())
+    test.assertIn('./smoke.log', sums)
+    test.assertIn('./smoke-result.json', sums)
+    test.assertNotIn('./smoke.pid', sums)
+    test.assertFalse(any('results-' in name for name in sums))
+    for name, digest in sums.items():
+        test.assertEqual(hashlib.sha256((run_dir / name).read_bytes()).hexdigest(), digest, name)
+    test.assertIn('finished rc=', (run_dir / 'smoke.log').read_text().splitlines()[-1])
+    result = run_dir / 'smoke-result.json'
+    tarball = run_dir / f'results-{run_dir.name}.tar.gz'
+    with tarfile.open(tarball) as archive:
+        packed = archive.extractfile(f'{run_dir.name}/smoke-result.json').read()
+        names = archive.getnames()
+    test.assertEqual(packed, result.read_bytes())
+    test.assertFalse(any('.stage-' in name or name.endswith('.tar.gz') for name in names), names)
+
+
+FAKE_PYTHON = r"""#!/usr/bin/env bash
+# Test double for $ROOT/env/bin/python: fakes the GPU steps, runs everything else for real.
+printf '%s\n' "$*" >> "$FAKE_LOG"
+script="$(basename "${1:-}")"
+output=""; mode=""; previous=""
+for argument in "$@"; do
+  [[ "$previous" == --output ]] && output="$argument"
+  [[ "$previous" == --mode ]] && mode="$argument"
+  previous="$argument"
+done
+case "$script" in
+  lilith_training_cache_control.py)
+    printf '{"status": "%s", "numerics": {"label": "fake"}}\n' "${FAKE_CACHE_STATUS:-failed_equivalence}" > "$output"
+    [[ "${FAKE_CACHE_STATUS:-failed_equivalence}" == passed ]]; exit $? ;;
+  lilith_cache_path_diagnostic.py)
+    printf '{"status": "finished", "verdict": {"cause": "run_to_run_nondeterminism", "recommended_numerics_flags": ["--numerics-deterministic"]}}\n' > "$output"
+    exit 0 ;;
+  reference_microrun.py)
+    [[ "$mode" == "${FAKE_FAIL_MODE:-none}" ]] && exit 2
+    printf '{"status": "ok", "contexts": {}}\n' > "$output"
+    exit 0 ;;
+esac
+exec "$REAL_PYTHON" "$@"
+"""
+
+
+class SmokeSequencingTests(unittest.TestCase):
+    """run_smoke.sh on a CPU host with faked GPU steps: independent steps survive a failed control."""
+
+    def smoke(self, run_id, **extra):
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base, True)
+        scripts = base / 'pod/scripts/lilith/runpod'
+        scripts.mkdir(parents=True)
+        for name in ('run_smoke.sh', 'verify_payload.py'):
+            shutil.copy2(HERE / name, scripts / name)
+        (scripts / 'bootstrap.sh').write_text('echo \'{"status": "ok"}\'\n')
+        bin_dir = base / 'bin'
+        bin_dir.mkdir()
+        (bin_dir / 'nvidia-smi').write_text('#!/usr/bin/env bash\necho "NVIDIA H100 80GB HBM3, 580.0, 81559 MiB, GPU-x"\n')
+        (bin_dir / 'timeout').write_text('#!/usr/bin/env bash\nshift 3\nexec "$@"\n')
+        root = base / 'lilith'
+        (root / 'env/bin').mkdir(parents=True)
+        (root / 'env/bin/python').write_text(FAKE_PYTHON)
+        for path in (bin_dir / 'nvidia-smi', bin_dir / 'timeout', root / 'env/bin/python'):
+            path.chmod(0o755)
+        log = base / 'fake.log'
+        result = run('run_smoke.sh', run_id, root=root, script_dir=scripts,
+                     PATH=f'{bin_dir}{os.pathsep}{os.environ["PATH"]}', FAKE_LOG=str(log),
+                     REAL_PYTHON=sys.executable, LILITH_ALLOW_UNMERGED='1', LILITH_SMOKE_SYNTHETIC='1', **extra)
+        run_dir = root / 'runs' / run_id
+        smoke_result = json.loads((run_dir / 'smoke-result.json').read_text())
+        return result, smoke_result, run_dir, log.read_text() if log.exists() else ''
+
+    def statuses(self, smoke_result):
+        return {step['step']: step['status'] for step in smoke_result['steps']}
+
+    def test_failed_control_runs_the_diagnostic_and_every_independent_step(self):
+        result, smoke, run_dir, calls = self.smoke('seq-fail', LILITH_NUMERICS_TF32='off',
+                                                   LILITH_NUMERICS_DETERMINISTIC='1')
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(smoke['status'], 'failed')
+        self.assertEqual(smoke['failed_steps'], ['cache-control'])
+        self.assertEqual(list(self.statuses(smoke)), [
+            'provenance', 'bootstrap-check', 'gpu', 'data-pin', 'cache-control', 'cache-diagnostic',
+            'memory-probe', 'microrun', 'cold-reload'])
+        self.assertEqual(self.statuses(smoke)['cache-diagnostic'], 'ok')
+        self.assertEqual(smoke['cache_diagnostic_verdict']['cause'], 'run_to_run_nondeterminism')
+        self.assertEqual(smoke['knobs']['LILITH_NUMERICS_TF32'], 'off')
+        control_call = next(line for line in calls.splitlines() if 'lilith_training_cache_control.py' in line)
+        self.assertIn('--numerics-tf32 off', control_call)
+        self.assertIn('--numerics-deterministic', control_call)
+        self.assertIn('FAILED steps: cache-control', (run_dir / 'smoke.log').read_text())
+        assert_packaging(self, run_dir)
+
+    def test_passing_control_skips_the_diagnostic(self):
+        result, smoke, run_dir, calls = self.smoke('seq-pass', FAKE_CACHE_STATUS='passed')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(smoke['status'], 'passed')
+        self.assertEqual(smoke['failed_steps'], [])
+        self.assertNotIn('cache-diagnostic', self.statuses(smoke))
+        self.assertNotIn('lilith_cache_path_diagnostic.py', calls)
+        control_call = next(line for line in calls.splitlines() if 'lilith_training_cache_control.py' in line)
+        self.assertNotIn('--numerics', control_call)   # default = qualified behaviour
+        assert_packaging(self, run_dir)
+
+    def test_dependent_step_is_skipped_and_listed(self):
+        _, smoke, run_dir, _ = self.smoke('seq-dep', FAKE_CACHE_STATUS='passed', FAKE_FAIL_MODE='microrun')
+        statuses = self.statuses(smoke)
+        self.assertEqual(statuses['microrun'], 'failed')
+        self.assertEqual(statuses['cold-reload'], 'skipped_dependency')
+        self.assertEqual(statuses['memory-probe'], 'ok')
+        self.assertEqual(smoke['failed_steps'], ['microrun', 'cold-reload'])
+        assert_packaging(self, run_dir)
+
+    def test_exhausted_budget_is_recorded_per_step(self):
+        _, smoke, run_dir, _ = self.smoke('seq-budget', LILITH_SMOKE_BUDGET_SECONDS='100')
+        statuses = self.statuses(smoke)
+        self.assertEqual(statuses, {'provenance': 'budget_exhausted'})
+        self.assertEqual(smoke['status'], 'failed')
+        assert_packaging(self, run_dir)
+
+
+FAKE_UV = r"""#!/usr/bin/env bash
+# Test double for the pinned uv: `venv` creates a python shim, `pip install` succeeds.
+case "$1" in
+  --version) echo "uv 0.12.8" ;;
+  venv)
+    target="${@: -1}"
+    mkdir -p "$target/bin" "$target/fake-site"
+    printf '#!/usr/bin/env bash\nPYTHONPATH="%s/fake-site" exec "%s" "$@"\n' "$target" "$REAL_PYTHON" > "$target/bin/python"
+    chmod 755 "$target/bin/python"
+    printf '%s\n' '__version__ = "0.0+fake"' 'class version:' '    cuda = None' '    hip = None' \
+      'class cuda:' '    @staticmethod' '    def is_available():' '        return False' \
+      '    @staticmethod' '    def get_device_name(index):' '        return "fake"' > "$target/fake-site/torch.py" ;;
+  pip) exit 0 ;;
+  *) exit 64 ;;
+esac
+"""
+
+
+class BootstrapEnvStateTests(unittest.TestCase):
+    """An interrupted env build is rebuilt; a complete env from another lock is refused."""
+
+    def root_with_uv(self):
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base, True)
+        root = base / 'lilith'
+        (root / 'bin').mkdir(parents=True)
+        (root / 'bin/uv').write_text(FAKE_UV)
+        (root / 'bin/uv').chmod(0o755)
+        return root
+
+    def bootstrap(self, root, *args):
+        return run('bootstrap.sh', *args, root=root, LILITH_ALLOW_NO_CUDA='1', REAL_PYTHON=sys.executable)
+
+    def test_empty_env_is_moved_aside_and_rebuilt(self):
+        for partial in ('empty', 'python-only'):
+            with self.subTest(partial=partial):
+                root = self.root_with_uv()
+                (root / 'env').mkdir()
+                if partial == 'python-only':
+                    (root / 'env/bin').mkdir()
+                    (root / 'env/bin/python').write_text('#!/bin/sh\n')
+                    (root / 'env/bin/python').chmod(0o755)
+                result = self.bootstrap(root)
+                self.assertNotIn('env_missing', result.stderr)
+                self.assertIn('never finished building', result.stderr)
+                aside = sorted(root.glob('env.incomplete-*'))
+                self.assertEqual(len(aside), 1, result.stderr)
+                lock = hashlib.sha256((HERE / 'requirements-cuda.txt').read_bytes()).hexdigest()
+                self.assertEqual((root / 'env/.lilith-lock-sha256').read_text().strip(), lock)
+                self.assertTrue((root / 'env/versions.json').is_file())
+                # The run then stops at the parent download (no HF_TOKEN in tests).
+                self.assertIn('lilith::bootstrap::hf_token', result.stderr)
+
+    def test_check_reports_an_incomplete_env_without_moving_it(self):
+        root = self.root_with_uv()
+        (root / 'env').mkdir()
+        result = self.bootstrap(root, '--check')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('lilith::bootstrap::env_incomplete', result.stderr)
+        self.assertTrue((root / 'env').is_dir())
+        self.assertFalse(list(root.glob('env.incomplete-*')))
+
+    def test_complete_env_from_another_lock_is_refused(self):
+        root = self.root_with_uv()
+        (root / 'env/bin').mkdir(parents=True)
+        (root / 'env/bin/python').write_text('#!/bin/sh\n')
+        (root / 'env/bin/python').chmod(0o755)
+        (root / 'env/.lilith-lock-sha256').write_text('0' * 64 + '\n')
+        result = self.bootstrap(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('lilith::bootstrap::env_lock', result.stderr)
+        self.assertEqual((root / 'env/.lilith-lock-sha256').read_text(), '0' * 64 + '\n')
+        self.assertFalse(list(root.glob('env.incomplete-*')))
 
 
 class ChatTemplatePinConventionTest(unittest.TestCase):
@@ -299,3 +490,7 @@ class ChatTemplatePinConventionTest(unittest.TestCase):
         d, m = self._setup('template', '0' * 64)
         with self.assertRaises(Exception):
             rm.check_chat_template(d, m)
+
+
+if __name__ == '__main__':
+    unittest.main()
