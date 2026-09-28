@@ -30,6 +30,9 @@
 #                                 LILITH_WG_CLIENT=kernel, or auto detects real kernel capability)
 #   LILITH_WG_HEALTHCHECK_TIMEOUT_S  per-attempt TCP connect timeout in seconds (default: 5)
 #   LILITH_WG_HEALTHCHECK_RETRIES    attempts before failing a service (default: 6)
+#   LILITH_WG_HOSTS              Variant C: one /etc/hosts line ("127.0.0.1 seshat.lab.home
+#                                 board.lab.home") so HTTP clients send the right Host header
+#                                 through the lab-gateway forward. Appended once if missing.
 #
 # NOTE on onetun's --private-key: the rendered onetun commands read the key
 # via ordinary shell expansion of $LILITH_WG_PRIVATE_KEY at the point this
@@ -119,6 +122,18 @@ start_onetun() {
   done <<< "$LILITH_WG_ONETUN_CMDS"
   [ "$count" -gt 0 ] || fail "LILITH_WG_ONETUN_CMDS was empty — nothing to forward"
 }
+
+# Variant C: forwarded HTTP virtual hosts resolve to the local forward.
+if [ -n "${LILITH_WG_HOSTS:-}" ]; then
+  if grep -qxF "$LILITH_WG_HOSTS" /etc/hosts 2>/dev/null; then
+    :
+  elif [ -w /etc/hosts ]; then
+    printf '%s\n' "$LILITH_WG_HOSTS" >> /etc/hosts
+    log "mapped forwarded virtual hosts: $LILITH_WG_HOSTS"
+  else
+    fail "LILITH_WG_HOSTS is set but /etc/hosts is not writable; send explicit Host headers instead"
+  fi
+fi
 
 case "$CLIENT_MODE" in
   kernel)

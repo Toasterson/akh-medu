@@ -67,7 +67,7 @@ class ConfigLoadingTests(unittest.TestCase):
     def test_example_config_loads_and_is_variant_a(self):
         with tempfile.TemporaryDirectory() as td:
             keys_dir = Path(td) / "keys"
-            text = (HERE / "wg-config.toml.example").read_text().replace(
+            text = (HERE / "wg-config.variant-a.toml.example").read_text().replace(
                 "~/.config/akh-medu/lilith-wireguard/keys", str(keys_dir)
             )
             cfg_path = Path(td) / "wg-config.toml"
@@ -93,7 +93,7 @@ class ConfigLoadingTests(unittest.TestCase):
         repo_root = HERE.parent.parent.parent  # scripts/lilith/wireguard -> repo root
         self.assertTrue((repo_root / ".git").exists() or (repo_root / "Cargo.toml").exists())
         with tempfile.TemporaryDirectory() as td:
-            text = (HERE / "wg-config.toml.example").read_text().replace(
+            text = (HERE / "wg-config.variant-a.toml.example").read_text().replace(
                 "~/.config/akh-medu/lilith-wireguard/keys", str(repo_root / "scripts" / "lilith-wg-keys-should-fail")
             )
             cfg_path = Path(td) / "wg-config.toml"
@@ -303,9 +303,13 @@ class NoPrivateKeyMaterialInRepoTests(unittest.TestCase):
             self.assertEqual(hits, [], f"found generated key/state files matching {pattern} inside the repo: {hits}")
 
     def test_example_config_contains_no_key_material(self):
-        text = (HERE / "wg-config.toml.example").read_text()
+        text = (HERE / "wg-config.variant-a.toml.example").read_text()
         self.assertNotIn("PrivateKey", text)
         self.assertNotIn("public_key =", text)
+        # Variant C carries only the hub's PUBLIC key; never a private one.
+        text_c = (HERE / "wg-config.toml.example").read_text()
+        self.assertNotIn("PrivateKey", text_c)
+        self.assertNotRegex(text_c, r"(?m)^\s*private_key\s*=")
 
     def test_kernel_conf_is_never_written_under_out_dir_without_explicit_out_dir(self):
         # render_all only ever writes under the caller-supplied --out-dir; it

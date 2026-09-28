@@ -11,10 +11,20 @@ any host unless the caller actually runs it with network access to the hub;
 `--dry-run` prints the exact commands instead of running them, which is the
 mode used for testing and for review.
 
-Usage:
+Usage (Variant C — chosen; hub = talos clusters/archibald/lilith-wg):
+    peer.py slot-status [--fetch]
+    peer.py slot-assign <run> [--runpod-pod-id ID] [--slot N] [--fetch]
+    peer.py slot-release (--slot N | --run RUN)
+
+Usage (Variants A/B — superseded; hub managed over SSH):
     peer.py add <name> [--runpod-pod-id ID] [--dry-run]
     peer.py remove <name> [--dry-run]
     peer.py list [--live]
+
+Variant C slot keys are read from / rotated in 1Password at call time via
+the op-service-account wrapper and never written to disk or logs. The hub
+hot-reloads the published peer set (1Password -> ESO), so assign/release
+need no git change; see slots.py.
 
 ADR: docs/ai/decisions/116-lilith-chief-of-staff-guided-rl.md (Decision 3)
 Plan: docs/ai/plans/2026-09-27-lilith-chief-of-staff-rl-runpod.md (C6a row)
@@ -32,6 +42,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import render  # noqa: E402  (local module, path inserted above)
+import slots  # noqa: E402
 
 
 def _ssh_argv(config: render.Config) -> list[str]:
@@ -194,6 +205,38 @@ def cmd_list(config: render.Config, peers_state: Path, *, live: bool, dry_run: b
     return 0
 
 
+def _op(config: render.Config) -> "slots.OnePassword":
+    assert config.slots is not None
+    return slots.OnePassword(command=config.slots.op_command, vault=config.slots.vault)
+
+
+def _warn(message: str) -> None:
+    print(f"warning: {message}", file=sys.stderr)
+
+
+def cmd_slot_status(config: render.Config) -> int:
+    views = slots.slot_status(config, _op(config))
+    print(json.dumps([v.to_dict() for v in views], indent=2))
+    return 0
+
+
+def cmd_slot_assign(config: render.Config, run: str, *, runpod_pod_id: str | None, slot: int | None,
+                    fetch: bool, ignore_allowlist_drift: bool) -> int:
+    bundle = slots.assign(
+        config, _op(config), run, runpod_pod_id=runpod_pod_id, slot=slot, fetch=fetch,
+        ignore_allowlist_drift=ignore_allowlist_drift, warn=_warn,
+    )
+    print(json.dumps(bundle, indent=2))
+    print(f"slot {bundle['slot']} ({bundle['address']}) assigned to {run!r}", file=sys.stderr)
+    return 0
+
+
+def cmd_slot_release(config: render.Config, *, slot: int | None, run: str | None) -> int:
+    result = slots.release(config, _op(config), slot=slot, run=run)
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True, help="path to wg-config.toml")
@@ -211,8 +254,39 @@ def main(argv: list[str] | None = None) -> int:
     p_list = sub.add_parser("list", help="list persisted (and optionally live) peers")
     p_list.add_argument("--live", action="store_true", help="also query the hub with `wg show ... dump`")
 
+    sub.add_parser("slot-status", help="variant C: assigned / free / rotating per slot")
+
+    p_assign = sub.add_parser("slot-assign", help="variant C: claim a free slot, print the pod bundle")
+    p_assign.add_argument("run")
+    p_assign.add_argument("--runpod-pod-id", default=None)
+    p_assign.add_argument("--slot", type=int, default=None, help="only this slot")
+    p_assign.add_argument("--fetch", action="store_true", help="git fetch the talos checkout first")
+    p_assign.add_argument("--ignore-allowlist-drift", action="store_true")
+
+    p_release = sub.add_parser("slot-release", help="variant C: disable + rotate a slot (after a run, or to revoke)")
+    target = p_release.add_mutually_exclusive_group(required=True)
+    target.add_argument("--slot", type=int, default=None)
+    target.add_argument("--run", default=None)
+
     args = parser.parse_args(argv)
     config = render.load_config(args.config)
+
+    if args.command.startswith("slot-"):
+        try:
+            if args.command == "slot-status":
+                return cmd_slot_status(config)
+            if args.command == "slot-assign":
+                return cmd_slot_assign(
+                    config, args.run, runpod_pod_id=args.runpod_pod_id, slot=args.slot,
+                    fetch=args.fetch, ignore_allowlist_drift=args.ignore_allowlist_drift,
+                )
+            return cmd_slot_release(config, slot=args.slot, run=args.run)
+        except slots.SlotError as exc:
+            print(f"error: {exc}\n  help: {exc.help}", file=sys.stderr)
+            return 1
+    if config.is_variant_c():
+        parser.error(f"{args.command!r} manages an SSH hub (variants A/B); variant C uses slot-assign/slot-release")
+
     peers_state = args.peers_state or render.default_peers_state(config)
 
     if args.command == "add":

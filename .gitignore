@@ -36,6 +36,7 @@ __pycache__/
 # there -- this is defense in depth against an accidental filled-in copy or
 # a --out-dir pointed at the repo by mistake.
 scripts/lilith/wireguard/wg-config.toml
+scripts/lilith/wireguard/wg-config.variant-a.toml
 scripts/lilith/wireguard/*.private
 scripts/lilith/wireguard/*.public
 scripts/lilith/wireguard/peers.json

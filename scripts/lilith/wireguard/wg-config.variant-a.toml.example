@@ -1,0 +1,184 @@
+# Lilith C6a — pure WireGuard tunnel configuration, variants A/B (EXAMPLE).
+#
+# SUPERSEDED 2026-09-28 by Variant C (wg-config.toml.example): the hub is the
+# Flux-managed wg-lilith pod on archibald's k0s cluster (talos repo). Kept
+# for the record and for the A/B code paths in render.py / peer.py.
+#
+# Copy this file to `wg-config.toml` next to it and fill in the real values.
+# `wg-config.toml` (without `.example`) is gitignored by convention — never
+# commit a filled-in copy, and never put private keys in this file at all:
+# render.py / peer.py keep private key material under `[keys] dir`, which
+# must resolve outside the repository (both scripts refuse to run otherwise).
+#
+# Variant A (recommended): the hub runs on archibald (public IP, root VPS).
+#   hephaistos (LAN gateway, 192.168.1.114) dials OUT to the hub as a regular
+#   WireGuard peer with PersistentKeepalive, so no inbound port is opened at
+#   home. Runpod pods are peers of the hub. Traffic flow is
+#   pod -> hub -> hephaistos -> allowlisted LAN services only.
+#
+# Variant B: the hub runs on hephaistos itself, with a UDP port-forward
+#   opened on the home router. `gateway` == `hub` in this variant (hephaistos
+#   plays both roles); keep the [gateway] table for documentation but skip
+#   rendering a separate gateway peer.
+#
+# ADR: docs/ai/decisions/116-lilith-chief-of-staff-guided-rl.md (Decision 3)
+# Plan: docs/ai/plans/2026-09-27-lilith-chief-of-staff-rl-runpod.md (C6a row)
+# Runbook: docs/ops/lilith-wireguard.md
+
+[tunnel]
+variant = "A"                       # "A" (hub on archibald) or "B" (hub on hephaistos)
+subnet = "10.73.0.0/24"             # the whole WireGuard tunnel subnet
+listen_port = 51820                 # UDP port the hub listens on
+# DNS pushed to pod clients. Left empty on purpose: every allowlisted service
+# below is addressed by IP, so pod clients never need to resolve a name
+# through the tunnel. Fill in only if a service host is later expressed as a
+# hostname instead of an IP.
+dns = []
+
+[hub]
+# Variant A: archibald (public VPS). Variant B: hephaistos (same host as
+# [gateway] below — fill both tables identically and see docs/ops/lilith-wireguard.md).
+host = "archibald.example.net"              # placeholder — real public hostname or IP
+public_endpoint = "archibald.example.net:51820"
+tunnel_address = "10.73.0.1/32"             # the hub's own address inside the tunnel
+ssh_user = "root"
+ssh_target = "root@archibald.example.net"   # used by peer.py over SSH — no other credential path
+ssh_port = 22
+wg_interface = "wg0"
+config_path = "/etc/wireguard/wg0.conf"
+
+[gateway]
+# The LAN gateway peer. Variant A: hephaistos, dials OUT to the hub.
+# Variant B: unused as a separate peer (gateway == hub); keep filled for docs.
+#
+# IMPORTANT: `host` must be the literal LAN IP address, written exactly the
+# same way as it appears in `host` on any [[services]] entry that runs on
+# this machine (not a hostname like "hephaistos.local"). render.py splits
+# the gateway's nftables rules into an `input`-chain rule for services whose
+# `host` equals this value (they terminate locally — Linux never routes
+# same-host traffic through the `forward` hook) and a `forward` + masquerade
+# rule for every other allowlisted host. A hostname here would silently
+# route every self-hosted service through the wrong chain.
+host = "192.168.1.114"                      # hephaistos's LAN IP
+tunnel_address = "10.73.0.2/32"
+persistent_keepalive = 25
+lan_cidr = "192.168.1.0/24"                 # scope for the gateway's forwarding rules
+lan_interface = "eth0"                      # the gateway's LAN-facing NIC (verify with `ip route`)
+wg_interface = "wg0"
+config_path = "/etc/wireguard/wg0.conf"
+
+[pods]
+# Runpod pods are peers of the hub, one /32 each, allocated dynamically by
+# peer.py. Must not overlap [hub].tunnel_address or [gateway].tunnel_address.
+address_range = "10.73.0.16/28"             # 10.73.0.17 - 10.73.0.30 usable, 14 /32s
+
+[keys]
+# Key material lives OUTSIDE the repository, in this directory (created with
+# mode 0700, individual key files 0600). render.py / peer.py refuse to write
+# here if the resolved path is inside the akh-medu checkout.
+dir = "~/.config/akh-medu/lilith-wireguard/keys"
+
+[nftables]
+# A dedicated nft table name, isolated from docker/ufw. Never reuse an
+# existing table name; render.py and peer.py always emit `flush table` +
+# redefine for exactly this table, and only this table.
+table = "lilith_wg"
+
+# --- Service allowlist -------------------------------------------------
+# Every LAN destination reachable through the tunnel, as data. Nothing
+# outside this list is ever forwarded by the gateway or accepted by the hub.
+#
+# Fields:
+#   name             stable identifier, used as the onetun/wireproxy local
+#                     bind name and in nft rule comments
+#   host             LAN IP (or public hostname when bypass_gateway = true)
+#   port             remote port
+#   protocol         "tcp" or "udp"
+#   bypass_gateway   true for public HTTPS services the pod can reach
+#                     directly over the internet without the tunnel at all
+#                     (kept here for allowlist completeness / documentation)
+#   local_port       optional; local port bound on the pod by onetun /
+#                     wireproxy. Defaults to `port` when omitted. Give every
+#                     service a distinct local_port if two entries would
+#                     otherwise collide on 127.0.0.1.
+#   description      free text
+
+[[services]]
+name = "akhsessd"
+host = "192.168.1.114"              # placeholder — real akh runtime host
+port = 7401
+protocol = "tcp"
+bypass_gateway = false
+description = "akh session daemon (runtime services)"
+
+[[services]]
+name = "akhrtd"
+host = "192.168.1.114"
+port = 7402
+protocol = "tcp"
+bypass_gateway = false
+description = "akh runtime daemon"
+
+[[services]]
+name = "akhsbxd"
+host = "192.168.1.114"
+port = 7403
+protocol = "tcp"
+bypass_gateway = false
+description = "akh sandbox executor daemon"
+
+[[services]]
+name = "akhexecd"
+host = "192.168.1.114"
+port = 7404
+protocol = "tcp"
+bypass_gateway = false
+description = "akh exec daemon"
+
+[[services]]
+name = "anima-mcp"
+host = "anima.wegmueller.it"
+port = 443
+protocol = "tcp"
+bypass_gateway = true
+description = "Anima MCP — public HTTPS; may bypass the tunnel entirely, listed for allowlist completeness"
+
+[[services]]
+name = "agent-board-mcp"
+host = "192.168.1.115"              # placeholder — real Agent Board host
+port = 8080
+protocol = "tcp"
+bypass_gateway = false
+description = "Agent Board MCP"
+
+[[services]]
+name = "seshat-mcp"
+host = "192.168.1.116"              # placeholder — resolve seshat.lab.home to its LAN/cluster IP
+port = 443
+protocol = "tcp"
+bypass_gateway = false
+description = "Seshat MCP"
+
+[[services]]
+name = "forgejo"
+host = "code.aopc.cloud"
+port = 443
+protocol = "tcp"
+bypass_gateway = true
+description = "Forgejo — public HTTPS repository access; may bypass the tunnel entirely"
+
+[[services]]
+name = "fleet-status"
+host = "192.168.1.117"              # placeholder — real fleet status endpoint
+port = 9100
+protocol = "tcp"
+bypass_gateway = false
+description = "fleet status endpoint"
+
+[[services]]
+name = "lilith_vm_executor"
+host = "192.168.1.114"
+port = 10115
+protocol = "tcp"
+bypass_gateway = false
+description = "OpenIndiana validation VM executor SSH (resolves the Runpod handoff's localhost:10115-unreachable blocker)"
