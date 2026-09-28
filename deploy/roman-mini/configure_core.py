@@ -33,10 +33,20 @@ Renders (existing unrelated keys and secrets are preserved; rerunning is safe):
                                             switches Janus onto the cluster akhsessd, PR 7 cluster
                                             variant)
 - skills/vesta-remediation/                  Vesta's sandbox procedures (53g PR 8)
+- workspaces/lilith.toml + core-data/…/workspaces/lilith/kg/skills/chief-of-staff
+                                            Lilith C2 (ADR 116), only once config/lilith.json exists;
+                                            auto-started only once her secrets and ancestry clone exist
 Never reads a provider key; token files are only concatenated into the ACP
-shared-secret file, never printed.
+shared-secret file, never printed. (Lilith's endpoint base URL is read from
+secrets/lilith-base-url, because `[openai_endpoint] base_url` has no `env:` form.)
+
+`--plan` renders into memory and prints the TOML diff per file (host config and
+every workspace) without writing, installing or signing anything. Run it before
+every full render: re-renders have dropped hand-applied holds before.
 """
 import argparse
+from dataclasses import dataclass, field
+import difflib
 import hashlib
 import json
 import os
@@ -198,6 +208,182 @@ def install_skillpack(source, root, role):
     return dest
 
 
+def install_skill_tree(src, dest):
+    """Copy a whole skillpack directory (files and subdirectories such as the
+    chief-of-staff `schemas/`) into an engine skills dir: dirs 0700, files
+    0600, each file replaced atomically. Files the pack no longer ships are
+    left alone (the engine may keep state next to them)."""
+    if not (src / "skill.json").is_file():
+        raise fa.RenderError(f"skillpack {src} has no skill.json")
+    for item in sorted(src.rglob("*")):
+        target = dest / item.relative_to(src)
+        if item.is_dir():
+            target.mkdir(parents=True, exist_ok=True, mode=0o700)
+        elif item.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fa.write_atomic(target, item.read_bytes(), mode=0o600)
+    return dest
+
+
+def cos_skill_source(source):
+    """The chief-of-staff skillpack ships at the repository root
+    (`skills/chief-of-staff`), two levels above deploy/roman-mini."""
+    return source.resolve().parents[1] / "skills" / fa.COS_SKILL
+
+
+@dataclass
+class Rendered:
+    """Everything `render()` writes that is derived from the operator inputs,
+    computed without touching the deployment root (shared with `--plan`)."""
+    toml: dict            # Path -> rendered TOML text (host config + workspaces)
+    seeds: dict           # role -> reactor_manage payloads
+    staged: dict          # config/events.akh-target.json
+    core: dict            # config/core.json
+    akhs: tuple           # every akh this core hosts
+    specs: dict           # role -> fa.RoleSpec
+    auto_start: list
+    warnings: list = field(default_factory=list)
+
+
+def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=False):
+    """Compute every rendered configuration file without writing anything.
+
+    Reads config/{sessions,events,core}.json, the existing workspace TOMLs
+    (their unrelated keys are preserved) and the operator's switch files
+    (janus-delegation.json, vesta-sandbox.json, lilith.json). A malformed
+    switch raises RenderError here, before `render()` writes a single file.
+    """
+    if tomllib is None:
+        raise SystemExit(
+            "configure_core.py needs Python >= 3.11 (tomllib) to read the existing "
+            f"workspace TOMLs; this is {sys.version.split()[0]}. Run it with "
+            "/opt/homebrew/bin/python3 (cutover.sh selects one automatically)."
+        )
+    warnings = []
+    config = root / "config"
+    session = json.loads((config / "sessions.json").read_text())
+    events = json.loads((config / "events.json").read_text())
+    core = json.loads((config / "core.json").read_text())
+    registry = config / "janus-escalation.json"
+    projects = list(json.loads(registry.read_text()).get("projects", {})) if registry.exists() else []
+    if not projects:
+        warnings.append("config/janus-escalation.json lists no projects; Janus's escalation tools stay disabled")
+    # config/janus-delegation.json (PR 7 cluster variant, operator decision
+    # 2026-09-27 option a): switches Janus onto the cluster akh-platform
+    # akhsessd instead of the Mac's local one.
+    cluster = fa.janus_delegation_switch(root)
+
+    # Lilith C2 (ADR 116): rendered only once config/lilith.json exists; she
+    # auto-starts only once her secrets and ancestry clone exist too.
+    specs = dict(fa.ROLE_SPECS)
+    auto_start = list(fa.ROLES)
+    lilith = fa.lilith_settings(root)
+    cos_source = None
+    if lilith is not None:
+        cos_source = cos_skill_source(source)
+        if not (cos_source / "skill.json").is_file():
+            raise fa.RenderError(f"the chief-of-staff skillpack is missing at {cos_source}; render from a "
+                                 "full akh-medu checkout of origin/main")
+        specs[fa.LILITH] = lilith.spec()
+        events = fa.with_board_endpoint(events, fa.LILITH, fa.LILITH_BOARD_TOKEN_ENV)
+        missing = fa.lilith_missing_inputs(root)
+        if missing:
+            warnings.append("lilith is rendered but NOT auto-started until these exist: " + ", ".join(missing)
+                            + " (see CUTOVER.md \"Lilith\"); rerun configure_core.py afterwards")
+        else:
+            auto_start.append(fa.LILITH)
+    akhs = tuple(specs)
+
+    url = "sqlite://" + str(root / "state/core/akh.sqlite3") + "?mode=rwc"
+    retargeted = fa.retarget_events(events, root)
+    staged = fa.render_anima_events(fa.render_monitoring_events(retargeted, root), live=live)
+    retired_routes = [r for r in retargeted.get("routes", []) if fa.legacy_route(r)] if live else []
+    retired_servers = (fa.LAYA_SERVER,) if live else ()
+
+    toml = {}
+    host = fa.render_host_config(url, fa.acp_principals(session, root, akhs), acp_port, auto_start)
+    toml[root / "core-config/akh-medu/config.toml"] = fa.dump_toml(
+        host, fa.HOST_COMMENTS,
+        header="Rendered by deploy/roman-mini/configure_core.py (Phase 53f, ADR 113).\n"
+               f"akhomed-main-{provenance.short} = {provenance.commit}")
+
+    seeds = {}
+    for role, spec in specs.items():
+        path = root / f"core-config/akh-medu/workspaces/{role}.toml"
+        existing = tomllib.loads(path.read_text()) if path.exists() else None
+        if not spec.session_grants:
+            # Lilith: her own identities, no akhsessd grants, no reactor seeds
+            # yet (her wakes are a later slice), exec as the Romans use.
+            servers = fa.lilith_mcp_servers(session)
+            prompt = fa.system_prompt(source / "roles", role, servers, cos_source, files=spec.prompt_files)
+            doc = fa.render_workspace(existing, role, prompt, servers, fa.board_identity(events, role),
+                                      exec_table={"kind": "none"}, inference=spec.inference,
+                                      chief_of_staff=fa.render_chief_of_staff(root, lilith))
+            toml[path] = fa.dump_toml(doc, fa.LILITH_WORKSPACE_COMMENTS,
+                                      header=f"{role}: full akh (ADR 113), Chief of Staff (ADR 116). "
+                                             "Rendered by configure_core.py.")
+            continue
+        servers, server_warnings = fa.mcp_servers(session, role, root, retired_servers)
+        warnings.extend(server_warnings)
+        delegation = None
+        if role in fa.DELEGATING_ROLES:
+            delegation, delegation_warnings = fa.render_delegation(session, root, projects, role, cluster=cluster)
+            warnings.extend(delegation_warnings)
+        # 53g PR 8: after the operator writes config/vesta-sandbox.json, Vesta's
+        # [exec] targets her akhsbxd sandboxes and her policy prompt is the
+        # vesta-remediation skillpack instead of roles/addenda/vesta.md.
+        prompt = fa.system_prompt(source / "roles", role, servers, fa.role_skill(source, role, root),
+                                  files=spec.prompt_files)
+        doc = fa.render_workspace(existing, role, prompt, servers,
+                                  fa.board_identity(events, role), delegation=delegation,
+                                  monitoring=fa.monitoring_config(session, role, root, observer_retired=live),
+                                  exec_table=fa.render_exec(role, fa.vesta_sandbox(root)),
+                                  inference=spec.inference)
+        toml[path] = fa.dump_toml(doc, fa.WORKSPACE_COMMENTS,
+                                  header=f"{role}: full akh (ADR 113). Rendered by configure_core.py.")
+        seeds[role] = fa.reactor_seeds(staged, session, role, source=source, retired=retired_routes)
+    return Rendered(toml=toml, seeds=seeds, staged=staged, core=fa.render_core_config(core, root, akhs),
+                    akhs=akhs, specs=specs, auto_start=auto_start, warnings=warnings)
+
+
+def plan(root, provenance, source=None, acp_port=fa.ACP_TCP_PORT, live=False):
+    """`--plan`: the rendered-TOML diff per file, without writing anything.
+
+    Full re-renders have dropped hand-applied holds before (Janus's broker
+    hold, 2026-09-27), so the operator reviews exactly what a render would
+    replace. Returns (report lines, warnings).
+    """
+    source = source or Path(__file__).resolve().parent
+    rendered = render_configs(root, provenance, source, acp_port, live)
+    lines = []
+    for path, text in rendered.toml.items():
+        rel = str(path.relative_to(root))
+        old = path.read_text() if path.exists() else None
+        if old == text:
+            lines.append(f"= {rel}: unchanged")
+            continue
+        if old is None:
+            lines.append(f"+ {rel}: new file")
+        else:
+            lines.append(f"~ {rel}: changes")
+        lines.extend(line.rstrip("\n") for line in difflib.unified_diff(
+            (old or "").splitlines(keepends=True), text.splitlines(keepends=True),
+            fromfile="/dev/null" if old is None else f"a/{rel}", tofile=f"b/{rel}"))
+    lines.append("daemon.auto_start = " + json.dumps(rendered.auto_start))
+    return lines, rendered.warnings
+
+
+def release_provenance(root):
+    """The provenance of the release currently installed (config/core-release.json),
+    for `--plan` without `--repo`: the host config header then diffs as unchanged."""
+    path = root / "config/core-release.json"
+    if not path.exists():
+        raise fa.RenderError(f"{path} not found; pass --repo <clean origin/main checkout> with --plan")
+    release = json.loads(path.read_text())
+    return fa.Provenance(commit=release["commit"], short=release["short"],
+                         origin_main=release.get("origin_main", release["commit"]), committed_at=0)
+
+
 def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None,
            acp_port=fa.ACP_TCP_PORT, live=False, build_sha256=None, versioned_binary=None,
            codesign=None):
@@ -219,26 +405,17 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
     `[monitoring]` stops reading the observer's status export.
     """
     source = source or Path(__file__).resolve().parent
-    warnings = []
+    # Everything derived from the operator inputs is computed first, so a
+    # malformed switch file fails before a single file is written.
+    rendered = render_configs(root, provenance, source, acp_port, live)
+    warnings = list(rendered.warnings)
     for name in ("core-config/akh-medu/workspaces", "core-data", "core-state", "core-runtime",
                  "core-cache", "state/core", "config/reactor-seeds", "launchd", "evidence", "logs"):
         (root / name).mkdir(parents=True, exist_ok=True, mode=0o700)
     fa.private_dir(root / "secrets")
     config = root / "config"
     session = json.loads((config / "sessions.json").read_text())
-    events = json.loads((config / "events.json").read_text())
-    core = json.loads((config / "core.json").read_text())
     url = "sqlite://" + str(root / "state/core/akh.sqlite3") + "?mode=rwc"
-    retargeted = fa.retarget_events(events, root)
-    staged = fa.render_anima_events(fa.render_monitoring_events(retargeted, root), live=live)
-    retired_routes = [r for r in retargeted.get("routes", []) if fa.legacy_route(r)] if live else []
-    retired_servers = (fa.LAYA_SERVER,) if live else ()
-
-    host = fa.render_host_config(url, fa.acp_principals(session, root), acp_port)
-    _save_text(root / "core-config/akh-medu/config.toml", fa.dump_toml(
-        host, fa.HOST_COMMENTS,
-        header="Rendered by deploy/roman-mini/configure_core.py (Phase 53f, ADR 113).\n"
-               f"akhomed-main-{provenance.short} = {provenance.commit}"))
 
     # Skillpacks ship next to the rendered config so the operator can read
     # exactly the procedures a role runs with: Janus's escalation and
@@ -248,52 +425,31 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
     # (53g PR 8).
     if (source / "skills").is_dir():
         shutil.copytree(source / "skills", root / "skills", dirs_exist_ok=True)
-    registry = config / "janus-escalation.json"
-    projects = list(json.loads(registry.read_text()).get("projects", {})) if registry.exists() else []
-    if not projects:
-        warnings.append("config/janus-escalation.json lists no projects; Janus's escalation tools stay disabled")
-    # config/janus-delegation.json (PR 7 cluster variant, operator decision
-    # 2026-09-27 option a): switches Janus onto the cluster akh-platform
-    # akhsessd instead of the Mac's local one. Its token is the cluster's own
-    # issued secret for the janus-delegation principal, so it must already
-    # exist; only the local-akhsessd path gets a freshly generated one here.
-    cluster = fa.janus_delegation_switch(root)
-    if cluster is None:
+    # The cluster akhsessd token (config/janus-delegation.json) is the
+    # cluster's own issued secret, so it must already exist; only the
+    # local-akhsessd path gets a freshly generated one here.
+    if fa.janus_delegation_switch(root) is None:
         _ensure_key(root / fa.DELEGATION_TOKEN)
 
-    for role in fa.ROLES:
-        path = root / f"core-config/akh-medu/workspaces/{role}.toml"
-        if tomllib is None:
-            raise SystemExit(
-                "configure_core.py needs Python >= 3.11 (tomllib) to read the existing "
-                f"workspace TOMLs; this is {sys.version.split()[0]}. Run it with "
-                "/opt/homebrew/bin/python3 (cutover.sh selects one automatically)."
-            )
-        existing = tomllib.loads(path.read_text()) if path.exists() else None
-        servers, server_warnings = fa.mcp_servers(session, role, root, retired_servers)
-        warnings.extend(server_warnings)
-        delegation = None
-        if role in fa.DELEGATING_ROLES:
-            delegation, delegation_warnings = fa.render_delegation(session, root, projects, role, cluster=cluster)
-            warnings.extend(delegation_warnings)
-        # 53g PR 8: after the operator writes config/vesta-sandbox.json, Vesta's
-        # [exec] targets her akhsbxd sandboxes and her policy prompt is the
-        # vesta-remediation skillpack instead of roles/addenda/vesta.md.
-        prompt = fa.system_prompt(source / "roles", role, servers, fa.role_skill(source, role, root))
-        doc = fa.render_workspace(existing, role, prompt, servers,
-                                  fa.board_identity(events, role), delegation=delegation,
-                                  monitoring=fa.monitoring_config(session, role, root, observer_retired=live),
-                                  exec_table=fa.render_exec(role, fa.vesta_sandbox(root)))
-        _save_text(path, fa.dump_toml(doc, fa.WORKSPACE_COMMENTS,
-                                      header=f"{role}: full akh (ADR 113). Rendered by configure_core.py."))
-        _save_json(config / f"reactor-seeds/{role}.json",
-                   fa.reactor_seeds(staged, session, role, source=source, retired=retired_routes))
-        install_skillpack(source, root, role)
+    for path, text in rendered.toml.items():
+        _save_text(path, text)
+    for role, seeds in rendered.seeds.items():
+        _save_json(config / f"reactor-seeds/{role}.json", seeds)
+    for role, spec in rendered.specs.items():
+        if spec.skill is None:
+            install_skillpack(source, root, role)
+        else:
+            # Lilith: the chief-of-staff pack, whose permission-profile.json
+            # her [chief_of_staff] table names.
+            install_skill_tree(cos_skill_source(source), fa.workspace_skill_dir(root, role, spec.skill))
+    if fa.LILITH in rendered.specs:
+        # The log's directory (outside her write roots); akhomed creates the file.
+        fa.private_dir((root / fa.LILITH_ANNOUNCEMENTS).parent)
 
     _ensure_key(root / "secrets/core-events.key")
     _ensure_key(root / f"secrets/{fa.MONITOR_READER}.key")
-    _save_json(config / "core.json", fa.render_core_config(core, root))
-    _save_json(config / "events.akh-target.json", staged)
+    _save_json(config / "core.json", rendered.core)
+    _save_json(config / "events.akh-target.json", rendered.staged)
     missing = fa.missing_monitor_files(json.loads((config / "events.akh-target.json").read_text()))
     if missing:
         warnings.append("akheventd would not start with the staged events config until these exist "
@@ -351,18 +507,35 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--binaries", type=Path, required=True,
-                        help="target/release of the clean origin/main checkout")
-    parser.add_argument("--repo", type=Path, required=True, help="the clean origin/main checkout")
+    parser.add_argument("--binaries", type=Path,
+                        help="target/release of the clean origin/main checkout (required unless --plan)")
+    parser.add_argument("--repo", type=Path,
+                        help="the clean origin/main checkout (required unless --plan; with --plan it "
+                             "sets the provenance in the host config header, default: the installed release)")
     parser.add_argument("--no-fetch", action="store_true", help="skip `git fetch origin`")
     parser.add_argument("--acp-port", type=int, default=fa.ACP_TCP_PORT)
     parser.add_argument("--live", action="store_true",
                         help="PR 6 cutover: the roman-anima source ingests (default: shadow), "
                              "drops the legacy observer/laya routes, seeds and laya MCP server")
+    parser.add_argument("--plan", action="store_true",
+                        help="print the rendered-TOML diff per workspace and the host config; write nothing")
     args = parser.parse_args()
+    root = args.root.resolve()
+    if args.plan:
+        provenance = (fa.main_provenance(args.repo.resolve(), fetch=not args.no_fetch) if args.repo
+                      else release_provenance(root))
+        lines, warnings = plan(root, provenance, acp_port=args.acp_port, live=args.live)
+        for line in lines:
+            print(line)
+        for warning in warnings:
+            print("warning:", warning)
+        print("Plan only: nothing was written. Re-apply any hand-held edit the diff removes, or "
+              "render and restore it afterwards (see CUTOVER.md).")
+        return
+    if args.binaries is None or args.repo is None:
+        parser.error("--binaries and --repo are required unless --plan is given")
     # Everything rendered here is private unless written with an explicit mode.
     os.umask(0o077)
-    root = args.root.resolve()
     provenance = fa.main_provenance(args.repo.resolve(), fetch=not args.no_fetch)
     built = args.binaries.resolve() / "akhomed"
     if not built.is_file():

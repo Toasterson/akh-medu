@@ -68,6 +68,46 @@ def anima_token(root):
         return None
 
 
+LILITH_CONFIG = 'config/lilith.json'
+# Lilith C2 (ADR 116): her secret files -> the core's environment. Mirrors
+# full_akh.LILITH_SECRETS (this file is copied into bin/ standalone, so it
+# cannot import full_akh).
+LILITH_SECRET_FILES = (
+    ('LILITH_OPENAI_KEY', 'lilith-openai-key'),
+    ('LILITH_ANIMA_TOKEN', 'anima-lilith-pat'),
+)
+LILITH_BOARD = 'board-lilith.json'
+LILITH_BOARD_ENV = 'ROMAN_BOARD_LILITH'
+
+
+def lilith_env(root, env, daemon):
+    """Add Lilith's credentials to `env` when she is configured.
+
+    Never raises: a missing or unreadable file only leaves her variable unset
+    and prints what to write. configure_core.py already keeps her out of
+    `daemon.auto_start` until every file exists, so the Romans start either way.
+    Returns the names of the missing files.
+    """
+    if not (root / LILITH_CONFIG).exists():
+        return []
+    missing = []
+    for var, name in LILITH_SECRET_FILES:
+        value = secret_file(root, name)
+        if value:
+            env[var] = value
+        else:
+            missing.append('secrets/' + name)
+    try:
+        env[LILITH_BOARD_ENV] = json.loads((root / 'secrets' / LILITH_BOARD).read_text())['bearer_token']
+    except (OSError, ValueError, KeyError, TypeError):
+        missing.append('secrets/' + LILITH_BOARD)
+    if missing:
+        print(f'Roman {daemon}: lilith credentials unavailable (write {", ".join(missing)}, mode 0600); '
+              'the Romans start normally, lilith stays unauthenticated until they exist and '
+              'configure_core.py is rerun', file=sys.stderr)
+    return missing
+
+
 def main():
     role, root_arg = sys.argv[1:]
     root = Path(root_arg)
@@ -110,6 +150,14 @@ def main():
         watchdog = root / 'secrets' / 'board-watchdog.json'
         if watchdog.exists():
             env['ROMAN_BOARD_WATCHDOG'] = json.loads(watchdog.read_text())['bearer_token']
+        # Lilith's `board-lilith` endpoint: optional, like the watchdog.
+        lilith_board = root / 'secrets' / LILITH_BOARD
+        if (root / LILITH_CONFIG).exists() and lilith_board.exists():
+            try:
+                env[LILITH_BOARD_ENV] = json.loads(lilith_board.read_text())['bearer_token']
+            except (ValueError, KeyError, TypeError):
+                print(f'Roman events: secrets/{LILITH_BOARD} is malformed; board-lilith stays '
+                      'unauthenticated', file=sys.stderr)
         binary = 'akheventd'
     elif role == 'core':
         # ADR 113 decision 2: the akh's own turn runs inside akhomed, so the core
@@ -140,6 +188,9 @@ def main():
                   'starting without the anima MCP server', file=sys.stderr)
         for akh in ('janus', 'minerva', 'vesta'):
             env['ROMAN_BOARD_' + akh.upper()] = json.loads((root / 'secrets' / f'board-{akh}.json').read_text())['bearer_token']
+        # Lilith C2 (ADR 116): her vLLM key, her own Anima PAT and her Board
+        # identity. Missing files never stop the core.
+        lilith_env(root, env, 'core')
         # ADR 113 decision 4 / 53d: Board, Anima and alert events are admitted
         # into each akh's own reactor. `reactor_manage enable` refuses without
         # this gate. It is process-wide, so while it is set an akh's own

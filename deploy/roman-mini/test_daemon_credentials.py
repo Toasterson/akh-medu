@@ -1,5 +1,6 @@
 """Anima token resolution for the Roman core LaunchDaemon (ADR 113, 53f)."""
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -149,6 +150,50 @@ class CoreRoleTests(unittest.TestCase):
         with unittest.mock.patch.object(dc.os, 'execve', side_effect=AssertionError('must not exec')):
             with self.assertRaisesRegex(RuntimeError, 'sha256'):
                 self.run_main()
+
+    def exec_env(self):
+        self.release('akhomed', b'binary-bytes')
+        captured = {}
+
+        def fake_execve(p, argv, env):
+            captured['env'] = env
+            raise SystemExit(0)
+
+        stderr = io.StringIO()
+        with unittest.mock.patch.object(dc.os, 'execve', side_effect=fake_execve), \
+             unittest.mock.patch.object(dc.sys, 'stderr', stderr):
+            with self.assertRaises(SystemExit):
+                self.run_main()
+        return captured['env'], stderr.getvalue()
+
+    def test_lilith_credentials_are_mapped_when_configured(self):
+        (self.root / 'config/lilith.json').write_text('{}')
+        (self.root / 'secrets/lilith-openai-key').write_text('vllm-key\n')
+        (self.root / 'secrets/anima-lilith-pat').write_text('Bearer lilith-pat\n')
+        (self.root / 'secrets/board-lilith.json').write_text('{"bearer_token": "lilith-board"}')
+        env, stderr = self.exec_env()
+        self.assertEqual(env['LILITH_OPENAI_KEY'], 'vllm-key')
+        self.assertEqual(env['LILITH_ANIMA_TOKEN'], 'lilith-pat')
+        self.assertEqual(env['ROMAN_BOARD_LILITH'], 'lilith-board')
+        self.assertNotIn('lilith', stderr)
+        # Her own PAT, never the Romans' Anima token.
+        self.assertEqual(env['ROMAN_ANIMA_TOKEN'], 'an')
+
+    def test_missing_lilith_secrets_do_not_stop_the_core(self):
+        (self.root / 'config/lilith.json').write_text('{}')
+        (self.root / 'secrets/board-lilith.json').write_text('not json')
+        env, stderr = self.exec_env()
+        for var in ('LILITH_OPENAI_KEY', 'LILITH_ANIMA_TOKEN', 'ROMAN_BOARD_LILITH'):
+            self.assertNotIn(var, env)
+        self.assertIn('lilith credentials unavailable', stderr)
+        for name in ('secrets/lilith-openai-key', 'secrets/anima-lilith-pat', 'secrets/board-lilith.json'):
+            self.assertIn(name, stderr)
+        self.assertEqual(env['ROMAN_BOARD_JANUS'], 'b')
+
+    def test_unconfigured_lilith_is_silent(self):
+        env, stderr = self.exec_env()
+        self.assertFalse([k for k in env if 'LILITH' in k])
+        self.assertNotIn('lilith', stderr)
 
     def test_unrecognized_filename_is_refused_before_the_sha256_check(self):
         self.release('akhomed-evil', b'binary-bytes')

@@ -1,0 +1,32 @@
+# Rendered by deploy/roman-mini/configure_core.py (Phase 53f, ADR 113).
+# akhomed-main-cccccccccccc = cccccccccccccccccccccccccccccccccccccccc
+
+deployment = "deployed"
+
+[database]
+url = "sqlite://{root}/state/core/akh.sqlite3?mode=rwc"
+migrate_on_start = true
+pool_size = 1
+wal_flush_interval_secs = 1
+snapshot_interval_secs = 30
+
+[daemon]
+auto_start = ["janus", "minerva", "vesta"]
+
+# Deployed mode refuses in-process exec; `none` until an execd sandbox profile exists.
+[exec]
+kind = "none"
+
+# ACP TCP for T3 (akh-acp --akhomed). `principals` scopes each client key to its akh,
+# per phase53/fixups; until that lands AKHOMED_SHARED_SECRET_FILE (secrets/acp-clients.keys)
+# is the only ACP check and any listed key can open any akh.
+[acp]
+unix = true
+tcp_bind = "127.0.0.1"
+tcp_port = 18444
+principals = [
+    { id = "t3-janus", token_file = "{root}/secrets/t3-janus.key", akhs = ["janus"] },
+    { id = "t3-minerva", token_file = "{root}/secrets/t3-minerva.key", akhs = ["minerva"] },
+    { id = "t3-vesta", token_file = "{root}/secrets/t3-vesta.key", akhs = ["vesta"] },
+    { id = "operator", token_file = "{root}/secrets/operator.key", akhs = ["janus", "minerva", "vesta"], control = true },
+]
