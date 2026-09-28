@@ -1193,6 +1193,9 @@ class CoreReleaseFieldsTests(unittest.TestCase):
 
 GOLDEN = SOURCE / "fixtures/golden"
 LILITH_URL = "https://abc123xyz-8000.proxy.runpod.net/v1"
+# WI 01a0e270-314e (ADR 116, C2): her own Board agent id, in the same
+# `secrets/board-<role>.json` shape as the Romans'.
+LILITH_AGENT_ID = "01a0abc4-90b1-7f43-8b13-2f7c9e6a1d44"
 
 
 def lilith_fixture(root: Path, secrets=True, repository=True, **settings) -> None:
@@ -1205,7 +1208,10 @@ def lilith_fixture(root: Path, secrets=True, repository=True, **settings) -> Non
     if secrets:
         (root / "secrets/lilith-openai-key").write_text("k" * 40 + "\n")
         (root / "secrets/anima-lilith-pat").write_text("p" * 40 + "\n")
-        (root / "secrets/board-lilith.json").write_text(json.dumps({"bearer_token": "b" * 40}))
+        (root / "secrets/board-lilith.json").write_text(json.dumps({
+            "bearer_token": "b" * 40,
+            "agent": {"id": LILITH_AGENT_ID, "handle": "lilith", "role": "agent",
+                      "created_at": "2026-09-28T00:00:00Z"}}))
     if repository:
         (root / fa.LILITH_REPOSITORY).mkdir(parents=True)
 
@@ -1303,7 +1309,8 @@ class LilithRenderTests(RenderFixture):
         self.assertTrue(ws["autonomy"]["enabled"])
         self.assertTrue(ws["capture_transcripts"])
         self.assertNotIn("delegation", ws)
-        self.assertEqual(ws["board"], {"url": fa.BOARD_URL, "auth": {"token_env": "ROMAN_BOARD_LILITH"}})
+        self.assertEqual(ws["board"], {"url": fa.BOARD_URL, "agent_id": LILITH_AGENT_ID,
+                                       "auth": {"token_env": "ROMAN_BOARD_LILITH"}})
         cos = ws["chief_of_staff"]
         # deny_unknown_fields on ChiefOfStaffConfig and Money.
         self.assertEqual(set(cos), {"profile", "repository", "announcements", "budget"})
@@ -1481,6 +1488,51 @@ class LilithRenderTests(RenderFixture):
         mapped[f"secrets/{dc.LILITH_BOARD}"] = dc.LILITH_BOARD_ENV
         self.assertEqual(mapped, fa.LILITH_SECRETS)
         self.assertEqual(dc.LILITH_CONFIG, fa.LILITH_CONFIG_FILE)
+
+
+@NEEDS_TOMLLIB
+class LilithBoardAgentIdTests(RenderFixture):
+    """`[board] agent_id` (daemon.rs ~2275: without it, board inbox ingest is
+    disabled for the akh) is wired for Lilith only. The Romans' board events
+    already arrive through akheventd routes, so turning on inbox ingest for
+    them is a separate operator decision (full_akh.lilith_board_agent_id)."""
+
+    WS = "core-config/akh-medu/workspaces/lilith.toml"
+
+    def test_agent_id_is_rendered_when_present(self):
+        lilith_fixture(self.root)
+        self.render()
+        ws = self.toml(self.WS)
+        self.assertEqual(ws["board"]["agent_id"], LILITH_AGENT_ID)
+        # bearer_token is read only by daemon_credentials.py at process start,
+        # never by the renderer, and never lands in the rendered TOML.
+        self.assertNotIn("b" * 40, self.text(self.WS))
+
+    def test_missing_agent_id_warns_and_does_not_block_auto_start(self):
+        lilith_fixture(self.root)
+        (self.root / "secrets/board-lilith.json").write_text(json.dumps({"bearer_token": "b" * 40}))
+        warnings = self.render()
+        ws = self.toml(self.WS)
+        self.assertNotIn("agent_id", ws["board"])
+        [warning] = [w for w in warnings if "agent.id" in w]
+        self.assertIn("board inbox ingest for lilith stays off", warning)
+        self.assertIn("GET /v1/agents/me", warning)
+        host = self.toml("core-config/akh-medu/config.toml")
+        self.assertIn("lilith", host["daemon"]["auto_start"])
+
+    def test_malformed_agent_id_fails_the_render_closed(self):
+        lilith_fixture(self.root)
+        (self.root / "secrets/board-lilith.json").write_text(
+            json.dumps({"bearer_token": "b" * 40, "agent": {"id": "not-a-uuid"}}))
+        with self.assertRaisesRegex(fa.RenderError, "not a UUID"):
+            self.render()
+
+    def test_romans_board_stays_unchanged(self):
+        lilith_fixture(self.root)
+        self.render()
+        for role in ROLES:
+            ws = self.toml(f"core-config/akh-medu/workspaces/{role}.toml")
+            self.assertEqual(set(ws["board"]), {"url", "auth"})
 
 
 @NEEDS_TOMLLIB

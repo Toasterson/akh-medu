@@ -316,7 +316,14 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
             # yet (her wakes are a later slice), exec as the Romans use.
             servers = fa.lilith_mcp_servers(session)
             prompt = fa.system_prompt(source / "roles", role, servers, cos_source, files=spec.prompt_files)
-            doc = fa.render_workspace(existing, role, prompt, servers, fa.board_identity(events, role),
+            board = fa.board_identity(events, role)
+            agent_id, id_warnings = fa.lilith_board_agent_id(root)
+            warnings.extend(id_warnings)
+            if agent_id is not None:
+                # Scalars before any sub-table (akh TOML ordering gotcha): url,
+                # agent_id, then the auth inline table.
+                board = {"url": board["url"], "agent_id": agent_id, "auth": board["auth"]}
+            doc = fa.render_workspace(existing, role, prompt, servers, board,
                                       exec_table={"kind": "none"}, inference=spec.inference,
                                       chief_of_staff=fa.render_chief_of_staff(root, lilith))
             toml[path] = fa.dump_toml(doc, fa.LILITH_WORKSPACE_COMMENTS,
