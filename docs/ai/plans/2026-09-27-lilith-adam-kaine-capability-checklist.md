@@ -25,7 +25,7 @@
 | 8 | High Grug v2 internal register (≈19 operators, typed slots); R1 ≤2 pp non-inferiority, ≥25% fewer tokens | ADAM | ADR 092; ADR 088 (HG boundary format) | S design / P test | `p350m-RESULT.md` 0.928/0.935 | TMS operators (assume, contradict, retract) deferred, but R1 revision needs them |
 | 9 | Dual-process handoff (model proposes, engine completes; neural fraction) | Both | ADR 093 | S | Lab and engine slices measured | Reverse direction out of scope; no threshold on the iterative arm |
 | 10 | Step rewards from engine replay, VSA judge, recurrent depth | ADAM | ADR 096 | R | none | **Conflicts with ADR 110** (see §2) |
-| 11 | Engine-in-the-loop training E1–E4 (symbolic completion, event-calculus validity, causal step reward, exact-owned revision); E5 breadth | ADAM | P6 plan; ADR 106 | P (controls, no success margin) | E1 treatment failed (window 1). No RESULT for E1-control, E2–E4, window 2 | Record P6.5 outcomes; E5 undesigned |
+| 11 | Engine-in-the-loop training E1–E4 (symbolic completion, event-calculus validity, causal step reward, exact-owned revision); E5 breadth | ADAM | P6 plan; ADR 106 | P (controls, no success margin) | **Recorded 2026-09-28** (`training/results/p6-5-windows-RESULT.md`): all 9 completed windows FAILED the release gate. Best: window 2 (sentinel-shaped siblings) 1265/1272, 1 blocker family. E1 control ≈ identical to treatment (no effect); E2 projection/raw-events byte-identical (no measured effect); E3 treatment trades a `reactor_manage` fix for a worse `memory_write` catastrophic rate; E4 treatment is the one pairwise win (1 fewer blocker family) | E5 still undesigned |
 | 12 | Learn commands at runtime, Unix composition, versioned skill records, changed interfaces (8 homelab families) | Both | Homelab release exam | S behaviours / P thresholds | Not implemented | **GNU/BSD only; no illumos variant** |
 | 13 | Languages EN/DE/FR certified; Portuguese basics (PT-BR, then PT-PT) | ADAM | ADR 102 §3, §5; R1; `2026-09-10-portuguese-language-stage.md` | EN/DE/FR S; PT P | EN/DE/FR in every sentinel; PT none | Certifier and sidecar reject anything outside en/de/fr; no PT threshold |
 | 14 | Perception → graph → action (native OCR) | ADAM | ADRs 100, 101, 103; R1 | S (gates) | `vision-v1-a40-RESULT.md`: overfit, promotion held | **No audio capability in ADAM docs** (Gemma has audio input) |
@@ -93,10 +93,14 @@ documents; items marked **→ Lilith exam design (supervisor)** need numeric exa
     must add it before PT can be certified (doc note only; no code changed).
 12. **Kaine naming.** **Fixed 2026-09-27 (commit `b0959628`)**: the hardware plan notes that "Lilith" names the
     inherited Gemma track and "Kaine" keeps its ADR 111 meaning.
-13. **P6.5 outcomes unrecorded.** **Fixed 2026-09-27 (commit `b0959628`)** as a record: no results exist in
-    the repo, any branch, the local `runs/` trees or the Anima threads; the P6 plan lists E1-control,
-    window 2, E2, E3 and E4 as "Outcome not recorded as of 2026-09-27". The results themselves are still
-    missing.
+13. **P6.5 outcomes unrecorded.** **Fixed 2026-09-28**: the nine completed windows' evidence was recovered
+    from the read-only NFS backup (`/Volumes/akh-medu-runs/mac-toasty/2026-09-24/akh-medu/t3code-bf7ae675/runs/p6-4/`,
+    never copied back to `origin/main` before the pods/queue were torn down) and written up in
+    `training/results/p6-5-windows-RESULT.md`, with the P6 plan's outcome table (§Experiments) updated to match.
+    **All nine windows FAILED the release gate**; window 2 (sentinel-shaped siblings, not an E1–E4 arm) is the
+    best result at 1265/1272 with a single blocker family. E1 and E2 show no measurable treatment effect; E3
+    trades one blocker family for a worse catastrophic rate elsewhere; E4 is the only clean pairwise win, and
+    still fails the gate.
 14. **Operator-owned open questions:**
     - voice names (dojo §8 Q1);
     - belt count and names (Q2);
