@@ -1,0 +1,10 @@
+{
+  "id": "chief-of-staff",
+  "name": "Chief of Staff — Lilith's standing discipline",
+  "version": "1.0.0",
+  "description": "Lilith's Chief-of-Staff role (ADR 116): autonomy tiers T0-T3, the operator's standing rules as her own discipline, illumos guidance duties for implementers/PM/PO, captain notes, and the lilith/cos-*@1 contracts. Use for briefings, action items, commitments, chasing, illumos guidance and every operator-class action.",
+  "domains": ["chief-of-staff", "coordination", "governance", "illumos"],
+  "weight_size_bytes": 0,
+  "triples_file": "triples.json",
+  "procedures_file": "procedures.md"
+}

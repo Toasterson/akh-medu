@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://akh-medu.dev/schemas/lilith/cos-permission-profile@1",
+  "title": "Lilith CoS permission profile v1",
+  "description": "Tool-to-tier classification and per-tier grants (ADR 116 revision 4: every tier autonomous). Tool keys are exact names or a single trailing `prefix*` pattern; an unclassified tool is T0 when read-only and T3 otherwise.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "akh",
+    "main_ref",
+    "grants",
+    "tools"
+  ],
+  "properties": {
+    "contract": {
+      "const": "lilith/cos-permission-profile@1"
+    },
+    "akh": {
+      "type": "string",
+      "minLength": 1
+    },
+    "main_ref": {
+      "type": "string",
+      "pattern": "^[^-].*"
+    },
+    "grants": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "t0-read": {
+          "enum": [
+            "autonomous",
+            "gated"
+          ]
+        },
+        "t1-own-state": {
+          "enum": [
+            "autonomous",
+            "gated"
+          ]
+        },
+        "t2-coordination": {
+          "enum": [
+            "autonomous",
+            "gated"
+          ]
+        },
+        "t3-operator-class": {
+          "enum": [
+            "autonomous",
+            "gated"
+          ]
+        }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[^*]+\\*?$"
+      },
+      "additionalProperties": {
+        "enum": [
+          "t0-read",
+          "t1-own-state",
+          "t2-coordination",
+          "t3-operator-class",
+          "outside-grant"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://akh-medu.dev/schemas/lilith/cos-guidance@1",
+  "title": "Lilith CoS guidance v1",
+  "description": "A finding for an implementer, the PM or the PO, grounded in man pages, source or a native VM check (ADR 116 Decision 5).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "language",
+    "audience",
+    "subject",
+    "subsystem",
+    "severity",
+    "finding",
+    "recommendation",
+    "citations",
+    "receipts"
+  ],
+  "properties": {
+    "contract": {
+      "const": "lilith/cos-guidance@1"
+    },
+    "language": {
+      "$ref": "#/$defs/language"
+    },
+    "audience": {
+      "enum": [
+        "implementer",
+        "product-manager",
+        "product-owner"
+      ]
+    },
+    "subject": {
+      "$ref": "#/$defs/entityRef"
+    },
+    "subsystem": {
+      "enum": [
+        "smf",
+        "ips",
+        "zones",
+        "zfs",
+        "rbac",
+        "libc-abi",
+        "dtrace",
+        "portability-trap",
+        "scope",
+        "other"
+      ]
+    },
+    "severity": {
+      "enum": [
+        "note",
+        "concern",
+        "blocker"
+      ]
+    },
+    "finding": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recommendation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "citations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "reference"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "man-page",
+              "source",
+              "vm-check",
+              "document"
+            ]
+          },
+          "reference": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "receipts": {
+      "$ref": "#/$defs/receipts"
+    }
+  },
+  "$defs": {
+    "entityRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "work-item",
+            "plan",
+            "pull-request",
+            "commit",
+            "run",
+            "board-thread",
+            "akh",
+            "host",
+            "document"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "language": {
+      "type": "string",
+      "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+      "description": "BCP 47 tag of the operator's (or recipient's) language, detected structurally."
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "reference",
+        "observed_at"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/receiptKind"
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed_at": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "digest": {
+          "type": "string"
+        }
+      }
+    },
+    "receiptKind": {
+      "enum": [
+        "tool-call",
+        "work-item",
+        "pull-request",
+        "commit",
+        "board-message",
+        "run-record",
+        "ancestry-check",
+        "digest",
+        "document"
+      ]
+    },
+    "receipts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/receipt"
+      },
+      "description": "Honesty: at least one receipt read in this episode."
+    },
+    "unixSeconds": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Seconds since the Unix epoch."
+    }
+  }
+}

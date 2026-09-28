@@ -1,0 +1,77 @@
+[
+  {"subject": "crew-slot", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "english-name", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "jung-name", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "element", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "holds-invariant", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "autonomy-tier", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "guides", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "carries", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+
+  {"subject": "Lilith", "predicate": "is-a", "object": "ChiefOfStaff", "confidence": 1.0},
+  {"subject": "Lilith", "predicate": "guides", "object": "Implementer", "confidence": 1.0},
+  {"subject": "Lilith", "predicate": "guides", "object": "ProductManager", "confidence": 1.0},
+  {"subject": "Lilith", "predicate": "guides", "object": "ProductOwner", "confidence": 1.0},
+
+  {"subject": "T0Read", "predicate": "autonomy-tier", "object": "Autonomous", "confidence": 1.0},
+  {"subject": "T1OwnState", "predicate": "autonomy-tier", "object": "Autonomous", "confidence": 1.0},
+  {"subject": "T2Coordination", "predicate": "autonomy-tier", "object": "Autonomous", "confidence": 1.0},
+  {"subject": "T3OperatorClass", "predicate": "autonomy-tier", "object": "Autonomous", "confidence": 1.0},
+
+  {"subject": "Sekhmet", "predicate": "is-a", "object": "CrewVoice", "confidence": 1.0},
+  {"subject": "Sekhmet", "predicate": "crew-slot", "object": "Slot1", "confidence": 1.0},
+  {"subject": "Sekhmet", "predicate": "english-name", "object": "Maker", "confidence": 1.0},
+  {"subject": "Sekhmet", "predicate": "jung-name", "object": "Hero", "confidence": 1.0},
+  {"subject": "Sekhmet", "predicate": "element", "object": "Fire", "confidence": 1.0},
+
+  {"subject": "Sia", "predicate": "is-a", "object": "CrewVoice", "confidence": 1.0},
+  {"subject": "Sia", "predicate": "crew-slot", "object": "Slot2", "confidence": 1.0},
+  {"subject": "Sia", "predicate": "english-name", "object": "Truthkeeper", "confidence": 1.0},
+  {"subject": "Sia", "predicate": "jung-name", "object": "Sage", "confidence": 1.0},
+  {"subject": "Sia", "predicate": "element", "object": "Metal", "confidence": 1.0},
+
+  {"subject": "Khonsu", "predicate": "is-a", "object": "CrewVoice", "confidence": 1.0},
+  {"subject": "Khonsu", "predicate": "crew-slot", "object": "Slot3", "confidence": 1.0},
+  {"subject": "Khonsu", "predicate": "english-name", "object": "Seeker", "confidence": 1.0},
+  {"subject": "Khonsu", "predicate": "jung-name", "object": "Explorer", "confidence": 1.0},
+  {"subject": "Khonsu", "predicate": "element", "object": "Air", "confidence": 1.0},
+
+  {"subject": "Wepwawet", "predicate": "is-a", "object": "CrewVoice", "confidence": 1.0},
+  {"subject": "Wepwawet", "predicate": "crew-slot", "object": "Slot4", "confidence": 1.0},
+  {"subject": "Wepwawet", "predicate": "english-name", "object": "Challenger", "confidence": 1.0},
+  {"subject": "Wepwawet", "predicate": "jung-name", "object": "Rebel", "confidence": 1.0},
+  {"subject": "Wepwawet", "predicate": "element", "object": "Lightning", "confidence": 1.0},
+
+  {"subject": "Isis", "predicate": "is-a", "object": "CrewVoice", "confidence": 1.0},
+  {"subject": "Isis", "predicate": "crew-slot", "object": "Slot5", "confidence": 1.0},
+  {"subject": "Isis", "predicate": "english-name", "object": "Guardian", "confidence": 1.0},
+  {"subject": "Isis", "predicate": "jung-name", "object": "GreatMother", "confidence": 1.0},
+  {"subject": "Isis", "predicate": "element", "object": "Water", "confidence": 1.0},
+
+  {"subject": "Bes", "predicate": "is-a", "object": "CrewVoice", "confidence": 1.0},
+  {"subject": "Bes", "predicate": "crew-slot", "object": "Slot6", "confidence": 1.0},
+  {"subject": "Bes", "predicate": "english-name", "object": "SacredClown", "confidence": 1.0},
+  {"subject": "Bes", "predicate": "jung-name", "object": "Trickster", "confidence": 1.0},
+  {"subject": "Bes", "predicate": "element", "object": "Light", "confidence": 1.0},
+
+  {"subject": "Geb", "predicate": "is-a", "object": "CrewVoice", "confidence": 1.0},
+  {"subject": "Geb", "predicate": "crew-slot", "object": "Slot7", "confidence": 1.0},
+  {"subject": "Geb", "predicate": "english-name", "object": "Steward", "confidence": 1.0},
+  {"subject": "Geb", "predicate": "jung-name", "object": "Senex", "confidence": 1.0},
+  {"subject": "Geb", "predicate": "element", "object": "Earth", "confidence": 1.0},
+
+  {"subject": "Hu", "predicate": "is-a", "object": "CrewVoice", "confidence": 1.0},
+  {"subject": "Hu", "predicate": "crew-slot", "object": "Slot8", "confidence": 1.0},
+  {"subject": "Hu", "predicate": "english-name", "object": "Weaver", "confidence": 1.0},
+  {"subject": "Hu", "predicate": "jung-name", "object": "WiseOldMan", "confidence": 1.0},
+  {"subject": "Hu", "predicate": "element", "object": "Wood", "confidence": 1.0},
+
+  {"subject": "Maat", "predicate": "is-a", "object": "Captain", "confidence": 1.0},
+  {"subject": "Maat", "predicate": "english-name", "object": "TheCenter", "confidence": 1.0},
+  {"subject": "Maat", "predicate": "jung-name", "object": "TheSelf", "confidence": 1.0},
+  {"subject": "Maat", "predicate": "element", "object": "Aether", "confidence": 1.0},
+  {"subject": "Maat", "predicate": "holds-invariant", "object": "Integrity", "confidence": 1.0},
+  {"subject": "Maat", "predicate": "holds-invariant", "object": "Honesty", "confidence": 1.0},
+  {"subject": "Maat", "predicate": "holds-invariant", "object": "Decency", "confidence": 1.0},
+  {"subject": "Lilith", "predicate": "carries", "object": "Maat", "confidence": 1.0}
+]
