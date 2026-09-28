@@ -145,6 +145,7 @@ These numbers also define the coordination exam the checklist found missing.
      under nohup/setsid, and resumes only with identical arguments.
    - Wait on pid files or unique marker strings, never `pgrep -f` on broad patterns (a 2026-09
      incident cost 2.5 h of idle GPU).
+   - **Pod watching (operator decision 2026-09-28): no blind hard caps.** `scripts/lilith/pod_watchdog.sh` checks every 15 minutes whether the run is still alive and progressing. It uses one ssh probe and no `pgrep`: result file, pid alive, age of the newest write, GPU utilisation. It collects and terminates when the run is done, dead (pid gone, no result), stalled (no write for a whole interval and the GPU at 0%), or unreachable twice in a row. A progressing run is never torn down by a timer.
 4. **Windows.** Train in bounded windows. After each window:
    - Run the rolling probe and a cheap held-out eval.
    - The controller decides:
