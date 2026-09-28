@@ -142,9 +142,102 @@ VESTA_SANDBOXED_TOOLS = ("gitops_exec", "homelab_write", "gitops_publish")
 VESTA_SKILL = "vesta-remediation"
 MAX_PROCEDURES_BYTES = 64 * 1024
 
+# ── Lilith C2 (ADR 116): the Chief of Staff as a workspace of this core ──────
+#
+# Placement decision (supervisor, 2026-09-28): Lilith runs as a workspace in
+# the Mac's full akhomed next to the Romans (ADR 113). Her model is a Runpod
+# vLLM endpoint reached over its HTTPS proxy URL. She is rendered only once
+# the operator writes LILITH_CONFIG_FILE; absent it, every rendered file is
+# byte-identical to the Roman-only deployment.
+LILITH = "lilith"
+LILITH_MODEL = "lilith"  # vLLM --served-model-name
+LILITH_CONTEXT_WINDOW = 32768
+LILITH_CONFIG_FILE = "config/lilith.json"
+LILITH_CONFIG_KEYS = {"budget", "base_url_file", "context_window"}
+# The Runpod proxy URL (1Password item `lilith-serve-endpoint`, field
+# `base_url`), written by the operator at render time. Never in this repo.
+LILITH_BASE_URL_FILE = "secrets/lilith-base-url"
+LILITH_OPENAI_KEY_ENV = "LILITH_OPENAI_KEY"
+LILITH_ANIMA_TOKEN_ENV = "LILITH_ANIMA_TOKEN"
+LILITH_BOARD_TOKEN_ENV = "ROMAN_BOARD_LILITH"
+# Secret files daemon_credentials.py maps into the core's environment. Any
+# one missing: Lilith is rendered but left out of `daemon.auto_start`.
+LILITH_SECRETS = {
+    "secrets/lilith-openai-key": LILITH_OPENAI_KEY_ENV,
+    "secrets/board-lilith.json": LILITH_BOARD_TOKEN_ENV,
+    "secrets/anima-lilith-pat": LILITH_ANIMA_TOKEN_ENV,
+}
+COS_SKILL = "chief-of-staff"
+# The dedicated clone her ancestry check (`git merge-base --is-ancestor <sha>
+# origin/main`) runs in, and her Chief-of-Staff log (announcements + the
+# write-ahead spend ledger), which must lie outside every root she can write.
+LILITH_REPOSITORY = "lilith/ancestry/akh-medu.git"
+LILITH_ANNOUNCEMENTS = "state/lilith/cos-announcements.jsonl"
+CURRENCY = re.compile(r"^[A-Z]{3}$")
+SESHAT_MCP_URL = "http://seshat.lab.home/mcp"
+
 
 class RenderError(RuntimeError):
     """A rendering precondition failed; the message says what to fix."""
+
+
+# ── Role specs (data-driven: one entry per akh this core hosts) ──────────────
+
+
+@dataclass(frozen=True)
+class Inference:
+    """Which model backing the workspace turns run on, and its endpoint table."""
+    backend: str
+    model: str
+    endpoint_table: str
+    endpoint: dict
+
+
+# Every endpoint table a workspace may carry; the one not selected is dropped.
+ENDPOINT_TABLES = ("ollama_endpoint", "openai_endpoint")
+ROMAN_INFERENCE = Inference("ollama", MODEL, "ollama_endpoint", OLLAMA_CLOUD)
+
+
+@dataclass(frozen=True)
+class RoleSpec:
+    """How one akh of this core is rendered.
+
+    `session_grants`: its MCP allowlists, wake prompts and reactor seeds come
+    from its akhsessd grants and akheventd routes (the Romans). `prompt_files`
+    are read from `roles/` in order. `skill` is a skillpack installed into the
+    workspace's engine skills dir (`None`: the laya-intervention pack, which
+    only the Romans run).
+    """
+    name: str
+    inference: Inference
+    prompt_files: tuple[str, ...]
+    session_grants: bool = True
+    skill: str | None = None
+
+
+def roman_spec(role: str) -> RoleSpec:
+    return RoleSpec(name=role, inference=ROMAN_INFERENCE,
+                    prompt_files=("common.md", f"{role}.md", "addenda/common.md"))
+
+
+ROLE_SPECS = {role: roman_spec(role) for role in ROLES}
+
+
+@dataclass(frozen=True)
+class LilithSettings:
+    """The operator's render inputs for Lilith (`config/lilith.json`)."""
+    base_url: str
+    budget: dict
+    context_window: int
+
+    def inference(self) -> Inference:
+        return Inference("openai", LILITH_MODEL, "openai_endpoint", {
+            "base_url": self.base_url, "api_key": f"env:{LILITH_OPENAI_KEY_ENV}",
+            "context_window": self.context_window})
+
+    def spec(self) -> RoleSpec:
+        return RoleSpec(name=LILITH, inference=self.inference(), prompt_files=("lilith.md",),
+                        session_grants=False, skill=COS_SKILL)
 
 
 # ── File writing ─────────────────────────────────────────────────────────────
@@ -595,25 +688,27 @@ MCP_SERVERS_PLACEHOLDER = "{mcp_servers}"
 
 
 def system_prompt(roles_dir: Path, role: str, servers: list[dict] | None = None,
-                  skill_dir: Path | None = None) -> str:
+                  skill_dir: Path | None = None, files: tuple[str, ...] | None = None) -> str:
     """The workspace system prompt: role files, then the role's policy, then
     `{mcp_servers}` substitution.
 
-    The policy is `roles/addenda/<role>.md`, or, when `skill_dir` is given,
-    that skillpack's procedures instead (Vesta after the sandbox cutover,
-    53g PR 8: the addendum describes the broker tools the cutover removes).
-    `{mcp_servers}` in the addenda becomes the names of the MCP servers
+    The role files are `files` (relative to `roles_dir`; default: the Roman
+    set common.md, <role>.md, addenda/common.md). The policy is
+    `roles/addenda/<role>.md`, or, when `skill_dir` is given, that
+    skillpack's procedures instead (Vesta after the sandbox cutover, 53g PR 8:
+    the addendum describes the broker tools the cutover removes; Lilith: the
+    chief-of-staff pack). `{mcp_servers}` becomes the names of the MCP servers
     actually rendered for the role.
     """
-    parts = [roles_dir / "common.md", roles_dir / f"{role}.md", roles_dir / "addenda/common.md"]
-    texts = [p.read_text() for p in parts]
+    files = files if files is not None else roman_spec(role).prompt_files
+    texts = [(roles_dir / name).read_text() for name in files]
     if skill_dir is not None:
         texts.append(skill_procedures(skill_dir))
     elif (roles_dir / f"addenda/{role}.md").exists():
         texts.append((roles_dir / f"addenda/{role}.md").read_text())
     text = "\n".join(texts)
     if MCP_SERVERS_PLACEHOLDER in text:
-        names = [s["name"] for s in servers] if servers is not None else list(ROLE_SERVERS[role])
+        names = [s["name"] for s in servers] if servers is not None else list(ROLE_SERVERS.get(role, ()))
         text = text.replace(MCP_SERVERS_PLACEHOLDER, ", ".join(names))
     return text
 
@@ -830,14 +925,26 @@ def role_skill(source: Path, role: str, root: Path) -> Path | None:
 
 def render_workspace(existing: dict | None, role: str, prompt: str, servers: list[dict],
                      board: dict, delegation: dict | None = None,
-                     monitoring: dict | None = None, exec_table: dict | None = None) -> dict:
-    """The full-akh workspace document, preserving unrelated existing keys."""
+                     monitoring: dict | None = None, exec_table: dict | None = None,
+                     inference: Inference = ROMAN_INFERENCE,
+                     chief_of_staff: dict | None = None) -> dict:
+    """The full-akh workspace document, preserving unrelated existing keys.
+
+    `inference` selects the backing and its endpoint table (the Romans:
+    GLM on Ollama Cloud; Lilith: her vLLM over `[openai_endpoint]`); the
+    other endpoint table is dropped so a stale one cannot linger.
+    `chief_of_staff` is the ADR 116 `[chief_of_staff]` table (Lilith only).
+    """
     doc = dict(existing or {})
     doc["name"] = role
     for key in ("model", "backend", "capture_transcripts", "system_prompt"):
         doc.pop(key, None)
-    doc.update(model=MODEL, backend="ollama", capture_transcripts=True, system_prompt=prompt)
-    doc["ollama_endpoint"] = dict(OLLAMA_CLOUD)
+    doc.update(model=inference.model, backend=inference.backend, capture_transcripts=True,
+               system_prompt=prompt)
+    for table in ENDPOINT_TABLES:
+        if table != inference.endpoint_table:
+            doc.pop(table, None)
+    doc[inference.endpoint_table] = dict(inference.endpoint)
     autonomy = dict(doc.get("autonomy") or {})
     autonomy["enabled"] = True
     autonomy.pop("budget", None)
@@ -849,11 +956,14 @@ def render_workspace(existing: dict | None, role: str, prompt: str, servers: lis
     doc.pop("monitoring", None)
     if monitoring is not None:
         doc["monitoring"] = dict(monitoring)
+    doc.pop("chief_of_staff", None)
+    if chief_of_staff is not None:
+        doc["chief_of_staff"] = dict(chief_of_staff)
     mcp = {k: v for k, v in (doc.get("mcp") or {}).items() if k != "servers"}
     mcp.setdefault("require_pushed_mcp", False)
     mcp["servers"] = servers
     doc["mcp"] = mcp
-    managed = ["ollama_endpoint", "autonomy", "exec", "board", "monitoring", "mcp"]
+    managed = [inference.endpoint_table, "autonomy", "exec", "board", "monitoring", "chief_of_staff", "mcp"]
     if delegation is not None:
         doc["delegation"] = delegation
         managed.append("delegation")
@@ -879,19 +989,190 @@ WORKSPACE_COMMENTS = {
                   "contained Codex workers as akhsessd sessions with per-incident grants. `enabled`\n"
                   "keeps the generic `delegate` tool off; [delegation.native.escalation] gates the\n"
                   "escalation tools. Worker instructions are the skillpacks under skills/.",
+    "openai_endpoint": "Lilith C2 (ADR 116): her own vLLM on Runpod, reached over its HTTPS proxy URL\n"
+                       "(1Password item lilith-serve-endpoint). The key is resolved from the environment\n"
+                       "(daemon_credentials.py maps secrets/lilith-openai-key).",
+    "chief_of_staff": "ADR 116: the CosGuard around every tool call. The log lies outside every root she\n"
+                      "can write; the repository is her dedicated clone for the origin/main ancestry check.",
 }
+# Lilith's servers are her own identities, not a mirror of akhsessd grants.
+LILITH_WORKSPACE_COMMENTS = {
+    **WORKSPACE_COMMENTS,
+    "exec": "Side effects stay disabled until an execd sandbox profile exists (ADR 113 53c),\n"
+            "as for the Romans.",
+    "mcp.servers": "Phase 53i: tools register as mcp__<server>__<tool>. Her own identities (anima-lilith\n"
+                   "PAT, board-lilith); no allowlist: her credentials' scopes and the CosGuard tiers bound her.",
+}
+
+
+# ── Lilith C2: render inputs, MCP servers, Chief-of-Staff table ──────────────
+
+
+def lilith_settings(root: Path) -> LilithSettings | None:
+    """Lilith's render inputs, or None when she is not configured.
+
+    `config/lilith.json` (written by the operator; non-secret) holds:
+    - `budget`: `{"minor_units": <int >= 0>, "currency": "<ISO 4217>"}`, the
+      spend ceiling her CosGuard enforces. Required: spending is an operator
+      decision, so there is no default.
+    - `base_url_file` (optional, default `<root>/secrets/lilith-base-url`):
+      absolute path of the 0600 file holding the Runpod proxy base URL
+      (1Password item `lilith-serve-endpoint`, field `base_url`). The URL is
+      read here, at render time, because `[openai_endpoint] base_url` takes no
+      `env:` indirection.
+    - `context_window` (optional, default 32768).
+
+    Absent file: None, and nothing about Lilith is rendered. A present but
+    malformed file (or a missing/invalid base URL) fails the whole render
+    closed before any file is written, with the fix in the message.
+    """
+    path = root / LILITH_CONFIG_FILE
+    if not path.exists():
+        return None
+    try:
+        settings = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise RenderError(f"{path} is not valid JSON ({error}); fix or remove it") from error
+    if not isinstance(settings, dict):
+        raise RenderError(f"{path} must be a JSON object")
+    unknown = sorted(set(settings) - LILITH_CONFIG_KEYS)
+    if unknown:
+        raise RenderError(f"{path} has unknown keys {unknown}; allowed: {sorted(LILITH_CONFIG_KEYS)}")
+    budget = settings.get("budget")
+    if (not isinstance(budget, dict) or set(budget) != {"minor_units", "currency"}
+            or not isinstance(budget["minor_units"], int) or isinstance(budget["minor_units"], bool)
+            or budget["minor_units"] < 0
+            or not isinstance(budget["currency"], str) or not CURRENCY.match(budget["currency"])):
+        raise RenderError(
+            f"{path} needs `budget`: {{\"minor_units\": <non-negative integer>, \"currency\": \"USD\"}} "
+            "(an ISO 4217 code); it is the spend ceiling Lilith's CosGuard enforces")
+    context_window = settings.get("context_window", LILITH_CONTEXT_WINDOW)
+    if not isinstance(context_window, int) or isinstance(context_window, bool) or context_window <= 0:
+        raise RenderError(f"{path}: `context_window` must be a positive integer")
+    url_file = Path(settings.get("base_url_file") or root / LILITH_BASE_URL_FILE)
+    if not url_file.is_absolute():
+        raise RenderError(f"{path}: `base_url_file` must be an absolute path")
+    if not url_file.is_file():
+        raise RenderError(
+            f"Lilith's endpoint URL file {url_file} does not exist. Write it (mode 0600) from 1Password: "
+            f"op-service-account read 'op://Homelab/lilith-serve-endpoint/base_url' > {url_file}; "
+            f"or remove {LILITH_CONFIG_FILE} to render the Romans only")
+    base_url = url_file.read_text().strip()
+    parsed = urlparse(base_url)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or not parsed.path.rstrip("/").endswith("/v1")):
+        raise RenderError(
+            f"{url_file} must hold the vLLM base URL: https, no credentials, query or fragment, "
+            "ending in the /v1 version segment (e.g. https://<pod>-8000.proxy.runpod.net/v1)")
+    return LilithSettings(base_url=base_url.rstrip("/"), budget=dict(budget), context_window=context_window)
+
+
+def lilith_missing_inputs(root: Path) -> list[str]:
+    """What must exist before Lilith may auto-start: her secret files (never
+    read here) and her ancestry clone. Empty list: ready."""
+    missing = [str(root / name) for name in LILITH_SECRETS if not (root / name).is_file()]
+    if not (root / LILITH_REPOSITORY).is_dir():
+        missing.append(str(root / LILITH_REPOSITORY))
+    return missing
+
+
+def workspace_data_dir(root: Path, role: str) -> Path:
+    """The engine data dir of a workspace under this core (XDG_DATA_HOME = core-data)."""
+    return root / f"core-data/akh-medu/workspaces/{role}"
+
+
+def workspace_skill_dir(root: Path, role: str, skill: str) -> Path:
+    return workspace_data_dir(root, role) / "kg/skills" / skill
+
+
+def lilith_write_roots(root: Path) -> list[Path]:
+    """A superset of the roots Lilith can write through file_io/edit.
+
+    akhomed passes `file_write_roots` (the engine's `<data_dir>/scratch`,
+    data_dir = `<workspace>/kg`) to the CosGuard; the whole workspace data
+    dir is checked here so a later scratch_dir change cannot move her log
+    inside her reach unnoticed.
+    """
+    return [workspace_data_dir(root, LILITH)]
+
+
+def _inside(path: Path, root: Path) -> bool:
+    path, root = Path(os.path.abspath(path)), Path(os.path.abspath(root))
+    return path == root or root in path.parents
+
+
+def render_chief_of_staff(root: Path, settings: LilithSettings) -> dict:
+    """Lilith's `[chief_of_staff]` table (ADR 116; `deny_unknown_fields`:
+    exactly profile, repository, announcements, budget).
+
+    Refuses (RenderError) when the announcements log would lie inside one of
+    her write roots: the akh would refuse it at load and run read-only
+    (FailClosedGuard) instead.
+    """
+    announcements = root / LILITH_ANNOUNCEMENTS
+    for write_root in lilith_write_roots(root):
+        if _inside(announcements, write_root):
+            raise RenderError(f"Lilith's Chief-of-Staff log {announcements} lies inside her write root "
+                              f"{write_root}; move LILITH_ANNOUNCEMENTS outside it")
+    return {"profile": str(workspace_skill_dir(root, LILITH, COS_SKILL) / "permission-profile.json"),
+            "repository": str(root / LILITH_REPOSITORY),
+            "announcements": str(announcements),
+            "budget": Inline(minor_units=settings.budget["minor_units"], currency=settings.budget["currency"])}
+
+
+def lilith_mcp_servers(session: dict) -> list[dict]:
+    """Lilith's own `[[mcp.servers]]`: she holds no akhsessd grants, so these
+    are not derived from sessions.json allowlists.
+
+    - `anima` via the `anima-lilith` identity: her own PAT (never Toasty's),
+      env LILITH_ANIMA_TOKEN.
+    - `djehuty`: the Agent Board as `board-lilith`, her own Board identity.
+      Named `djehuty` (not `board` as for the Romans) so her tools register
+      as `mcp__djehuty__*`, which her permission profile classifies as
+      T2 coordination; any other name would make every board post an
+      unmapped, operator-class (T3) call.
+    - `seshat`: the shared archive, same URL and credential as the Romans.
+
+    No `tools` allowlist: what she may do is bounded by her own credentials'
+    scopes and by the CosGuard tiers, not by a copy of a Roman grant.
+    """
+    seshat = session.get("endpoints", {}).get("seshat", {})
+    servers = [
+        {"name": "anima", "url": ANIMA_MCP_URL, "auth": Inline(token_env=LILITH_ANIMA_TOKEN_ENV)},
+        {"name": "djehuty", "url": BOARD_URL + "/mcp", "auth": Inline(token_env=LILITH_BOARD_TOKEN_ENV)},
+        {"name": "seshat", "url": seshat.get("url", SESHAT_MCP_URL),
+         "auth": Inline(token_env=seshat.get("token_env", "ROMAN_ARCHIVE_TOKEN"))},
+    ]
+    for server in servers:
+        if server["url"].startswith("http://") and not _is_loopback(server["url"]):
+            # Same trust decision as the Romans' seshat endpoint (LAN-only lab.home).
+            server["allow_insecure_http"] = True
+            server["auth"] = server.pop("auth")  # keep auth after the scalars
+    return servers
+
+
+def with_board_endpoint(events: dict, role: str, token_env: str) -> dict:
+    """`events` with a `board-<role>` endpoint (the akh's Board identity for
+    `board_identity`), added when missing. akheventd resolves an endpoint's
+    token only when a route or source uses it, so an unused entry is inert."""
+    rendered = json.loads(json.dumps(events))
+    rendered.setdefault("endpoints", {}).setdefault(
+        "board-" + role, {"url": BOARD_URL, "token_env": token_env})
+    return rendered
 
 
 # ── Host config, core.json, events ───────────────────────────────────────────
 
 
 def render_host_config(database_url: str, acp_principals: list[dict],
-                       acp_port: int = ACP_TCP_PORT) -> dict:
+                       acp_port: int = ACP_TCP_PORT, auto_start: list[str] | None = None) -> dict:
+    """The host config. `auto_start` defaults to the Romans; Lilith joins it
+    only once her secrets and ancestry clone exist (configure_core.py)."""
     return {
         "deployment": "deployed",
         "database": {"url": database_url, "migrate_on_start": True, "pool_size": 1,
                      "wal_flush_interval_secs": 1, "snapshot_interval_secs": 30},
-        "daemon": {"auto_start": list(ROLES)},
+        "daemon": {"auto_start": list(auto_start if auto_start is not None else ROLES)},
         "exec": {"kind": "none"},
         "acp": {"unix": True, "tcp_bind": "127.0.0.1", "tcp_port": acp_port,
                 "principals": acp_principals},
@@ -906,12 +1187,14 @@ HOST_COMMENTS = {
 }
 
 
-def acp_principals(session: dict, root: Path) -> list[dict]:
-    """T3 client keys scoped to their own akh, plus the operator (per phase53/fixups)."""
+def acp_principals(session: dict, root: Path, akhs: tuple[str, ...] = ROLES) -> list[dict]:
+    """T3 client keys scoped to their own akh, plus the operator (per phase53/fixups).
+
+    The operator reaches every akh this core hosts (`akhs`)."""
     principals = [Inline(id=p["id"], token_file=p["token_file"], akhs=list(p["akhs"]))
                   for p in session.get("principals", []) if p["id"].startswith("t3-")]
     principals.append(Inline(id="operator", token_file=str(root / "secrets/operator.key"),
-                             akhs=list(ROLES), control=True))
+                             akhs=list(akhs), control=True))
     return principals
 
 
@@ -922,8 +1205,11 @@ def acp_principals(session: dict, root: Path) -> list[dict]:
 OPERATOR_CORE_TOOLS = ["kg_query", "reactor_manage", "monitoring_snapshot"]
 
 
-def render_core_config(core: dict, root: Path) -> dict:
-    """core.json with explicit scopes: sessions (legacy nine), events, operator."""
+def render_core_config(core: dict, root: Path, akhs: tuple[str, ...] = ROLES) -> dict:
+    """core.json with explicit scopes: sessions (legacy nine), events, operator.
+
+    `events` and `operator` cover every akh this core hosts (`akhs`); the
+    legacy `sessions` principal keeps its own list (Lilith is not on akhsessd)."""
     rendered = {k: v for k, v in core.items() if k != "principals"}
     rendered["sqlite"] = True
     principals = []
@@ -938,10 +1224,10 @@ def render_core_config(core: dict, root: Path) -> dict:
             principal["grants"] = "optional"
         principals.append(principal)
     principals.append({"id": "events", "token_file": str(root / "secrets/core-events.key"),
-                       "akhs": list(ROLES), "roles": ["event"],
+                       "akhs": list(akhs), "roles": ["event"],
                        "tools": {"kind": "named", "tools": []}})
     principals.append({"id": "operator", "token_file": str(root / "secrets/operator.key"),
-                       "akhs": list(ROLES), "tools": {"kind": "named", "tools": OPERATOR_CORE_TOOLS}})
+                       "akhs": list(akhs), "tools": {"kind": "named", "tools": OPERATOR_CORE_TOOLS}})
     rendered["principals"] = principals
     return rendered
 

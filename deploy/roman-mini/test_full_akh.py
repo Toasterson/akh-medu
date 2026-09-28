@@ -1189,6 +1189,334 @@ class CoreReleaseFieldsTests(unittest.TestCase):
             self.assertEqual(release["build_sha256"], "s" * 64)
 
 
+# ── Lilith C2 (ADR 116) ─────────────────────────────────────────────────────
+
+GOLDEN = SOURCE / "fixtures/golden"
+LILITH_URL = "https://abc123xyz-8000.proxy.runpod.net/v1"
+
+
+def lilith_fixture(root: Path, secrets=True, repository=True, **settings) -> None:
+    """Configure Lilith on a fixture root: config/lilith.json, the endpoint
+    URL file, and (optionally) her secret files and ancestry clone."""
+    (root / fa.LILITH_BASE_URL_FILE).write_text(LILITH_URL + "\n")
+    config = {"budget": {"minor_units": 6673, "currency": "USD"}}
+    config.update(settings)
+    (root / fa.LILITH_CONFIG_FILE).write_text(json.dumps(config))
+    if secrets:
+        (root / "secrets/lilith-openai-key").write_text("k" * 40 + "\n")
+        (root / "secrets/anima-lilith-pat").write_text("p" * 40 + "\n")
+        (root / "secrets/board-lilith.json").write_text(json.dumps({"bearer_token": "b" * 40}))
+    if repository:
+        (root / fa.LILITH_REPOSITORY).mkdir(parents=True)
+
+
+def golden(root: Path, rel: str) -> str:
+    return (root / rel).read_text().replace(str(root), "{root}")
+
+
+class RenderFixture(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        fixture(self.root)
+        self.prov = fa.Provenance(commit="c" * 40, short="c" * 12, origin_main="c" * 40, committed_at=0)
+        self.binary = self.root / "bin" / self.prov.binary_name
+        self.binary.write_text("#!/bin/sh\n")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def render(self, **kwargs):
+        return configure_core.render(self.root, self.prov, self.binary, "0" * 64, source=SOURCE, **kwargs)
+
+    def text(self, rel):
+        return (self.root / rel).read_text()
+
+    def toml(self, rel):
+        return tomllib.loads(self.text(rel))
+
+
+@NEEDS_TOMLLIB
+class RomanGoldenTests(RenderFixture):
+    """The data-driven role refactor keeps every Roman output byte-identical.
+
+    fixtures/golden/ was rendered from this fixture by the pre-Lilith
+    renderer (origin/main 5b4c9efc). An accidental change to a Roman's output
+    fails here. After a deliberate one (a roles/*.md edit, a new server),
+    regenerate with `ROMAN_GOLDEN_REGEN=1 python3 -m unittest
+    test_full_akh.RomanGoldenTests` and review the fixture diff.
+    """
+
+    ROMAN_FILES = [f"core-config/akh-medu/workspaces/{r}.toml" for r in ROLES] + \
+                  [f"config/reactor-seeds/{r}.json" for r in ROLES]
+
+    def assert_romans_golden(self, host=False):
+        files = self.ROMAN_FILES + (["core-config/akh-medu/config.toml"] if host else [])
+        for rel in files:
+            name = {"config.toml": "host-config.toml"}.get(Path(rel).name, Path(rel).name)
+            name = name.replace(".json", ".reactor-seeds.json")
+            if os.environ.get("ROMAN_GOLDEN_REGEN") == "1":
+                (GOLDEN / name).write_text(golden(self.root, rel))
+            with self.subTest(rel=rel):
+                self.assertEqual(golden(self.root, rel), (GOLDEN / name).read_text())
+
+    def test_without_lilith_everything_is_byte_identical(self):
+        self.render()
+        self.assert_romans_golden(host=True)
+        self.assertFalse((self.root / "core-config/akh-medu/workspaces/lilith.toml").exists())
+
+    def test_with_lilith_the_romans_stay_byte_identical(self):
+        lilith_fixture(self.root)
+        self.render()
+        self.assert_romans_golden()
+        self.assertTrue((self.root / "core-config/akh-medu/workspaces/lilith.toml").exists())
+
+
+@NEEDS_TOMLLIB
+class LilithRenderTests(RenderFixture):
+    WS = "core-config/akh-medu/workspaces/lilith.toml"
+
+    def test_workspace_runs_on_her_vllm_with_the_chief_of_staff_guard(self):
+        lilith_fixture(self.root)
+        self.render()
+        ws = self.toml(self.WS)
+        self.assertEqual((ws["name"], ws["backend"], ws["model"]), ("lilith", "openai", "lilith"))
+        self.assertEqual(ws["openai_endpoint"], {"base_url": LILITH_URL, "api_key": "env:LILITH_OPENAI_KEY",
+                                                 "context_window": 32768})
+        self.assertNotIn("ollama_endpoint", ws)
+        self.assertNotIn(LILITH_URL, (SOURCE / "full_akh.py").read_text(), "the URL is a render input")
+        self.assertEqual(ws["exec"], {"kind": "none"})
+        self.assertTrue(ws["autonomy"]["enabled"])
+        self.assertTrue(ws["capture_transcripts"])
+        self.assertNotIn("delegation", ws)
+        self.assertEqual(ws["board"], {"url": fa.BOARD_URL, "auth": {"token_env": "ROMAN_BOARD_LILITH"}})
+        cos = ws["chief_of_staff"]
+        # deny_unknown_fields on ChiefOfStaffConfig and Money.
+        self.assertEqual(set(cos), {"profile", "repository", "announcements", "budget"})
+        self.assertEqual(cos["budget"], {"minor_units": 6673, "currency": "USD"})
+        self.assertEqual(cos["repository"], str(self.root / "lilith/ancestry/akh-medu.git"))
+        profile = Path(cos["profile"])
+        self.assertEqual(profile, self.root / "core-data/akh-medu/workspaces/lilith/kg/skills/"
+                                              "chief-of-staff/permission-profile.json")
+        source_pack = SOURCE.parents[1] / "skills/chief-of-staff"
+        self.assertEqual(profile.read_bytes(), (source_pack / "permission-profile.json").read_bytes())
+        self.assertEqual(json.loads(profile.read_text())["akh"], "lilith")
+        for schema in (source_pack / "schemas").iterdir():
+            installed = profile.parent / "schemas" / schema.name
+            self.assertEqual(installed.read_bytes(), schema.read_bytes())
+            self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
+        # The log is outside every root she can write, and its directory exists.
+        announcements = Path(cos["announcements"])
+        self.assertEqual(announcements, self.root / "state/lilith/cos-announcements.jsonl")
+        for write_root in fa.lilith_write_roots(self.root) + [
+                self.root / "core-data/akh-medu/workspaces/lilith/kg/scratch"]:
+            self.assertFalse(fa._inside(announcements, write_root), write_root)
+            self.assertFalse(str(announcements).startswith(str(write_root) + os.sep))
+        self.assertTrue(announcements.parent.is_dir())
+        self.assertEqual(announcements.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_her_own_mcp_identities(self):
+        lilith_fixture(self.root)
+        self.render()
+        servers = {s["name"]: s for s in self.toml(self.WS)["mcp"]["servers"]}
+        self.assertEqual(list(servers), ["anima", "djehuty", "seshat"])
+        self.assertEqual(servers["anima"], {"name": "anima", "url": fa.ANIMA_MCP_URL,
+                                            "auth": {"token_env": "LILITH_ANIMA_TOKEN"}})
+        self.assertEqual(servers["djehuty"], {"name": "djehuty", "url": "http://127.0.0.1:18089/mcp",
+                                              "auth": {"token_env": "ROMAN_BOARD_LILITH"}})
+        self.assertEqual(servers["seshat"], {"name": "seshat", "url": "http://seshat.lab.home/mcp",
+                                             "allow_insecure_http": True,
+                                             "auth": {"token_env": "ROMAN_ARCHIVE_TOKEN"}})
+        # Never a Roman's or Toasty's identity.
+        text = self.text(self.WS)
+        for foreign in ("ROMAN_ANIMA_TOKEN", "ROMAN_BOARD_JANUS", "ROMAN_BOARD_MINERVA", "ROMAN_BOARD_VESTA"):
+            self.assertNotIn(foreign, text)
+        # Her board tools land in the profile's T2 coordination class, not T3.
+        tiers = json.loads((SOURCE.parents[1] / "skills/chief-of-staff/permission-profile.json").read_text())["tools"]
+        self.assertEqual(tiers["mcp__djehuty__*"], "t2-coordination")
+
+    def test_top_level_keys_precede_the_first_table(self):
+        lilith_fixture(self.root)
+        # A pre-existing hand-written file with a stale ollama table and an
+        # unrelated key that must survive.
+        (self.root / self.WS).write_text('name = "lilith"\nseed_packs = ["identity"]\n'
+                                         '[ollama_endpoint]\nkind = "local"\nbase_url = "http://x"\n')
+        self.render()
+        text = self.text(self.WS)
+        ws = tomllib.loads(text)
+        self.assertEqual(ws["seed_packs"], ["identity"])
+        self.assertNotIn("ollama_endpoint", ws)
+        first_table = text.index("\n[")
+        top_level = [k for k, v in ws.items() if not isinstance(v, dict)
+                     and not (isinstance(v, list) and v and all(isinstance(i, dict) for i in v))]
+        self.assertEqual(set(top_level), {"name", "model", "backend", "capture_transcripts", "system_prompt",
+                                          "seed_packs"})
+        for key in top_level:
+            self.assertLess(text.index(f"\n{key} = "), first_table, key)
+        self.assertLess(text.index("\n[openai_endpoint]"), text.index("\n[chief_of_staff]"))
+
+    def test_prompt_is_her_role_and_the_skill_pack(self):
+        lilith_fixture(self.root)
+        self.render()
+        prompt = self.toml(self.WS)["system_prompt"]
+        role = (SOURCE / "roles/lilith.md").read_text().replace("{mcp_servers}", "anima, djehuty, seshat")
+        self.assertTrue(prompt.startswith(role))
+        self.assertIn((SOURCE.parents[1] / "skills/chief-of-staff/procedures.md").read_text(), prompt)
+        self.assertNotIn("{mcp_servers}", prompt)
+        self.assertNotIn("Roman-archetype", prompt, "the Roman common text is not hers")
+        self.assertNotIn("No filesystem or shell tools are granted", prompt)
+        for name in ("Maker", "Truthkeeper", "Seeker", "Challenger", "Guardian", "Sacred Clown",
+                     "Steward", "Weaver", "the Center"):
+            self.assertIn(name, prompt)
+
+    def test_auto_started_only_with_every_input(self):
+        lilith_fixture(self.root)
+        warnings = self.render()
+        host = self.toml("core-config/akh-medu/config.toml")
+        self.assertEqual(host["daemon"]["auto_start"], list(ROLES) + ["lilith"])
+        self.assertFalse([w for w in warnings if "lilith" in w], warnings)
+        scoped = {p["id"]: p["akhs"] for p in host["acp"]["principals"]}
+        self.assertEqual(scoped["operator"], list(ROLES) + ["lilith"])
+        self.assertEqual(scoped["t3-janus"], ["janus"])
+        core = {p["id"]: p for p in json.loads(self.text("config/core.json"))["principals"]}
+        self.assertIn("lilith", core["operator"]["akhs"])
+        self.assertIn("lilith", core["events"]["akhs"])
+        self.assertNotIn("lilith", core["sessions"]["akhs"])
+        # No reactor seeds yet (her wakes are a later slice).
+        self.assertFalse((self.root / "config/reactor-seeds/lilith.json").exists())
+
+    def test_missing_secrets_render_her_but_do_not_auto_start(self):
+        for missing in list(fa.LILITH_SECRETS) + [fa.LILITH_REPOSITORY]:
+            with self.subTest(missing=missing):
+                lilith_fixture(self.root, repository=False)
+                repository = self.root / fa.LILITH_REPOSITORY
+                if missing == fa.LILITH_REPOSITORY:
+                    if repository.exists():
+                        repository.rmdir()
+                else:
+                    repository.mkdir(parents=True, exist_ok=True)
+                    (self.root / missing).unlink()
+                warnings = self.render()
+                self.assertTrue((self.root / self.WS).exists())
+                self.assertEqual(self.toml("core-config/akh-medu/config.toml")["daemon"]["auto_start"], list(ROLES))
+                [warning] = [w for w in warnings if "lilith" in w]
+                self.assertIn("NOT auto-started", warning)
+                self.assertIn(str(self.root / missing), warning)
+
+    def test_staged_events_carry_her_board_identity(self):
+        lilith_fixture(self.root)
+        self.render()
+        staged = json.loads(self.text("config/events.akh-target.json"))
+        self.assertEqual(staged["endpoints"]["board-lilith"],
+                         {"url": fa.BOARD_URL, "token_env": "ROMAN_BOARD_LILITH"})
+        self.assertEqual(fa.board_identity(staged, "lilith")["auth"], {"token_env": "ROMAN_BOARD_LILITH"})
+        self.assertFalse([r for r in staged["routes"] if fa.route_akh(r) == "lilith"])
+        # An operator-written board-lilith endpoint is kept as it is.
+        events = {"endpoints": {"board-lilith": {"url": "http://other", "token_file": "/t"}}}
+        self.assertEqual(fa.with_board_endpoint(events, "lilith", "X")["endpoints"]["board-lilith"],
+                         {"url": "http://other", "token_file": "/t"})
+
+    def test_rerender_is_stable(self):
+        lilith_fixture(self.root)
+        self.render()
+        before = {p: p.read_bytes() for p in (self.root / "core-config").rglob("*.toml")}
+        self.render()
+        self.assertEqual(before, {p: p.read_bytes() for p in (self.root / "core-config").rglob("*.toml")})
+
+    def test_bad_inputs_fail_the_whole_render_closed(self):
+        lilith_fixture(self.root)
+        self.render()
+        snapshot = {p: p.read_bytes() for p in (self.root / "core-config").rglob("*.toml")}
+        cases = [
+            ({"budget": {"minor_units": -1, "currency": "USD"}}, "budget"),
+            ({"budget": {"minor_units": 5, "currency": "usd"}}, "budget"),
+            ({"budget": {"minor_units": True, "currency": "USD"}}, "budget"),
+            ({"budget": {"minor_units": 5}}, "budget"),
+            ({}, "budget"),
+            ({"budget": {"minor_units": 5, "currency": "USD"}, "extra": 1}, "unknown keys"),
+            ({"budget": {"minor_units": 5, "currency": "USD"}, "context_window": 0}, "context_window"),
+            ({"budget": {"minor_units": 5, "currency": "USD"}, "base_url_file": "rel/x"}, "absolute"),
+            ({"budget": {"minor_units": 5, "currency": "USD"},
+              "base_url_file": str(self.root / "secrets/nope")}, "does not exist"),
+        ]
+        for settings, message in cases:
+            (self.root / fa.LILITH_CONFIG_FILE).write_text(json.dumps(settings))
+            with self.subTest(settings=settings), self.assertRaisesRegex(fa.RenderError, message):
+                self.render()
+        (self.root / fa.LILITH_CONFIG_FILE).write_text(json.dumps({"budget": {"minor_units": 5, "currency": "USD"}}))
+        for url in ("http://abc-8000.proxy.runpod.net/v1", "https://abc-8000.proxy.runpod.net",
+                    "https://user:pw@abc.proxy.runpod.net/v1", "https://abc.proxy.runpod.net/v1?x=1", ""):
+            (self.root / fa.LILITH_BASE_URL_FILE).write_text(url + "\n")
+            with self.subTest(url=url), self.assertRaisesRegex(fa.RenderError, "base URL"):
+                self.render()
+        (self.root / fa.LILITH_CONFIG_FILE).write_text("[not json")
+        with self.assertRaisesRegex(fa.RenderError, "not valid JSON"):
+            self.render()
+        self.assertEqual(snapshot, {p: p.read_bytes() for p in (self.root / "core-config").rglob("*.toml")})
+
+    def test_announcements_inside_a_write_root_are_refused(self):
+        lilith_fixture(self.root)
+        inside = "core-data/akh-medu/workspaces/lilith/kg/scratch/cos.jsonl"
+        with unittest.mock.patch.object(fa, "LILITH_ANNOUNCEMENTS", inside):
+            with self.assertRaisesRegex(fa.RenderError, "inside her write root"):
+                self.render()
+
+    def test_credential_files_match_daemon_credentials(self):
+        import daemon_credentials as dc
+        mapped = {f"secrets/{name}": var for var, name in dc.LILITH_SECRET_FILES}
+        mapped[f"secrets/{dc.LILITH_BOARD}"] = dc.LILITH_BOARD_ENV
+        self.assertEqual(mapped, fa.LILITH_SECRETS)
+        self.assertEqual(dc.LILITH_CONFIG, fa.LILITH_CONFIG_FILE)
+
+
+@NEEDS_TOMLLIB
+class PlanTests(RenderFixture):
+    def tree(self):
+        return {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.root.rglob("*") if p.is_file()}
+
+    def test_plan_writes_nothing(self):
+        before = self.tree()
+        lines, _ = configure_core.plan(self.root, self.prov, source=SOURCE)
+        self.assertEqual(before, self.tree())
+        self.assertIn("~ core-config/akh-medu/workspaces/janus.toml: changes", lines)
+        self.assertIn("+ core-config/akh-medu/workspaces/minerva.toml: new file", lines)
+
+    def test_plan_after_render_is_unchanged_and_shows_a_dropped_hand_hold(self):
+        lilith_fixture(self.root)
+        self.render()
+        lines, _ = configure_core.plan(self.root, self.prov, source=SOURCE)
+        for role in ROLES + ("lilith",):
+            self.assertIn(f"= core-config/akh-medu/workspaces/{role}.toml: unchanged", lines)
+        self.assertIn("= core-config/akh-medu/config.toml: unchanged", lines)
+        self.assertEqual(lines[-1], 'daemon.auto_start = ["janus", "minerva", "vesta", "lilith"]')
+        # An operator's hand edit (e.g. the 2026-09-27 Janus broker hold) shows as removed.
+        janus = self.root / "core-config/akh-medu/workspaces/janus.toml"
+        janus.write_text(janus.read_text() + '\n[hold]\nreason = "operator hold"\n')
+        before = self.tree()
+        lines, _ = configure_core.plan(self.root, self.prov, source=SOURCE)
+        self.assertEqual(before, self.tree())
+        self.assertIn("~ core-config/akh-medu/workspaces/janus.toml: changes", lines)
+        self.assertIn('-reason = "operator hold"', lines)
+        self.assertIn("--- a/core-config/akh-medu/workspaces/janus.toml", lines)
+
+    def test_plan_reuses_the_installed_release_provenance(self):
+        self.render()
+        prov = configure_core.release_provenance(self.root)
+        self.assertEqual((prov.commit, prov.short), (self.prov.commit, self.prov.short))
+        lines, _ = configure_core.plan(self.root, prov, source=SOURCE)
+        self.assertIn("= core-config/akh-medu/config.toml: unchanged", lines)
+        (self.root / "config/core-release.json").unlink()
+        with self.assertRaisesRegex(fa.RenderError, "--repo"):
+            configure_core.release_provenance(self.root)
+
+    def test_plan_fails_closed_on_a_bad_switch_without_writing(self):
+        (self.root / fa.LILITH_CONFIG_FILE).write_text("{}")
+        before = self.tree()
+        with self.assertRaisesRegex(fa.RenderError, "budget"):
+            configure_core.plan(self.root, self.prov, source=SOURCE)
+        self.assertEqual(before, self.tree())
+
+
 @NEEDS_TOMLLIB
 class TomlWriterTests(unittest.TestCase):
     def test_round_trips_escapes_and_inline_tables(self):

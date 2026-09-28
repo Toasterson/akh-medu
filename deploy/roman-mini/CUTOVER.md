@@ -534,6 +534,86 @@ The `memory_hygiene` daemon task can be switched off per akh with
 - Keep `bin/akhomed-d563ba34a247` and `$BK` until the next successful full
   deploy.
 
+## 12. Add Lilith (Lilith C2, ADR 116)
+
+Lilith is the operator's Chief of Staff. She runs as a fourth workspace in this
+core (supervisor placement decision, 2026-09-28). Her model is the Runpod vLLM
+endpoint (`--served-model-name lilith`), reached over its HTTPS proxy URL.
+`configure_core.py` renders her only once `config/lilith.json` exists. She
+auto-starts only once every input below exists. A missing input leaves her
+rendered but out of `daemon.auto_start`, with a printed warning, and the Romans
+are unaffected.
+
+Render inputs (all under `$ROOT`, mode 0600, written from a login session):
+
+| Input | Content | Source |
+|---|---|---|
+| `config/lilith.json` | `{"budget": {"minor_units": N, "currency": "USD"}}`; optional `context_window` (default 32768) and `base_url_file` | operator decision (her spend ceiling) |
+| `secrets/lilith-base-url` | the vLLM base URL, `https://…proxy.runpod.net/v1` | 1Password item `lilith-serve-endpoint`, field `base_url` |
+| `secrets/lilith-openai-key` | the vLLM `--api-key` → env `LILITH_OPENAI_KEY` | the serve pod's key |
+| `secrets/anima-lilith-pat` | her own Anima PAT → env `LILITH_ANIMA_TOKEN` (MCP server `anima`) | minted for Lilith, never Toasty's |
+| `secrets/board-lilith.json` | `{"bearer_token": …}` of her own Board agent → env `ROMAN_BOARD_LILITH` (MCP server `djehuty`, `[board]`) | Board registration for `lilith` |
+| `lilith/ancestry/akh-medu.git` | her dedicated clone for `git merge-base --is-ancestor <sha> origin/main` | see below |
+
+```sh
+umask 077
+op-service-account read 'op://Homelab/lilith-serve-endpoint/base_url' > "$ROOT/secrets/lilith-base-url"
+printf '{"budget": {"minor_units": %s, "currency": "USD"}}\n' "$BUDGET_CENTS" > "$ROOT/config/lilith.json"
+git clone --bare https://code.aopc.cloud/toasterson/akh-medu.git "$ROOT/lilith/ancestry/akh-medu.git"
+git -C "$ROOT/lilith/ancestry/akh-medu.git" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+git -C "$ROOT/lilith/ancestry/akh-medu.git" fetch origin
+```
+
+The clone has to stay fresh, or her ancestry checks refuse new main SHAs
+(that is the safe direction). Re-run the `fetch` before you rely on a new main
+commit.
+
+Her workspace uses `backend = "openai"`, `model = "lilith"` and
+`[openai_endpoint]` (`api_key = "env:LILITH_OPENAI_KEY"`). Her
+`[chief_of_staff]` table points at:
+
+- the installed `core-data/akh-medu/workspaces/lilith/kg/skills/chief-of-staff/permission-profile.json`;
+- the clone above;
+- `state/lilith/cos-announcements.jsonl`, which lies outside her write roots
+  (the renderer refuses otherwise);
+- the budget.
+
+She has no reactor seeds yet. Her wakes are a later slice.
+
+Before every full render, review the plan. A full re-render has dropped hand
+holds before, for example Janus's broker hold:
+
+```sh
+python3 deploy/roman-mini/configure_core.py --plan --root "$ROOT"   # writes nothing
+```
+
+`--plan` prints one line per file: `=` unchanged, `~` changed with a unified
+diff, or `+` new. Then it prints the resulting `daemon.auto_start`. Without
+`--repo`, it takes the host-config provenance from the installed
+`config/core-release.json`. Then render as in step 4, and restart the core
+(KeepAlive: `kill` the core pid). Verify:
+
+```sh
+OP="Authorization: Bearer $(cat "$ROOT/secrets/operator.key")"
+curl -s http://127.0.0.1:18430/healthz
+grep -E 'workspace="?lilith|Chief-of-Staff guard' "$ROOT"/logs/core.*.log | tail -20
+curl -s -H "$OP" http://127.0.0.1:18430/v1/akhs/lilith/tools
+curl -sf -H "Authorization: Bearer $(cat "$ROOT/secrets/lilith-openai-key")" \
+  "$(cat "$ROOT/secrets/lilith-base-url")/models" | python3 -c 'import json,sys;print([m["id"] for m in json.load(sys.stdin)["data"]])'
+```
+
+Expected results:
+
+- `Chief-of-Staff guard installed` for `lilith`. `guard failed to load` means the guard
+  did not load and she runs read-only. The log line says why (the profile,
+  the clone or the log path).
+- `/v1/akhs/lilith/tools` answers.
+- `/models` lists `lilith`.
+- The Romans' startup lines are unchanged.
+
+To roll back, remove `config/lilith.json` and render again. She drops out of
+`auto_start`, and her workspace file and state stay in place.
+
 ## Rollback
 
 Use this at any step before 11.
