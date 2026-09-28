@@ -205,5 +205,7 @@ weekly against the credit.
 - **C4b exam harness:** exam manifest + tiers + controller semantics (port of `adaptive_exam.rs`
   decisions to the Lilith Python harness or a thin Rust binding), candidate/active manifest,
   decontamination hook, panel runner, RESULT generator skeleton.
+  Implemented in `scripts/lilith/exam/` (Anima WI `01a0e2db-ed79`, WI-524): a Python port of the
+  controller checked against golden values from the Rust code, plus `supervisor_status.sh`.
 - The supervisor scripts `scripts/lilith/`: `status_report.sh`, `start_pod`/`stop_pod` via the
   Runpod REST API with the agent key, WireGuard peer add/remove, spend ledger.

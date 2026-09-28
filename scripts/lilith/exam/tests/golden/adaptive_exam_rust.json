@@ -1,0 +1,2302 @@
+{
+  "benjamini_hochberg": [
+    {
+      "accepted": [
+        false,
+        true,
+        true,
+        false
+      ],
+      "alpha": 0.05,
+      "p": [
+        0.04,
+        0.001,
+        0.02,
+        0.8
+      ]
+    },
+    {
+      "accepted": [
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "alpha": 0.05,
+      "p": [
+        0.01,
+        0.02,
+        0.03,
+        0.04,
+        0.05
+      ]
+    },
+    {
+      "accepted": [
+        false,
+        false,
+        false
+      ],
+      "alpha": 0.05,
+      "p": [
+        0.5,
+        0.2,
+        0.9
+      ]
+    }
+  ],
+  "default_config": {
+    "catastrophic_failure_limit": 0.05,
+    "confidence_z": 1.959963984540054,
+    "ewma_alpha": 0.4,
+    "min_samples_per_window": 200,
+    "precursor_limit": 0.15,
+    "precursor_steering_enabled": false,
+    "regression_margin": 0.08,
+    "release_recovery": false,
+    "sentinel_regression_budget": 0.03,
+    "steer_windows": 2,
+    "stop_windows": 2,
+    "target_pass_high": 0.75,
+    "target_pass_low": 0.35
+  },
+  "generated_by": "scripts/lilith/exam/tests/golden/adaptive_exam_golden.rs (copied into crates/grug-data/examples to run)",
+  "plans": [
+    {
+      "fingerprint": "exam-fnv1a64-15fdae25a219fa6f",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000064",
+          "step": 100
+        },
+        "difficulty": 2,
+        "family": "reason.chain.depth",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 16289271940312588913,
+        "tier": "sentinel"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-bb4baf47229c69c6",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000064",
+          "step": 100
+        },
+        "difficulty": 2,
+        "family": "vision.text.line",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 15151365969386774016,
+        "tier": "sentinel"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-15fdae25a219fa6f",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:00000000000000000000000000000000000000000000000000000000000000c8",
+          "step": 200
+        },
+        "difficulty": 2,
+        "family": "reason.chain.depth",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 16289271940312588913,
+        "tier": "sentinel"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-bb4baf47229c69c6",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:00000000000000000000000000000000000000000000000000000000000000c8",
+          "step": 200
+        },
+        "difficulty": 2,
+        "family": "vision.text.line",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 15151365969386774016,
+        "tier": "sentinel"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-fbdfb3a422c46497",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000064",
+          "step": 100
+        },
+        "difficulty": 2,
+        "family": "reason.chain.depth",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 13430328844331850173,
+        "tier": "rolling_probe"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-a9aa1a196d45a014",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000064",
+          "step": 100
+        },
+        "difficulty": 2,
+        "family": "vision.text.line",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 16724470227393420956,
+        "tier": "rolling_probe"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-c01936d290c1777b",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:00000000000000000000000000000000000000000000000000000000000000c8",
+          "step": 200
+        },
+        "difficulty": 2,
+        "family": "reason.chain.depth",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 17708421442563270781,
+        "tier": "rolling_probe"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-a18f459321d6da58",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:00000000000000000000000000000000000000000000000000000000000000c8",
+          "step": 200
+        },
+        "difficulty": 2,
+        "family": "vision.text.line",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 9578614789312233052,
+        "tier": "rolling_probe"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-4690ba2fef9a4a20",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000064",
+          "step": 100
+        },
+        "difficulty": 2,
+        "family": "reason.chain.depth",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 191121055825958050,
+        "tier": "frontier"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-bb4861315a2964d0",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000064",
+          "step": 100
+        },
+        "difficulty": 2,
+        "family": "vision.text.line",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 13815357151968414143,
+        "tier": "frontier"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-cba952a4a9548199",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:00000000000000000000000000000000000000000000000000000000000000c8",
+          "step": 200
+        },
+        "difficulty": 2,
+        "family": "reason.chain.depth",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 2377430711338225378,
+        "tier": "frontier"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-ba941306ce6dac07",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:00000000000000000000000000000000000000000000000000000000000000c8",
+          "step": 200
+        },
+        "difficulty": 2,
+        "family": "vision.text.line",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 10346598048530120703,
+        "tier": "frontier"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-02eecb09b509d0d5",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000064",
+          "step": 100
+        },
+        "difficulty": 2,
+        "family": "reason.chain.depth",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 7725406738195849036,
+        "tier": "audit"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-3dd3a81629b899d9",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000064",
+          "step": 100
+        },
+        "difficulty": 2,
+        "family": "vision.text.line",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 14251676245310462253,
+        "tier": "audit"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-a1c16499d3ad28eb",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:00000000000000000000000000000000000000000000000000000000000000c8",
+          "step": 200
+        },
+        "difficulty": 2,
+        "family": "reason.chain.depth",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 11580169809548322444,
+        "tier": "audit"
+      }
+    },
+    {
+      "fingerprint": "exam-fnv1a64-b74b75c0e2874e3c",
+      "plan": {
+        "checkpoint": {
+          "artifact_hash": "sha256:00000000000000000000000000000000000000000000000000000000000000c8",
+          "step": 200
+        },
+        "difficulty": 2,
+        "family": "vision.text.line",
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "sample_count": 200,
+        "schema_version": 1,
+        "seed": 1865782178052119661,
+        "tier": "audit"
+      }
+    }
+  ],
+  "scenarios": {
+    "catastrophic_stop": {
+      "config": {
+        "catastrophic_failure_limit": 0.05,
+        "confidence_z": 1.959963984540054,
+        "ewma_alpha": 0.4,
+        "min_samples_per_window": 200,
+        "precursor_limit": 0.15,
+        "precursor_steering_enabled": false,
+        "regression_margin": 0.08,
+        "release_recovery": false,
+        "sentinel_regression_budget": 0.03,
+        "steer_windows": 2,
+        "stop_windows": 2,
+        "target_pass_high": 0.75,
+        "target_pass_low": 0.35
+      },
+      "final_state": {
+        "base_seed": 42,
+        "config": {
+          "catastrophic_failure_limit": 0.05,
+          "confidence_z": 1.959963984540054,
+          "ewma_alpha": 0.4,
+          "min_samples_per_window": 200,
+          "precursor_limit": 0.15,
+          "precursor_steering_enabled": false,
+          "regression_margin": 0.08,
+          "release_recovery": false,
+          "sentinel_regression_budget": 0.03,
+          "steer_windows": 2,
+          "stop_windows": 2,
+          "target_pass_high": 0.75,
+          "target_pass_low": 0.35
+        },
+        "families": {
+          "reason.chain.depth": {
+            "difficulty": 2,
+            "priority": 1.0,
+            "sentinel_baseline": null,
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "reason.chain.depth",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {}
+          },
+          "vision.text.line": {
+            "difficulty": 2,
+            "priority": 2.1,
+            "sentinel_baseline": null,
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "vision.text.line",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {
+              "frontier": {
+                "ewma_pass_rate": 0.75,
+                "last_pass_interval": {
+                  "estimate": 0.75,
+                  "lower": 0.7053228670693259,
+                  "upper": 0.7899209857635259
+                },
+                "observations": 2,
+                "steer_streak": 0,
+                "stop_streak": 2
+              }
+            }
+          }
+        },
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "schema_version": 1
+      },
+      "steps": [
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.1,
+              "lower": 0.07429925914003437,
+              "upper": 0.13331057632740284
+            },
+            "ewma_pass_rate": 0.75,
+            "family": "vision.text.line",
+            "learning_progress": 0.0,
+            "pass": {
+              "estimate": 0.75,
+              "lower": 0.7053228670693259,
+              "upper": 0.7899209857635259
+            },
+            "precursor": {
+              "estimate": 0.1,
+              "lower": 0.07429925914003437,
+              "upper": 0.13331057632740284
+            },
+            "precursor_steering_enabled": false,
+            "priority": 1.1,
+            "reasons": [
+              "candidate warning awaits consecutive-window confirmation"
+            ],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "frontier",
+            "warning": "watch"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+              "step": 10
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 16142998147925783506,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 40,
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+              "step": 10
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "pass_count": 300,
+            "precursor_count": 40,
+            "sample_count": 400,
+            "tier": "frontier"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.1,
+              "lower": 0.07429925914003437,
+              "upper": 0.13331057632740284
+            },
+            "ewma_pass_rate": 0.75,
+            "family": "vision.text.line",
+            "learning_progress": 0.0,
+            "pass": {
+              "estimate": 0.75,
+              "lower": 0.7053228670693259,
+              "upper": 0.7899209857635259
+            },
+            "precursor": {
+              "estimate": 0.1,
+              "lower": 0.07429925914003437,
+              "upper": 0.13331057632740284
+            },
+            "precursor_steering_enabled": false,
+            "priority": 2.1,
+            "reasons": [
+              "catastrophic hard-failure rate is significant"
+            ],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "frontier",
+            "warning": "stop"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000014",
+              "step": 20
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 15375627929749904305,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 40,
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000014",
+              "step": 20
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "pass_count": 300,
+            "precursor_count": 40,
+            "sample_count": 400,
+            "tier": "frontier"
+          }
+        }
+      ]
+    },
+    "difficulty_and_undersampled": {
+      "config": {
+        "catastrophic_failure_limit": 0.05,
+        "confidence_z": 1.959963984540054,
+        "ewma_alpha": 0.4,
+        "min_samples_per_window": 200,
+        "precursor_limit": 0.15,
+        "precursor_steering_enabled": false,
+        "regression_margin": 0.08,
+        "release_recovery": false,
+        "sentinel_regression_budget": 0.03,
+        "steer_windows": 2,
+        "stop_windows": 2,
+        "target_pass_high": 0.75,
+        "target_pass_low": 0.35
+      },
+      "final_state": {
+        "base_seed": 42,
+        "config": {
+          "catastrophic_failure_limit": 0.05,
+          "confidence_z": 1.959963984540054,
+          "ewma_alpha": 0.4,
+          "min_samples_per_window": 200,
+          "precursor_limit": 0.15,
+          "precursor_steering_enabled": false,
+          "regression_margin": 0.08,
+          "release_recovery": false,
+          "sentinel_regression_budget": 0.03,
+          "steer_windows": 2,
+          "stop_windows": 2,
+          "target_pass_high": 0.75,
+          "target_pass_low": 0.35
+        },
+        "families": {
+          "reason.chain.depth": {
+            "difficulty": 2,
+            "priority": 0.5700000000000001,
+            "sentinel_baseline": null,
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "reason.chain.depth",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {
+              "rolling_probe": {
+                "ewma_pass_rate": 0.39,
+                "last_pass_interval": {
+                  "estimate": 0.15,
+                  "lower": 0.11834499530337544,
+                  "upper": 0.18831361073063213
+                },
+                "observations": 2,
+                "steer_streak": 1,
+                "stop_streak": 0
+              }
+            }
+          },
+          "vision.text.line": {
+            "difficulty": 2,
+            "priority": 0.99,
+            "sentinel_baseline": null,
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "vision.text.line",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {
+              "frontier": {
+                "ewma_pass_rate": 0.605,
+                "last_pass_interval": {
+                  "estimate": 0.05,
+                  "lower": 0.03259742983714726,
+                  "upper": 0.07596363506371961
+                },
+                "observations": 3,
+                "steer_streak": 1,
+                "stop_streak": 0
+              }
+            }
+          }
+        },
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "schema_version": 1
+      },
+      "steps": [
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.975,
+            "family": "vision.text.line",
+            "learning_progress": 0.0,
+            "pass": {
+              "estimate": 0.975,
+              "lower": 0.9545984121283544,
+              "upper": 0.986364908254064
+            },
+            "precursor": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "precursor_steering_enabled": false,
+            "priority": 0.25,
+            "reasons": [],
+            "recommended_difficulty": 3,
+            "statistically_eligible": true,
+            "tier": "frontier",
+            "warning": "green"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+              "step": 10
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 15554567340125656143,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+              "step": 10
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "pass_count": 390,
+            "precursor_count": 0,
+            "sample_count": 400,
+            "tier": "frontier"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.16112515805281938
+            },
+            "ewma_pass_rate": 0.975,
+            "family": "vision.text.line",
+            "learning_progress": 0.0,
+            "pass": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.16112515805281938
+            },
+            "precursor": {
+              "estimate": 1.0,
+              "lower": 0.8388748419471806,
+              "upper": 1.0
+            },
+            "precursor_steering_enabled": false,
+            "priority": 0.25,
+            "reasons": [
+              "20 samples is below the 200-sample decision floor"
+            ],
+            "recommended_difficulty": 3,
+            "statistically_eligible": false,
+            "tier": "frontier",
+            "warning": "watch"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000f",
+              "step": 15
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 14853464092873428269,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000f",
+              "step": 15
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "pass_count": 0,
+            "precursor_count": 20,
+            "sample_count": 20,
+            "tier": "frontier"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.605,
+            "family": "vision.text.line",
+            "learning_progress": -0.37,
+            "pass": {
+              "estimate": 0.05,
+              "lower": 0.03259742983714726,
+              "upper": 0.07596363506371961
+            },
+            "precursor": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "precursor_steering_enabled": false,
+            "priority": 0.99,
+            "reasons": [
+              "candidate warning awaits consecutive-window confirmation"
+            ],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "frontier",
+            "warning": "watch"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000014",
+              "step": 20
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 15908383661245714256,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000014",
+              "step": 20
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "pass_count": 20,
+            "precursor_count": 0,
+            "sample_count": 400,
+            "tier": "frontier"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.55,
+            "family": "reason.chain.depth",
+            "learning_progress": 0.0,
+            "pass": {
+              "estimate": 0.55,
+              "lower": 0.5010009985806122,
+              "upper": 0.5980477719859582
+            },
+            "precursor": {
+              "estimate": 0.025,
+              "lower": 0.013635091745936023,
+              "upper": 0.045401587871645666
+            },
+            "precursor_steering_enabled": false,
+            "priority": 1.0,
+            "reasons": [],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "rolling_probe",
+            "warning": "green"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000001e",
+              "step": 30
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 5426181865310971210,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000001e",
+              "step": 30
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "pass_count": 220,
+            "precursor_count": 10,
+            "sample_count": 400,
+            "tier": "rolling_probe"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.39,
+            "family": "reason.chain.depth",
+            "learning_progress": -0.16000000000000003,
+            "pass": {
+              "estimate": 0.15,
+              "lower": 0.11834499530337544,
+              "upper": 0.18831361073063213
+            },
+            "precursor": {
+              "estimate": 0.025,
+              "lower": 0.013635091745936023,
+              "upper": 0.045401587871645666
+            },
+            "precursor_steering_enabled": false,
+            "priority": 0.5700000000000001,
+            "reasons": [
+              "candidate warning awaits consecutive-window confirmation"
+            ],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "rolling_probe",
+            "warning": "watch"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000028",
+              "step": 40
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 5922033166121979238,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000028",
+              "step": 40
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "pass_count": 60,
+            "precursor_count": 10,
+            "sample_count": 400,
+            "tier": "rolling_probe"
+          }
+        }
+      ]
+    },
+    "precursor_shadow": {
+      "config": {
+        "catastrophic_failure_limit": 0.05,
+        "confidence_z": 1.959963984540054,
+        "ewma_alpha": 0.4,
+        "min_samples_per_window": 200,
+        "precursor_limit": 0.15,
+        "precursor_steering_enabled": false,
+        "regression_margin": 0.08,
+        "release_recovery": false,
+        "sentinel_regression_budget": 0.03,
+        "steer_windows": 2,
+        "stop_windows": 2,
+        "target_pass_high": 0.75,
+        "target_pass_low": 0.35
+      },
+      "final_state": {
+        "base_seed": 42,
+        "config": {
+          "catastrophic_failure_limit": 0.05,
+          "confidence_z": 1.959963984540054,
+          "ewma_alpha": 0.4,
+          "min_samples_per_window": 200,
+          "precursor_limit": 0.15,
+          "precursor_steering_enabled": false,
+          "regression_margin": 0.08,
+          "release_recovery": false,
+          "sentinel_regression_budget": 0.03,
+          "steer_windows": 2,
+          "stop_windows": 2,
+          "target_pass_high": 0.75,
+          "target_pass_low": 0.35
+        },
+        "families": {
+          "reason.chain.depth": {
+            "difficulty": 2,
+            "priority": 1.0,
+            "sentinel_baseline": null,
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "reason.chain.depth",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {}
+          },
+          "vision.text.line": {
+            "difficulty": 4,
+            "priority": 0.2500000000000002,
+            "sentinel_baseline": null,
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "vision.text.line",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {
+              "frontier": {
+                "ewma_pass_rate": 0.9000000000000001,
+                "last_pass_interval": {
+                  "estimate": 0.9,
+                  "lower": 0.8666894236725972,
+                  "upper": 0.9257007408599657
+                },
+                "observations": 2,
+                "steer_streak": 0,
+                "stop_streak": 0
+              }
+            }
+          }
+        },
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "schema_version": 1
+      },
+      "steps": [
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.9,
+            "family": "vision.text.line",
+            "learning_progress": 0.0,
+            "pass": {
+              "estimate": 0.9,
+              "lower": 0.8666894236725972,
+              "upper": 0.9257007408599657
+            },
+            "precursor": {
+              "estimate": 0.3,
+              "lower": 0.25716767195619705,
+              "upper": 0.34663724577752153
+            },
+            "precursor_steering_enabled": false,
+            "priority": 0.25,
+            "reasons": [
+              "precursor alarm recorded in shadow mode; steering is disabled"
+            ],
+            "recommended_difficulty": 3,
+            "statistically_eligible": true,
+            "tier": "frontier",
+            "warning": "watch"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+              "step": 10
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 15554567340125656143,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+              "step": 10
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "pass_count": 360,
+            "precursor_count": 120,
+            "sample_count": 400,
+            "tier": "frontier"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.9000000000000001,
+            "family": "vision.text.line",
+            "learning_progress": 1.1102230246251565e-16,
+            "pass": {
+              "estimate": 0.9,
+              "lower": 0.8666894236725972,
+              "upper": 0.9257007408599657
+            },
+            "precursor": {
+              "estimate": 0.3,
+              "lower": 0.25716767195619705,
+              "upper": 0.34663724577752153
+            },
+            "precursor_steering_enabled": false,
+            "priority": 0.2500000000000002,
+            "reasons": [
+              "precursor alarm recorded in shadow mode; steering is disabled"
+            ],
+            "recommended_difficulty": 4,
+            "statistically_eligible": true,
+            "tier": "frontier",
+            "warning": "watch"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000014",
+              "step": 20
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 15908383661245714256,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000014",
+              "step": 20
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "pass_count": 360,
+            "precursor_count": 120,
+            "sample_count": 400,
+            "tier": "frontier"
+          }
+        }
+      ]
+    },
+    "precursor_steer": {
+      "config": {
+        "catastrophic_failure_limit": 0.05,
+        "confidence_z": 1.959963984540054,
+        "ewma_alpha": 0.4,
+        "min_samples_per_window": 200,
+        "precursor_limit": 0.15,
+        "precursor_steering_enabled": true,
+        "regression_margin": 0.08,
+        "release_recovery": false,
+        "sentinel_regression_budget": 0.03,
+        "steer_windows": 2,
+        "stop_windows": 2,
+        "target_pass_high": 0.75,
+        "target_pass_low": 0.35
+      },
+      "final_state": {
+        "base_seed": 42,
+        "config": {
+          "catastrophic_failure_limit": 0.05,
+          "confidence_z": 1.959963984540054,
+          "ewma_alpha": 0.4,
+          "min_samples_per_window": 200,
+          "precursor_limit": 0.15,
+          "precursor_steering_enabled": true,
+          "regression_margin": 0.08,
+          "release_recovery": false,
+          "sentinel_regression_budget": 0.03,
+          "steer_windows": 2,
+          "stop_windows": 2,
+          "target_pass_high": 0.75,
+          "target_pass_low": 0.35
+        },
+        "families": {
+          "reason.chain.depth": {
+            "difficulty": 2,
+            "priority": 1.0,
+            "sentinel_baseline": null,
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "reason.chain.depth",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {}
+          },
+          "vision.text.line": {
+            "difficulty": 4,
+            "priority": 1.5324999999999998,
+            "sentinel_baseline": null,
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "vision.text.line",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {
+              "frontier": {
+                "ewma_pass_rate": 0.8900000000000001,
+                "last_pass_interval": {
+                  "estimate": 0.875,
+                  "lower": 0.8389809024860414,
+                  "upper": 0.9038848767632363
+                },
+                "observations": 2,
+                "steer_streak": 2,
+                "stop_streak": 0
+              }
+            }
+          }
+        },
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "schema_version": 1
+      },
+      "steps": [
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.9,
+            "family": "vision.text.line",
+            "learning_progress": 0.0,
+            "pass": {
+              "estimate": 0.9,
+              "lower": 0.8666894236725972,
+              "upper": 0.9257007408599657
+            },
+            "precursor": {
+              "estimate": 0.25,
+              "lower": 0.2100790142364741,
+              "upper": 0.2946771329306741
+            },
+            "precursor_steering_enabled": true,
+            "priority": 0.5,
+            "reasons": [
+              "candidate warning awaits consecutive-window confirmation"
+            ],
+            "recommended_difficulty": 3,
+            "statistically_eligible": true,
+            "tier": "frontier",
+            "warning": "watch"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+              "step": 10
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 15554567340125656143,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+              "step": 10
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "pass_count": 360,
+            "precursor_count": 100,
+            "sample_count": 400,
+            "tier": "frontier"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.8900000000000001,
+            "family": "vision.text.line",
+            "learning_progress": -0.009999999999999898,
+            "pass": {
+              "estimate": 0.875,
+              "lower": 0.8389809024860414,
+              "upper": 0.9038848767632363
+            },
+            "precursor": {
+              "estimate": 0.2625,
+              "lower": 0.22178679994488373,
+              "upper": 0.30773153986390706
+            },
+            "precursor_steering_enabled": true,
+            "priority": 1.5324999999999998,
+            "reasons": [
+              "precursor rate is significantly above its limit"
+            ],
+            "recommended_difficulty": 4,
+            "statistically_eligible": true,
+            "tier": "frontier",
+            "warning": "steer"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000014",
+              "step": 20
+            },
+            "difficulty": 4,
+            "family": "vision.text.line",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 15373939079889350659,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000014",
+              "step": 20
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "pass_count": 350,
+            "precursor_count": 105,
+            "sample_count": 400,
+            "tier": "frontier"
+          }
+        }
+      ]
+    },
+    "regression_steer": {
+      "config": {
+        "catastrophic_failure_limit": 0.05,
+        "confidence_z": 1.959963984540054,
+        "ewma_alpha": 0.4,
+        "min_samples_per_window": 200,
+        "precursor_limit": 0.15,
+        "precursor_steering_enabled": false,
+        "regression_margin": 0.08,
+        "release_recovery": false,
+        "sentinel_regression_budget": 0.03,
+        "steer_windows": 2,
+        "stop_windows": 2,
+        "target_pass_high": 0.75,
+        "target_pass_low": 0.35
+      },
+      "final_state": {
+        "base_seed": 42,
+        "config": {
+          "catastrophic_failure_limit": 0.05,
+          "confidence_z": 1.959963984540054,
+          "ewma_alpha": 0.4,
+          "min_samples_per_window": 200,
+          "precursor_limit": 0.15,
+          "precursor_steering_enabled": false,
+          "regression_margin": 0.08,
+          "release_recovery": false,
+          "sentinel_regression_budget": 0.03,
+          "steer_windows": 2,
+          "stop_windows": 2,
+          "target_pass_high": 0.75,
+          "target_pass_low": 0.35
+        },
+        "families": {
+          "reason.chain.depth": {
+            "difficulty": 1,
+            "priority": 1.5699999999999998,
+            "sentinel_baseline": null,
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "reason.chain.depth",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {
+              "frontier": {
+                "ewma_pass_rate": 0.49,
+                "last_pass_interval": {
+                  "estimate": 0.25,
+                  "lower": 0.2100790142364741,
+                  "upper": 0.2946771329306741
+                },
+                "observations": 3,
+                "steer_streak": 2,
+                "stop_streak": 0
+              }
+            }
+          },
+          "vision.text.line": {
+            "difficulty": 2,
+            "priority": 1.0,
+            "sentinel_baseline": null,
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "vision.text.line",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {}
+          }
+        },
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "schema_version": 1
+      },
+      "steps": [
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.75,
+            "family": "reason.chain.depth",
+            "learning_progress": 0.0,
+            "pass": {
+              "estimate": 0.75,
+              "lower": 0.7053228670693259,
+              "upper": 0.7899209857635259
+            },
+            "precursor": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "precursor_steering_enabled": false,
+            "priority": 1.0,
+            "reasons": [],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "frontier",
+            "warning": "green"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+              "step": 10
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 15554567340125656143,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+              "step": 10
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "pass_count": 300,
+            "precursor_count": 0,
+            "sample_count": 400,
+            "tier": "frontier"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.6499999999999999,
+            "family": "reason.chain.depth",
+            "learning_progress": -0.10000000000000009,
+            "pass": {
+              "estimate": 0.5,
+              "lower": 0.451234504169709,
+              "upper": 0.548765495830291
+            },
+            "precursor": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "precursor_steering_enabled": false,
+            "priority": 1.2000000000000002,
+            "reasons": [
+              "candidate warning awaits consecutive-window confirmation"
+            ],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "frontier",
+            "warning": "watch"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000014",
+              "step": 20
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 15908383661245714256,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000014",
+              "step": 20
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "pass_count": 200,
+            "precursor_count": 0,
+            "sample_count": 400,
+            "tier": "frontier"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.49,
+            "family": "reason.chain.depth",
+            "learning_progress": -0.15999999999999992,
+            "pass": {
+              "estimate": 0.25,
+              "lower": 0.2100790142364741,
+              "upper": 0.2946771329306741
+            },
+            "precursor": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "precursor_steering_enabled": false,
+            "priority": 1.5699999999999998,
+            "reasons": [
+              "pass-rate regression is outside overlapping confidence bounds"
+            ],
+            "recommended_difficulty": 1,
+            "statistically_eligible": true,
+            "tier": "frontier",
+            "warning": "steer"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000001e",
+              "step": 30
+            },
+            "difficulty": 1,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 5423367115543318725,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000001e",
+              "step": 30
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "pass_count": 100,
+            "precursor_count": 0,
+            "sample_count": 400,
+            "tier": "frontier"
+          }
+        }
+      ]
+    },
+    "release_recovery": {
+      "config": {
+        "catastrophic_failure_limit": 0.05,
+        "confidence_z": 1.959963984540054,
+        "ewma_alpha": 0.4,
+        "min_samples_per_window": 24,
+        "precursor_limit": 0.15,
+        "precursor_steering_enabled": false,
+        "regression_margin": 0.08,
+        "release_recovery": true,
+        "sentinel_regression_budget": 0.03,
+        "steer_windows": 1,
+        "stop_windows": 2,
+        "target_pass_high": 0.75,
+        "target_pass_low": 0.35
+      },
+      "final_state": {
+        "base_seed": 42,
+        "config": {
+          "catastrophic_failure_limit": 0.05,
+          "confidence_z": 1.959963984540054,
+          "ewma_alpha": 0.4,
+          "min_samples_per_window": 24,
+          "precursor_limit": 0.15,
+          "precursor_steering_enabled": false,
+          "regression_margin": 0.08,
+          "release_recovery": true,
+          "sentinel_regression_budget": 0.03,
+          "steer_windows": 1,
+          "stop_windows": 2,
+          "target_pass_high": 0.75,
+          "target_pass_low": 0.35
+        },
+        "families": {
+          "reason.chain.depth": {
+            "difficulty": 3,
+            "priority": 0.2833333333333332,
+            "release_sentinel": {
+              "catastrophic_count": 0,
+              "checkpoint": {
+                "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+                "step": 2
+              },
+              "difficulty": 2,
+              "family": "reason.chain.depth",
+              "pass_count": 400,
+              "precursor_count": 0,
+              "sample_count": 400,
+              "tier": "sentinel"
+            },
+            "sentinel_baseline": {
+              "estimate": 0.9583333333333334,
+              "lower": 0.7975819352134406,
+              "upper": 0.9926065438344942
+            },
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "reason.chain.depth",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {
+              "frontier": {
+                "ewma_pass_rate": 1.0,
+                "last_pass_interval": {
+                  "estimate": 1.0,
+                  "lower": 0.9904877056657034,
+                  "upper": 1.0
+                },
+                "observations": 1,
+                "steer_streak": 1,
+                "stop_streak": 0
+              },
+              "sentinel": {
+                "ewma_pass_rate": 0.975,
+                "last_pass_interval": {
+                  "estimate": 1.0,
+                  "lower": 0.9904877056657034,
+                  "upper": 1.0
+                },
+                "observations": 2,
+                "steer_streak": 0,
+                "stop_streak": 0
+              }
+            }
+          },
+          "vision.text.line": {
+            "difficulty": 2,
+            "priority": 1.0,
+            "release_sentinel": {
+              "catastrophic_count": 0,
+              "checkpoint": {
+                "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+                "step": 1
+              },
+              "difficulty": 2,
+              "family": "vision.text.line",
+              "pass_count": 200,
+              "precursor_count": 200,
+              "sample_count": 400,
+              "tier": "sentinel"
+            },
+            "sentinel_baseline": {
+              "estimate": 0.5,
+              "lower": 0.451234504169709,
+              "upper": 0.548765495830291
+            },
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "vision.text.line",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {
+              "sentinel": {
+                "ewma_pass_rate": 0.5,
+                "last_pass_interval": {
+                  "estimate": 0.5,
+                  "lower": 0.451234504169709,
+                  "upper": 0.548765495830291
+                },
+                "observations": 1,
+                "steer_streak": 0,
+                "stop_streak": 0
+              }
+            }
+          }
+        },
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "schema_version": 1
+      },
+      "steps": [
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.041666666666666664,
+              "lower": 0.0073934561655057685,
+              "upper": 0.20241806478655938
+            },
+            "ewma_pass_rate": 0.9583333333333334,
+            "family": "reason.chain.depth",
+            "learning_progress": 0.0,
+            "pass": {
+              "estimate": 0.9583333333333334,
+              "lower": 0.7975819352134406,
+              "upper": 0.9926065438344942
+            },
+            "precursor": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.13797620467498017
+            },
+            "precursor_steering_enabled": false,
+            "priority": 0.2916666666666667,
+            "reasons": [],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "sentinel",
+            "warning": "green"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+              "step": 1
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 9712047201555965353,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 1,
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+              "step": 1
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "pass_count": 23,
+            "precursor_count": 0,
+            "sample_count": 24,
+            "tier": "sentinel"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.5,
+            "family": "vision.text.line",
+            "learning_progress": 0.0,
+            "pass": {
+              "estimate": 0.5,
+              "lower": 0.451234504169709,
+              "upper": 0.548765495830291
+            },
+            "precursor": {
+              "estimate": 0.5,
+              "lower": 0.451234504169709,
+              "upper": 0.548765495830291
+            },
+            "precursor_steering_enabled": false,
+            "priority": 1.0,
+            "reasons": [
+              "precursor alarm recorded in shadow mode; steering is disabled"
+            ],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "sentinel",
+            "warning": "watch"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+              "step": 1
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 9712047201555965353,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+              "step": 1
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "pass_count": 200,
+            "precursor_count": 200,
+            "sample_count": 400,
+            "tier": "sentinel"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 1.0,
+            "family": "reason.chain.depth",
+            "learning_progress": 0.0,
+            "pass": {
+              "estimate": 1.0,
+              "lower": 0.9904877056657034,
+              "upper": 1.0
+            },
+            "precursor": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "precursor_steering_enabled": false,
+            "priority": 1.25,
+            "reasons": [
+              "same-checkpoint sentinel violates the release threshold; operator-enabled targeted repair"
+            ],
+            "recommended_difficulty": 3,
+            "statistically_eligible": true,
+            "tier": "frontier",
+            "warning": "steer"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+              "step": 1
+            },
+            "difficulty": 3,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 9713173101463064192,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+              "step": 1
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "pass_count": 400,
+            "precursor_count": 0,
+            "sample_count": 400,
+            "tier": "frontier"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.975,
+            "family": "reason.chain.depth",
+            "learning_progress": 0.016666666666666607,
+            "pass": {
+              "estimate": 1.0,
+              "lower": 0.9904877056657034,
+              "upper": 1.0
+            },
+            "precursor": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "precursor_steering_enabled": false,
+            "priority": 0.2833333333333332,
+            "reasons": [],
+            "recommended_difficulty": 3,
+            "statistically_eligible": true,
+            "tier": "sentinel",
+            "warning": "green"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+              "step": 2
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 8162019187798557724,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+              "step": 2
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "pass_count": 400,
+            "precursor_count": 0,
+            "sample_count": 400,
+            "tier": "sentinel"
+          }
+        }
+      ]
+    },
+    "sentinel_regression_stop": {
+      "config": {
+        "catastrophic_failure_limit": 0.05,
+        "confidence_z": 1.959963984540054,
+        "ewma_alpha": 0.4,
+        "min_samples_per_window": 200,
+        "precursor_limit": 0.15,
+        "precursor_steering_enabled": false,
+        "regression_margin": 0.08,
+        "release_recovery": false,
+        "sentinel_regression_budget": 0.03,
+        "steer_windows": 2,
+        "stop_windows": 2,
+        "target_pass_high": 0.75,
+        "target_pass_low": 0.35
+      },
+      "final_state": {
+        "base_seed": 42,
+        "config": {
+          "catastrophic_failure_limit": 0.05,
+          "confidence_z": 1.959963984540054,
+          "ewma_alpha": 0.4,
+          "min_samples_per_window": 200,
+          "precursor_limit": 0.15,
+          "precursor_steering_enabled": false,
+          "regression_margin": 0.08,
+          "release_recovery": false,
+          "sentinel_regression_budget": 0.03,
+          "steer_windows": 2,
+          "stop_windows": 2,
+          "target_pass_high": 0.75,
+          "target_pass_low": 0.35
+        },
+        "families": {
+          "reason.chain.depth": {
+            "difficulty": 2,
+            "priority": 0.3543999999999998,
+            "sentinel_baseline": {
+              "estimate": 0.95,
+              "lower": 0.9240363649362803,
+              "upper": 0.9674025701628527
+            },
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "reason.chain.depth",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {
+              "sentinel": {
+                "ewma_pass_rate": 0.8692,
+                "last_pass_interval": {
+                  "estimate": 0.9475,
+                  "lower": 0.921078024928725,
+                  "upper": 0.9654084716420795
+                },
+                "observations": 4,
+                "steer_streak": 0,
+                "stop_streak": 0
+              }
+            }
+          },
+          "vision.text.line": {
+            "difficulty": 2,
+            "priority": 1.0,
+            "sentinel_baseline": null,
+            "sentinel_difficulty": 2,
+            "spec": {
+              "id": "vision.text.line",
+              "initial_difficulty": 2,
+              "max_difficulty": 5,
+              "min_difficulty": 0
+            },
+            "tier_history": {}
+          }
+        },
+        "generator_version": "test-generator-v1",
+        "run_id": "run-42",
+        "schema_version": 1
+      },
+      "steps": [
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.95,
+            "family": "reason.chain.depth",
+            "learning_progress": 0.0,
+            "pass": {
+              "estimate": 0.95,
+              "lower": 0.9240363649362803,
+              "upper": 0.9674025701628527
+            },
+            "precursor": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "precursor_steering_enabled": false,
+            "priority": 0.25,
+            "reasons": [],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "sentinel",
+            "warning": "green"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "step": 0
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 15653435665650897296,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "step": 0
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "pass_count": 380,
+            "precursor_count": 0,
+            "sample_count": 400,
+            "tier": "sentinel"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.87,
+            "family": "reason.chain.depth",
+            "learning_progress": -0.07999999999999996,
+            "pass": {
+              "estimate": 0.75,
+              "lower": 0.7053228670693259,
+              "upper": 0.7899209857635259
+            },
+            "precursor": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "precursor_steering_enabled": false,
+            "priority": 1.16,
+            "reasons": [
+              "candidate warning awaits consecutive-window confirmation"
+            ],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "sentinel",
+            "warning": "watch"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+              "step": 10
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 15554567340125656143,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+              "step": 10
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "pass_count": 300,
+            "precursor_count": 0,
+            "sample_count": 400,
+            "tier": "sentinel"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.8170000000000001,
+            "family": "reason.chain.depth",
+            "learning_progress": -0.052999999999999936,
+            "pass": {
+              "estimate": 0.7375,
+              "lower": 0.6922684601360929,
+              "upper": 0.7782132000551163
+            },
+            "precursor": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "precursor_steering_enabled": false,
+            "priority": 2.106,
+            "reasons": [
+              "sentinel regression exceeds the cumulative budget"
+            ],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "sentinel",
+            "warning": "stop"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000014",
+              "step": 20
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 15908383661245714256,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000014",
+              "step": 20
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "pass_count": 295,
+            "precursor_count": 0,
+            "sample_count": 400,
+            "tier": "sentinel"
+          }
+        },
+        {
+          "decision": {
+            "catastrophic": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "ewma_pass_rate": 0.8692,
+            "family": "reason.chain.depth",
+            "learning_progress": 0.05219999999999991,
+            "pass": {
+              "estimate": 0.9475,
+              "lower": 0.921078024928725,
+              "upper": 0.9654084716420795
+            },
+            "precursor": {
+              "estimate": 0.0,
+              "lower": 0.0,
+              "upper": 0.009512294334296508
+            },
+            "precursor_steering_enabled": false,
+            "priority": 0.3543999999999998,
+            "reasons": [],
+            "recommended_difficulty": 2,
+            "statistically_eligible": true,
+            "tier": "sentinel",
+            "warning": "green"
+          },
+          "next_frontier_plan": {
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000001e",
+              "step": 30
+            },
+            "difficulty": 2,
+            "family": "vision.text.line",
+            "generator_version": "test-generator-v1",
+            "run_id": "run-42",
+            "sample_count": 24,
+            "schema_version": 1,
+            "seed": 668980360951778663,
+            "tier": "frontier"
+          },
+          "observation": {
+            "catastrophic_count": 0,
+            "checkpoint": {
+              "artifact_hash": "sha256:000000000000000000000000000000000000000000000000000000000000001e",
+              "step": 30
+            },
+            "difficulty": 2,
+            "family": "reason.chain.depth",
+            "pass_count": 379,
+            "precursor_count": 0,
+            "sample_count": 400,
+            "tier": "sentinel"
+          }
+        }
+      ]
+    }
+  },
+  "source": "crates/grug-data/src/adaptive_exam.rs",
+  "wilson": [
+    {
+      "i": {
+        "estimate": 0.0,
+        "lower": 0.0,
+        "upper": 1.0
+      },
+      "n": 0,
+      "s": 0
+    },
+    {
+      "i": {
+        "estimate": 0.25,
+        "lower": 0.11186170140766569,
+        "upper": 0.468700877618744
+      },
+      "n": 20,
+      "s": 5
+    },
+    {
+      "i": {
+        "estimate": 0.1,
+        "lower": 0.06567044866909588,
+        "upper": 0.1494058124327174
+      },
+      "n": 200,
+      "s": 20
+    },
+    {
+      "i": {
+        "estimate": 0.995,
+        "lower": 0.9722262956021069,
+        "upper": 0.9991168312843989
+      },
+      "n": 200,
+      "s": 199
+    },
+    {
+      "i": {
+        "estimate": 1.0,
+        "lower": 0.9811546736227335,
+        "upper": 1.0
+      },
+      "n": 200,
+      "s": 200
+    },
+    {
+      "i": {
+        "estimate": 0.3075,
+        "lower": 0.2642873977313039,
+        "upper": 0.3543748355874003
+      },
+      "n": 400,
+      "s": 123
+    },
+    {
+      "i": {
+        "estimate": 0.3333333333333333,
+        "lower": 0.06149194472039621,
+        "upper": 0.7923403991979522
+      },
+      "n": 3,
+      "s": 1
+    }
+  ]
+}
