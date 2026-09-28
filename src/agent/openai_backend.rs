@@ -138,21 +138,36 @@ pub enum OpenAiError {
     Unreachable { url: String, reason: String },
 
     /// The host answered with a non-2xx status.
-    #[error("OpenAI-compatible request to {url} failed with HTTP {status}")]
+    #[error(
+        "OpenAI-compatible request to {url} failed with HTTP {status}{}",
+        message.as_deref().map(|m| format!(": {m}")).unwrap_or_default()
+    )]
     #[diagnostic(
         code(akh::openai::request_failed),
         help(
             "401/403 ⇒ the bearer token is missing, expired, or lacks access to \
              model `{model}`. 404 ⇒ `base_url` is probably missing its version \
              segment (it must end in e.g. `/v1`). 400 ⇒ the model rejected the \
-             request body; the response body below says which field."
+             request body; the message above (when present) says which field."
         )
     )]
     RequestFailed {
         url: String,
         status: u16,
         model: String,
+        /// Full, untruncated response body, kept for callers that want to
+        /// inspect it programmatically. Never logged directly — use
+        /// `message` (below) for display, which is bounded and redacted.
         body: String,
+        /// Truncated (~600 chars), redacted copy of the response body's
+        /// `error.message`, or the raw body when it isn't JSON / carries no
+        /// `error.message`. `None` when the body was empty. Built only from
+        /// the response body — never from request headers or the API key —
+        /// and defensively scrubbed of anything that looks like a bearer
+        /// token, in case a misbehaving proxy echoes the request back. This
+        /// is what the `Display` impl (and therefore the WARN log at the
+        /// call site) shows.
+        message: Option<String>,
         /// `Retry-After` and structured `error.code`/`error.type`, for the
         /// provider-failure taxonomy (Phase 53g PR 4). Not part of the message.
         /// Boxed so the error stays small on every `Result` path.
@@ -218,7 +233,7 @@ fn tool_call_id(round: usize, idx: usize) -> String {
 
 /// Translate the loop's Ollama-shaped conversation into strict OpenAI messages.
 ///
-/// Four fixes are applied during translation:
+/// Six fixes are applied during translation:
 ///
 /// 1. **Assistant tool calls** gain an `id` and a `type: "function"`, and their
 ///    `arguments` object is stringified (OpenAI transports arguments as a JSON
@@ -228,13 +243,28 @@ fn tool_call_id(round: usize, idx: usize) -> String {
 ///    order [`agentic_chat`](super::agentic_chat) appends them in.
 /// 3. **Assistant turns that only called tools** get their empty `content`
 ///    dropped rather than sent as `""`, which some strict servers reject.
-/// 4. **System messages** are coalesced into one leading message.  Some strict
+/// 4. **System messages** are coalesced into one leading message. Some strict
 ///    chat templates (including Qwen) reject a system role anywhere else in
 ///    the conversation.
-///
-/// A tool result with no outstanding call (malformed history) is passed through
-/// without `tool_call_id` rather than dropped: losing the observation would be a
-/// worse failure than letting the server complain about it.
+/// 5. **Tool content is always a string.** Gemma 4's pinned template calls
+///    `.get()` on a tool message's `content` while resolving the response
+///    block; a non-string `content` (an object or array, which nothing in
+///    this codebase's own tool dispatch produces today, but a future tool or
+///    a replayed/compacted history entry could) makes that call raise
+///    `UndefinedError: 'str object' has no attribute 'get'` — a hard 400,
+///    reproduced by rendering the pinned template offline. Anything that
+///    isn't already a JSON string is serialized to one.
+/// 6. **A tool result with no outstanding call** (malformed/compacted
+///    history — the pending-id queue is empty) is folded into a `role:"user"`
+///    message instead of emitted as `role:"tool"` with no `tool_call_id`.
+///    The same pinned template raises `TypeError: can only concatenate str
+///    (not "NoneType") to str` while formatting a tool-response block for a
+///    call it can't resolve — also reproduced offline — so "let the server
+///    complain about it" is not survivable for this template; folding keeps
+///    the observation without ever sending the malformed shape. Adjacent
+///    messages of the same non-tool role (this fold can produce two adjacent
+///    `user` turns) are then merged into one, since some strict templates
+///    also expect strict user/assistant alternation.
 pub fn to_openai_messages(system_prompt: &str, conversation: &[Value]) -> Vec<Value> {
     let mut out = Vec::with_capacity(conversation.len() + 1);
 
@@ -313,17 +343,68 @@ pub fn to_openai_messages(system_prompt: &str, conversation: &[Value]) -> Vec<Va
                 out.push(translated);
             }
             "tool" => {
-                let mut translated = json!({
-                    "role": "tool",
-                    "content": msg.get("content").cloned().unwrap_or_else(|| json!("")),
-                });
-                if let Some(id) = pending_ids.pop_front() {
-                    translated["tool_call_id"] = json!(id);
+                let content = stringify_content(msg.get("content"));
+                match pending_ids.pop_front() {
+                    Some(id) => out.push(json!({
+                        "role": "tool",
+                        "content": content,
+                        "tool_call_id": id,
+                    })),
+                    // No outstanding call to answer: emitting `role:"tool"`
+                    // without `tool_call_id` is rejected outright by Gemma
+                    // 4's pinned template (see the fix-5/6 doc comment
+                    // above), so fold the observation into a `user` turn
+                    // instead of losing it or sending the malformed shape.
+                    None => out.push(json!({
+                        "role": "user",
+                        "content": format!("[unmatched tool result] {content}"),
+                    })),
                 }
-                out.push(translated);
             }
             _ => out.push(msg.clone()),
         }
+    }
+    merge_adjacent_same_role(out)
+}
+
+/// Coerce a possibly-absent, possibly-non-string `content` value to a JSON
+/// string: pass a string through verbatim, serialize anything else (object,
+/// array, number, `null`, missing) to its JSON text. See fix 5 above.
+fn stringify_content(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+/// Merge adjacent messages that share the same non-tool role, concatenating
+/// their content with a blank line. `tool` messages are never merged (each
+/// carries a distinct `tool_call_id`); `system` never reaches here (already
+/// coalesced by the caller); a message with `tool_calls` is never merged
+/// into a neighbor, since that would silently drop the calls' positional
+/// pairing with their queued response ids.
+fn merge_adjacent_same_role(messages: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
+        let mergeable = role != "tool" && role != "system" && msg.get("tool_calls").is_none();
+        if mergeable
+            && let Some(prev) = out.last_mut()
+            && prev.get("role").and_then(Value::as_str) == Some(role)
+            && prev.get("tool_calls").is_none()
+        {
+            let prev_content = prev.get("content").and_then(Value::as_str).unwrap_or("");
+            let next_content = msg.get("content").and_then(Value::as_str).unwrap_or("");
+            let merged = match (prev_content.is_empty(), next_content.is_empty()) {
+                (true, _) => next_content.to_owned(),
+                (false, true) => prev_content.to_owned(),
+                (false, false) => format!("{prev_content}\n\n{next_content}"),
+            };
+            prev["content"] = json!(merged);
+            continue;
+        }
+        out.push(msg);
     }
     out
 }
@@ -335,6 +416,17 @@ pub fn to_openai_messages(system_prompt: &str, conversation: &[Value]) -> Vec<Va
 /// is what the tool dispatcher indexes into. Arguments that don't parse degrade
 /// to an empty object rather than dropping the call — the tool's own validation
 /// then produces a far better diagnostic than a silently vanished call would.
+///
+/// Only `message.content` becomes the returned content — `message.reasoning_content`
+/// (present when the server runs with `--reasoning-parser`, e.g. Lilith's
+/// pod, see `docs/ops/lilith-serve.md` "Reasoning parser") is read on the
+/// streaming path (`chat_stream`, which surfaces it as [`StreamEvent::Thinking`])
+/// but not here: [`AssistantTurn`] carries no separate reasoning field for the
+/// non-streaming turn to populate. This is not a leak — a configured reasoning
+/// parser keeps `content` itself clean of the `<|channel>thought…<channel|>`
+/// markers regardless — it just means a non-streaming turn's separated
+/// reasoning text is dropped rather than surfaced as a thinking step, unlike
+/// its streaming counterpart.
 fn parse_message(msg: &Value) -> (String, Vec<ToolCall>) {
     let content = msg
         .get("content")
@@ -710,11 +802,14 @@ impl OpenAiClient {
             ureq::Error::Status(status, resp) => {
                 let (body, detail) =
                     super::provider_failure::ProviderErrorDetail::from_response(resp);
+                let message =
+                    extract_error_message(&body, self.config.resolved_api_key().as_deref());
                 OpenAiError::RequestFailed {
                     url: url.to_string(),
                     status,
                     model: self.config.model.clone(),
                     body,
+                    message,
                     detail: Box::new(detail),
                 }
             }
@@ -724,6 +819,73 @@ impl OpenAiClient {
             },
         }
     }
+}
+
+/// Maximum length (in `char`s) of the display message extracted from a
+/// provider's error body. Long enough to show a real diagnostic, short
+/// enough to keep a log line readable.
+const ERROR_MESSAGE_MAX_CHARS: usize = 600;
+
+/// Build the truncated, redacted display copy of an HTTP error's response
+/// body: `error.message` when the body is the documented OpenAI error JSON
+/// shape (`{"error":{"message": "..."}}`), otherwise the raw body verbatim
+/// (some non-strict servers answer 400 with plain text or a different JSON
+/// shape, and that text is still worth showing). `None` for an empty body.
+///
+/// `api_key`, when given, is redacted if it appears verbatim in the body —
+/// defense in depth against a proxy that echoes the request back in its
+/// error response. `Bearer <token>`-shaped substrings are always redacted
+/// regardless, since a leaked body is a worse outcome than an over-eager
+/// redaction.
+fn extract_error_message(body: &str, api_key: Option<&str>) -> Option<String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let text = serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| trimmed.to_owned());
+    let redacted = redact_secrets(&text, api_key);
+    Some(truncate_chars(&redacted, ERROR_MESSAGE_MAX_CHARS))
+}
+
+/// Mask `Bearer <token>` substrings and any verbatim occurrence of `api_key`.
+fn redact_secrets(text: &str, api_key: Option<&str>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.to_ascii_lowercase().find("bearer ") {
+        out.push_str(&rest[..pos]);
+        out.push_str("Bearer [REDACTED]");
+        let after = &rest[pos + "bearer ".len()..];
+        // Skip the token itself (up to the next whitespace or quote).
+        let token_end = after
+            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+            .unwrap_or(after.len());
+        rest = &after[token_end..];
+    }
+    out.push_str(rest);
+
+    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        out = out.replace(key, "[REDACTED]");
+    }
+    out
+}
+
+/// Truncate `text` to at most `max_chars` characters (not bytes, so a
+/// multi-byte codepoint is never split), appending `…` when truncated.
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let mut truncated: String = text.chars().take(max_chars).collect();
+    truncated.push('…');
+    truncated
 }
 
 /// Read `usage.{prompt,completion}_tokens` from a response or stream frame.
@@ -954,8 +1116,9 @@ mod tests {
         let error = client.map_transport(ureq::Error::Status(429, response), "http://h/v1");
         assert_eq!(
             error.to_string(),
-            "OpenAI-compatible request to http://h/v1 failed with HTTP 429",
-            "the message is unchanged"
+            "OpenAI-compatible request to http://h/v1 failed with HTTP 429: \
+             You exceeded your current quota",
+            "the display message now surfaces the provider's error.message"
         );
         let expected = ProviderFailureEvidence::Http {
             status: 429,
@@ -985,6 +1148,92 @@ mod tests {
             }
             .provider_evidence(),
             Some(ProviderFailureEvidence::Transport)
+        );
+    }
+
+    /// Non-JSON bodies (a plain-text 400 from a non-strict server) still
+    /// surface, verbatim, rather than being swallowed to nothing.
+    #[test]
+    fn error_message_falls_back_to_raw_body_when_not_json() {
+        assert_eq!(
+            extract_error_message("Bad Request: role order invalid", None),
+            Some("Bad Request: role order invalid".to_owned())
+        );
+        assert_eq!(extract_error_message("", None), None);
+        assert_eq!(extract_error_message("   ", None), None);
+    }
+
+    /// The OpenAI error shape is unwrapped to just `error.message`, not the
+    /// whole JSON body (which would duplicate `type`/`code` already carried
+    /// structurally in `ProviderErrorDetail`).
+    #[test]
+    fn error_message_extracts_error_message_from_json() {
+        let body = r#"{"error":{"message":"model does not support tools","type":"invalid_request_error"}}"#;
+        assert_eq!(
+            extract_error_message(body, None),
+            Some("model does not support tools".to_owned())
+        );
+    }
+
+    /// A JSON body with no `error.message` (e.g. a bare `{"detail": "..."}`
+    /// from some other server) falls back to the raw body rather than `None`.
+    #[test]
+    fn error_message_falls_back_when_json_has_no_error_message() {
+        let body = r#"{"detail":"invalid role sequence"}"#;
+        assert_eq!(extract_error_message(body, None), Some(body.to_owned()));
+    }
+
+    #[test]
+    fn error_message_is_truncated_around_600_chars() {
+        let long = "x".repeat(1000);
+        let body = format!(r#"{{"error":{{"message":"{long}"}}}}"#);
+        let extracted = extract_error_message(&body, None).unwrap();
+        assert_eq!(extracted.chars().count(), ERROR_MESSAGE_MAX_CHARS + 1); // +1 for the ellipsis
+        assert!(extracted.ends_with('…'));
+    }
+
+    /// Defense in depth: a body that echoes `Authorization: Bearer ...` (a
+    /// misbehaving proxy reflecting the request) never reaches the log.
+    #[test]
+    fn error_message_redacts_bearer_tokens_and_the_configured_key() {
+        let body = r#"{"error":{"message":"rejected request with header Authorization: Bearer sk-super-secret-token-value"}}"#;
+        let extracted = extract_error_message(body, None).unwrap();
+        assert!(
+            !extracted.contains("sk-super-secret-token-value"),
+            "{extracted}"
+        );
+        assert!(extracted.contains("Bearer [REDACTED]"), "{extracted}");
+
+        // Even without the "Bearer " prefix, a verbatim echo of the resolved
+        // key is redacted when the caller has it to check against.
+        let body2 = r#"{"error":{"message":"key literal-secret-123 is not authorized"}}"#;
+        let extracted2 = extract_error_message(body2, Some("literal-secret-123")).unwrap();
+        assert!(!extracted2.contains("literal-secret-123"), "{extracted2}");
+        assert_eq!(extracted2, "key [REDACTED] is not authorized");
+    }
+
+    /// The redacted, truncated message is what both `Display` (and therefore
+    /// the WARN log at the agentic-loop call site) and the miette diagnostic
+    /// show — never headers, never the key, always bounded in length.
+    #[test]
+    fn request_failed_display_includes_the_redacted_message() {
+        let body = r#"{"error":{"message":"invalid role sequence: user must follow tool"}}"#;
+        let raw = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response: ureq::Response = raw.parse().unwrap();
+        let client = OpenAiClient::new(cfg());
+        let error = client.map_transport(ureq::Error::Status(400, response), "http://h/v1");
+        assert_eq!(
+            error.to_string(),
+            "OpenAI-compatible request to http://h/v1 failed with HTTP 400: \
+             invalid role sequence: user must follow tool"
+        );
+        let report = miette::Report::new(error);
+        assert!(
+            report.to_string().contains("invalid role sequence"),
+            "{report}"
         );
     }
 
@@ -1091,6 +1340,145 @@ mod tests {
         assert!(out[0].get("tool_calls").is_none());
     }
 
+    // ── Lilith / Gemma-4 strict-template hardening (ADR 116, Anima WI
+    // 01a0e270-314e) ──────────────────────────────────────────────────────
+    //
+    // Both shapes below were proven to crash the *pinned* Gemma 4 chat
+    // template (`chat_template.jinja` on the Lilith serve pod), rendered
+    // offline via `AutoTokenizer.apply_chat_template` with the tokenizer's
+    // own Jinja engine — not a guess about what a strict template *might*
+    // reject:
+    //
+    //   * a `role:"tool"` message whose `content` is a JSON object (not a
+    //     string) → `jinja2.exceptions.UndefinedError: 'str object' has no
+    //     attribute 'get'` while the template forward-scans the response
+    //     block.
+    //   * a `role:"tool"` message with no `tool_call_id` (the "malformed
+    //     history" fallback this module used to emit deliberately) →
+    //     `TypeError: can only concatenate str (not "NoneType") to str`
+    //     while the template formats the response block for a call id it
+    //     can't resolve.
+    //
+    // Both are fast, synchronous template-render failures — exactly the
+    // "HTTP 400 in ~0.1s, no generation" shape from the live incident — so
+    // `to_openai_messages` must never produce either shape, regardless of
+    // which upstream code path (a future tool, a compacted/replayed history
+    // entry, or this module's own old fallback) would otherwise cause it.
+
+    #[test]
+    fn tool_content_is_always_stringified() {
+        let conv = vec![
+            json!({"role": "assistant", "tool_calls": [
+                {"function": {"name": "list_plans", "arguments": {}}},
+            ]}),
+            // A structured (non-string) tool result, as a future tool or a
+            // replayed history entry could produce.
+            json!({"role": "tool", "content": {"plans": [{"id": "pl1"}]}}),
+        ];
+        let out = to_openai_messages("", &conv);
+        let content = out[1]["content"]
+            .as_str()
+            .expect("tool content must always serialize to a JSON string");
+        assert_eq!(content, r#"{"plans":[{"id":"pl1"}]}"#);
+        assert_eq!(out[1]["tool_call_id"], "call_0_0");
+    }
+
+    #[test]
+    fn tool_content_missing_entirely_becomes_an_empty_string() {
+        let conv = vec![
+            json!({"role": "assistant", "tool_calls": [{"function": {"name": "a", "arguments": {}}}]}),
+            json!({"role": "tool"}),
+        ];
+        let out = to_openai_messages("", &conv);
+        assert_eq!(out[1]["content"], "");
+        assert_eq!(out[1]["tool_call_id"], "call_0_0");
+    }
+
+    #[test]
+    fn orphaned_tool_result_is_folded_into_a_user_turn_not_sent_malformed() {
+        // No preceding assistant tool_calls at all: pending_ids is empty
+        // from the start. This is the exact "malformed/compacted history"
+        // shape the old fallback used to pass through as `role:"tool"` with
+        // no `tool_call_id` — which the pinned template cannot render.
+        let conv = vec![json!({"role": "tool", "content": "orphaned result"})];
+        let out = to_openai_messages("", &conv);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        assert!(out[0].get("tool_call_id").is_none());
+        assert!(
+            out[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("orphaned result"),
+            "the observation must survive the fold: {out:?}"
+        );
+        // Never the crashing shape: role:"tool" with no tool_call_id.
+        assert!(
+            !(out[0]["role"] == "tool" && out[0].get("tool_call_id").is_none()),
+            "must never emit a tool message without a tool_call_id"
+        );
+    }
+
+    #[test]
+    fn orphaned_tool_result_merges_with_an_adjacent_user_turn() {
+        // A second tool message beyond what the preceding assistant round
+        // declared: the first consumes the only pending id, the second is
+        // orphaned and must fold *and* merge into the neighboring user turn
+        // rather than appear as a second, separate user message (which
+        // would violate strict user/assistant alternation too).
+        let conv = vec![
+            json!({"role": "assistant", "tool_calls": [{"function": {"name": "a", "arguments": {}}}]}),
+            json!({"role": "tool", "content": "first"}),
+            json!({"role": "tool", "content": "second (orphaned)"}),
+            json!({"role": "user", "content": "please continue"}),
+        ];
+        let out = to_openai_messages("", &conv);
+        // assistant, tool(first), then ONE merged user turn (folded orphan
+        // + the real next user message) — never two adjacent user messages.
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert_eq!(out[1]["role"], "tool");
+        assert_eq!(out[1]["tool_call_id"], "call_0_0");
+        assert_eq!(out[2]["role"], "user");
+        let merged = out[2]["content"].as_str().unwrap();
+        assert!(merged.contains("second (orphaned)"), "{merged}");
+        assert!(merged.contains("please continue"), "{merged}");
+    }
+
+    #[test]
+    fn adjacent_assistant_content_turns_are_merged() {
+        // force_final_answer / the no-work-retry path can append a plain
+        // `role:"user"` turn; symmetrically, two consecutive content-only
+        // assistant turns (no tool_calls on either) are merged too, since
+        // some strict templates expect alternation there as well.
+        let conv = vec![
+            json!({"role": "assistant", "content": "partial answer"}),
+            json!({"role": "assistant", "content": "more detail"}),
+        ];
+        let out = to_openai_messages("", &conv);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0]["content"], "partial answer\n\nmore detail");
+    }
+
+    #[test]
+    fn merge_never_touches_tool_messages_or_assistant_tool_call_turns() {
+        // Two adjacent tool results for two DIFFERENT calls must stay
+        // separate (each keyed by its own tool_call_id) even though they
+        // share a role — merging would silently drop one observation.
+        let conv = vec![
+            json!({"role": "assistant", "tool_calls": [
+                {"function": {"name": "a", "arguments": {}}},
+                {"function": {"name": "b", "arguments": {}}},
+            ]}),
+            json!({"role": "tool", "content": "out-a"}),
+            json!({"role": "tool", "content": "out-b"}),
+        ];
+        let out = to_openai_messages("", &conv);
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert_eq!(out[1]["content"], "out-a");
+        assert_eq!(out[2]["content"], "out-b");
+        assert_ne!(out[1]["tool_call_id"], out[2]["tool_call_id"]);
+    }
+
     #[test]
     fn system_prompt_is_prepended_only_when_present() {
         let conv = vec![json!({"role": "user", "content": "hi"})];
@@ -1167,6 +1555,23 @@ mod tests {
             "the call must survive for the tool to reject"
         );
         assert_eq!(calls[0].arguments, json!({}));
+    }
+
+    /// A non-streaming response from a server with `--reasoning-parser`
+    /// enabled (Lilith's pod, Anima WI 01a0e270-314e) carries the separated
+    /// reasoning text in a sibling `reasoning_content` field. It must never
+    /// leak into, or be concatenated with, the returned content — even
+    /// though `AssistantTurn` currently has nowhere else to put it (unlike
+    /// the streaming path's `StreamEvent::Thinking`).
+    #[test]
+    fn non_streaming_reasoning_content_never_contaminates_content() {
+        let msg = json!({
+            "content": "The answer is 4.",
+            "reasoning_content": "The user asked 2+2, so I should compute 2+2=4.",
+        });
+        let (content, calls) = parse_message(&msg);
+        assert_eq!(content, "The answer is 4.");
+        assert!(calls.is_empty());
     }
 
     #[test]
