@@ -134,7 +134,7 @@ pub use affect::{
     AffectiveState, AffectiveSystem, Appraisal, AppraisalTrigger, MoodState, SomaticMarker,
     SomaticMarkerRegistry, emotional_salience, mood_congruence_bias,
 };
-pub use agent::{Agent, AgentConfig, AgentPredicates, ExecToolWiring};
+pub use agent::{Agent, AgentConfig, AgentPredicates, ExecToolWiring, file_write_roots};
 pub use calendar::{
     AllenRelation, CalendarError, CalendarEvent, CalendarManager, CalendarPredicates,
     CalendarResult, CalendarRoleVectors,

@@ -60,7 +60,7 @@ pub type UnixSeconds = u64;
 ///
 /// Parsing rejects anything else, so a value can never smuggle an option or a
 /// revision expression into the `git merge-base` call.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct CommitSha(String);
 
@@ -385,30 +385,6 @@ pub enum Reversibility {
     Irreversible,
 }
 
-/// The inspected target of a deletion or overwrite.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TargetVerification {
-    /// Path, object key, volume id, or resource id.
-    pub target: String,
-    /// Digest observed when the target was inspected.
-    pub digest: String,
-    /// The inspection receipt.
-    pub receipt: Receipt,
-}
-
-/// A verified copy of a target, made before an irreversible action.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CopyVerification {
-    /// Where the copy lives.
-    pub location: String,
-    /// The copy's digest as read back.
-    pub digest: String,
-    /// The read-back receipt.
-    pub receipt: Receipt,
-}
-
 /// An operator-class (T3) action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
@@ -432,19 +408,25 @@ pub enum OperatorAction {
     },
     /// Spend money (pods, API credit).
     Spend { amount: Money, purpose: String },
-    /// Delete something.
+    /// Delete something. The runtime computes the target's digest itself and
+    /// compares it with `observed_digest` (what she saw when she looked); an
+    /// irreversible deletion also needs a `copy` whose runtime-computed digest
+    /// matches the target's.
     Delete {
-        target: TargetVerification,
+        target: String,
         reversibility: Reversibility,
+        observed_digest: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        copy: Option<CopyVerification>,
+        copy: Option<String>,
     },
-    /// Overwrite something.
+    /// Overwrite something (including any file_io/edit write to an existing
+    /// file). Verified like [`OperatorAction::Delete`].
     Overwrite {
-        target: TargetVerification,
+        target: String,
         reversibility: Reversibility,
+        observed_digest: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        copy: Option<CopyVerification>,
+        copy: Option<String>,
     },
     /// Anything outward-facing outside the fleet.
     Outward { destination: String },
@@ -509,12 +491,21 @@ pub enum ActionOutcome {
     Succeeded { detail: String },
     /// The tool reported failure.
     Failed { detail: String },
+    /// The call did not finish normally (it panicked or unwound), so whether
+    /// the action took effect is unknown. A spend stays counted.
+    Unknown { detail: String },
 }
 
 impl ActionOutcome {
     /// Whether the action took effect.
     pub fn succeeded(&self) -> bool {
         matches!(self, Self::Succeeded { .. })
+    }
+
+    /// Whether the action certainly took no effect, so a budget reservation
+    /// can be returned.
+    pub fn certainly_failed(&self) -> bool {
+        matches!(self, Self::Failed { .. })
     }
 }
 
@@ -531,6 +522,9 @@ pub struct CosAnnouncement {
     pub announced_at: UnixSeconds,
     /// The tool that carried the action.
     pub tool: String,
+    /// The tool's actual input arguments (declaration stripped, values that
+    /// look like credentials redacted), so a mis-declared action is visible.
+    pub arguments: serde_json::Map<String, serde_json::Value>,
     /// The action.
     pub action: OperatorAction,
     /// Evidence for the action, including the runtime's own rule receipts.

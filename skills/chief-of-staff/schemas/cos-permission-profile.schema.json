@@ -68,6 +68,58 @@
           "outside-grant"
         ]
       }
+    },
+    "artifact_tools": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[^*]+\\*?$"
+      },
+      "description": "Deploy-capable tools: every commit referenced in their arguments must be on main_ref."
+    },
+    "adapter_markers": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Structural identifiers of adapter activation; any in a T2/T3 call's arguments puts it outside her grant."
+    },
+    "overwrite_tools": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[^*]+\\*?$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path_param"
+        ],
+        "properties": {
+          "path_param": {
+            "type": "string",
+            "minLength": 1
+          },
+          "when": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "param",
+              "equals"
+            ],
+            "properties": {
+              "param": {
+                "type": "string",
+                "minLength": 1
+              },
+              "equals": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

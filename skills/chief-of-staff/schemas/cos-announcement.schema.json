@@ -10,6 +10,7 @@
     "akh",
     "announced_at",
     "tool",
+    "arguments",
     "action",
     "receipts",
     "reason",
@@ -31,6 +32,10 @@
     "tool": {
       "type": "string",
       "minLength": 1
+    },
+    "arguments": {
+      "type": "object",
+      "description": "The tool's actual input arguments, declaration stripped, credential-shaped values redacted."
     },
     "action": {
       "$ref": "#/$defs/operatorAction"
@@ -103,6 +108,22 @@
               "type": "string"
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "detail"
+          ],
+          "properties": {
+            "status": {
+              "const": "unknown"
+            },
+            "detail": {
+              "type": "string"
+            }
+          }
         }
       ]
     }
@@ -111,27 +132,6 @@
     "commitSha": {
       "type": "string",
       "pattern": "^[0-9a-f]{7,64}$"
-    },
-    "copyVerification": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "location",
-        "digest",
-        "receipt"
-      ],
-      "properties": {
-        "location": {
-          "type": "string",
-          "minLength": 1
-        },
-        "digest": {
-          "type": "string"
-        },
-        "receipt": {
-          "$ref": "#/$defs/receipt"
-        }
-      }
     },
     "money": {
       "type": "object",
@@ -267,14 +267,17 @@
           "required": [
             "kind",
             "target",
-            "reversibility"
+            "reversibility",
+            "observed_digest"
           ],
           "properties": {
             "kind": {
               "const": "delete"
             },
             "target": {
-              "$ref": "#/$defs/targetVerification"
+              "type": "string",
+              "minLength": 1,
+              "description": "Absolute path (or a path relative to the scratch directory) the runtime can read and digest."
             },
             "reversibility": {
               "enum": [
@@ -282,8 +285,15 @@
                 "irreversible"
               ]
             },
+            "observed_digest": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The sha256 you observed when you looked at the target (`sha256:<hex>` or bare hex); the runtime recomputes it."
+            },
             "copy": {
-              "$ref": "#/$defs/copyVerification"
+              "type": "string",
+              "minLength": 1,
+              "description": "Where a copy of the target lives; required when irreversible; the runtime digests it."
             }
           }
         },
@@ -293,14 +303,17 @@
           "required": [
             "kind",
             "target",
-            "reversibility"
+            "reversibility",
+            "observed_digest"
           ],
           "properties": {
             "kind": {
               "const": "overwrite"
             },
             "target": {
-              "$ref": "#/$defs/targetVerification"
+              "type": "string",
+              "minLength": 1,
+              "description": "Absolute path (or a path relative to the scratch directory) the runtime can read and digest."
             },
             "reversibility": {
               "enum": [
@@ -308,8 +321,15 @@
                 "irreversible"
               ]
             },
+            "observed_digest": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The sha256 you observed when you looked at the target (`sha256:<hex>` or bare hex); the runtime recomputes it."
+            },
             "copy": {
-              "$ref": "#/$defs/copyVerification"
+              "type": "string",
+              "minLength": 1,
+              "description": "Where a copy of the target lives; required when irreversible; the runtime digests it."
             }
           }
         },
@@ -448,27 +468,6 @@
           }
         }
       ]
-    },
-    "targetVerification": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "target",
-        "digest",
-        "receipt"
-      ],
-      "properties": {
-        "target": {
-          "type": "string",
-          "minLength": 1
-        },
-        "digest": {
-          "type": "string"
-        },
-        "receipt": {
-          "$ref": "#/$defs/receipt"
-        }
-      }
     },
     "unixSeconds": {
       "type": "integer",

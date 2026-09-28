@@ -584,9 +584,22 @@ impl ToolRegistry {
                 }
             }
         });
+        let guard = self.guard.lock().unwrap().clone();
         manifests
             .into_values()
             .filter(|manifest| !unadvertised.contains(&manifest.name))
+            .map(|mut manifest| {
+                // A guarded akh advertises the guard's own parameters (e.g.
+                // `cos_declaration`) so grammar-constrained backends can emit them.
+                if let Some(guard) = guard.as_ref() {
+                    for param in guard.advertised_params(&manifest) {
+                        if !manifest.parameters.iter().any(|p| p.name == param.name) {
+                            manifest.parameters.push(param);
+                        }
+                    }
+                }
+                manifest
+            })
             .collect()
     }
 
@@ -669,11 +682,17 @@ impl ToolRegistry {
         // Per-akh rule layer (e.g. Lilith's standing rules, ADR 116). It may
         // strip guard-owned arguments and refuse with a rendered diagnostic;
         // a refusal is a failed ToolOutput, like a permission denial.
+        // The pending settlement is a drop guard: if the tool panics, the
+        // unwind still settles the ticket (as `Aborted`), so no admission
+        // leaks and a spend reservation stays counted.
         let call_guard = self.guard.lock().unwrap().clone();
-        let call_ticket = match (call_guard.as_ref(), manifest.as_ref()) {
+        let mut pending_settle = match (call_guard, manifest.as_ref()) {
             (None, _) => None,
             (Some(call_guard), Some(manifest)) => match call_guard.admit(manifest, &mut input) {
-                Ok(ticket) => Some(ticket),
+                Ok(ticket) => Some(PendingSettle {
+                    guard: call_guard,
+                    ticket: Some(ticket),
+                }),
                 Err(reason) => return Ok(ToolOutput::err(format!("refused: {reason}"))),
             },
             (Some(_), None) => {
@@ -730,12 +749,16 @@ impl ToolRegistry {
         // Settle the rule layer (e.g. post the operator-class announcement).
         // The call already ran, so a failed after-effect is surfaced on the
         // output rather than turning a successful call into a failure.
-        if let (Some(call_guard), Some(ticket)) = (call_guard, call_ticket) {
-            let (succeeded, detail) = match &result {
-                Ok(out) => (out.success, truncate_summary(&out.result, 200)),
-                Err(e) => (false, truncate_summary(&e.to_string(), 200)),
+        if let Some(pending) = pending_settle.as_mut() {
+            use super::permission::CallOutcome;
+            let (outcome, detail) = match &result {
+                Ok(out) if out.success => {
+                    (CallOutcome::Succeeded, truncate_summary(&out.result, 200))
+                }
+                Ok(out) => (CallOutcome::Failed, truncate_summary(&out.result, 200)),
+                Err(e) => (CallOutcome::Failed, truncate_summary(&e.to_string(), 200)),
             };
-            if let Err(reason) = call_guard.settle(ticket, succeeded, &detail) {
+            if let Err(reason) = pending.settle(outcome, &detail) {
                 tracing::error!(tool = %name, %reason, "tool-call guard settle failed");
                 if let Ok(out) = &mut result {
                     out.result
@@ -786,6 +809,41 @@ impl ToolRegistry {
     /// Whether the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.tools.lock().unwrap().is_empty()
+    }
+}
+
+/// An admitted guard ticket that must be settled exactly once. Dropping it
+/// unsettled (a panic unwinding through `execute`) settles it as
+/// [`CallOutcome::Aborted`](super::permission::CallOutcome::Aborted).
+struct PendingSettle {
+    guard: Arc<dyn super::permission::ToolCallGuard>,
+    ticket: Option<super::permission::GuardTicket>,
+}
+
+impl PendingSettle {
+    fn settle(
+        &mut self,
+        outcome: super::permission::CallOutcome,
+        detail: &str,
+    ) -> Result<(), String> {
+        match self.ticket.take() {
+            Some(ticket) => self.guard.settle(ticket, outcome, detail),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for PendingSettle {
+    fn drop(&mut self) {
+        if let Some(ticket) = self.ticket.take()
+            && let Err(reason) = self.guard.settle(
+                ticket,
+                super::permission::CallOutcome::Aborted,
+                "the tool call unwound before it returned",
+            )
+        {
+            tracing::error!(%reason, "tool-call guard settle after unwind failed");
+        }
     }
 }
 

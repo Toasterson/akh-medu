@@ -1,16 +1,28 @@
-//! Lilith C1 exit criteria (ADR 116, plan slice C1): schema tests, a T3
-//! action taken and announced with receipts + rollback path, a non-main
-//! deploy refused by the rule check, a T2 post carrying receipts, adapter
-//! activation refused.
+//! Lilith C1 exit criteria (ADR 116, plan slice C1) and the PR #436 review
+//! fixes. Covered here:
+//!
+//! - schema tests;
+//! - a T3 action taken and announced with its arguments, receipts and rollback
+//!   path;
+//! - a non-main deploy refused, whether the SHA is declared or only appears
+//!   in the arguments;
+//! - a T2 post carrying receipts;
+//! - adapter activation refused, by tool name, by declared action or by an
+//!   argument marker;
+//! - runtime-computed digests for deletions and overwrites;
+//! - the write-ahead spend ledger, crash tolerance, panics and concurrency;
+//! - the fail-closed fallback;
+//! - the advertised declaration parameter.
 
 use std::collections::{BTreeSet, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use miette::Diagnostic;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::agent::error::AgentResult;
+use crate::agent::permission::{CallOutcome, PermissionMode, ToolCallGuard};
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
 use crate::agent::tool_manifest::{
     Capability, DangerInfo, DangerLevel, ToolEffect, ToolManifest, ToolSource,
@@ -19,6 +31,7 @@ use crate::engine::{Engine, EngineConfig};
 use crate::vsa::Dimension;
 
 use super::contracts::*;
+use super::ledger::{SpendReservation, SpendSettlement};
 use super::*;
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -47,13 +60,16 @@ fn validator(name: &str) -> jsonschema::Validator {
     jsonschema::validator_for(&schema(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
-fn assert_valid(name: &str, instance: &Value) {
-    let validator = validator(name);
+fn assert_valid_against(validator: &jsonschema::Validator, name: &str, instance: &Value) {
     let errors: Vec<String> = validator
         .iter_errors(instance)
         .map(|e| e.to_string())
         .collect();
     assert!(errors.is_empty(), "{name}: {errors:?}\n{instance:#}");
+}
+
+fn assert_valid(name: &str, instance: &Value) {
+    assert_valid_against(&validator(name), name, instance);
 }
 
 /// Schema name for a contract id (`lilith/cos-briefing@1` → `cos-briefing`).
@@ -108,41 +124,56 @@ fn manifest(name: &str, effect: ToolEffect) -> ToolManifest {
     }
 }
 
+fn args(value: Value) -> Map<String, Value> {
+    value.as_object().cloned().unwrap()
+}
+
+fn no_args() -> Map<String, Value> {
+    Map::new()
+}
+
 fn shipped_profile() -> CosPermissionProfile {
     CosPermissionProfile::load(&skill_dir().join("permission-profile.json")).unwrap()
 }
 
-/// Ancestry oracle over a fixed set of main commits.
-struct FakeMain(BTreeSet<String>);
+/// A repository with one main commit and one branch commit; every other
+/// token is not a commit.
+struct FakeRepo;
 
-impl AncestryOracle for FakeMain {
-    fn is_ancestor(&self, sha: &CommitSha, _main_ref: &str) -> CosResult<bool> {
-        Ok(self.0.contains(sha.as_str()))
+impl AncestryOracle for FakeRepo {
+    fn ancestry(&self, sha: &CommitSha, _main_ref: &str) -> CosResult<Ancestry> {
+        Ok(match sha.as_str() {
+            MAIN_SHA => Ancestry::Ancestor,
+            BRANCH_SHA => Ancestry::NotAncestor,
+            _ => Ancestry::NotACommit,
+        })
     }
 }
 
-fn guard_with(
-    profile: CosPermissionProfile,
-    budget: u64,
-) -> (Arc<CosGuard>, Arc<MemoryAnnouncementSink>) {
-    let sink = Arc::new(MemoryAnnouncementSink::default());
-    let guard = CosGuard::new(
+fn guard_on(profile: CosPermissionProfile, budget: u64, log: Arc<dyn CosLog>) -> CosGuard {
+    CosGuard::new(
         profile,
         SpendLedger::new(usd(budget)),
-        Box::new(FakeMain(BTreeSet::from([MAIN_SHA.to_string()]))),
-        sink.clone(),
+        Box::new(FakeRepo),
+        log,
     )
-    .with_clock(fixed_clock);
-    (Arc::new(guard), sink)
+    .with_clock(fixed_clock)
 }
 
-fn guard() -> (Arc<CosGuard>, Arc<MemoryAnnouncementSink>) {
+fn guard_with(profile: CosPermissionProfile, budget: u64) -> (Arc<CosGuard>, Arc<MemoryLog>) {
+    let log = Arc::new(MemoryLog::default());
+    (Arc::new(guard_on(profile, budget, log.clone())), log)
+}
+
+fn guard() -> (Arc<CosGuard>, Arc<MemoryLog>) {
     guard_with(shipped_profile(), 5_000)
 }
 
-/// A tool that records the inputs it actually received.
+/// A tool that records the inputs it actually received, or panics.
 struct RecordingTool {
     name: &'static str,
+    effect: ToolEffect,
+    panics: bool,
     calls: Arc<Mutex<Vec<ToolInput>>>,
 }
 
@@ -157,23 +188,26 @@ impl Tool for RecordingTool {
 
     fn execute(&self, _engine: &Engine, input: ToolInput) -> AgentResult<ToolOutput> {
         self.calls.lock().unwrap().push(input);
+        assert!(!self.panics, "tool exploded mid-call");
         Ok(ToolOutput::ok("done"))
     }
 
     fn manifest(&self) -> ToolManifest {
-        manifest(self.name, ToolEffect::Mutating)
+        manifest(self.name, self.effect)
     }
 }
 
 fn registry_with(
-    guard: Arc<CosGuard>,
-    names: &[&'static str],
+    guard: Arc<dyn ToolCallGuard>,
+    tools: &[(&'static str, ToolEffect, bool)],
 ) -> (ToolRegistry, Arc<Mutex<Vec<ToolInput>>>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let registry = ToolRegistry::new();
-    for name in names {
+    for (name, effect, panics) in tools {
         registry.register(Box::new(RecordingTool {
             name,
+            effect: *effect,
+            panics: *panics,
             calls: calls.clone(),
         }));
     }
@@ -189,14 +223,40 @@ fn engine() -> Engine {
     .unwrap()
 }
 
-fn deploy_declaration(artifact_sha: &str) -> Value {
+fn operator(action: Value) -> Value {
     json!({
         "tier": "operator-class",
-        "action": {"kind": "deploy", "artifact_sha": artifact_sha, "target": "akhomed@archibald"},
+        "action": action,
         "receipts": [{"kind": "run-record", "reference": "ci/job/8812", "observed_at": NOW}],
         "reason": "CI green on the fix; the running binary predates it",
         "rollback": {"kind": "revert", "steps": "redeploy akhomed-main-1a2b3c4 and restart"}
     })
+}
+
+fn deploy_declaration(artifact_sha: &str) -> Value {
+    operator(json!({"kind": "deploy", "artifact_sha": artifact_sha, "target": "akhomed@archibald"}))
+}
+
+fn declared(value: Value) -> Option<Declaration> {
+    Some(serde_json::from_value(value).unwrap())
+}
+
+fn spend(minor_units: u64) -> Declaration {
+    Declaration::OperatorClass {
+        action: OperatorAction::Spend {
+            amount: usd(minor_units),
+            purpose: "H100 hour".into(),
+        },
+        receipts: vec![receipt(ReceiptKind::RunRecord, "runpod/pricing")],
+        reason: "C6 smoke".into(),
+        rollback: RollbackPath::Irreversible {
+            mitigation: "auto-terminate".into(),
+        },
+    }
+}
+
+fn digest_of(path: &Path) -> String {
+    LocalDigest.digest(path).unwrap()
 }
 
 // ── Schema tests ────────────────────────────────────────────────────────────
@@ -239,6 +299,7 @@ fn sample_documents() -> Vec<CosDocument> {
             akh: "lilith".into(),
             announced_at: NOW,
             tool: "shell_exec".into(),
+            arguments: args(json!({"command": "deploy/akhomed.sh"})),
             action: deploy.clone(),
             receipts: receipts(ReceiptKind::AncestryCheck, "git merge-base --is-ancestor"),
             reason: "fix landed".into(),
@@ -247,8 +308,8 @@ fn sample_documents() -> Vec<CosDocument> {
                 rule: StandingRule::MainOnlyDeploy,
                 evidence: "exit 0".into(),
             }],
-            outcome: ActionOutcome::Succeeded {
-                detail: "done".into(),
+            outcome: ActionOutcome::Unknown {
+                detail: "unwound".into(),
             },
         }),
         CosDocument::Commitment(CosCommitment {
@@ -288,13 +349,16 @@ fn sample_documents() -> Vec<CosDocument> {
         CosDocument::Proposal(CosProposal {
             language: lang("de"),
             motive: ProposalMotive::OutsideGrant,
-            action: OperatorAction::ActivateAdapter {
-                adapter: "lilith-cos-r1".into(),
+            action: OperatorAction::Delete {
+                target: "/srv/runs/old".into(),
+                reversibility: Reversibility::Irreversible,
+                observed_digest: "sha256:aa".into(),
+                copy: Some("/nfs/runs/old".into()),
             },
             receipts: receipts(ReceiptKind::RunRecord, "runs/c7/report"),
-            reason: "sealed eval beats the parent on every family".into(),
-            rollback: RollbackPath::Revert {
-                steps: "switch the served adapter back to the parent".into(),
+            reason: "volume retired".into(),
+            rollback: RollbackPath::RestoreFromCopy {
+                location: "/nfs/runs/old".into(),
             },
         }),
     ]
@@ -309,6 +373,7 @@ fn every_schema_compiles() {
         "cos-commitment",
         "cos-guidance",
         "cos-proposal",
+        "cos-declaration",
         "cos-permission-profile",
     ] {
         validator(name);
@@ -324,6 +389,16 @@ fn typed_documents_validate_against_their_schemas_and_round_trip() {
         let back: CosDocument = serde_json::from_value(wire).unwrap();
         assert_eq!(back, document);
     }
+    // Every declaration shape the guard accepts is valid against the
+    // advertised declaration schema.
+    for declaration in [
+        deploy_declaration(MAIN_SHA),
+        serde_json::to_value(spend(10)).unwrap(),
+        json!({"tier": "coordination", "receipts": [{"kind": "work-item", "reference": "x", "observed_at": 1}]}),
+    ] {
+        serde_json::from_value::<Declaration>(declaration.clone()).unwrap();
+        assert_valid("cos-declaration", &declaration);
+    }
 }
 
 #[test]
@@ -331,35 +406,38 @@ fn schemas_and_types_reject_missing_standing_fields() {
     let documents = sample_documents();
     let wire = |index: usize| serde_json::to_value(&documents[index]).unwrap();
 
-    // An action item without its cost of skipping.
     let mut action_item = wire(1);
     action_item
         .as_object_mut()
         .unwrap()
         .remove("cost_of_skipping");
-    // A briefing item without receipts (Honesty).
     let mut briefing = wire(0);
     briefing["blocked"][0]["receipts"] = json!([]);
-    // An announcement without a rollback path.
     let mut announcement = wire(2);
     announcement.as_object_mut().unwrap().remove("rollback");
-    // A deploy naming something that is not a SHA.
+    let mut no_arguments = wire(2);
+    no_arguments.as_object_mut().unwrap().remove("arguments");
     let mut not_a_sha = wire(2);
     not_a_sha["action"]["artifact_sha"] = json!("--upload-pack=evil");
-    // Guidance without a citation.
     let mut uncited = wire(4);
     uncited["citations"] = json!([]);
-    // A language that is not a BCP 47 tag.
     let mut language = wire(5);
     language["language"] = json!("German");
+    let mut unobserved = wire(5);
+    unobserved["action"]
+        .as_object_mut()
+        .unwrap()
+        .remove("observed_digest");
 
     for (name, instance) in [
         ("cos-action-item", action_item),
         ("cos-briefing", briefing),
         ("cos-announcement", announcement),
+        ("cos-announcement", no_arguments),
         ("cos-announcement", not_a_sha),
         ("cos-guidance", uncited),
         ("cos-proposal", language),
+        ("cos-proposal", unobserved),
     ] {
         assert!(
             !validator(name).is_valid(&instance),
@@ -407,6 +485,11 @@ fn classification_uses_exact_names_then_longest_prefix_then_fails_closed() {
     let class = |name: &str, effect| profile.classify(&manifest(name, effect));
     assert_eq!(class("kg_query", ToolEffect::ReadOnly), ToolClass::T0Read);
     assert_eq!(
+        class("user_interact", ToolEffect::Mutating),
+        ToolClass::T1OwnState,
+        "asking the operator needs no receipts"
+    );
+    assert_eq!(
         class("mcp__anima__get_work_item", ToolEffect::Mutating),
         ToolClass::T0Read
     );
@@ -432,34 +515,44 @@ fn classification_uses_exact_names_then_longest_prefix_then_fails_closed() {
     );
 }
 
-// ── Exit criterion: T3 taken and announced ──────────────────────────────────
+// ── T3 taken and announced ──────────────────────────────────────────────────
 
 #[test]
-fn t3_action_is_taken_and_announced_with_receipts_and_rollback_path() {
-    let (guard, sink) = guard();
-    let (registry, calls) = registry_with(guard, &["shell_exec"]);
+fn t3_action_is_taken_and_announced_with_arguments_receipts_and_rollback_path() {
+    let (guard, log) = guard();
+    let (registry, calls) = registry_with(guard, &[("shell_exec", ToolEffect::Mutating, false)]);
+    let secret = format!("ghp_{}", "x".repeat(36));
+    let command = format!("GH_TOKEN={secret} deploy/akhomed.sh akhomed-main-{MAIN_SHA}");
     let input = ToolInput::new()
-        .with_param("command", "deploy/akhomed.sh")
+        .with_param("command", command.clone())
         .with_value(DECLARATION_PARAM, deploy_declaration(MAIN_SHA));
 
     let out = registry.execute("shell_exec", input, &engine()).unwrap();
     assert!(out.success, "{}", out.result);
 
-    // The action ran, and the tool never saw the declaration.
+    // The action ran with its real input, and the tool never saw the declaration.
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert!(calls[0].get_value(DECLARATION_PARAM).is_none());
-    assert_eq!(calls[0].get("command"), Some("deploy/akhomed.sh"));
+    assert_eq!(calls[0].get("command"), Some(command.as_str()));
 
-    // Announced: her receipt plus the quoted ancestry check, reason, rollback.
-    let announced = sink.announcements();
+    let announced = log.announcements();
     assert_eq!(announced.len(), 1);
     let announcement = &announced[0];
     assert_eq!(announcement.akh, "lilith");
     assert_eq!(announcement.tool, "shell_exec");
     assert!(announcement.outcome.succeeded());
-    assert!(!announcement.reason.is_empty());
     assert!(matches!(announcement.rollback, RollbackPath::Revert { .. }));
+
+    // (2a) The real arguments are announced, declaration stripped, the
+    // credential redacted.
+    let announced_command = announcement.arguments["command"].as_str().unwrap();
+    assert!(announced_command.contains("deploy/akhomed.sh"));
+    assert!(!announced_command.contains(&secret), "{announced_command}");
+    assert!(!announcement.arguments.contains_key(DECLARATION_PARAM));
+
+    // Her receipt plus one quoted ancestry check (deduplicated between the
+    // declared SHA and the same SHA found in the arguments).
     let kinds: Vec<ReceiptKind> = announcement
         .receipts
         .as_slice()
@@ -470,94 +563,51 @@ fn t3_action_is_taken_and_announced_with_receipts_and_rollback_path() {
         kinds,
         vec![ReceiptKind::RunRecord, ReceiptKind::AncestryCheck]
     );
-    let ancestry = &announcement.receipts.as_slice()[1].reference;
     assert_eq!(
-        ancestry,
-        &format!("git merge-base --is-ancestor {MAIN_SHA} origin/main")
+        announcement.receipts.as_slice()[1].reference,
+        format!("git merge-base --is-ancestor {MAIN_SHA} origin/main")
     );
-    let rules: Vec<StandingRule> = announcement.rule_checks.iter().map(|c| c.rule).collect();
-    assert_eq!(
-        rules,
-        vec![StandingRule::ReceiptsPresent, StandingRule::MainOnlyDeploy]
+    assert!(
+        announcement
+            .rule_checks
+            .iter()
+            .any(|c| c.rule == StandingRule::MainOnlyDeploy)
     );
 
-    // The announcement is a valid `lilith/cos-announcement@1` document.
     let wire = serde_json::to_value(CosDocument::Announcement(announcement.clone())).unwrap();
     assert_valid("cos-announcement", &wire);
 }
 
-#[test]
-fn announcements_persist_to_jsonl_and_rebuild_the_spend_ledger() {
-    let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("cos-announcements.jsonl");
-    let sink = Arc::new(JsonlAnnouncementSink::new(&log));
-    let guard = CosGuard::new(
-        shipped_profile(),
-        SpendLedger::new(usd(1_000)),
-        Box::new(FakeMain(BTreeSet::new())),
-        sink.clone(),
-    )
-    .with_clock(fixed_clock);
-    let spend = Declaration::OperatorClass {
-        action: OperatorAction::Spend {
-            amount: usd(700),
-            purpose: "akh-medu-lilith-serve, 2 h".into(),
-        },
-        receipts: vec![receipt(ReceiptKind::RunRecord, "runpod/pricing")],
-        reason: "C2 operator session".into(),
-        rollback: RollbackPath::Irreversible {
-            mitigation: "pod auto-terminates after 2 h".into(),
-        },
-    };
-    let admission = guard
-        .admit(
-            &manifest("mcp__runpod__create_pod", ToolEffect::Mutating),
-            Some(spend),
-        )
-        .unwrap();
-    guard
-        .settle(
-            admission,
-            ActionOutcome::Succeeded {
-                detail: "pod up".into(),
-            },
-        )
-        .unwrap();
-
-    let line = std::fs::read_to_string(&log).unwrap();
-    assert_valid(
-        "cos-announcement",
-        &serde_json::from_str::<Value>(line.trim()).unwrap(),
-    );
-    let replayed = SpendLedger::replay(usd(1_000), &sink.read_all().unwrap());
-    assert_eq!(replayed.remaining(), 300);
-}
-
-// ── Exit criterion: non-main deploy refused ─────────────────────────────────
+// ── Main-only deploy ────────────────────────────────────────────────────────
 
 #[test]
 fn non_main_deploy_is_refused_by_the_rule_check_with_a_diagnostic() {
-    let (guard, sink) = guard();
-    let declaration: Declaration = serde_json::from_value(deploy_declaration(BRANCH_SHA)).unwrap();
-
+    let (guard, log) = guard();
     let err = guard
         .admit(
             &manifest("shell_exec", ToolEffect::Mutating),
-            Some(declaration),
+            declared(deploy_declaration(BRANCH_SHA)),
+            &no_args(),
         )
         .unwrap_err();
-    assert!(matches!(err, CosError::NonMainArtifact { .. }), "{err:?}");
+    assert!(
+        matches!(
+            err,
+            CosError::NonMainArtifact {
+                found_in: RefSource::DeclaredAction,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
     assert_eq!(err.standing_rule(), Some(StandingRule::MainOnlyDeploy));
     assert_eq!(
         err.code().unwrap().to_string(),
         "akh::cos::non_main_artifact"
     );
-    let help = err.help().unwrap().to_string();
-    assert!(help.contains("origin/main"), "{help}");
+    assert!(err.help().unwrap().to_string().contains("origin/main"));
 
-    // Through the registry: the tool does not run, nothing is announced, and
-    // the refusal carries the diagnostic code and the options.
-    let (registry, calls) = registry_with(guard, &["shell_exec"]);
+    let (registry, calls) = registry_with(guard, &[("shell_exec", ToolEffect::Mutating, false)]);
     let input = ToolInput::new().with_value(DECLARATION_PARAM, deploy_declaration(BRANCH_SHA));
     let out = registry.execute("shell_exec", input, &engine()).unwrap();
     assert!(!out.success);
@@ -567,12 +617,60 @@ fn non_main_deploy_is_refused_by_the_rule_check_with_a_diagnostic() {
         out.result
     );
     assert!(calls.lock().unwrap().is_empty());
-    assert!(sink.announcements().is_empty());
+    assert!(log.announcements().is_empty());
+}
+
+#[test]
+fn a_mis_declared_action_cannot_carry_a_branch_sha_through_a_deploy_capable_tool() {
+    let (guard, _) = guard();
+    let shell = manifest("shell_exec", ToolEffect::Mutating);
+    let merge = || declared(operator(json!({"kind": "merge", "change": "PR #436"})));
+
+    // Declared as a merge, but the command deploys a branch build.
+    let err = guard
+        .admit(
+            &shell,
+            merge(),
+            &args(json!({"command": format!("kubectl set image deploy/akhomed akhomed=code.aopc.cloud/akhomed:{BRANCH_SHA}")})),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CosError::NonMainArtifact {
+                found_in: RefSource::ToolArguments,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+
+    // Hex-looking tokens that are not commits (UUIDs, Anima short ids) and
+    // main SHAs pass; the main SHA is quoted as evidence.
+    let admitted = guard
+        .admit(
+            &shell,
+            merge(),
+            &args(json!({"command": format!(
+                "deploy {MAIN_SHA} for 01a0e270-0288-7ac1-b297-a45375d4e6e6 and 01a0e270-0288"
+            )})),
+        )
+        .unwrap();
+    let Admission::OperatorClass(authorized) = admitted else {
+        panic!("expected an operator-class admission");
+    };
+    assert!(
+        authorized
+            .receipts
+            .as_slice()
+            .iter()
+            .any(|r| r.reference.contains(MAIN_SHA))
+    );
 }
 
 #[test]
 fn git_ancestry_decides_against_a_real_repository() {
-    let git = |dir: &std::path::Path, args: &[&str]| {
+    let git = |dir: &Path, args: &[&str]| {
         std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
@@ -589,20 +687,26 @@ fn git_ancestry_decides_against_a_real_repository() {
     };
     let dir = tempfile::tempdir().unwrap();
     let Ok(init) = git(dir.path(), &["init", "-q"]) else {
-        eprintln!("git not installed; GitAncestry exercised through FakeMain only");
+        eprintln!("git not installed; GitAncestry exercised through FakeRepo only");
         return;
     };
     assert!(init.status.success());
-    let head = |dir: &std::path::Path| {
+    let head = |dir: &Path| {
         let out = git(dir, &["rev-parse", "HEAD"]).unwrap();
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     };
-    assert!(
-        git(dir.path(), &["commit", "-q", "--allow-empty", "-m", "a"])
+    let commit = |message: &str| {
+        assert!(
+            git(
+                dir.path(),
+                &["commit", "-q", "--allow-empty", "-m", message]
+            )
             .unwrap()
             .status
             .success()
-    );
+        );
+    };
+    commit("a");
     let on_main = head(dir.path());
     assert!(
         git(
@@ -613,26 +717,36 @@ fn git_ancestry_decides_against_a_real_repository() {
         .status
         .success()
     );
-    assert!(
-        git(dir.path(), &["commit", "-q", "--allow-empty", "-m", "b"])
-            .unwrap()
-            .status
-            .success()
-    );
+    commit("b");
     let on_branch = head(dir.path());
 
     let oracle = GitAncestry::new(dir.path());
-    assert!(oracle.is_ancestor(&sha(&on_main), "origin/main").unwrap());
-    assert!(!oracle.is_ancestor(&sha(&on_branch), "origin/main").unwrap());
-    let unknown = oracle.is_ancestor(&sha("0123456789abcdef0123"), "origin/main");
-    assert!(matches!(unknown, Err(CosError::AncestryUnknown { .. })));
+    assert_eq!(
+        oracle.ancestry(&sha(&on_main), "origin/main").unwrap(),
+        Ancestry::Ancestor
+    );
+    assert_eq!(
+        oracle.ancestry(&sha(&on_branch), "origin/main").unwrap(),
+        Ancestry::NotAncestor
+    );
+    assert_eq!(
+        oracle
+            .ancestry(&sha("0123456789abcdef0123"), "origin/main")
+            .unwrap(),
+        Ancestry::NotACommit
+    );
+    let outside = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        GitAncestry::new(outside.path()).ancestry(&sha(&on_main), "origin/main"),
+        Err(CosError::AncestryUnknown { .. })
+    ));
 }
 
-// ── Exit criterion: T2 post carries receipts ────────────────────────────────
+// ── T2 receipts, T0/T1 ──────────────────────────────────────────────────────
 
 #[test]
 fn t2_post_carries_receipts() {
-    let (guard, sink) = guard();
+    let (guard, log) = guard();
     let post = manifest("mcp__anima__post_message", ToolEffect::Mutating);
 
     let admission = guard
@@ -641,6 +755,7 @@ fn t2_post_carries_receipts() {
             Some(Declaration::Coordination {
                 receipts: vec![receipt(ReceiptKind::WorkItem, "01a0e270-0288")],
             }),
+            &no_args(),
         )
         .unwrap();
     let settled = guard
@@ -656,18 +771,17 @@ fn t2_post_carries_receipts() {
     };
     assert_eq!(tool, "mcp__anima__post_message");
     assert_eq!(receipts.as_slice()[0].reference, "01a0e270-0288");
-    // T2 is autonomous: nothing waits for approval, nothing is announced.
-    assert!(sink.announcements().is_empty());
+    assert!(log.announcements().is_empty());
 
     let no_receipts = guard
-        .admit(&post, Some(Declaration::Coordination { receipts: vec![] }))
+        .admit(
+            &post,
+            Some(Declaration::Coordination { receipts: vec![] }),
+            &no_args(),
+        )
         .unwrap_err();
     assert!(matches!(no_receipts, CosError::MissingReceipts { .. }));
-    assert_eq!(
-        no_receipts.standing_rule(),
-        Some(StandingRule::ReceiptsPresent)
-    );
-    let undeclared = guard.admit(&post, None).unwrap_err();
+    let undeclared = guard.admit(&post, None, &no_args()).unwrap_err();
     assert!(matches!(
         undeclared,
         CosError::MissingDeclaration {
@@ -683,9 +797,10 @@ fn t0_and_t1_run_without_a_declaration() {
     for (name, tier) in [
         ("kg_query", AutonomyTier::Read),
         ("memory_write", AutonomyTier::OwnState),
+        ("user_interact", AutonomyTier::OwnState),
     ] {
         let admission = guard
-            .admit(&manifest(name, ToolEffect::Mutating), None)
+            .admit(&manifest(name, ToolEffect::Mutating), None, &no_args())
             .unwrap();
         assert_eq!(
             admission,
@@ -697,65 +812,203 @@ fn t0_and_t1_run_without_a_declaration() {
     }
 }
 
-// ── Exit criterion: adapter activation refused ──────────────────────────────
+// ── Adapter activation ──────────────────────────────────────────────────────
 
 #[test]
-fn adapter_activation_is_refused() {
-    let (guard, sink) = guard();
+fn adapter_activation_is_refused_by_tool_action_and_argument() {
+    let (guard, log) = guard();
 
-    // By tool class.
     let by_tool = guard
         .admit(
             &manifest("lilith_adapter_activate", ToolEffect::Mutating),
             None,
+            &no_args(),
         )
         .unwrap_err();
     assert!(matches!(by_tool, CosError::OutsideGrant { .. }));
 
-    // By declared action, even on a tool she may otherwise use for T3.
-    let by_action = Declaration::OperatorClass {
-        action: OperatorAction::ActivateAdapter {
-            adapter: "lilith-cos-r1".into(),
-        },
-        receipts: vec![receipt(ReceiptKind::RunRecord, "runs/c7/report")],
-        reason: "sealed eval passed".into(),
-        rollback: RollbackPath::Revert {
-            steps: "serve the parent".into(),
-        },
-    };
-    let (registry, calls) = registry_with(guard.clone(), &["shell_exec"]);
-    let input =
-        ToolInput::new().with_value(DECLARATION_PARAM, serde_json::to_value(&by_action).unwrap());
-    let out = registry.execute("shell_exec", input, &engine()).unwrap();
-    assert!(!out.success);
-    assert!(
-        out.result.contains("akh::cos::outside_grant"),
-        "{}",
-        out.result
-    );
+    let by_action = operator(json!({"kind": "activate-adapter", "adapter": "lilith-cos-r1"}));
+    // (2c) Declared as something harmless, but the arguments activate an
+    // adapter on the serving endpoint.
+    let by_argument = operator(json!({"kind": "outward", "destination": "vllm"}));
+    let (registry, calls) = registry_with(guard, &[("shell_exec", ToolEffect::Mutating, false)]);
+    for (declaration, command) in [
+        (by_action, "true"),
+        (
+            by_argument,
+            "curl -X POST http://serve:8000/v1/load_lora_adapter -d '{\"lora_name\":\"r1\"}'",
+        ),
+    ] {
+        let input = ToolInput::new()
+            .with_param("command", command)
+            .with_value(DECLARATION_PARAM, declaration);
+        let out = registry.execute("shell_exec", input, &engine()).unwrap();
+        assert!(!out.success);
+        assert!(
+            out.result.contains("akh::cos::outside_grant"),
+            "{}",
+            out.result
+        );
+    }
     assert!(calls.lock().unwrap().is_empty());
-    assert!(sink.announcements().is_empty());
+    assert!(log.announcements().is_empty());
 }
 
-// ── Other standing rules ────────────────────────────────────────────────────
+// ── Verified target (deletion and overwrite) ────────────────────────────────
+
+#[test]
+fn deletion_digests_are_computed_by_the_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("run.ckpt");
+    let copy = dir.path().join("run.ckpt.bak");
+    let other = dir.path().join("other.ckpt");
+    std::fs::write(&target, b"weights").unwrap();
+    std::fs::write(&copy, b"weights").unwrap();
+    std::fs::write(&other, b"different").unwrap();
+    let real = digest_of(&target);
+
+    let (guard, _) = guard();
+    let shell = manifest("shell_exec", ToolEffect::Mutating);
+    let delete = |observed: &str, copy: Option<&Path>| {
+        declared(operator(json!({
+            "kind": "delete",
+            "target": target.display().to_string(),
+            "reversibility": "irreversible",
+            "observed_digest": observed,
+            "copy": copy.map(|c| c.display().to_string()),
+        })))
+    };
+    let gap = |declaration| match guard.admit(&shell, declaration, &no_args()) {
+        Err(CosError::UnverifiedDeletion { gap, .. }) => gap,
+        other => panic!("expected a verified-deletion refusal, got {other:?}"),
+    };
+
+    // Two matching strings she supplies prove nothing: the runtime digests.
+    assert_eq!(
+        gap(delete("sha256:aa", Some(&copy))),
+        DeletionGap::TargetChanged
+    );
+    assert_eq!(gap(delete(&real, None)), DeletionGap::NoVerifiedCopy);
+    assert_eq!(
+        gap(delete(&real, Some(&other))),
+        DeletionGap::CopyDigestMismatch
+    );
+    assert_eq!(
+        gap(delete(&real, Some(&dir.path().join("missing")))),
+        DeletionGap::CopyUnreadable
+    );
+    assert_eq!(gap(delete(&real, Some(&target))), DeletionGap::CopyIsTarget);
+
+    let admitted = guard.admit(&shell, delete(&real, Some(&copy)), &no_args());
+    let Ok(Admission::OperatorClass(authorized)) = admitted else {
+        panic!("expected an operator-class admission, got {admitted:?}");
+    };
+    let digests: Vec<&str> = authorized
+        .receipts
+        .as_slice()
+        .iter()
+        .filter(|r| r.kind == ReceiptKind::Digest)
+        .filter_map(|r| r.digest.as_deref())
+        .collect();
+    assert_eq!(digests, vec![real.as_str(), real.as_str()]);
+}
+
+#[test]
+fn file_io_and_edit_overwrites_of_existing_files_need_a_verified_target() {
+    let scratch = tempfile::tempdir().unwrap();
+    let notes = scratch.path().join("notes.md");
+    std::fs::write(&notes, "v1").unwrap();
+    let (guard, log) = {
+        let log = Arc::new(MemoryLog::default());
+        let guard = guard_on(shipped_profile(), 1_000, log.clone())
+            .with_write_roots(vec![scratch.path().to_path_buf()]);
+        (Arc::new(guard), log)
+    };
+    let file_io = manifest("file_io", ToolEffect::Mutating);
+    let edit = manifest("edit", ToolEffect::Mutating);
+    let write = |path: &str| args(json!({"action": "write", "path": path, "content": "v2"}));
+    let overwrite = |target: &str, observed: &str| {
+        declared(operator(json!({
+            "kind": "overwrite",
+            "target": target,
+            "reversibility": "reversible",
+            "observed_digest": observed,
+        })))
+    };
+    let real = digest_of(&notes);
+
+    // A new file is her own state: no declaration needed.
+    assert!(matches!(
+        guard.admit(&file_io, None, &write("fresh.md")).unwrap(),
+        Admission::Autonomous { .. }
+    ));
+    // Reading an existing file is not a write.
+    assert!(matches!(
+        guard
+            .admit(
+                &file_io,
+                None,
+                &args(json!({"action": "read", "path": "notes.md"}))
+            )
+            .unwrap(),
+        Admission::Autonomous { .. }
+    ));
+
+    let gap = |result: CosResult<Admission>| match result {
+        Err(CosError::UnverifiedDeletion { gap, .. }) => gap,
+        other => panic!("expected a verified-target refusal, got {other:?}"),
+    };
+    assert_eq!(
+        gap(guard.admit(&file_io, None, &write("notes.md"))),
+        DeletionGap::UndeclaredOverwrite
+    );
+    assert_eq!(
+        gap(guard.admit(
+            &edit,
+            None,
+            &args(json!({"path": "notes.md", "old_string": "v1", "new_string": "v2"}))
+        )),
+        DeletionGap::UndeclaredOverwrite
+    );
+    assert_eq!(
+        gap(guard.admit(&file_io, overwrite("fresh.md", &real), &write("notes.md"))),
+        DeletionGap::TargetMismatch
+    );
+    assert_eq!(
+        gap(guard.admit(
+            &file_io,
+            overwrite("notes.md", "sha256:00"),
+            &write("notes.md")
+        )),
+        DeletionGap::TargetChanged
+    );
+
+    // Declared, observed and matching: admitted as T3 and announced.
+    let admission = guard
+        .admit(&file_io, overwrite("notes.md", &real), &write("notes.md"))
+        .unwrap();
+    assert!(matches!(admission, Admission::OperatorClass(_)));
+    guard
+        .settle(
+            admission,
+            ActionOutcome::Succeeded {
+                detail: "written".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(log.announcements().len(), 1);
+}
+
+// ── Budget: write-ahead, crash tolerance, panics, concurrency ───────────────
 
 #[test]
 fn spend_beyond_budget_is_refused_and_a_failed_spend_is_released() {
-    let (guard, _) = guard_with(shipped_profile(), 1_000);
+    let (guard, log) = guard_with(shipped_profile(), 1_000);
     let tool = manifest("mcp__runpod__create_pod", ToolEffect::Mutating);
-    let spend = |minor_units| Declaration::OperatorClass {
-        action: OperatorAction::Spend {
-            amount: usd(minor_units),
-            purpose: "H100 hour".into(),
-        },
-        receipts: vec![receipt(ReceiptKind::RunRecord, "runpod/pricing")],
-        reason: "C6 smoke".into(),
-        rollback: RollbackPath::Irreversible {
-            mitigation: "auto-terminate".into(),
-        },
-    };
 
-    let too_much = guard.admit(&tool, Some(spend(1_001))).unwrap_err();
+    let too_much = guard
+        .admit(&tool, Some(spend(1_001)), &no_args())
+        .unwrap_err();
     assert!(matches!(
         too_much,
         CosError::BudgetExceeded {
@@ -765,7 +1018,12 @@ fn spend_beyond_budget_is_refused_and_a_failed_spend_is_released() {
     ));
     assert_eq!(too_much.standing_rule(), Some(StandingRule::WithinBudget));
 
-    let admission = guard.admit(&tool, Some(spend(600))).unwrap();
+    let admission = guard.admit(&tool, Some(spend(600)), &no_args()).unwrap();
+    // (3a) The reservation is on the log before the call runs.
+    assert!(matches!(
+        log.records().as_slice(),
+        [CosLogRecord::SpendReserved(SpendReservation { .. })]
+    ));
     assert_eq!(guard.remaining_budget(), 400);
     guard
         .settle(
@@ -776,61 +1034,284 @@ fn spend_beyond_budget_is_refused_and_a_failed_spend_is_released() {
         )
         .unwrap();
     assert_eq!(guard.remaining_budget(), 1_000, "failed spend is released");
+    assert!(matches!(
+        log.records().as_slice(),
+        [
+            CosLogRecord::SpendReserved(_),
+            CosLogRecord::SpendSettled(SpendSettlement { spent: false, .. }),
+            CosLogRecord::Announcement(_)
+        ]
+    ));
 }
 
 #[test]
-fn irreversible_deletion_needs_an_inspected_target_and_a_verified_copy() {
-    let (guard, _) = guard();
-    let tool = manifest("shell_exec", ToolEffect::Mutating);
-    let target = TargetVerification {
-        target: "runpod-volume:4wgri7h01a".into(),
-        digest: "sha256:aa".into(),
-        receipt: receipt(ReceiptKind::Digest, "4wgri7h01a/SHA256SUMS"),
-    };
-    let delete = |copy: Option<CopyVerification>| Declaration::OperatorClass {
-        action: OperatorAction::Delete {
-            target: target.clone(),
-            reversibility: Reversibility::Irreversible,
-            copy,
-        },
-        receipts: vec![receipt(ReceiptKind::Document, "operator decision")],
-        reason: "volume retired".into(),
-        rollback: RollbackPath::RestoreFromCopy {
-            location: "nfs:/export/toast/akh-medu-runs/babyllm".into(),
-        },
-    };
-    let copy = |location: &str, digest: &str| CopyVerification {
-        location: location.into(),
-        digest: digest.into(),
-        receipt: receipt(ReceiptKind::Digest, location),
-    };
-    let gap = |declaration| match guard.admit(&tool, Some(declaration)) {
-        Err(CosError::UnverifiedDeletion { gap, .. }) => gap,
-        other => panic!("expected a verified-deletion refusal, got {other:?}"),
-    };
+fn unsettled_reservations_count_as_spent_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cos.jsonl");
+    let (log, records) = JsonlLog::open(&path).unwrap();
+    assert!(records.is_empty());
+    let guard = guard_on(shipped_profile(), 1_000, Arc::new(log));
+    let tool = manifest("mcp__runpod__create_pod", ToolEffect::Mutating);
 
-    assert_eq!(gap(delete(None)), DeletionGap::NoVerifiedCopy);
-    assert_eq!(
-        gap(delete(Some(copy("nfs:/babyllm", "sha256:bb")))),
-        DeletionGap::CopyDigestMismatch
-    );
-    assert_eq!(
-        gap(delete(Some(copy("runpod-volume:4wgri7h01a", "sha256:aa")))),
-        DeletionGap::CopyIsTarget
-    );
-    let admitted = guard
-        .admit(&tool, Some(delete(Some(copy("nfs:/babyllm", "sha256:aa")))))
+    // One spend settles as failed (released); one is left in flight (crash).
+    let released = guard.admit(&tool, Some(spend(300)), &no_args()).unwrap();
+    guard
+        .settle(released, ActionOutcome::Failed { detail: "x".into() })
         .unwrap();
-    let Admission::OperatorClass(authorized) = admitted else {
-        panic!("expected an operator-class admission");
-    };
-    assert!(
-        authorized
-            .rule_checks
-            .iter()
-            .any(|c| c.rule == StandingRule::VerifiedDeletion)
-    );
+    let _in_flight = guard.admit(&tool, Some(spend(450)), &no_args()).unwrap();
+    drop(guard);
+
+    let (_, records) = JsonlLog::open(&path).unwrap();
+    let ledger = SpendLedger::replay(usd(1_000), &records);
+    assert_eq!(ledger.remaining(), 550, "the unsettled 450 stays spent");
 }
+
+#[test]
+fn a_truncated_final_line_is_skipped_and_the_next_append_starts_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cos.jsonl");
+    let reserved = CosLogRecord::SpendReserved(SpendReservation {
+        reservation: "r-1".into(),
+        tool: "mcp__runpod__create_pod".into(),
+        amount: usd(200),
+        reserved_at: NOW,
+    });
+    let full = serde_json::to_string(&reserved).unwrap();
+    std::fs::write(&path, format!("{full}\n{}", &full[..full.len() / 2])).unwrap();
+
+    let (log, records) = JsonlLog::open(&path).unwrap();
+    assert_eq!(records, vec![reserved.clone()]);
+    log.append(&reserved).unwrap();
+    let (_, records) = JsonlLog::open(&path).unwrap();
+    assert_eq!(records.len(), 2, "the half line was cut off, not merged");
+
+    // A damaged line in the middle still stops the rebuild.
+    let damaged = dir.path().join("damaged.jsonl");
+    std::fs::write(&damaged, format!("{{broken\n{full}\n")).unwrap();
+    assert!(matches!(
+        JsonlLog::open(&damaged),
+        Err(CosError::AnnouncementLog { line: 1, .. })
+    ));
+}
+
+#[test]
+fn a_panicking_tool_settles_its_ticket_and_keeps_the_spend_counted() {
+    let log = Arc::new(MemoryLog::default());
+    let guard = Arc::new(guard_on(shipped_profile(), 1_000, log.clone()));
+    let (registry, _) = registry_with(
+        guard.clone(),
+        &[("mcp__runpod__create_pod", ToolEffect::Mutating, true)],
+    );
+    let input = ToolInput::new()
+        .with_param("gpu", "H100")
+        .with_value(DECLARATION_PARAM, serde_json::to_value(spend(250)).unwrap());
+    let engine = engine();
+
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        registry.execute("mcp__runpod__create_pod", input, &engine)
+    }));
+    assert!(unwound.is_err(), "the tool panicked");
+
+    assert_eq!(guard.pending_admissions(), 0, "no leaked ticket");
+    assert_eq!(
+        guard.remaining_budget(),
+        750,
+        "an unknown outcome stays spent"
+    );
+    let records = log.records();
+    let [
+        CosLogRecord::SpendReserved(_),
+        CosLogRecord::SpendSettled(SpendSettlement { spent: true, .. }),
+        CosLogRecord::Announcement(announcement),
+    ] = records.as_slice()
+    else {
+        panic!("expected reserve, settle(spent), announce; got {records:?}");
+    };
+    assert!(matches!(
+        announcement.outcome,
+        ActionOutcome::Unknown { .. }
+    ));
+    assert_eq!(SpendLedger::replay(usd(1_000), &records).remaining(), 750);
+}
+
+#[test]
+fn concurrent_spends_never_overdraw_and_log_lines_never_interleave() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cos.jsonl");
+    let (log, _) = JsonlLog::open(&path).unwrap();
+    let guard = Arc::new(guard_on(shipped_profile(), 1_000, Arc::new(log)));
+    let tool = manifest("mcp__runpod__create_pod", ToolEffect::Mutating);
+
+    let admitted: usize = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..12)
+            .map(|_| {
+                let guard = guard.clone();
+                let tool = tool.clone();
+                scope.spawn(move || {
+                    let mut input = ToolInput::new()
+                        .with_value(DECLARATION_PARAM, serde_json::to_value(spend(150)).unwrap());
+                    match ToolCallGuard::admit(guard.as_ref(), &tool, &mut input) {
+                        Ok(ticket) => {
+                            ToolCallGuard::settle(
+                                guard.as_ref(),
+                                ticket,
+                                CallOutcome::Succeeded,
+                                "pod up",
+                            )
+                            .unwrap();
+                            1
+                        }
+                        Err(refusal) => {
+                            assert!(refusal.contains("akh::cos::budget_exceeded"), "{refusal}");
+                            0
+                        }
+                    }
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).sum()
+    });
+
+    assert_eq!(admitted, 6, "1000 / 150 = 6 spends fit");
+    assert_eq!(guard.remaining_budget(), 100);
+    assert_eq!(guard.pending_admissions(), 0);
+    // Every line parses: 6 reservations, 6 settlements, 6 announcements.
+    let (_, records) = JsonlLog::open(&path).unwrap();
+    assert_eq!(records.len(), 18);
+    assert_eq!(SpendLedger::replay(usd(1_000), &records).remaining(), 100);
+}
+
+// ── Config: log placement, fail-closed fallback ─────────────────────────────
+
+fn config_in(dir: &Path, profile: PathBuf, log: PathBuf) -> ChiefOfStaffConfig {
+    ChiefOfStaffConfig {
+        profile,
+        repository: dir.to_path_buf(),
+        announcements: log,
+        budget: usd(1_000),
+    }
+}
+
+#[test]
+fn a_log_inside_the_write_sandbox_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = dir.path().join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let profile = skill_dir().join("permission-profile.json");
+
+    let inside = config_in(dir.path(), profile.clone(), scratch.join("cos.jsonl"));
+    assert!(matches!(
+        CosGuard::from_config(&inside, std::slice::from_ref(&scratch)),
+        Err(CosError::LogInsideSandbox { .. })
+    ));
+    let outside = config_in(dir.path(), profile, dir.path().join("state/cos.jsonl"));
+    std::fs::create_dir_all(dir.path().join("state")).unwrap();
+    assert!(CosGuard::from_config(&outside, &[scratch]).is_ok());
+}
+
+#[test]
+fn a_guard_that_fails_to_load_stays_read_only_whatever_the_permission_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_in(
+        dir.path(),
+        dir.path().join("missing-profile.json"),
+        dir.path().join("cos.jsonl"),
+    );
+    let install = GuardInstall::from_config(&config, &[]);
+    assert!(matches!(
+        install,
+        GuardInstall::FailClosed {
+            error: CosError::ProfileRead { .. },
+            ..
+        }
+    ));
+    let (registry, calls) = registry_with(
+        install.guard(),
+        &[
+            ("memory_write", ToolEffect::Mutating, false),
+            ("kg_query", ToolEffect::ReadOnly, false),
+        ],
+    );
+    // An ACP client switching the mode back to bypass does not lift it.
+    registry.set_permission_mode(PermissionMode::Bypass);
+    let engine = engine();
+
+    let write = registry
+        .execute("memory_write", ToolInput::new(), &engine)
+        .unwrap();
+    assert!(!write.success);
+    assert!(
+        write.result.contains("akh::cos::guard_unavailable"),
+        "{}",
+        write.result
+    );
+    let read = registry
+        .execute("kg_query", ToolInput::new(), &engine)
+        .unwrap();
+    assert!(read.success, "{}", read.result);
+    assert_eq!(calls.lock().unwrap().len(), 1, "only the read ran");
+}
+
+// ── Catalog and repair ──────────────────────────────────────────────────────
+
+#[test]
+fn guarded_akhs_advertise_the_declaration_parameter() {
+    let (guard, _) = guard();
+    let (registry, _) = registry_with(
+        guard,
+        &[
+            ("shell_exec", ToolEffect::Mutating, false),
+            ("file_io", ToolEffect::Mutating, false),
+            ("kg_query", ToolEffect::ReadOnly, false),
+        ],
+    );
+    let manifests = registry.list_advertised_manifests();
+    let param = |tool: &str| {
+        manifests
+            .iter()
+            .find(|m| m.name == tool)
+            .unwrap()
+            .parameters
+            .iter()
+            .find(|p| p.name == DECLARATION_PARAM)
+            .cloned()
+    };
+    let shell = param("shell_exec").expect("T3 tools advertise the declaration");
+    assert!(shell.required);
+    assert!(!param("file_io").unwrap().required, "overwrites only");
+    assert!(param("kg_query").is_none());
+
+    // The advertised fragment accepts what the guard accepts.
+    let fragment = jsonschema::validator_for(shell.schema.as_ref().unwrap()).unwrap();
+    assert_valid_against(&fragment, "advertised", &deploy_declaration(MAIN_SHA));
+}
+
+#[test]
+fn argument_repair_keeps_the_declaration() {
+    let catalog = vec![json!({
+        "type": "function",
+        "function": {
+            "name": "shell_exec",
+            "description": "run",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"]
+            }
+        }
+    })];
+    let declaration = deploy_declaration(MAIN_SHA);
+    let repaired = crate::agent::organ::repair_known_call_args(
+        "shell_exec",
+        &json!({"comand": "ls", DECLARATION_PARAM: declaration.clone()}),
+        &catalog,
+    )
+    .expect("the misspelt parameter is repaired");
+    assert_eq!(repaired.arguments["command"], json!("ls"));
+    assert_eq!(repaired.arguments[DECLARATION_PARAM], declaration);
+}
+
+// ── Gates and profile validation ────────────────────────────────────────────
 
 #[test]
 fn a_gated_tier_refuses_with_the_proposal_option() {
@@ -839,11 +1320,11 @@ fn a_gated_tier_refuses_with_the_proposal_option() {
         .grants
         .insert(AutonomyTier::OperatorClass, TierGrant::Gated);
     let (guard, _) = guard_with(profile, 1_000);
-    let declaration: Declaration = serde_json::from_value(deploy_declaration(MAIN_SHA)).unwrap();
     let err = guard
         .admit(
             &manifest("shell_exec", ToolEffect::Mutating),
-            Some(declaration),
+            declared(deploy_declaration(MAIN_SHA)),
+            &no_args(),
         )
         .unwrap_err();
     assert!(matches!(err, CosError::TierGated { .. }));
@@ -859,6 +1340,7 @@ fn a_declaration_below_the_tool_tier_is_refused() {
             Some(Declaration::Coordination {
                 receipts: vec![receipt(ReceiptKind::WorkItem, "x")],
             }),
+            &no_args(),
         )
         .unwrap_err();
     assert!(matches!(err, CosError::DeclarationBelowTier { .. }));
@@ -873,4 +1355,21 @@ fn a_profile_with_the_wrong_contract_is_rejected() {
     .to_string();
     let err = CosPermissionProfile::from_json("inline", &text).unwrap_err();
     assert!(matches!(err, CosError::ProfileParse { .. }));
+}
+
+#[test]
+fn commit_refs_are_found_structurally() {
+    let refs: BTreeSet<String> = policy::commit_refs_in(&args(json!({
+        "command": format!("crane copy x:main-{MAIN_SHA} y && echo 1234567 deadbee cafe"),
+        "nested": [{"image": format!("akhomed-main-{BRANCH_SHA}")}],
+        "id": "01a0e270-0288-7ac1-b297-a45375d4e6e6",
+    })))
+    .into_iter()
+    .map(|sha| sha.to_string())
+    .collect();
+    // Digits-only and letters-only tokens are not SHAs; full UUIDs are ignored.
+    assert_eq!(
+        refs,
+        BTreeSet::from([MAIN_SHA.to_string(), BRANCH_SHA.to_string()])
+    );
 }

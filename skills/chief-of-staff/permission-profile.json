@@ -55,10 +55,10 @@
     "structured_task_update": "t1-own-state",
     "structured_task_complete": "t1-own-state",
     "task_list": "t1-own-state",
+    "user_interact": "t1-own-state",
 
     "agent_message": "t2-coordination",
     "delegate": "t2-coordination",
-    "user_interact": "t2-coordination",
     "trigger_manage": "t2-coordination",
     "reactor_manage": "t2-coordination",
     "mcp__anima__post_message": "t2-coordination",
@@ -76,5 +76,25 @@
 
     "lilith_adapter_*": "outside-grant",
     "adapter_*": "outside-grant"
+  },
+  "artifact_tools": [
+    "shell_exec",
+    "sandbox_exec",
+    "mcp_call",
+    "agent_spawn",
+    "mcp__runpod__*"
+  ],
+  "adapter_markers": [
+    "adapter_model.safetensors",
+    "adapter_model.bin",
+    "adapter_config.json",
+    "load_lora_adapter",
+    "unload_lora_adapter",
+    "--lora-modules",
+    "--enable-lora"
+  ],
+  "overwrite_tools": {
+    "file_io": { "path_param": "path", "when": { "param": "action", "equals": "write" } },
+    "edit": { "path_param": "path" }
   }
 }

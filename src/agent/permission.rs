@@ -72,9 +72,33 @@ pub trait ToolCallGuard: Send + Sync {
         input: &mut crate::agent::tool::ToolInput,
     ) -> Result<GuardTicket, String>;
 
-    /// Report how the admitted call ended. An error means the guard's
-    /// after-effect (e.g. the announcement) failed; the call itself already ran.
-    fn settle(&self, ticket: GuardTicket, succeeded: bool, detail: &str) -> Result<(), String>;
+    /// Report how the admitted call ended. Called exactly once per admitted
+    /// ticket, including when the tool panics (with [`CallOutcome::Aborted`]).
+    /// An error means the guard's after-effect (e.g. the announcement)
+    /// failed; the call itself already ran.
+    fn settle(&self, ticket: GuardTicket, outcome: CallOutcome, detail: &str)
+    -> Result<(), String>;
+
+    /// Extra parameters the guard needs in `manifest`'s advertised schema
+    /// (e.g. the Chief-of-Staff `cos_declaration`), so grammar-constrained
+    /// backends can emit them. Default: none.
+    fn advertised_params(
+        &self,
+        _manifest: &ToolManifest,
+    ) -> Vec<crate::agent::tool_manifest::ToolParamSchema> {
+        Vec::new()
+    }
+}
+
+/// How a guarded tool call ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallOutcome {
+    /// The tool returned a successful output.
+    Succeeded,
+    /// The tool returned a failed output or an error.
+    Failed,
+    /// The call unwound (panicked) before returning: its effect is unknown.
+    Aborted,
 }
 
 /// Decides whether a tool may run under the active [`PermissionMode`].

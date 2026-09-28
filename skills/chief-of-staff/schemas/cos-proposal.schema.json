@@ -47,27 +47,6 @@
       "type": "string",
       "pattern": "^[0-9a-f]{7,64}$"
     },
-    "copyVerification": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "location",
-        "digest",
-        "receipt"
-      ],
-      "properties": {
-        "location": {
-          "type": "string",
-          "minLength": 1
-        },
-        "digest": {
-          "type": "string"
-        },
-        "receipt": {
-          "$ref": "#/$defs/receipt"
-        }
-      }
-    },
     "language": {
       "type": "string",
       "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
@@ -207,14 +186,17 @@
           "required": [
             "kind",
             "target",
-            "reversibility"
+            "reversibility",
+            "observed_digest"
           ],
           "properties": {
             "kind": {
               "const": "delete"
             },
             "target": {
-              "$ref": "#/$defs/targetVerification"
+              "type": "string",
+              "minLength": 1,
+              "description": "Absolute path (or a path relative to the scratch directory) the runtime can read and digest."
             },
             "reversibility": {
               "enum": [
@@ -222,8 +204,15 @@
                 "irreversible"
               ]
             },
+            "observed_digest": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The sha256 you observed when you looked at the target (`sha256:<hex>` or bare hex); the runtime recomputes it."
+            },
             "copy": {
-              "$ref": "#/$defs/copyVerification"
+              "type": "string",
+              "minLength": 1,
+              "description": "Where a copy of the target lives; required when irreversible; the runtime digests it."
             }
           }
         },
@@ -233,14 +222,17 @@
           "required": [
             "kind",
             "target",
-            "reversibility"
+            "reversibility",
+            "observed_digest"
           ],
           "properties": {
             "kind": {
               "const": "overwrite"
             },
             "target": {
-              "$ref": "#/$defs/targetVerification"
+              "type": "string",
+              "minLength": 1,
+              "description": "Absolute path (or a path relative to the scratch directory) the runtime can read and digest."
             },
             "reversibility": {
               "enum": [
@@ -248,8 +240,15 @@
                 "irreversible"
               ]
             },
+            "observed_digest": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The sha256 you observed when you looked at the target (`sha256:<hex>` or bare hex); the runtime recomputes it."
+            },
             "copy": {
-              "$ref": "#/$defs/copyVerification"
+              "type": "string",
+              "minLength": 1,
+              "description": "Where a copy of the target lives; required when irreversible; the runtime digests it."
             }
           }
         },
@@ -388,27 +387,6 @@
           }
         }
       ]
-    },
-    "targetVerification": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "target",
-        "digest",
-        "receipt"
-      ],
-      "properties": {
-        "target": {
-          "type": "string",
-          "minLength": 1
-        },
-        "digest": {
-          "type": "string"
-        },
-        "receipt": {
-          "$ref": "#/$defs/receipt"
-        }
-      }
     },
     "unixSeconds": {
       "type": "integer",

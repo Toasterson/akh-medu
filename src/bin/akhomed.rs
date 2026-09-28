@@ -3454,30 +3454,29 @@ impl ServerState {
             tracing::info!(workspace = %name, "OpenClaw self-import surface enabled");
         }
 
-        // ADR 116 (Lilith C1): the Chief-of-Staff guard — profile tiers,
-        // standing rules, announcements of operator-class actions. A profile
-        // that fails to load fails closed: the akh runs read-only (plan mode)
-        // until the operator fixes it.
+        // ADR 116 (Lilith C1): the Chief-of-Staff guard. It covers the
+        // profile tiers, the standing rules and the announcements of
+        // operator-class actions. If it fails to load, a read-only
+        // FailClosedGuard takes its place. That is a guard, not a permission
+        // mode, so an ACP `_akh/permission/mode` switch cannot lift it.
         if let Some(cos) = akh_config.chief_of_staff.as_ref() {
-            match akh_medu::agent::chief_of_staff::CosGuard::from_config(cos) {
-                Ok(guard) => {
-                    tracing::info!(
-                        workspace = %name,
-                        profile = %cos.profile.display(),
-                        remaining_budget = guard.remaining_budget(),
-                        "Chief-of-Staff guard installed"
-                    );
-                    agent.set_tool_call_guard(Arc::new(guard));
-                }
-                Err(err) => {
-                    tracing::error!(
-                        workspace = %name,
-                        error = %err.to_tool_refusal(),
-                        "Chief-of-Staff guard failed to load; running read-only"
-                    );
-                    agent.set_permission_mode(akh_medu::agent::permission::PermissionMode::Plan);
-                }
+            use akh_medu::agent::chief_of_staff::GuardInstall;
+            let write_roots = akh_medu::agent::file_write_roots(agent.engine().config());
+            let install = GuardInstall::from_config(cos, &write_roots);
+            match &install {
+                GuardInstall::Active(guard) => tracing::info!(
+                    workspace = %name,
+                    profile = %cos.profile.display(),
+                    remaining_budget = guard.remaining_budget(),
+                    "Chief-of-Staff guard installed"
+                ),
+                GuardInstall::FailClosed { error, .. } => tracing::error!(
+                    workspace = %name,
+                    error = %error.to_tool_refusal(),
+                    "Chief-of-Staff guard failed to load; read-only fallback guard installed"
+                ),
             }
+            agent.set_tool_call_guard(install.guard());
         }
 
         // Phase 53g PR 5: the native read-only `monitoring_snapshot` tool,
