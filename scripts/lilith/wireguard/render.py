@@ -569,17 +569,11 @@ def render_onetun_commands(config: Config, hub_pubkey: str, pod_address: str) ->
     Split into batches of at most ONETUN_MAX_FORWARDS_PER_PROCESS per
     process, per onetun's own documented smoltcp interface-address limit.
 
-    Deliberately takes no pod private key: the command reads it from
-    `$LILITH_WG_PRIVATE_KEY` at run time via ordinary shell expansion.
-    Caveat (documented in docs/ops/lilith-wireguard.md): shell expansion
-    means the expanded value ends up in this process's own argv, so it is
-    visible to `ps`/`/proc/<pid>/cmdline` from *within the same pod
-    container* (not from outside it — Runpod pods are single-tenant
-    containers). onetun's `--help` documents environment-variable support
-    for every flag; if onetun accepts the key via its own env var without
-    ever taking it as an argument, prefer that instead once confirmed
-    against the deployed onetun version — this is called out as a
-    pre-flight check in the runbook rather than guessed here.
+    Deliberately takes no pod private key and never puts it on argv: each
+    command sets `ONETUN_PRIVATE_KEY` from `$LILITH_WG_PRIVATE_KEY` in the
+    process environment. onetun v0.3.10 reads that variable and warns
+    ("Private key was passed using CLI. This is insecure.") when the key comes
+    as `--private-key` instead (observed in the C6a live run, 2026-09-28).
     """
     addr_only = pod_address.split("/")[0]
     services = config.allow_services()
@@ -591,10 +585,9 @@ def render_onetun_commands(config: Config, hub_pubkey: str, pod_address: str) ->
             for s in batch
         )
         commands.append(
-            "onetun " + forwards
+            "ONETUN_PRIVATE_KEY=\"$LILITH_WG_PRIVATE_KEY\" onetun " + forwards
             + f" --endpoint-addr {config.hub.public_endpoint}"
             + f" --endpoint-public-key '{hub_pubkey}'"
-            + " --private-key \"$LILITH_WG_PRIVATE_KEY\""
             + f" --source-peer-ip {addr_only}"
             + " --keep-alive 25"
             + " --log info"

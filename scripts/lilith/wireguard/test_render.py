@@ -286,6 +286,13 @@ class OnetunBatchingTests(unittest.TestCase):
                 self.assertLessEqual(cmd.count("127.0.0.1:"), render.ONETUN_MAX_FORWARDS_PER_PROCESS)
             self.assertGreater(len(commands), 1, "expected the allowlist to be split across processes")
 
+    def test_onetun_takes_the_key_from_its_environment_not_argv(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = make_config(render, Path(td) / "keys")
+            for cmd in render.render_onetun_commands(config, "hubpub", "10.73.0.17/32"):
+                self.assertTrue(cmd.startswith('ONETUN_PRIVATE_KEY="$LILITH_WG_PRIVATE_KEY" onetun '), cmd)
+                self.assertNotIn("--private-key", cmd)
+
     def test_udp_service_gets_protocol_suffix(self):
         with tempfile.TemporaryDirectory() as td:
             config = make_config(render, Path(td) / "keys", extra_services=[
