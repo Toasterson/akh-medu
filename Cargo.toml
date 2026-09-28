@@ -347,6 +347,9 @@ remote-executor = ["dep:russh", "dep:base64", "tokio"]
 execd-executor = []
 
 [dev-dependencies]
+# ADR 116 / Lilith C1: validate the `lilith/cos-*@1` JSON Schemas in
+# `skills/chief-of-staff/schemas/` against the typed Rust contracts.
+jsonschema = { version = "0.33", default-features = false }
 tower = { version = "0.5", features = ["util"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"

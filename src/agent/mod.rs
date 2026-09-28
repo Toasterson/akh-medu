@@ -23,6 +23,7 @@ pub mod channel;
 pub mod channel_message;
 pub mod chat;
 pub mod chat_backend;
+pub mod chief_of_staff;
 pub mod chunking;
 pub mod cli_tool;
 pub mod communicative;

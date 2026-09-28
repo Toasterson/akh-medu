@@ -53,6 +53,30 @@ pub trait PermissionAsker: Send + Sync {
     fn ask(&self, manifest: &ToolManifest, input_summary: &str) -> bool;
 }
 
+/// Opaque handle linking a [`ToolCallGuard::admit`] to its
+/// [`ToolCallGuard::settle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GuardTicket(pub u64);
+
+/// A per-akh rule layer that runs after the [`PermissionPolicy`] and around
+/// the tool call itself: it may refuse a call with a diagnostic, strip
+/// guard-owned arguments from the input, and act on the outcome (for
+/// Lilith's Chief-of-Staff profile: announce an operator-class action with
+/// its receipts and rollback path — ADR 116).
+pub trait ToolCallGuard: Send + Sync {
+    /// Admit the call (possibly consuming guard-owned params from `input`) or
+    /// refuse it with a rendered diagnostic.
+    fn admit(
+        &self,
+        manifest: &ToolManifest,
+        input: &mut crate::agent::tool::ToolInput,
+    ) -> Result<GuardTicket, String>;
+
+    /// Report how the admitted call ended. An error means the guard's
+    /// after-effect (e.g. the announcement) failed; the call itself already ran.
+    fn settle(&self, ticket: GuardTicket, succeeded: bool, detail: &str) -> Result<(), String>;
+}
+
 /// Decides whether a tool may run under the active [`PermissionMode`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PermissionPolicy {

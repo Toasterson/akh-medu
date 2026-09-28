@@ -3454,6 +3454,32 @@ impl ServerState {
             tracing::info!(workspace = %name, "OpenClaw self-import surface enabled");
         }
 
+        // ADR 116 (Lilith C1): the Chief-of-Staff guard — profile tiers,
+        // standing rules, announcements of operator-class actions. A profile
+        // that fails to load fails closed: the akh runs read-only (plan mode)
+        // until the operator fixes it.
+        if let Some(cos) = akh_config.chief_of_staff.as_ref() {
+            match akh_medu::agent::chief_of_staff::CosGuard::from_config(cos) {
+                Ok(guard) => {
+                    tracing::info!(
+                        workspace = %name,
+                        profile = %cos.profile.display(),
+                        remaining_budget = guard.remaining_budget(),
+                        "Chief-of-Staff guard installed"
+                    );
+                    agent.set_tool_call_guard(Arc::new(guard));
+                }
+                Err(err) => {
+                    tracing::error!(
+                        workspace = %name,
+                        error = %err.to_tool_refusal(),
+                        "Chief-of-Staff guard failed to load; running read-only"
+                    );
+                    agent.set_permission_mode(akh_medu::agent::permission::PermissionMode::Plan);
+                }
+            }
+        }
+
         // Phase 53g PR 5: the native read-only `monitoring_snapshot` tool,
         // reading this akh's configured akheventd monitor source. Registered
         // only when the workspace TOML has a `[monitoring]` table.

@@ -299,6 +299,9 @@ pub struct ToolRegistry {
     /// Optional approver for [`PermissionDecision::Ask`] tools (e.g. an ACP
     /// client bridge). With none attached, `Ask` fails closed.
     asker: Mutex<Option<Arc<dyn super::permission::PermissionAsker>>>,
+    /// Optional per-akh rule layer run around every call after the permission
+    /// gate (e.g. Lilith's Chief-of-Staff standing rules, ADR 116).
+    guard: Mutex<Option<Arc<dyn super::permission::ToolCallGuard>>>,
     /// Optional execution tracker for emitting ToolCall events over ACP.
     tracker: Mutex<Option<Arc<super::tool_execution_tracker::ToolExecutionTracker>>>,
 }
@@ -392,6 +395,7 @@ impl ToolRegistry {
             audit_ledger: None,
             policy: Mutex::new(super::permission::PermissionPolicy::default()),
             asker: Mutex::new(None),
+            guard: Mutex::new(None),
             tracker: Mutex::new(None),
         }
     }
@@ -467,6 +471,17 @@ impl ToolRegistry {
     /// Remove any attached approver. `Ask` decisions then fail closed (deny).
     pub fn clear_permission_asker(&self) {
         *self.asker.lock().unwrap() = None;
+    }
+
+    /// Attach a rule layer consulted around every tool call (after the
+    /// permission gate). Replaces any previous guard.
+    pub fn set_tool_call_guard(&self, guard: Arc<dyn super::permission::ToolCallGuard>) {
+        *self.guard.lock().unwrap() = Some(guard);
+    }
+
+    /// Remove the rule layer.
+    pub fn clear_tool_call_guard(&self) {
+        *self.guard.lock().unwrap() = None;
     }
 
     /// Resolve an upstream runtime's approval through this session's client.
@@ -614,19 +629,20 @@ impl ToolRegistry {
     pub fn execute(
         &self,
         name: &str,
-        input: ToolInput,
+        mut input: ToolInput,
         engine: &Engine,
     ) -> AgentResult<ToolOutput> {
         let tool = self
             .get(name)
             .ok_or_else(|| AgentError::ToolNotFound { name: name.into() })?;
+        let manifest = self.manifest(name);
 
         // Permission gate (no-op under the default Bypass mode). A denied or
         // unapproved tool returns a failed ToolOutput rather than Err, so the
         // OODA loop's tool-error isolation is preserved.
-        if let Some(manifest) = self.manifest(name) {
+        if let Some(manifest) = manifest.as_ref() {
             use super::permission::PermissionDecision;
-            let decision = self.policy.lock().unwrap().decide(&manifest);
+            let decision = self.policy.lock().unwrap().decide(manifest);
             match decision {
                 PermissionDecision::Allow => {}
                 PermissionDecision::Deny(reason) => {
@@ -639,7 +655,7 @@ impl ToolRegistry {
                     let asker = session_asker.unwrap_or_else(|| self.asker.lock().unwrap().clone());
                     let approved = asker
                         .as_ref()
-                        .map(|asker| asker.ask(&manifest, &summary))
+                        .map(|asker| asker.ask(manifest, &summary))
                         .unwrap_or(false);
                     if !approved {
                         return Ok(ToolOutput::err(format!(
@@ -649,6 +665,23 @@ impl ToolRegistry {
                 }
             }
         }
+
+        // Per-akh rule layer (e.g. Lilith's standing rules, ADR 116). It may
+        // strip guard-owned arguments and refuse with a rendered diagnostic;
+        // a refusal is a failed ToolOutput, like a permission denial.
+        let call_guard = self.guard.lock().unwrap().clone();
+        let call_ticket = match (call_guard.as_ref(), manifest.as_ref()) {
+            (None, _) => None,
+            (Some(call_guard), Some(manifest)) => match call_guard.admit(manifest, &mut input) {
+                Ok(ticket) => Some(ticket),
+                Err(reason) => return Ok(ToolOutput::err(format!("refused: {reason}"))),
+            },
+            (Some(_), None) => {
+                return Ok(ToolOutput::err(format!(
+                    "refused: tool \"{name}\" has no manifest, so the rule layer cannot classify it"
+                )));
+            }
+        };
 
         // Start tracking this tool execution for ACP ToolCall events.
         let session_tracker =
@@ -666,7 +699,7 @@ impl ToolRegistry {
         // Entered around `tool.execute` so it parents to the ambient
         // `acp.turn`; finished in the same match that completes the tracker.
         let exec_span = crate::agent::turn_telemetry::ToolExecutionSpan::begin(name);
-        let result = {
+        let mut result = {
             let _exec_span_guard = exec_span.span().entered();
             tool.execute(engine, input.clone())
         };
@@ -692,6 +725,23 @@ impl ToolRegistry {
         // duration exactly once on its own child span.
         if let Some(success) = span_outcome_success {
             exec_span.finish(success);
+        }
+
+        // Settle the rule layer (e.g. post the operator-class announcement).
+        // The call already ran, so a failed after-effect is surfaced on the
+        // output rather than turning a successful call into a failure.
+        if let (Some(call_guard), Some(ticket)) = (call_guard, call_ticket) {
+            let (succeeded, detail) = match &result {
+                Ok(out) => (out.success, truncate_summary(&out.result, 200)),
+                Err(e) => (false, truncate_summary(&e.to_string(), 200)),
+            };
+            if let Err(reason) = call_guard.settle(ticket, succeeded, &detail) {
+                tracing::error!(tool = %name, %reason, "tool-call guard settle failed");
+                if let Ok(out) = &mut result {
+                    out.result
+                        .push_str(&format!("\n[guard after-effect failed: {reason}]"));
+                }
+            }
         }
 
         // Best-effort audit logging — never fail the tool call.

@@ -7,7 +7,11 @@
 > acceptance. Preserves ADR 113 full-Akh ownership and ADR 114 structural live /
 > learned shadow decisions. This is a planned capability, not a runtime release.
 
-> Last updated: 2026-09-26 (**53g PR 8** — Vesta's side effects move into
+> Last updated: 2026-09-28 (**Lilith C1** — `ToolCallGuard` seam and the
+> Chief-of-Staff guard, contracts and skill pack; see "Permission layer"
+> below).
+>
+> 2026-09-26 (**53g PR 8** — Vesta's side effects move into
 > execd sandboxes; see "Core Service, Autonomy and Delegation" below).
 >
 > 2026-09-26 (**53g PR 6** — akheventd Anima source,
@@ -422,6 +426,20 @@ control commands), discovered via the PID record's ACP socket/TCP endpoints.
   side-effecting tools at `ToolRegistry::execute`; a supervising client sets the
   mode via `_akh/permission/mode` and resolves interactive `Ask` decisions over
   `session/request_permission` (bridged across the spawn_blocking↔async boundary).
+- **Tool-call guard + Lilith Chief of Staff** (`src/agent/chief_of_staff/`,
+  [ADR 116](decisions/116-lilith-chief-of-staff-guided-rl.md) slice C1, Anima
+  WI `01a0e270-0288`): `ToolRegistry` takes an optional `ToolCallGuard`
+  after the permission gate (admit → may strip guard-owned args or refuse;
+  settle → after-effect). `CosGuard` classifies tools into T0–T3 by the data
+  profile `skills/chief-of-staff/permission-profile.json` (all tiers
+  autonomous, any tier gateable). It requires a `cos_declaration` with receipts
+  on T2/T3, checks the standing rules before T3 (main-only deploy via
+  `git merge-base --is-ancestor`, budget ledger rebuilt from the announcement
+  log, verified deletion), refuses adapter activation, and announces each T3
+  action as `lilith/cos-announcement@1` to a JSONL sink. It is enabled by the
+  per-akh `[chief_of_staff]` table. A profile that fails to load leaves the akh
+  in plan mode. The typed `lilith/cos-*@1` contracts have JSON Schema twins in
+  `skills/chief-of-staff/schemas/`.
 
 ## Core Service, Autonomy and Delegation (Phase 53, ADR 113)
 

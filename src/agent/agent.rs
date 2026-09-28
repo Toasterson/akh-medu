@@ -2249,6 +2249,18 @@ impl Agent {
             .clear_permission_asker();
     }
 
+    /// Attach a rule layer run around every tool call (e.g. Lilith's
+    /// Chief-of-Staff standing rules, ADR 116).
+    pub fn set_tool_call_guard(
+        &self,
+        guard: std::sync::Arc<dyn crate::agent::permission::ToolCallGuard>,
+    ) {
+        self.tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_tool_call_guard(guard);
+    }
+
     /// Install a tool execution tracker (for ACP ToolCall events).
     pub fn set_tool_tracker(
         &self,
