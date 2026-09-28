@@ -121,14 +121,14 @@ fn lilith_workspace_loads_with_every_intended_key() {
         endpoint.base_url
     );
     assert_eq!(endpoint.api_key.as_deref(), Some("env:LILITH_OPENAI_KEY"));
-    assert_eq!(endpoint.context_window, Some(32768));
+    assert_eq!(endpoint.context_window, Some(49152));
     let openai = cfg
         .to_openai_config()
         .expect("openai config resolves")
         .expect("backend is openai");
     assert_eq!(openai.model, "lilith");
     assert_eq!(openai.base_url, endpoint.base_url);
-    assert_eq!(openai.context_window, Some(32768));
+    assert_eq!(openai.context_window, Some(49152));
 
     // [chief_of_staff] (deny_unknown_fields: profile, repository,
     // announcements, budget).
