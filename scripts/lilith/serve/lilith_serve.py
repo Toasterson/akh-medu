@@ -1087,6 +1087,7 @@ def cmd_idle_watch(ctx: Context, *, daemon: bool, once: bool, serve_key: Callabl
     serve_key = memoize(serve_key)  # type: ignore[arg-type]
     outcome = TickOutcome.NO_SESSION
     probe: Vllm | None = None
+    failures = 0
     while True:
         state = ctx.state()
         if state.base_url and (probe is None or probe.base_url != state.base_url.rstrip("/")):
@@ -1101,7 +1102,25 @@ def cmd_idle_watch(ctx: Context, *, daemon: bool, once: bool, serve_key: Callabl
         if not daemon and outcome in (TickOutcome.NO_SESSION, TickOutcome.IDLE_STOP, TickOutcome.CAP_STOP,
                                       TickOutcome.EXTERNAL_STOP):
             return outcome
-        ctx.clock.sleep(ctx.policy.interval_s)
+        failures = failures + 1 if outcome is TickOutcome.STOP_FAILED else 0
+        ctx.clock.sleep(retry_interval(ctx.policy.interval_s, failures))
+
+
+FAILED_TICK_BACKOFF_CAP_S = 300
+
+
+def retry_interval(interval_s: int, consecutive_failures: int) -> int:
+    """Seconds until the next idle-watch tick.
+
+    A failed tick (a stop or status call that could not reach 1Password or Runpod) backs off
+    exponentially, `interval_s * 2**(n-1)` capped at FAILED_TICK_BACKOFF_CAP_S. Every retry
+    reads the Runpod key through the 1Password service account, whose read quota is limited:
+    retrying every minute kept it exhausted for over an hour on 2026-09-28 while the idle pod
+    billed. The first good tick resets the interval.
+    """
+    if consecutive_failures <= 0:
+        return interval_s
+    return min(interval_s * 2 ** (consecutive_failures - 1), max(interval_s, FAILED_TICK_BACKOFF_CAP_S))
 
 
 def cmd_status(ctx: Context) -> dict[str, Any]:

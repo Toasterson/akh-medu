@@ -575,6 +575,10 @@ class IdleWatchTests(Harness):
         self.clock.advance(minutes=21)
         self.assertEqual(ls.watch_tick(ctx, probe), ls.TickOutcome.IDLE_STOP)
 
+    def test_failed_ticks_back_off_exponentially_to_the_cap(self):
+        self.assertEqual([ls.retry_interval(60, n) for n in range(6)], [60, 60, 120, 240, 300, 300])
+        self.assertEqual(ls.retry_interval(600, 3), 600)   # a long base interval is never shortened
+
     def test_parse_metrics_sums_labelled_series(self):
         text = ('vllm:request_success_total{finished_reason="stop"} 4.0\n'
                 'vllm:request_success_total{finished_reason="length"} 1.0\n'
