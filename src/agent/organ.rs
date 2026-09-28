@@ -50,12 +50,40 @@
 
 use grug_data::{
     ParamSpec, ParamType, Retriever, ToolCall, ToolSchema, ground_values, normalized_similarity_ci,
-    repair_call,
+    repair_call_preserving,
 };
 use serde_json::Value;
 
 use crate::engine::Engine;
 use crate::vsa::grounding::encode_text_as_vector;
+
+/// Arguments owned by the akh runtime rather than by any tool schema. Repair
+/// and grounding copy them through verbatim and never fuzzy-match anything
+/// onto them (ADR 116: the Chief-of-Staff guard reads and strips
+/// `cos_declaration` before the tool runs).
+const RESERVED_ARGS: &[&str] = &[crate::agent::chief_of_staff::DECLARATION_PARAM];
+
+/// Take the reserved arguments out of `arguments` (for passes that do not know
+/// about them), returning them for [`restore_reserved`].
+fn take_reserved(arguments: &Value) -> (Value, serde_json::Map<String, Value>) {
+    let mut stripped = arguments.clone();
+    let mut reserved = serde_json::Map::new();
+    if let Some(map) = stripped.as_object_mut() {
+        for name in RESERVED_ARGS {
+            if let Some(value) = map.remove(*name) {
+                reserved.insert((*name).to_string(), value);
+            }
+        }
+    }
+    (stripped, reserved)
+}
+
+fn restore_reserved(mut arguments: Value, reserved: serde_json::Map<String, Value>) -> Value {
+    if let Some(map) = arguments.as_object_mut() {
+        map.extend(reserved);
+    }
+    arguments
+}
 
 /// Minimum normalized name similarity (`1 - lev/maxlen`) between the emitted
 /// tool name and the repaired tool's name for an M2 repair to be **accepted**.
@@ -202,7 +230,7 @@ pub fn repair_unknown_call(
     }
 
     let call = ToolCall::new(name.to_string(), arguments.clone());
-    let (repaired, stats) = repair_call(&call, &schemas);
+    let (repaired, stats) = repair_call_preserving(&call, &schemas, RESERVED_ARGS);
 
     // The boundary accept-gate the lab pass deliberately lacks: only trust the
     // reroute when the emitted name genuinely resembles the repaired tool.
@@ -259,7 +287,8 @@ pub fn repair_known_call_args(
     let call = ToolCall::new(name.to_string(), arguments.clone());
     // A single-schema offered slice: `repair_call`'s tool-grounding step has
     // nothing else to reroute to, by construction.
-    let (repaired, stats) = repair_call(&call, std::slice::from_ref(&schema));
+    let (repaired, stats) =
+        repair_call_preserving(&call, std::slice::from_ref(&schema), RESERVED_ARGS);
 
     let changed = stats.args_renamed > 0 || stats.args_dropped > 0 || stats.values_coerced > 0;
     if !changed {
@@ -322,7 +351,8 @@ pub fn ground_call_values(
         return None;
     }
     let schemas: Vec<ToolSchema> = offered.iter().filter_map(schema_from_catalog).collect();
-    let call = ToolCall::new(name.to_string(), arguments.clone());
+    let (stripped, reserved) = take_reserved(arguments);
+    let call = ToolCall::new(name.to_string(), stripped);
     let (grounded, stats) = ground_values(&call, request, &schemas);
 
     let changed =
@@ -349,7 +379,7 @@ pub fn ground_call_values(
     }
     Some(RepairedCall {
         name: grounded.name,
-        arguments: grounded.arguments,
+        arguments: restore_reserved(grounded.arguments, reserved),
         note: notes.join(", "),
     })
 }

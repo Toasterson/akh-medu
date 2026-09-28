@@ -107,7 +107,7 @@ pub use reason::{
     Fact as ReasonFact, ReasonConfig, ReasonDataset, ReasonDiversityReport, ReasonError,
     ReasonEvalSummary, ReasonExample, RelationKind, ReplayReport, TraceArm, score_reason_outputs,
 };
-pub use repair::{RepairStats, repair_call};
+pub use repair::{RepairStats, repair_call, repair_call_preserving};
 pub use retriever::{
     EmbedRetriever, Retriever, SemanticRetriever, embed_recall_at_k, retrieval_recall_at_k,
     semantic_recall_at_k,
