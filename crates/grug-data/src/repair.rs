@@ -51,16 +51,36 @@ pub struct RepairStats {
 /// Repair a proposed [`ToolCall`] against the offered schemas, returning the
 /// grounded/repaired call and [`RepairStats`]. See the module docs.
 pub fn repair_call(call: &ToolCall, offered: &[ToolSchema]) -> (ToolCall, RepairStats) {
+    repair_call_preserving(call, offered, &[])
+}
+
+/// [`repair_call`], but the argument names in `preserved` are **reserved**:
+/// they are copied through verbatim (never renamed, dropped or coerced), they
+/// take no part in tool grounding, and no other emitted argument can be
+/// fuzzy-matched onto them. A host uses this for arguments that belong to its
+/// own runtime rather than to the tool's schema (e.g. akh-medu's
+/// Chief-of-Staff `cos_declaration`, ADR 116), so repair can neither strip
+/// them nor forge one out of a near-miss name.
+pub fn repair_call_preserving(
+    call: &ToolCall,
+    offered: &[ToolSchema],
+    preserved: &[&str],
+) -> (ToolCall, RepairStats) {
     let mut stats = RepairStats::default();
-    let Some(tool) = ground_tool(call, offered) else {
+    let Some(tool) = ground_tool(call, offered, preserved) else {
         // No tools offered at all: nothing to ground against.
         return (call.clone(), stats);
     };
     stats.tool_changed = tool.name != call.name;
 
     let mut args = Map::new();
-    let mut used: Vec<String> = Vec::new();
+    // Reserved names start out "used", so nothing can be grounded onto them.
+    let mut used: Vec<String> = preserved.iter().map(|p| (*p).to_string()).collect();
     for (arg_name, value) in call.arguments_map() {
+        if preserved.contains(&arg_name.as_str()) {
+            args.insert(arg_name, value);
+            continue;
+        }
         match ground_param(&arg_name, tool, &used) {
             Some(pname) => {
                 if pname != arg_name {
@@ -84,12 +104,21 @@ pub fn repair_call(call: &ToolCall, offered: &[ToolSchema]) -> (ToolCall, Repair
 /// Pick the offered tool that best explains `call`: a blend of name similarity
 /// and the fraction of emitted argument names that fuzzy-match the tool's
 /// parameters (so a good-params/wrong-name proposal still grounds correctly).
-fn ground_tool<'a>(call: &ToolCall, offered: &'a [ToolSchema]) -> Option<&'a ToolSchema> {
+fn ground_tool<'a>(
+    call: &ToolCall,
+    offered: &'a [ToolSchema],
+    preserved: &[&str],
+) -> Option<&'a ToolSchema> {
     // Exact name match wins outright.
     if let Some(t) = offered.iter().find(|t| t.name == call.name) {
         return Some(t);
     }
-    let emitted: Vec<String> = call.arguments_map().keys().cloned().collect();
+    let emitted: Vec<String> = call
+        .arguments_map()
+        .keys()
+        .filter(|name| !preserved.contains(&name.as_str()))
+        .cloned()
+        .collect();
     offered
         .iter()
         .map(|t| {
@@ -100,9 +129,10 @@ fn ground_tool<'a>(call: &ToolCall, offered: &'a [ToolSchema]) -> Option<&'a Too
                 let matched = emitted
                     .iter()
                     .filter(|e| {
-                        t.params
-                            .iter()
-                            .any(|p| normalized_similarity(e, &p.name) >= PARAM_MATCH_FLOOR)
+                        t.params.iter().any(|p| {
+                            !preserved.contains(&p.name.as_str())
+                                && normalized_similarity(e, &p.name) >= PARAM_MATCH_FLOOR
+                        })
                     })
                     .count();
                 matched as f64 / emitted.len() as f64
@@ -175,6 +205,42 @@ mod tests {
                 .map(|(n, t)| ParamSpec::new(*n, t.clone(), true))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn preserved_args_pass_through_and_are_never_fuzzy_targets() {
+        let tools = vec![tool(
+            "shell_exec",
+            &[
+                ("command", ParamType::String),
+                ("cos_declaration", ParamType::String),
+            ],
+        )];
+        let declaration = serde_json::json!({"tier": "coordination", "receipts": []});
+        // A near-miss name must not be snapped onto the reserved parameter,
+        // and the reserved argument itself must survive untouched.
+        let call = ToolCall::new(
+            "shell_exec",
+            serde_json::json!({
+                "comand": "ls",
+                "cos_declaraton": "forged",
+                "cos_declaration": declaration.clone(),
+            }),
+        );
+        let (fixed, stats) = repair_call_preserving(&call, &tools, &["cos_declaration"]);
+        assert_eq!(fixed.arguments["cos_declaration"], declaration);
+        assert_eq!(fixed.arguments["command"], serde_json::json!("ls"));
+        assert_eq!(fixed.arguments.as_object().unwrap().len(), 2);
+        assert_eq!(stats.args_dropped, 1, "the forged near-miss is dropped");
+
+        // Absent from the schema: still copied through, never dropped.
+        let bare = vec![tool("shell_exec", &[("command", ParamType::String)])];
+        let (fixed, _) = repair_call_preserving(&call, &bare, &["cos_declaration"]);
+        assert_eq!(fixed.arguments["cos_declaration"], declaration);
+
+        // Without the reservation, plain repair would lose it to the schema.
+        let (plain, _) = repair_call(&call, &bare);
+        assert!(plain.arguments.get("cos_declaration").is_none());
     }
 
     #[test]

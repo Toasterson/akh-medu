@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://akh-medu.dev/schemas/lilith/cos-action-item@1",
+  "title": "Lilith CoS action item v1",
+  "description": "Something the operator must do: the action, the location, the trigger and the cost of skipping it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "language",
+    "action",
+    "location",
+    "trigger",
+    "cost_of_skipping",
+    "receipts"
+  ],
+  "properties": {
+    "contract": {
+      "const": "lilith/cos-action-item@1"
+    },
+    "language": {
+      "$ref": "#/$defs/language"
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "location": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trigger": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "now"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "due_at"
+          ],
+          "properties": {
+            "kind": {
+              "const": "deadline"
+            },
+            "due_at": {
+              "$ref": "#/$defs/unixSeconds"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "description"
+          ],
+          "properties": {
+            "kind": {
+              "const": "event"
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "cost_of_skipping": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entityRef"
+      }
+    },
+    "receipts": {
+      "$ref": "#/$defs/receipts"
+    }
+  },
+  "$defs": {
+    "entityRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "work-item",
+            "plan",
+            "pull-request",
+            "commit",
+            "run",
+            "board-thread",
+            "akh",
+            "host",
+            "document"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "language": {
+      "type": "string",
+      "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+      "description": "BCP 47 tag of the operator's (or recipient's) language, detected structurally."
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "reference",
+        "observed_at"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/receiptKind"
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed_at": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "digest": {
+          "type": "string"
+        }
+      }
+    },
+    "receiptKind": {
+      "enum": [
+        "tool-call",
+        "work-item",
+        "pull-request",
+        "commit",
+        "board-message",
+        "run-record",
+        "ancestry-check",
+        "digest",
+        "document"
+      ]
+    },
+    "receipts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/receipt"
+      },
+      "description": "Honesty: at least one receipt read in this episode."
+    },
+    "unixSeconds": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Seconds since the Unix epoch."
+    }
+  }
+}

@@ -246,6 +246,7 @@ dependencies = [
  "icalendar",
  "image",
  "imap",
+ "jsonschema",
  "knuffel",
  "lapin",
  "lettre",

@@ -1319,6 +1319,22 @@ pub struct AkhConfig {
     /// executor than the host default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecBackendConfig>,
+
+    /// Chief-of-Staff role (ADR 116, `lilith`): installs the
+    /// [`CosGuard`](crate::agent::chief_of_staff::CosGuard) around every tool
+    /// call — profile tiers, standing rules, and announcements of
+    /// operator-class actions. `None` (every other akh) leaves tool calls
+    /// unguarded.
+    ///
+    /// ```toml
+    /// [chief_of_staff]
+    /// profile = "/srv/akh-medu/skills/chief-of-staff/permission-profile.json"
+    /// repository = "/srv/akh-medu"
+    /// announcements = "/var/lib/akh/lilith/cos-announcements.jsonl"
+    /// budget = { minor_units = 6673, currency = "USD" }
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chief_of_staff: Option<crate::agent::chief_of_staff::ChiefOfStaffConfig>,
 }
 
 impl Default for AkhConfig {
@@ -1348,6 +1364,7 @@ impl Default for AkhConfig {
             provider: crate::agent::provider_failure::ProviderConfig::default(),
             delegation: None,
             exec: None,
+            chief_of_staff: None,
         }
     }
 }
@@ -1579,6 +1596,10 @@ impl AkhConfig {
                     "allocate_timeout_secs",
                     "sandboxes",
                 ],
+            ),
+            (
+                "chief_of_staff",
+                &["profile", "repository", "announcements", "budget"],
             ),
         ]
     }

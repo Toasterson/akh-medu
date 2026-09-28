@@ -7,7 +7,11 @@
 > acceptance. Preserves ADR 113 full-Akh ownership and ADR 114 structural live /
 > learned shadow decisions. This is a planned capability, not a runtime release.
 
-> Last updated: 2026-09-26 (**53g PR 8** — Vesta's side effects move into
+> Last updated: 2026-09-28 (**Lilith C1** — `ToolCallGuard` seam and the
+> Chief-of-Staff guard, contracts and skill pack; see "Permission layer"
+> below).
+>
+> 2026-09-26 (**53g PR 8** — Vesta's side effects move into
 > execd sandboxes; see "Core Service, Autonomy and Delegation" below).
 >
 > 2026-09-26 (**53g PR 6** — akheventd Anima source,
@@ -422,6 +426,35 @@ control commands), discovered via the PID record's ACP socket/TCP endpoints.
   side-effecting tools at `ToolRegistry::execute`; a supervising client sets the
   mode via `_akh/permission/mode` and resolves interactive `Ask` decisions over
   `session/request_permission` (bridged across the spawn_blocking↔async boundary).
+- **Tool-call guard + Lilith Chief of Staff** (`src/agent/chief_of_staff/`,
+  [ADR 116](decisions/116-lilith-chief-of-staff-guided-rl.md) slice C1, Anima
+  WI `01a0e270-0288`): `ToolRegistry` takes an optional `ToolCallGuard`
+  after the permission gate.
+  - `admit` may strip guard-owned arguments or refuse the call.
+  - `settle` is called exactly once. A drop guard settles it as `Aborted` if
+    the tool panics.
+  - `advertised_params` adds guard parameters to the tool catalog.
+
+  `CosGuard` classifies tools into T0–T3 by the data profile
+  `skills/chief-of-staff/permission-profile.json`. All tiers are autonomous
+  and any tier can be gated. The guard:
+  - requires a `cos_declaration` with receipts on T2/T3;
+  - checks the declaration against the real arguments: commit SHAs in a
+    deploy-capable tool must pass `git merge-base --is-ancestor`, adapter
+    markers are refused, and `file_io`/`edit` writes to existing files need a
+    verified `overwrite`;
+  - digests delete/overwrite targets and copies itself;
+  - writes spend reservations ahead of the call to a JSONL log outside the
+    write sandbox. Unsettled reservations count as spent on restart, and a
+    truncated final line is skipped;
+  - announces each T3 action as `lilith/cos-announcement@1` with redacted
+    arguments.
+
+  It is enabled by the per-akh `[chief_of_staff]` table. If the guard fails to
+  load, a read-only `FailClosedGuard` takes its place, and no permission mode
+  can lift it. Agent-side repair (`grug_data::repair_call_preserving`) keeps
+  `cos_declaration` intact. The typed `lilith/cos-*@1` contracts have JSON
+  Schema twins in `skills/chief-of-staff/schemas/`.
 
 ## Core Service, Autonomy and Delegation (Phase 53, ADR 113)
 

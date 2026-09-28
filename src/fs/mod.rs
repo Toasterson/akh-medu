@@ -410,7 +410,7 @@ fn contained(path: &Path, roots: &[PathBuf]) -> bool {
 /// non-existent tail. This resolves symlinks in the real prefix before a
 /// containment check — closing the parent-only-canonicalize bypass — while
 /// still allowing writes to not-yet-existing files.
-fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+pub(crate) fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
     let mut ancestor = path.to_path_buf();
     let mut tail: Vec<OsString> = Vec::new();
     loop {

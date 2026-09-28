@@ -44,6 +44,21 @@ use super::tools;
 use super::vsa_decide::DecideMode;
 use super::watch::{self, Watch, WatchFiring};
 
+/// The roots the agent's file_io/edit tools may write to: the workspace's
+/// `scratch/` directory, or none when the engine has no data dir. Rule layers
+/// (the Chief-of-Staff guard, ADR 116) use the same roots to resolve write
+/// paths and to keep their own logs out of reach.
+pub fn file_write_roots(cfg: &crate::engine::EngineConfig) -> Vec<std::path::PathBuf> {
+    match cfg.data_dir.as_ref() {
+        Some(dir) => vec![
+            cfg.scratch_dir
+                .clone()
+                .unwrap_or_else(|| dir.join("scratch")),
+        ],
+        None => Vec::new(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -482,11 +497,7 @@ impl Agent {
                 let mut read_roots =
                     vec![cfg.workspace_root.clone().unwrap_or_else(|| dir.clone())];
                 read_roots.extend(cfg.extra_read_roots.iter().cloned());
-                let write_root = cfg
-                    .scratch_dir
-                    .clone()
-                    .unwrap_or_else(|| dir.join("scratch"));
-                std::sync::Arc::new(crate::fs::LocalFs::new(read_roots, vec![write_root]))
+                std::sync::Arc::new(crate::fs::LocalFs::new(read_roots, file_write_roots(cfg)))
             }
             None => std::sync::Arc::new(crate::fs::LocalFs::denied()),
         };
@@ -2247,6 +2258,18 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear_permission_asker();
+    }
+
+    /// Attach a rule layer run around every tool call (e.g. Lilith's
+    /// Chief-of-Staff standing rules, ADR 116).
+    pub fn set_tool_call_guard(
+        &self,
+        guard: std::sync::Arc<dyn crate::agent::permission::ToolCallGuard>,
+    ) {
+        self.tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_tool_call_guard(guard);
     }
 
     /// Install a tool execution tracker (for ACP ToolCall events).

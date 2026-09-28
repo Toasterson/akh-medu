@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://akh-medu.dev/schemas/lilith/cos-briefing@1",
+  "title": "Lilith CoS briefing v1",
+  "description": "Done / In flight / Blocked / Next. Every item names its entity and the receipts it was read from (ADR 116 Decision 1).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "language",
+    "generated_at",
+    "done",
+    "in_flight",
+    "blocked",
+    "next"
+  ],
+  "properties": {
+    "contract": {
+      "const": "lilith/cos-briefing@1"
+    },
+    "language": {
+      "$ref": "#/$defs/language"
+    },
+    "generated_at": {
+      "$ref": "#/$defs/unixSeconds"
+    },
+    "done": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/briefingItem"
+      }
+    },
+    "in_flight": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/briefingItem"
+      }
+    },
+    "blocked": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/briefingItem"
+      }
+    },
+    "next": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/briefingItem"
+      }
+    }
+  },
+  "$defs": {
+    "briefingItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity",
+        "summary",
+        "receipts"
+      ],
+      "properties": {
+        "entity": {
+          "$ref": "#/$defs/entityRef"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "receipts": {
+          "$ref": "#/$defs/receipts"
+        }
+      }
+    },
+    "entityRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "work-item",
+            "plan",
+            "pull-request",
+            "commit",
+            "run",
+            "board-thread",
+            "akh",
+            "host",
+            "document"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "language": {
+      "type": "string",
+      "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+      "description": "BCP 47 tag of the operator's (or recipient's) language, detected structurally."
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "reference",
+        "observed_at"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/receiptKind"
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed_at": {
+          "$ref": "#/$defs/unixSeconds"
+        },
+        "digest": {
+          "type": "string"
+        }
+      }
+    },
+    "receiptKind": {
+      "enum": [
+        "tool-call",
+        "work-item",
+        "pull-request",
+        "commit",
+        "board-message",
+        "run-record",
+        "ancestry-check",
+        "digest",
+        "document"
+      ]
+    },
+    "receipts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/receipt"
+      },
+      "description": "Honesty: at least one receipt read in this episode."
+    },
+    "unixSeconds": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Seconds since the Unix epoch."
+    }
+  }
+}
