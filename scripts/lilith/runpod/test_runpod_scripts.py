@@ -8,6 +8,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -285,6 +286,7 @@ def assert_packaging(test: unittest.TestCase, run_dir: Path):
 FAKE_PYTHON = r"""#!/usr/bin/env bash
 # Test double for $ROOT/env/bin/python: fakes the GPU steps, runs everything else for real.
 printf '%s\n' "$*" >> "$FAKE_LOG"
+printf 'PATH0=%s\n' "${PATH%%:*}" >> "$FAKE_LOG"
 script="$(basename "${1:-}")"
 output=""; mode=""; previous=""
 for argument in "$@"; do
@@ -311,7 +313,7 @@ exec "$REAL_PYTHON" "$@"
 class SmokeSequencingTests(unittest.TestCase):
     """run_smoke.sh on a CPU host with faked GPU steps: independent steps survive a failed control."""
 
-    def smoke(self, run_id, **extra):
+    def smoke(self, run_id, *flags, **extra):
         base = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, base, True)
         scripts = base / 'pod/scripts/lilith/runpod'
@@ -329,7 +331,8 @@ class SmokeSequencingTests(unittest.TestCase):
         for path in (bin_dir / 'nvidia-smi', bin_dir / 'timeout', root / 'env/bin/python'):
             path.chmod(0o755)
         log = base / 'fake.log'
-        result = run('run_smoke.sh', run_id, root=root, script_dir=scripts,
+        self.root = root
+        result = run('run_smoke.sh', *flags, run_id, root=root, script_dir=scripts,
                      PATH=f'{bin_dir}{os.pathsep}{os.environ["PATH"]}', FAKE_LOG=str(log),
                      REAL_PYTHON=sys.executable, LILITH_ALLOW_UNMERGED='1', LILITH_SMOKE_SYNTHETIC='1', **extra)
         run_dir = root / 'runs' / run_id
@@ -347,7 +350,7 @@ class SmokeSequencingTests(unittest.TestCase):
         self.assertEqual(smoke['failed_steps'], ['cache-control'])
         self.assertEqual(list(self.statuses(smoke)), [
             'provenance', 'bootstrap-check', 'gpu', 'data-pin', 'cache-control', 'cache-diagnostic',
-            'memory-probe', 'microrun', 'cold-reload'])
+            'memory-probe', 'microrun', 'cold-reload', 'vllm-generation'])
         self.assertEqual(self.statuses(smoke)['cache-diagnostic'], 'ok')
         self.assertEqual(smoke['cache_diagnostic_verdict']['cause'], 'run_to_run_nondeterminism')
         self.assertEqual(smoke['knobs']['LILITH_NUMERICS_TF32'], 'off')
@@ -374,8 +377,50 @@ class SmokeSequencingTests(unittest.TestCase):
         self.assertEqual(statuses['microrun'], 'failed')
         self.assertEqual(statuses['cold-reload'], 'skipped_dependency')
         self.assertEqual(statuses['memory-probe'], 'ok')
-        self.assertEqual(smoke['failed_steps'], ['microrun', 'cold-reload'])
+        self.assertEqual(smoke['failed_steps'], ['microrun', 'cold-reload', 'vllm-generation'])
+        self.assertEqual(statuses['vllm-generation'], 'skipped_dependency')
         assert_packaging(self, run_dir)
+
+    def test_every_step_sees_the_env_bin_first_on_path(self):
+        _, _, _, calls = self.smoke('seq-path', FAKE_CACHE_STATUS='passed')
+        heads = {line for line in calls.splitlines() if line.startswith('PATH0=')}
+        self.assertEqual(heads, {f'PATH0={self.root}/env/bin'})
+
+    def test_only_runs_the_gates_and_the_named_steps(self):
+        adapter = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, adapter, True)
+        result, smoke, run_dir, calls = self.smoke(
+            'seq-only', '--only', 'cache-control,cache-diagnostic,vllm-generation',
+            LILITH_GENERATION_ADAPTER_DIR=str(adapter))
+        self.assertNotEqual(result.returncode, 0)   # the faked control fails
+        self.assertEqual(list(self.statuses(smoke)), [
+            'provenance', 'bootstrap-check', 'gpu', 'data-pin', 'cache-control', 'cache-diagnostic',
+            'vllm-generation'])
+        self.assertEqual(smoke['only'], 'cache-control,cache-diagnostic,vllm-generation')
+        self.assertEqual(smoke['failed_steps'], ['cache-control'])
+        self.assertEqual(smoke['vllm_generation']['status'], 'ok')
+        generate = next(line for line in calls.splitlines() if '--mode generate' in line)
+        self.assertIn('--generation-backend vllm', generate)
+        self.assertIn(f'--adapter-dir {adapter}', generate)
+        self.assertNotIn('--mode microrun', calls)
+        assert_packaging(self, run_dir)
+
+    def test_only_diagnostic_runs_it_without_the_control(self):
+        _, smoke, _, calls = self.smoke('seq-only-diag', '--only', 'cache-diagnostic')
+        self.assertEqual(list(self.statuses(smoke))[-1], 'cache-diagnostic')
+        self.assertNotIn('lilith_training_cache_control.py', calls)
+        self.assertEqual(smoke['status'], 'passed')
+
+    def test_only_is_fail_closed_on_missing_prerequisites_and_unknown_steps(self):
+        _, smoke, _, _ = self.smoke('seq-only-dep', '--only', 'vllm-generation')
+        self.assertEqual(self.statuses(smoke)['vllm-generation'], 'skipped_dependency')
+        self.assertEqual(smoke['status'], 'failed')
+        with tempfile.TemporaryDirectory() as directory:
+            for flags in (['--only', 'bogus'], ['--only', 'microrun,provenance'], ['--only']):
+                result = run('run_smoke.sh', *flags, 'x-run', root=directory)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('lilith::smoke::usage', result.stderr)
+            self.assertFalse((Path(directory) / 'runs').exists())
 
     def test_exhausted_budget_is_recorded_per_step(self):
         _, smoke, run_dir, _ = self.smoke('seq-budget', LILITH_SMOKE_BUDGET_SECONDS='100')
@@ -394,6 +439,8 @@ case "$1" in
     mkdir -p "$target/bin" "$target/fake-site"
     printf '#!/usr/bin/env bash\nPYTHONPATH="%s/fake-site" exec "%s" "$@"\n' "$target" "$REAL_PYTHON" > "$target/bin/python"
     chmod 755 "$target/bin/python"
+    printf '#!/usr/bin/env bash\necho 1.13.2\n' > "$target/bin/ninja"
+    chmod 755 "$target/bin/ninja"
     printf '%s\n' '__version__ = "0.0+fake"' 'class version:' '    cuda = None' '    hip = None' \
       'class cuda:' '    @staticmethod' '    def is_available():' '        return False' \
       '    @staticmethod' '    def get_device_name(index):' '        return "fake"' > "$target/fake-site/torch.py" ;;
@@ -438,6 +485,16 @@ class BootstrapEnvStateTests(unittest.TestCase):
                 # The run then stops at the parent download (no HF_TOKEN in tests).
                 self.assertIn('lilith::bootstrap::hf_token', result.stderr)
 
+    def test_env_ninja_is_a_readiness_check(self):
+        root = self.root_with_uv()
+        result = self.bootstrap(root)
+        self.assertIn(f'readiness: ninja 1.13.2 ({root}/env/bin/ninja)', result.stderr)
+        self.assertIn('lilith::bootstrap::hf_token', result.stderr)   # got past the readiness checks
+        (root / 'env/bin/ninja').unlink()
+        result = self.bootstrap(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('lilith::bootstrap::ninja', result.stderr)
+
     def test_check_reports_an_incomplete_env_without_moving_it(self):
         root = self.root_with_uv()
         (root / 'env').mkdir()
@@ -458,6 +515,15 @@ class BootstrapEnvStateTests(unittest.TestCase):
         self.assertIn('lilith::bootstrap::env_lock', result.stderr)
         self.assertEqual((root / 'env/.lilith-lock-sha256').read_text(), '0' * 64 + '\n')
         self.assertFalse(list(root.glob('env.incomplete-*')))
+
+
+class EnvBinPathTest(unittest.TestCase):
+    def test_interpreter_bin_is_first_on_path_exactly_once(self):
+        import reference_microrun as rm
+        env_bin = str(Path(sys.executable).parent)
+        with unittest.mock.patch.dict(os.environ, {'PATH': os.pathsep.join(['/usr/bin', env_bin, '/bin'])}):
+            self.assertEqual(rm.env_bin_first_on_path(), env_bin)
+            self.assertEqual(os.environ['PATH'].split(os.pathsep), [env_bin, '/usr/bin', '/bin'])
 
 
 class ChatTemplatePinConventionTest(unittest.TestCase):

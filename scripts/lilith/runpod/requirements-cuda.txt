@@ -2197,6 +2197,7 @@ ninja==1.13.2 \
     --hash=sha256:f90f84affc441e219f15fe52532806c1c9dbd22fb66c3addddce88a3deaabab7 \
     --hash=sha256:fd82e26c0706ad4ab88e5fdd26f3fab0a987a90f810160f6c322e752c6af298b
     # via
+    #   -r scripts/lilith/runpod/requirements-cuda.in
     #   flashinfer-python
     #   vllm
 numba==0.65.0 \
