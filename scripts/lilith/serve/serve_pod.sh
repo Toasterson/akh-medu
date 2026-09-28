@@ -20,6 +20,11 @@
 #                   tool calling: --enable-auto-tool-choice --tool-call-parser <serve_tools.py
 #                   resolve: LILITH_SERVE_TOOL_PARSER, default auto = the registered gemma4 parser>
 #                   --chat-template <the parent's pinned chat_template.jinja>. No parser, no serving.
+#                   reasoning: --reasoning-parser <serve_tools.py resolve-reasoning:
+#                   LILITH_SERVE_REASONING_PARSER, default auto = the registered gemma4 parser,
+#                   'none' disables it>, resolved the same way but non-fatal when nothing fits —
+#                   the pinned template opens a thinking channel whenever tools or a system
+#                   message are present; without a reasoning parser it leaks into `content`.
 #   6. health       /health 200, /v1/models lists `lilith` with the key AND answers 401
 #                   without it (the key is enforced), then status.json state=ready
 #   7. backstop     after LILITH_SERVE_POD_HARD_CAP_SECONDS (7800 = 2 h 10 min) the pod stops
@@ -39,6 +44,7 @@
 #   LILITH_SERVE_GPU_MEMORY_UTILIZATION (0.90)     LILITH_SERVE_ADAPTER auto|parent (auto)
 #   LILITH_SERVE_HEALTH_TIMEOUT_SECONDS (1500)     LILITH_SERVE_POD_HARD_CAP_SECONDS (7800; 0 = off)
 #   LILITH_SERVE_TOOL_PARSER (auto)                LILITH_SERVE_CHAT_TEMPLATE ($ROOT/parent/chat_template.jinja)
+#   LILITH_SERVE_REASONING_PARSER auto|none|<name> (auto; non-fatal — see step 5)
 #   LILITH_EXPECTED_MAIN_SHA (overrides current.json)  LILITH_ALLOW_UNMERGED=1 (recorded deviation)
 #   Numerics: LILITH_NUMERICS_SDPA_BACKEND (efficient) / LILITH_NUMERICS_SDPA_MATH_FALLBACK (1),
 #     the recorded CUDA default (C6 round 3). They govern torch SDPA only; vLLM picks its own
@@ -222,10 +228,28 @@ tool() { "$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[
 TOOL_PARSER="$(tool parser)"
 CHAT_TEMPLATE="$(tool chat_template)"
 log "tool calling: parser $TOOL_PARSER ($(tool reason)); chat template $CHAT_TEMPLATE"
+
+# Reasoning-channel capture is non-fatal (see the step-5 header comment): resolution never dies
+# on "auto, nothing registered" the way tool-call resolution does, only on an explicit name that
+# isn't registered — that IS a refusal, same [code] message / help: shape as tools.err above.
+if ! "$PY" "$SCRIPT_DIR/serve_tools.py" resolve-reasoning --requested "${LILITH_SERVE_REASONING_PARSER:-auto}" \
+     > "$SESSION_DIR/reasoning.json" 2> "$SESSION_DIR/reasoning.err"; then
+  first="$(head -n1 "$SESSION_DIR/reasoning.err")"
+  code="${first#\[}"; code="${code%%\]*}"
+  die "${code:-lilith::serve::reasoning_parser}" "${first#*] }" "$(sed -n 's/^  help: //p' "$SESSION_DIR/reasoning.err" | head -n1)"
+fi
+reasoning() { "$PY" -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print("" if v is None else v)' \
+          "$SESSION_DIR/reasoning.json" "$1"; }
+REASONING_PARSER="$(reasoning parser)"
+log "reasoning: $([[ -n "$REASONING_PARSER" ]] && echo "parser $REASONING_PARSER" || echo "disabled") ($(reasoning reason))"
+
 ARGS=(serve "$ROOT/parent" --tokenizer "$ROOT/parent" --host 0.0.0.0 --port "$PORT"
       --dtype bfloat16 --max-model-len "$MAX_LEN" --gpu-memory-utilization "$GPU_UTIL"
       --kv-cache-dtype "$KV_DTYPE" --limit-mm-per-prompt '{"image": 0, "audio": 0}'
       --enable-auto-tool-choice --tool-call-parser "$TOOL_PARSER" --chat-template "$CHAT_TEMPLATE")
+if [[ -n "$REASONING_PARSER" ]]; then
+  ARGS+=(--reasoning-parser "$REASONING_PARSER")
+fi
 if [[ "$MODE" == adapter ]]; then
   ARGS+=(--served-model-name "$SERVED_NAME-parent" --enable-lora --max-loras 1
          --max-lora-rank "$(sel max_lora_rank)" --lora-modules "$SERVED_NAME=$(sel adapter_dir)")
@@ -251,7 +275,8 @@ out, session, mode, kv, max_len, port, logging, boot, cap, sdir, *args = sys.arg
 sdir = Path(sdir)
 load = lambda name: json.loads((sdir / name).read_text()) if (sdir / name).is_file() else None
 record = {'schema': 'lilith/serve-session@1', 'session': session, 'served_model_name': 'lilith', 'mode': mode,
-          'selection': load('selection.json'), 'tool_calling': load('tools.json'), 'provenance': {k: (load('provenance.json') or {}).get(k)
+          'selection': load('selection.json'), 'tool_calling': load('tools.json'),
+          'reasoning': load('reasoning.json'), 'provenance': {k: (load('provenance.json') or {}).get(k)
           for k in ('status', 'expected_main_sha', 'manifest_sha256', 'problems')},
           'bootstrap': {'action': boot, 'check': load('bootstrap-check.json')},
           'kv_cache_dtype': kv, 'max_model_len': int(max_len), 'port': int(port), 'request_logging': logging,

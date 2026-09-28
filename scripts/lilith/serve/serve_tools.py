@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Resolve vLLM's tool-call parser for the Lilith serve pod (Anima WI 01a0e270-314e, Lilith C2).
+"""Resolve vLLM's tool-call and reasoning parsers for the Lilith serve pod
+(Anima WI 01a0e270-314e, Lilith C2/C3).
 
 Lilith's akh talks to vLLM through the ``openai`` backing with native ``tool_calls``, so the
 server must run with ``--enable-auto-tool-choice --tool-call-parser <name>``. Serving without
@@ -33,6 +34,33 @@ its sha256 is recorded next to the parser.
 
 Prints one ``lilith/serve-tools@1`` JSON object. Exit 0 on a choice, 2 on a refusal
 (``[code] message`` + ``help:`` on stderr).
+
+A second, independent resolution covers ``--reasoning-parser``:
+
+    serve_tools.py resolve-reasoning --requested auto|none|<name>
+
+Gemma 4's pinned chat template opens a ``<|channel>thought`` block whenever tools or a system
+message are present (which is always, for Lilith), and without ``--reasoning-parser`` vLLM has
+nowhere to route that channel except into ``content`` — the raw ``<|channel>thought\\n...\\n
+<channel|>`` markers leak straight into the answer text. Unlike tool calling this is *not*
+mandatory to serve correctly (a leaked channel is ugly, not a broken response), so resolution
+degrades instead of refusing when nothing fits:
+
+* ``--requested none``: reasoning-channel capture is off. No registry lookup at all.
+* ``--requested <name>`` (``LILITH_SERVE_REASONING_PARSER``): used when that name is registered
+  in vLLM's ``ReasoningParserManager``, otherwise a refusal (an explicit request that can't be
+  honored is a misconfiguration, not silently ignored).
+* ``--requested auto`` (default): the first of ``REASONING_PREFERRED`` (``gemma4``) that is
+  registered. With none registered — or ``vllm.reasoning``/
+  ``vllm.entrypoints.openai.reasoning_parsers`` not importable at all, which is the normal case
+  off-pod (no vLLM installed) — reasoning capture is quietly disabled; the pod still serves.
+
+There is no help-text fallback for the reasoning parser: unlike ``--tool-call-parser``, vLLM's
+``vllm serve --help`` prints ``--reasoning-parser REASONING_PARSER`` with no enumerable
+``{choices}`` set, so the registry must come from an actual import of ``ReasoningParserManager``.
+
+Prints one ``lilith/serve-reasoning@1`` JSON object. Exit 0 always except an explicit,
+unregistered ``--requested <name>`` (2, same ``[code] message`` / ``help:`` shape).
 """
 from __future__ import annotations
 
@@ -49,6 +77,10 @@ from typing import Any, Sequence
 SCHEMA = "lilith/serve-tools@1"
 PREFERRED = ("gemma4",)
 MANAGER_MODULES = ("vllm.tool_parsers", "vllm.entrypoints.openai.tool_parsers")
+
+REASONING_SCHEMA = "lilith/serve-reasoning@1"
+REASONING_PREFERRED = ("gemma4",)
+REASONING_MANAGER_MODULES = ("vllm.reasoning", "vllm.entrypoints.openai.reasoning_parsers")
 
 
 class ToolParserError(Exception):
@@ -96,6 +128,87 @@ def registry_from_manager() -> Registry | None:
         if names:
             return Registry(tuple(sorted(names)), f"{module_name}.ToolParserManager")
     return None
+
+
+class ReasoningParserError(Exception):
+    code = "lilith::serve::reasoning_parser"
+
+    def __init__(self, message: str, *, help: str, code: str | None = None):
+        super().__init__(message)
+        self.help = help
+        if code:
+            self.code = code
+
+    def render(self) -> str:
+        return f"[{self.code}] {self}\n  help: {self.help}"
+
+
+@dataclasses.dataclass(frozen=True)
+class ReasoningSelection:
+    parser: str | None
+    requested: str
+    reason: str
+    enabled: bool
+    registry_source: str | None
+    available: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"schema": REASONING_SCHEMA} | dataclasses.asdict(self) | {"available": list(self.available)}
+
+
+def registry_from_reasoning_manager() -> Registry | None:
+    for module_name in REASONING_MANAGER_MODULES:
+        try:
+            module = importlib.import_module(module_name)
+            manager = getattr(module, "ReasoningParserManager")
+        except Exception:  # noqa: BLE001  (any import failure means "try the next source")
+            continue
+        names = (set(getattr(manager, "reasoning_parsers", {}) or {}) |
+                 set(getattr(manager, "lazy_parsers", {}) or {}))
+        if names:
+            return Registry(tuple(sorted(names)), f"{module_name}.ReasoningParserManager")
+    return None
+
+
+def resolve_reasoning(requested: str, preferred: Sequence[str] = REASONING_PREFERRED) -> ReasoningSelection:
+    if requested == "none":
+        return ReasoningSelection(parser=None, requested="none", enabled=False,
+                                  reason="disabled by LILITH_SERVE_REASONING_PARSER=none",
+                                  registry_source=None, available=())
+
+    registry = registry_from_reasoning_manager()
+
+    if requested != "auto":
+        if registry is not None and requested in registry.names:
+            return ReasoningSelection(parser=requested, requested=requested, enabled=True,
+                                      reason=f"requested by LILITH_SERVE_REASONING_PARSER={requested}",
+                                      registry_source=registry.source, available=registry.names)
+        available = ", ".join(registry.names) if registry is not None else \
+            "(no registry: vllm.reasoning is not importable)"
+        raise ReasoningParserError(
+            f"reasoning parser {requested!r} is not registered in this vLLM (available: {available})",
+            help="set LILITH_SERVE_REASONING_PARSER to one of the available names, to 'auto' to "
+                 "auto-select the Gemma 4 parser when registered, or to 'none' to disable "
+                 "reasoning-channel capture (the thinking channel then leaks into content)")
+
+    if registry is not None:
+        for name in preferred:
+            if name in registry.names:
+                return ReasoningSelection(parser=name, requested="auto", enabled=True,
+                                          reason=f"auto: {name} is the Gemma 4 reasoning parser "
+                                                 "registered in this vLLM",
+                                          registry_source=registry.source, available=registry.names)
+
+    # Non-fatal, unlike tool calling: a model that leaks its thinking channel
+    # into `content` still answers, just with visible noise. The pod serves.
+    if registry is not None:
+        reason = (f"auto: no Gemma 4 reasoning parser ({', '.join(preferred)}) registered "
+                  f"(available: {', '.join(registry.names)}); reasoning-channel capture disabled")
+    else:
+        reason = "auto: vllm.reasoning is not importable; reasoning-channel capture disabled"
+    return ReasoningSelection(parser=None, requested="auto", enabled=False, reason=reason,
+                              registry_source=registry.source if registry else None,
+                              available=registry.names if registry else ())
 
 
 def registry_from_help(help_text: str) -> Registry | None:
@@ -151,7 +264,19 @@ def main(argv: list[str] | None = None) -> int:
     res.add_argument("--requested", default="auto")
     res.add_argument("--help-file", type=Path, required=True)
     res.add_argument("--chat-template", type=Path, required=True)
+    res_reasoning = sub.add_parser("resolve-reasoning")
+    res_reasoning.add_argument("--requested", default="auto")
     args = parser.parse_args(argv)
+
+    if args.command == "resolve-reasoning":
+        try:
+            selection = resolve_reasoning(args.requested.strip() or "auto")
+        except ReasoningParserError as error:
+            print(error.render(), file=sys.stderr)
+            return 2
+        print(json.dumps(selection.to_dict(), sort_keys=True))
+        return 0
+
     help_text = args.help_file.read_text(errors="replace") if args.help_file.is_file() else ""
     try:
         selection = resolve(args.requested.strip() or "auto", help_text, args.chat_template)
