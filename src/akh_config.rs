@@ -110,6 +110,23 @@ pub enum AkhConfigError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Monitoring(#[from] crate::agent::tools::monitoring_snapshot::MonitoringConfigError),
+
+    #[error(
+        "akh \"{akh}\" is `tool_surface = \"session-only\"` but its config gives it a way to reach \
+         or keep something outside the client's session: {}",
+        problems.join("; ")
+    )]
+    #[diagnostic(
+        code(akh::akh_config::session_only_conflict),
+        help(
+            "A session-only akh (the Lilith C4 dojo teacher, ADR 116) may use nothing but the MCP \
+             servers an ACP client pushes for one session, and keeps nothing between sessions. \
+             Two ways forward: remove the listed settings (deploy/roman-mini/configure_core.py \
+             renders a conforming `dojo-teacher` workspace from config/dojo-teacher.json), or \
+             drop `tool_surface` to run this akh as a full akh (ADR 113)."
+        )
+    )]
+    SessionOnlyConflict { akh: String, problems: Vec<String> },
 }
 
 /// One unrecognized key found while loading an `akh.toml`, surfaced so the
@@ -143,6 +160,33 @@ impl std::fmt::Display for UnknownConfigKey {
 
 /// Convenience alias for akh-config operations.
 pub type AkhConfigResult<T> = std::result::Result<T, AkhConfigError>;
+
+/// Which tools an akh's turns may advertise and call (`tool_surface` in
+/// `akh.toml`).
+///
+/// ```toml
+/// tool_surface = "session-only"
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolSurface {
+    /// Every built-in, executor, static-MCP and configured tool (ADR 113: every
+    /// working akh runs fully featured). The default.
+    #[default]
+    Full,
+    /// No tool of its own: the registry is sealed after load, so a turn sees
+    /// only the MCP servers its ACP client pushed for that session. An exam
+    /// instrument, not a working akh: the Lilith C4 dojo teacher answers
+    /// recorded episodes through the per-episode replay servers and must not
+    /// reach anything else (docs/ai/plans/2026-09-29-lilith-c4-teacher-via-akh.md).
+    SessionOnly,
+}
+
+impl ToolSurface {
+    pub fn is_full(&self) -> bool {
+        *self == Self::Full
+    }
+}
 
 /// Where an akh's pinned model runs.
 ///
@@ -1226,6 +1270,12 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_strategy: Option<String>,
 
+    /// Which tools this akh's turns may use: `"full"` (default, ADR 113) or
+    /// `"session-only"` (no tool of its own; only the MCP servers an ACP client
+    /// pushes for its session). A top-level scalar, kept above the tables.
+    #[serde(default, skip_serializing_if = "ToolSurface::is_full")]
+    pub tool_surface: ToolSurface,
+
     // ── tables (must be serialized after all values for TOML) ───────────────
     /// Where the pinned model runs (local Ollama or cloud).
     #[serde(default)]
@@ -1353,6 +1403,7 @@ impl Default for AkhConfig {
             extra_read_roots: Vec::new(),
             capture_transcripts: true,
             context_strategy: None,
+            tool_surface: ToolSurface::Full,
             ollama_endpoint: OllamaEndpoint::default(),
             openai_endpoint: None,
             agent_runtime: None,
@@ -1471,7 +1522,68 @@ impl AkhConfig {
         if let Some(monitoring) = &cfg.monitoring {
             monitoring.validate(cfg.name())?;
         }
+        cfg.validate_tool_surface()?;
         Ok((cfg, Self::unknown_keys(&raw)))
+    }
+
+    /// Refuse a `tool_surface = "session-only"` akh whose config would give it
+    /// a tool, an identity, a memory channel or an executor of its own. The
+    /// registry seal (`ToolRegistry::seal_to_session_tools`) already removes
+    /// every tool; this check makes a conflicting config fail loudly at load
+    /// instead of being silently overridden, and closes the non-tool channels
+    /// the seal cannot see (federated reads, shared partitions, transcript
+    /// capture, autonomy, board ingress).
+    pub fn validate_tool_surface(&self) -> AkhConfigResult<()> {
+        if self.tool_surface != ToolSurface::SessionOnly {
+            return Ok(());
+        }
+        let mut problems = Vec::new();
+        let mut refuse = |present: bool, what: &str| {
+            if present {
+                problems.push(what.to_string());
+            }
+        };
+        refuse(!self.mcp.servers.is_empty(), "[[mcp.servers]] is set");
+        refuse(self.board.is_some(), "[board] is set (board inbox ingress)");
+        refuse(self.monitoring.is_some(), "[monitoring] is set");
+        refuse(self.delegation.is_some(), "[delegation] is set");
+        refuse(self.chief_of_staff.is_some(), "[chief_of_staff] is set");
+        refuse(self.agent_runtime.is_some(), "[agent_runtime] is set");
+        refuse(
+            matches!(self.backend, ChatBacking::Codex | ChatBacking::Claude),
+            "backend is a coding-agent runtime with native tools of its own",
+        );
+        refuse(
+            !matches!(self.exec, Some(ExecBackendConfig::None)),
+            "[exec] is not `kind = \"none\"`",
+        );
+        refuse(self.openclaw_import, "openclaw_import = true");
+        refuse(!self.extra_read_roots.is_empty(), "extra_read_roots is set");
+        refuse(
+            !self.related_workspaces.is_empty(),
+            "related_workspaces is set (federated reads of other akhs' memory)",
+        );
+        refuse(
+            !self.workspace.shared_partitions.is_empty(),
+            "shared_partitions is set (memory shared with other akhs)",
+        );
+        refuse(
+            self.context_strategy.as_deref() == Some("virtual"),
+            "context_strategy = \"virtual\" (memory self-edit tools)",
+        );
+        refuse(self.capture_transcripts, "capture_transcripts = true");
+        refuse(
+            self.autonomy.enabled || self.autonomy.tasks.values().any(|on| *on),
+            "autonomy is enabled",
+        );
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(AkhConfigError::SessionOnlyConflict {
+                akh: self.name().to_string(),
+                problems,
+            })
+        }
     }
 
     /// Top-level scalar/array keys accepted at the root of `akh.toml`
@@ -1505,6 +1617,7 @@ impl AkhConfig {
             "extra_read_roots",
             "capture_transcripts",
             "context_strategy",
+            "tool_surface",
         ]
     }
 
@@ -3213,6 +3326,123 @@ auth = { token_file = "/tmp/observer.key" }
         let raw: toml::Value =
             toml::from_str("name = \"a\"\n[monitoring]\nsorce = \"x\"\n").expect("parse");
         assert_eq!(AkhConfig::unknown_keys(&raw)[0].path, "monitoring.sorce");
+    }
+
+    /// The workspace `configure_core.py --dojo-teacher` renders (Lilith C4).
+    const SESSION_ONLY_TEACHER: &str = "name = \"dojo-teacher\"\n\
+        model = \"glm-5.3\"\n\
+        backend = \"ollama\"\n\
+        capture_transcripts = false\n\
+        context_strategy = \"passthrough\"\n\
+        tool_surface = \"session-only\"\n\
+        [ollama_endpoint]\nkind = \"cloud\"\nbase_url = \"https://ollama.com\"\napi_key = \"env:K\"\n\
+        [autonomy]\nenabled = false\n\
+        [exec]\nkind = \"none\"\n\
+        [mcp]\nrequire_pushed_mcp = true\nservers = []\n";
+
+    #[test]
+    fn session_only_teacher_loads_and_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        std::fs::write(&path, SESSION_ONLY_TEACHER).expect("write");
+        let (cfg, unknown) = AkhConfig::load_checked(&path).expect("a conforming teacher loads");
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(cfg.tool_surface, ToolSurface::SessionOnly);
+        let rendered = toml::to_string(&cfg).expect("serialize");
+        assert!(
+            rendered.contains("tool_surface = \"session-only\""),
+            "{rendered}"
+        );
+        // The default stays off the wire, so every other akh.toml is unchanged.
+        let full = toml::to_string(&AkhConfig::with_name("janus")).expect("serialize");
+        assert!(!full.contains("tool_surface"), "{full}");
+    }
+
+    #[test]
+    fn session_only_refuses_every_channel_outside_the_session() {
+        let base: AkhConfig = toml::from_str(SESSION_ONLY_TEACHER).expect("parse");
+        assert!(base.validate_tool_surface().is_ok());
+        let cases: Vec<(&str, AkhConfig)> = vec![
+            (
+                "mcp.servers",
+                toml::from_str(&SESSION_ONLY_TEACHER.replace(
+                    "servers = []",
+                    "[[mcp.servers]]\nname = \"anima\"\nurl = \"https://anima.example/mcp\"",
+                ))
+                .expect("parse"),
+            ),
+            (
+                "capture_transcripts",
+                AkhConfig {
+                    capture_transcripts: true,
+                    ..base.clone()
+                },
+            ),
+            (
+                "autonomy",
+                AkhConfig {
+                    autonomy: AutonomyConfig::default(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "exec",
+                AkhConfig {
+                    exec: Some(ExecBackendConfig::InProcess),
+                    ..base.clone()
+                },
+            ),
+            (
+                "exec",
+                AkhConfig {
+                    exec: None,
+                    ..base.clone()
+                },
+            ),
+            (
+                "related_workspaces",
+                AkhConfig {
+                    related_workspaces: vec!["janus".into()],
+                    ..base.clone()
+                },
+            ),
+            (
+                "openclaw_import",
+                AkhConfig {
+                    openclaw_import: true,
+                    ..base.clone()
+                },
+            ),
+            (
+                "virtual",
+                AkhConfig {
+                    context_strategy: Some("virtual".into()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "backend",
+                AkhConfig {
+                    backend: ChatBacking::Claude,
+                    ..base.clone()
+                },
+            ),
+        ];
+        for (needle, cfg) in cases {
+            let err = cfg.validate_tool_surface().expect_err(needle);
+            let text = err.to_string();
+            assert!(text.contains(needle), "{needle}: {text}");
+            assert!(matches!(err, AkhConfigError::SessionOnlyConflict { .. }));
+        }
+        let mut shared = base.clone();
+        shared.workspace.shared_partitions = vec!["roman".into()];
+        assert!(shared.validate_tool_surface().is_err());
+        // A full akh is never checked: ADR 113 behaviour is unchanged.
+        let full = AkhConfig {
+            tool_surface: ToolSurface::Full,
+            ..shared
+        };
+        assert!(full.validate_tool_surface().is_ok());
     }
 
     #[test]

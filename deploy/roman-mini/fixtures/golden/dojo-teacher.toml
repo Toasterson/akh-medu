@@ -1,0 +1,30 @@
+# dojo-teacher: sealed Lilith C4 dojo teacher (ADR 116; tool_surface = session-only, an exam instrument, not a working akh). Rendered by configure_core.py.
+
+name = "dojo-teacher"
+model = "glm-5.3"
+system_prompt = "You are the teacher in the Lilith dojo, answering recorded episodes of the operator's fleet.\nEach session's first message holds your complete instructions for that session: a system prompt\nand a task. Follow them exactly. The only tools you have are the ones listed for the session;\nthey answer from the recording. Nothing you do here reaches production.\n"
+backend = "ollama"
+capture_transcripts = false
+context_strategy = "passthrough"
+tool_surface = "session-only"
+
+[ollama_endpoint]
+kind = "cloud"
+base_url = "https://ollama.com"
+api_key = "env:ROMAN_OLLAMA_KEY"
+
+# No background work: the teacher only answers dojo episodes, one ACP session each.
+[autonomy]
+enabled = false
+
+[autonomy.tasks]
+
+# No executor: the teacher runs nothing on this host.
+[exec]
+kind = "none"
+
+# No servers of its own. The dojo runner pushes each episode's replay servers (anima, git)
+# over ACP `session/new`; a turn whose servers do not come up fails (require_pushed_mcp).
+[mcp]
+require_pushed_mcp = true
+servers = []

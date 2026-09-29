@@ -2090,6 +2090,16 @@ impl Agent {
     /// (the KG reconciliation path) — only [`Self::sync_live_tools`], which
     /// updates the engine's live-tool view. ACP prompt-scoped proxies use
     /// [`Self::begin_tool_session`] instead and never enter global state.
+    /// Seal this akh's tool registry to session-pushed MCP servers
+    /// (`tool_surface = "session-only"`, the Lilith C4 dojo teacher; ADR 116):
+    /// every tool of its own is removed and no later registration is accepted.
+    /// Returns the removed names, sorted.
+    pub fn seal_tools_to_session(&self) -> Vec<String> {
+        let removed = self.tool_registry_handle().seal_to_session_tools();
+        self.sync_live_tools();
+        removed
+    }
+
     pub fn register_tool(&self, tool: Box<dyn super::tool::Tool>) {
         self.tool_registry
             .lock()

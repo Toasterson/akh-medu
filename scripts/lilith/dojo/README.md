@@ -23,6 +23,7 @@ over the C3 recorder's `lilith/cos-snapshot@1` roots.
 | `contracts.py` | Loads the C1 schemas from `skills/chief-of-staff/schemas/` and defines the dojo answer contracts (`lilith/dojo-*@1`). Also holds the tier lookup against the C1 permission profile and the schema validator. |
 | `language.py` | Checks the reply language structurally: the BCP 47 tag, plus Unicode-script agreement of the prose fields. |
 | `runner.py` + `baseline.py` + `model_adapters.py` | The model-driven `EpisodeRunner`: a broker over the replay servers, OpenAI-compatible and Anthropic adapters, the batch/resume driver, the baseline summary and the paired `compare`. See "Baselines" below. |
+| `acp_teacher.py` + `mcp_gateway.py` | The teacher arm through a sealed akh over ACP, with the replay servers served to it over loopback MCP HTTP. See "The teacher arm" below. |
 | `dojo_report.py` | Reports how many episodes per family the recorded snapshots support. |
 
 ## Runner integration (the akhrtd step is separate)
@@ -71,11 +72,14 @@ python3 scripts/lilith/dojo/runner.py run \
   --model-kind openai --base-url-file "$S/lilith-base-url" --key-file "$S/lilith-openai-key" --model lilith \
   --label frozen-parent --out runs/c4/parent-sealed
 
-# (b) the Claude teacher. The key comes from an env var the operator provides.
-ANTHROPIC_API_KEY=... python3 scripts/lilith/dojo/runner.py run \
+# (b) the teacher: the sealed dojo-teacher akh on the Mac core, over ACP (see "The teacher arm" below).
+R="$HOME/Library/Application Support/roman-akhs"
+python3 scripts/lilith/dojo/runner.py run \
   --root "$HOME/Library/Application Support/akh-medu/lilith/cos-snapshots" --repo . \
-  --family all --split sealed --seed 0 --concurrency 4 \
-  --model-kind anthropic --key-env ANTHROPIC_API_KEY --model <opus id> \
+  --family all --split sealed --seed 0 \
+  --model-kind acp --acp-endpoint tcp://127.0.0.1:18444 --akh dojo-teacher \
+  --key-file "$R/secrets/dojo-teacher.key" \
+  --akh-config "$R/core-config/akh-medu/workspaces/dojo-teacher.toml" \
   --label teacher --out runs/c4/teacher-sealed
 
 # the paired per-family table (reference first; candidate last once it exists)
@@ -90,8 +94,9 @@ python3 scripts/lilith/dojo/runner.py compare runs/c4/parent-sealed runs/c4/teac
   the floors sha and the prompt sha. The endpoint is recorded as host only.
 - Re-running the same command resumes: completed episodes are skipped and errored ones are retried. A
   resume with a different model, prompt, snapshots, seed or commit is refused. Use a fresh `--out`.
-- The teacher default is Opus 5.5 (`claude-opus-5-5`), the exam plan's teacher. Some newer Anthropic
-  models reject `temperature`: add `--omit-temperature`.
+- The teacher makes no batch or direct model-API calls (operator decision 2026-09-29): it runs as the
+  sealed `dojo-teacher` akh (`--model-kind acp`). `--model-kind anthropic` stays for other arms; some
+  newer Anthropic models reject `temperature`: add `--omit-temperature`.
 - Files in `--out`: `episodes.jsonl` (steps, receipts, transcript, usage), `verification.jsonl` (verdict,
   weight, hard constraints), `provenance.json`, `baseline-summary.json` (per family: n, errors, mean weight
   and bootstrap 95% CI, fabrication / rule-break / unannounced counts, contract-validity rate, language-check
@@ -109,8 +114,40 @@ first `--limit 3` run gives real numbers in the summary's `tokens` and `latency_
   **about 1 h per 100 episodes at concurrency 1 and 15-25 min at `--concurrency 4`, roughly $1-4 of pod time**.
   The 278 sealed episodes fit one serve session (ADR 116 Decision 7 caps a session at 2 h). Resume continues
   across sessions.
+- The teacher arm (`acp`) bills no API key of its own: its turns run on the Romans' Ollama Cloud
+  subscription (`ROMAN_OLLAMA_KEY`) and share its rate limits with Janus, Minerva and Vesta. It runs
+  one episode at a time; the per-episode time is not measured yet (the first `--limit 1` run records it
+  in `latency_ms`), so plan the sealed run as a long, resumable job outside the Romans' busy hours.
 - Frontier cost is dominated by the tool list. If the teacher run proves too expensive, narrow `--family`
   or `--limit`; do not change the tool list, since that would break the same-broker comparison.
+
+## The teacher arm through an akh (`--model-kind acp`)
+
+Design: `docs/ai/plans/2026-09-29-lilith-c4-teacher-via-akh.md`. `acp_teacher.AcpEpisodeRunner` replaces
+the in-process model loop; the akh runs its own loop and calls the tools itself:
+
+- `mcp_gateway.ReplayMcpGateway` serves the episode's in-process replay servers over loopback MCP HTTP,
+  one unguessable token per episode, closed when the episode ends. Every call goes through
+  `runner.Broker.call`, so the akh's model reads the same bytes (`{"isError", "_meta", "result"}`), under
+  the same names (`mcp__anima__...`, `mcp__git__...`) and recorded schemas, and the receipts land in the
+  episode's one `ReceiptLog`.
+- The runner speaks ACP to akhomed's loopback listener: `initialize`, the isolation preflight,
+  `session/new` with the gateway's `mcpServers`, one `session/prompt` carrying the dojo system prompt and
+  the task. The final message (text after the last tool call) goes through the same `finish_answer`.
+- Isolation is checked, and a failed check stops the whole batch (`lilith::dojo::teacher_isolation`): the
+  akh must list no tool of its own (`_akh/tools`), may start or request no tool outside the replay set
+  during a turn, and its memory size (`_akh/health`) must not change across an episode or between
+  episodes. The akh side is sealed by `tool_surface = "session-only"` (akhomed removes every tool of its
+  own and refuses later registrations; `AkhConfig::validate_tool_surface` refuses boards, static MCP
+  servers, executors, federated or shared memory, transcript capture and autonomy).
+- Episodes run one at a time (`--concurrency` > 1 is refused). Usage is the difference of the akh's
+  `_akh/usage` counters over the turn. A provider error (`error[...]` chunk, refusal, timeout) is an
+  unscored episode, retried on resume, like a model endpoint failure.
+- `--key-file` is the ACP principal's token (`secrets/dojo-teacher.key`, scoped to the teacher akh).
+  `--akh-config` (optional, read-only) checks the rendered workspace is sealed and records its model and
+  sha256 in `provenance.json` next to the probe (daemon version, memory size).
+- The Mac core renders the teacher only behind `config/dojo-teacher.json` (`{"model": "<Ollama Cloud
+  model>"}`, default `glm-5.3`): see `deploy/roman-mini/full_akh.py` `render_dojo_teacher_workspace`.
 
 ## Design choices worth knowing
 

@@ -12,6 +12,9 @@
 //! output to equal that fixture byte for byte, so a renderer change that drops
 //! a key fails there or here. Set `AKH_LILITH_WORKSPACE_TOML=<path>` to check a
 //! real render instead (its profile must be installed at the rendered path).
+//!
+//! `dojo_teacher_workspace_loads_sealed` does the same for the Lilith C4 dojo
+//! teacher (`fixtures/golden/dojo-teacher.toml`, `DojoTeacherRenderTests`).
 
 use std::path::{Path, PathBuf};
 
@@ -220,4 +223,28 @@ fn roman_workspaces_load_without_dropped_keys() {
         assert_eq!(cfg.backend, ChatBacking::Ollama);
         assert!(cfg.chief_of_staff.is_none());
     }
+}
+
+/// Lilith C4 (ADR 116): the sealed dojo teacher `configure_core.py` renders
+/// behind `config/dojo-teacher.json`. It must load through `load_checked`,
+/// which runs `validate_tool_surface`, with no key dropped.
+const DOJO_TEACHER_FIXTURE: &str =
+    include_str!("../deploy/roman-mini/fixtures/golden/dojo-teacher.toml");
+
+#[test]
+fn dojo_teacher_workspace_loads_sealed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("dojo-teacher.toml");
+    std::fs::write(&path, DOJO_TEACHER_FIXTURE).unwrap();
+    let cfg = load_without_unknown_keys(&path);
+    assert_eq!(cfg.name(), "dojo-teacher");
+    assert_eq!(cfg.tool_surface, ToolSurface::SessionOnly);
+    assert_eq!(cfg.backend, ChatBacking::Ollama);
+    assert_eq!(cfg.context_strategy.as_deref(), Some("passthrough"));
+    assert!(!cfg.capture_transcripts && !cfg.autonomy.enabled);
+    assert!(matches!(cfg.exec, Some(ExecBackendConfig::None)));
+    assert!(cfg.mcp.servers.is_empty() && cfg.mcp.require_pushed_mcp);
+    assert!(
+        cfg.board.is_none() && cfg.chief_of_staff.is_none() && cfg.related_workspaces.is_empty()
+    );
 }

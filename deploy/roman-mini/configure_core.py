@@ -38,6 +38,10 @@ Renders (existing unrelated keys and secrets are preserved; rerunning is safe):
 - workspaces/lilith.toml + core-data/…/workspaces/lilith/kg/skills/chief-of-staff
                                             Lilith C2 (ADR 116), only once config/lilith.json exists;
                                             auto-started only once her secrets and ancestry clone exist
+- workspaces/dojo-teacher.toml + secrets/dojo-teacher.key
+                                            Lilith C4 sealed dojo teacher (tool_surface = session-only,
+                                            ADR 116), only once config/dojo-teacher.json exists; its ACP
+                                            principal `dojo-teacher` reaches that akh alone
 Never reads a provider key; token files are only concatenated into the ACP
 shared-secret file, never printed. (Lilith's endpoint base URL is read from
 secrets/lilith-base-url, because `[openai_endpoint] base_url` has no `env:` form.)
@@ -247,6 +251,8 @@ class Rendered:
     warnings: list = field(default_factory=list)
     lilith: object = None  # fa.LilithSettings when she is configured
     database: object = None  # fa.DatabaseSettings (ADR 120 layout switch)
+    teacher: object = None  # fa.DojoTeacherSettings when the dojo teacher is configured
+    acp_akhs: tuple = ()  # every akh an ACP principal may name (akhs + the dojo teacher)
 
 
 def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=False):
@@ -298,6 +304,13 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
         else:
             auto_start.append(fa.LILITH)
     akhs = tuple(specs)
+    # Lilith C4 (ADR 116): the sealed dojo teacher, only once config/dojo-teacher.json
+    # exists. It is an ACP-only exam instrument: no T3 role, no core /v1 scope,
+    # no events, no reactor seeds.
+    teacher = fa.dojo_teacher_settings(root)
+    acp_akhs = akhs + ((fa.DOJO_TEACHER,) if teacher is not None else ())
+    if teacher is not None:
+        auto_start.append(fa.DOJO_TEACHER)
 
     # ADR 120: config/per-akh-databases.json switches the core onto the
     # per-akh layout (host.sqlite3 + akh.<name>.sqlite3), gated on the split
@@ -313,7 +326,7 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
     retired_servers = (fa.LAYA_SERVER,) if live else ()
 
     toml = {}
-    host = fa.render_host_config(database.url, fa.acp_principals(session, root, akhs), acp_port,
+    host = fa.render_host_config(database.url, fa.acp_principals(session, root, acp_akhs), acp_port,
                                  auto_start, database_layout=database.layout)
     host_comments = dict(fa.HOST_COMMENTS)
     if database.layout is not None:
@@ -324,6 +337,14 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
         host, host_comments,
         header="Rendered by deploy/roman-mini/configure_core.py (Phase 53f, ADR 113).\n"
                f"akhomed-main-{provenance.short} = {provenance.commit}")
+
+    if teacher is not None:
+        path = root / f"core-config/akh-medu/workspaces/{fa.DOJO_TEACHER}.toml"
+        existing = tomllib.loads(path.read_text()) if path.exists() else None
+        toml[path] = fa.dump_toml(fa.render_dojo_teacher_workspace(existing, teacher), fa.DOJO_TEACHER_COMMENTS,
+                                  header=f"{fa.DOJO_TEACHER}: sealed Lilith C4 dojo teacher (ADR 116; "
+                                         "tool_surface = session-only, an exam instrument, not a working akh). "
+                                         "Rendered by configure_core.py.")
 
     seeds = {}
     for role, spec in specs.items():
@@ -368,7 +389,7 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
         seeds[role] = fa.reactor_seeds(staged, session, role, source=source, retired=retired_routes)
     return Rendered(toml=toml, seeds=seeds, staged=staged, core=fa.render_core_config(core, root, akhs),
                     akhs=akhs, specs=specs, auto_start=auto_start, warnings=warnings, lilith=lilith,
-                    database=database)
+                    database=database, teacher=teacher, acp_akhs=acp_akhs)
 
 
 def plan(root, provenance, source=None, acp_port=fa.ACP_TCP_PORT, live=False):
@@ -486,7 +507,10 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
     if fa.LILITH in rendered.specs:
         # T3 chat with Lilith: her scoped client key, created once, never overwritten.
         _ensure_key(root / fa.LILITH_T3_KEY_FILE)
-    keys = [Path(p["token_file"]) for p in fa.acp_principals(session, root, rendered.akhs)]
+    if rendered.teacher is not None:
+        # The dojo runner's scoped key (Lilith C4), created once, never overwritten.
+        _ensure_key(root / fa.DOJO_TEACHER_KEY_FILE)
+    keys = [Path(p["token_file"]) for p in fa.acp_principals(session, root, rendered.acp_akhs or rendered.akhs)]
     missing = [str(k) for k in keys if not k.exists()]
     if missing:
         raise fa.RenderError("ACP client key files are missing: " + ", ".join(missing))

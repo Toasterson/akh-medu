@@ -1167,6 +1167,107 @@ def lilith_settings(root: Path) -> LilithSettings | None:
                           serve_checkout=serve_checkout)
 
 
+# ── Lilith C4 dojo teacher (ADR 116, ADR 110) ─────────────────────────────────
+# docs/ai/plans/2026-09-29-lilith-c4-teacher-via-akh.md, Anima WI 01a0e270-475e.
+# An exam instrument, not a working akh: `tool_surface = "session-only"` seals
+# its registry (akhomed keeps no tool of its own for it), so the only tools a
+# turn has are the per-episode replay servers the dojo runner pushes over ACP.
+# Rendered only once the operator writes config/dojo-teacher.json.
+
+DOJO_TEACHER = "dojo-teacher"
+DOJO_TEACHER_CONFIG_FILE = "config/dojo-teacher.json"
+DOJO_TEACHER_CONFIG_KEYS = {"model", "reasoning_effort"}
+DOJO_TEACHER_PRINCIPAL = "dojo-teacher"
+DOJO_TEACHER_KEY_FILE = "secrets/dojo-teacher.key"
+REASONING_EFFORTS = ("low", "medium", "high", "max")
+_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+# Engine sizing keys akhomed may have written into an existing workspace TOML;
+# everything else is rendered from scratch (a stale `related_workspaces`,
+# `shared_partitions` or `[[mcp.servers]]` must not survive a re-render).
+DOJO_TEACHER_ENGINE_KEYS = ("dimension", "encoding", "language", "max_memory_mb", "max_symbols",
+                            "max_triples", "enabled")
+DOJO_TEACHER_PROMPT = """\
+You are the teacher in the Lilith dojo, answering recorded episodes of the operator's fleet.
+Each session's first message holds your complete instructions for that session: a system prompt
+and a task. Follow them exactly. The only tools you have are the ones listed for the session;
+they answer from the recording. Nothing you do here reaches production.
+"""
+
+
+@dataclass(frozen=True)
+class DojoTeacherSettings:
+    """The operator's render inputs for the dojo teacher (`config/dojo-teacher.json`)."""
+    model: str = MODEL
+    reasoning_effort: str | None = None
+
+    def inference(self) -> Inference:
+        # The Romans' Ollama Cloud subscription (ROMAN_OLLAMA_KEY): no direct
+        # model-API key of its own (operator decision 2026-09-29).
+        return Inference("ollama", self.model, "ollama_endpoint", OLLAMA_CLOUD)
+
+
+def dojo_teacher_settings(root: Path) -> DojoTeacherSettings | None:
+    """The dojo teacher's render inputs, or None when it is not configured.
+
+    `config/dojo-teacher.json` (written by the operator; non-secret) holds:
+    - `model` (optional, default the Romans' `glm-5.3`): the Ollama Cloud model
+      that backs the teacher, reached with the Romans' ROMAN_OLLAMA_KEY;
+    - `reasoning_effort` (optional): one of low, medium, high, max.
+
+    Absent file: None, nothing about the teacher is rendered. A malformed file
+    fails the whole render closed before any file is written.
+    """
+    path = root / DOJO_TEACHER_CONFIG_FILE
+    if not path.exists():
+        return None
+    try:
+        settings = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise RenderError(f"{path} is not valid JSON ({error}); fix or remove it") from error
+    if not isinstance(settings, dict):
+        raise RenderError(f"{path} must be a JSON object")
+    unknown = sorted(set(settings) - DOJO_TEACHER_CONFIG_KEYS)
+    if unknown:
+        raise RenderError(f"{path} has unknown keys {unknown}; allowed: {sorted(DOJO_TEACHER_CONFIG_KEYS)}")
+    model = settings.get("model", MODEL)
+    if not isinstance(model, str) or not _MODEL_NAME.match(model):
+        raise RenderError(f"{path}: `model` must be an Ollama Cloud model name such as {MODEL!r}")
+    effort = settings.get("reasoning_effort")
+    if effort is not None and effort not in REASONING_EFFORTS:
+        raise RenderError(f"{path}: `reasoning_effort` must be one of {list(REASONING_EFFORTS)}")
+    return DojoTeacherSettings(model=model, reasoning_effort=effort)
+
+
+def render_dojo_teacher_workspace(existing: dict | None, settings: DojoTeacherSettings) -> dict:
+    """The sealed teacher workspace. Rendered from scratch except for engine
+    sizing keys; akhomed refuses the load if any channel beyond the session
+    is configured (`AkhConfig::validate_tool_surface`)."""
+    doc = {key: existing[key] for key in DOJO_TEACHER_ENGINE_KEYS if existing and key in existing}
+    inference = settings.inference()
+    doc.update(name=DOJO_TEACHER, model=inference.model)
+    if settings.reasoning_effort is not None:
+        doc["reasoning_effort"] = settings.reasoning_effort
+    doc.update(system_prompt=DOJO_TEACHER_PROMPT, backend=inference.backend,
+               # Keep nothing between episodes, and pre-load nothing: the dojo
+               # prompt is the whole context (the passthrough A/B control).
+               capture_transcripts=False, context_strategy="passthrough",
+               tool_surface="session-only")
+    doc[inference.endpoint_table] = dict(inference.endpoint)
+    doc["autonomy"] = {"enabled": False, "tasks": {}}
+    doc["exec"] = {"kind": "none"}
+    # A turn without its replay servers fails instead of running tool-less.
+    doc["mcp"] = {"require_pushed_mcp": True, "servers": []}
+    return doc
+
+
+DOJO_TEACHER_COMMENTS = {
+    "exec": "No executor: the teacher runs nothing on this host.",
+    "autonomy": "No background work: the teacher only answers dojo episodes, one ACP session each.",
+    "mcp": "No servers of its own. The dojo runner pushes each episode's replay servers (anima, git)\n"
+           "over ACP `session/new`; a turn whose servers do not come up fails (require_pushed_mcp).",
+}
+
+
 def lilith_missing_inputs(root: Path) -> list[str]:
     """What must exist before Lilith may auto-start: her secret files (never
     read here) and her ancestry clone. Empty list: ready."""
@@ -1419,6 +1520,9 @@ HOST_COMMENTS = {
 def acp_principals(session: dict, root: Path, akhs: tuple[str, ...] = ROLES) -> list[dict]:
     """T3 client keys scoped to their own akh, plus the operator (per phase53/fixups).
 
+    With the dojo teacher hosted (`config/dojo-teacher.json`), its runner key
+    `dojo-teacher` (token `secrets/dojo-teacher.key`) reaches that akh alone.
+
     The operator reaches every akh this core hosts (`akhs`). Lilith is not on
     akhsessd, so her `t3-lilith` principal (token `secrets/t3-lilith.key`,
     scoped to her alone) is added here whenever she is hosted, unless the
@@ -1428,6 +1532,10 @@ def acp_principals(session: dict, root: Path, akhs: tuple[str, ...] = ROLES) -> 
     if LILITH in akhs and not any(p["id"] == LILITH_T3_PRINCIPAL for p in principals):
         principals.append(Inline(id=LILITH_T3_PRINCIPAL, token_file=str(root / LILITH_T3_KEY_FILE),
                                  akhs=[LILITH]))
+    if DOJO_TEACHER in akhs:
+        # The dojo runner's key (Lilith C4): the teacher akh only, no control plane.
+        principals.append(Inline(id=DOJO_TEACHER_PRINCIPAL, token_file=str(root / DOJO_TEACHER_KEY_FILE),
+                                 akhs=[DOJO_TEACHER]))
     principals.append(Inline(id="operator", token_file=str(root / "secrets/operator.key"),
                              akhs=list(akhs), control=True))
     return principals

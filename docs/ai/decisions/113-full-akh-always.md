@@ -114,3 +114,4 @@ the split as if cognition were one more thing to contain.
   attributable and scoped.
 - Two deployment topologies share one binary: Mac (SQLite) and cluster (akh-pg).
 - Every deployed artifact is built from `origin/main`, per the repository rule.
+- Exception, exam instruments only (2026-09-29, Lilith C4, ADR 116): `tool_surface = "session-only"` seals the `dojo-teacher` akh's tool registry to the MCP servers its ACP client pushes per session, so it can answer recorded dojo episodes without reaching live state; working akhs stay fully featured — see [the design note](../plans/2026-09-29-lilith-c4-teacher-via-akh.md).

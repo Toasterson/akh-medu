@@ -7,7 +7,11 @@
 > acceptance. Preserves ADR 113 full-Akh ownership and ADR 114 structural live /
 > learned shadow decisions. This is a planned capability, not a runtime release.
 
-> Last updated: 2026-09-30 (**Lilith C2 transcript read surface** — read-only
+> Last updated: 2026-09-30 (**Sealed tool surface** — per-akh
+> `tool_surface = "session-only"` seals the tool registry to client-pushed
+> ACP MCP servers, for the Lilith C4 dojo teacher; see "Permission layer"
+> below and [the plan](plans/2026-09-29-lilith-c4-teacher-via-akh.md)).
+> Previously 2026-09-30 (**Lilith C2 transcript read surface** — read-only
 > ACP `_akh/transcripts/list` over the ADR 091 `kind="turn"` WAL rows (watermark
 > paging; engine-only, per-akh authorised) and receipts in the turn's tool trace,
 > for the operator-side session harvester `scripts/lilith/c2/`; see
@@ -467,6 +471,21 @@ control commands), discovered via the PID record's ACP socket/TCP endpoints.
   can lift it. Agent-side repair (`grug_data::repair_call_preserving`) keeps
   `cos_declaration` intact. The typed `lilith/cos-*@1` contracts have JSON
   Schema twins in `skills/chief-of-staff/schemas/`.
+- **Sealed tool surface** (`tool_surface = "session-only"` in `akh.toml`,
+  `ToolSurface` in `src/akh_config.rs`; Lilith C4, ADR 116, Anima WI
+  `01a0e270-475e`, [plan](plans/2026-09-29-lilith-c4-teacher-via-akh.md)).
+  After akhomed has registered every tool of a workspace, it calls
+  `ToolRegistry::seal_to_session_tools` for such an akh. That removes every
+  tool of its own and refuses every later `register`, so a turn advertises
+  and calls only the thread-scoped proxies of the MCP servers its ACP client
+  pushed at `session/new`. `AkhConfig::validate_tool_surface` refuses the
+  load when the config opens another channel: `[[mcp.servers]]`, `[board]`,
+  `[monitoring]`, `[delegation]`, `[chief_of_staff]`, `[agent_runtime]`, a
+  coding-agent backing, an `[exec]` other than `none`, federated or shared
+  memory, `virtual` context, transcript capture or autonomy. It is an exam
+  instrument, the dojo teacher that answers recorded episodes through
+  per-episode replay servers, and an explicit exception to ADR 113's "every
+  akh runs fully featured"; working akhs keep the default `full`.
 
 ## Core Service, Autonomy and Delegation (Phase 53, ADR 113)
 

@@ -4133,6 +4133,20 @@ impl ServerState {
             }
         }
 
+        // Lilith C4 dojo teacher (ADR 116, docs/ai/plans/2026-09-29-lilith-c4-
+        // teacher-via-akh.md): a `tool_surface = "session-only"` akh keeps no
+        // tool of its own. Sealed last, after every registration above, and
+        // one-way: the registry refuses later registrations too, so its turns
+        // can only use the MCP servers the ACP client pushed for the session.
+        if akh_config.tool_surface == akh_medu::akh_config::ToolSurface::SessionOnly {
+            let removed = agent.seal_tools_to_session();
+            tracing::info!(
+                workspace = %name,
+                removed = removed.len(),
+                "tool registry sealed to session-pushed MCP servers (tool_surface = session-only)"
+            );
+        }
+
         // ADR 091: per-akh transcript-capture opt-out (default on). The
         // `AKH_TRANSCRIPT_CAPTURE` env override is applied at the emit site
         // (`agentic_chat::Agent::transcript_capture_enabled`), not here — this
