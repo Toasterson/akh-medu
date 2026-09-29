@@ -339,6 +339,18 @@ class RenderTests(unittest.TestCase):
             "name": "grafana", "url": "http://127.0.0.1:18441/mcp",
             "tools": ["list_datasources", "query_prometheus"]})
 
+    def test_vesta_ops_drops_grafana_passthroughs_served_by_the_direct_server(self):
+        # Legacy sessions.json grants still list grafana__<tool> on vesta-ops (53g PR 3 moved
+        # them to the direct `grafana` server); the broker no longer advertises them.
+        session = json.loads((self.root / "config/sessions.json").read_text())
+        session["akhs"]["vesta"]["tools"] += [mcp_tool("grafana__query_prometheus", "vesta-ops", "grafana__query_prometheus"),
+                                              mcp_tool("grafana__list_datasources", "vesta-ops", "grafana__list_datasources")]
+        (self.root / "config/sessions.json").write_text(json.dumps(session))
+        configure_core.render(self.root, self.prov, self.binary, "0" * 64, source=SOURCE)
+        servers = {s["name"]: s for s in self.toml("core-config/akh-medu/workspaces/vesta.toml")["mcp"]["servers"]}
+        self.assertFalse([t for t in servers["vesta-ops"]["tools"] if t.startswith("grafana__")])
+        self.assertEqual(servers["grafana"]["tools"], ["list_datasources", "query_prometheus"])
+
     def test_missing_grafana_catalog_fails_rendering_closed(self):
         (self.root / "config/vesta-grafana-tools.json").unlink()
         with self.assertRaisesRegex(fa.RenderError, "vesta-grafana-tools.json"):
