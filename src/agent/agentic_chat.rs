@@ -1160,6 +1160,8 @@ impl Agent {
                 }
             };
 
+            emit_turn_reasoning(sink, &turn);
+
             // Echo the assistant turn (content + tool calls) back into the
             // conversation so the model sees its own prior step.
             let tool_calls_json: Vec<Value> = turn
@@ -1801,6 +1803,8 @@ impl Agent {
             }
         };
 
+        emit_turn_reasoning(sink, &turn);
+
         let answer = turn.content.trim();
         if answer.is_empty() {
             sink.emit(&AkhMessage::system(format!(
@@ -1882,6 +1886,25 @@ impl Agent {
             "tools": tools,
         });
         engine.record_turn(payload);
+    }
+}
+
+/// Surface a turn's separately-returned chain-of-thought as a thinking step.
+///
+/// Streaming turns deliver thinking live as `StreamEvent::Thinking` and leave
+/// [`AssistantTurn::reasoning`] empty, so this only fires for non-streaming
+/// turns (the streaming-failure fallback, or a backend without native
+/// streaming). It emits the same `AkhMessage::Reasoning` the streaming
+/// handler does, before any answer text, and it is a trace-only channel: the
+/// text is never merged into the visible answer and never echoed back into
+/// the conversation the model sees.
+fn emit_turn_reasoning(sink: &dyn MessageSink, turn: &crate::agent::ollama::AssistantTurn) {
+    let reasoning = turn.reasoning.trim();
+    if !reasoning.is_empty() {
+        sink.emit(&AkhMessage::Reasoning {
+            step: reasoning.to_string(),
+            expression: None,
+        });
     }
 }
 
@@ -4910,5 +4933,119 @@ mod tests {
             .filter_map(|tool| tool["function"]["name"].as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, ["edit", "compile_feedback", "memory_write"]);
+    }
+
+    #[test]
+    fn empty_or_blank_reasoning_emits_nothing() {
+        let sink = crate::message::VecSink::new();
+        let mut turn = crate::agent::ollama::AssistantTurn::default();
+        emit_turn_reasoning(&sink, &turn);
+        turn.reasoning = "  \n".into();
+        emit_turn_reasoning(&sink, &turn);
+        assert!(sink.messages().is_empty());
+    }
+
+    /// Streaming always fails; the non-streaming retry returns the answer
+    /// with separated `reasoning`.
+    struct ReasoningFallbackBackend {
+        conversations: std::sync::Mutex<Vec<Vec<Value>>>,
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for ReasoningFallbackBackend {
+        fn label(&self) -> &str {
+            "reasoning-fallback"
+        }
+
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            conversation: &[Value],
+            _tools: &[Value],
+            _request_seq: usize,
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            self.conversations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(conversation.to_vec());
+            Ok(crate::agent::ollama::AssistantTurn {
+                content: "The answer is 4.".into(),
+                reasoning: "Two plus two is four.".into(),
+                ..Default::default()
+            })
+        }
+
+        fn chat_with_tools_streaming(
+            &self,
+            _agent_id: &str,
+            _conversation: &[Value],
+            _tools: &[Value],
+            _request_seq: usize,
+            _on_event: &mut dyn FnMut(crate::agent::ollama::StreamEvent),
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            Err(crate::agent::chat_backend::ChatBackendError::TurnFailed {
+                backend: "reasoning-fallback".into(),
+                reason: "stream broke".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn non_streaming_fallback_surfaces_reasoning_as_a_thinking_step_not_content() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        let backend = std::sync::Arc::new(ReasoningFallbackBackend {
+            conversations: std::sync::Mutex::new(Vec::new()),
+        });
+        agent.set_chat_backend(backend.clone());
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            agent.run_agentic_turn_with_conversation_state(
+                &engine,
+                "thoth",
+                "what is 2+2?",
+                &sink,
+                &cancel,
+                false,
+                &agent.conversation_state,
+            ),
+            Some(AgenticTurnOutcome::Completed)
+        );
+
+        let messages = sink.messages();
+        let reasoning_at = messages
+            .iter()
+            .position(|m| matches!(m, AkhMessage::Reasoning { step, .. } if step == "Two plus two is four."))
+            .expect("the separated reasoning becomes a thinking step");
+        let narrative_at = messages
+            .iter()
+            .position(
+                |m| matches!(m, AkhMessage::Narrative { text, .. } if text == "The answer is 4."),
+            )
+            .expect("the answer is emitted as narrative");
+        assert!(reasoning_at < narrative_at, "thinking precedes the answer");
+        // The reasoning is never merged into any visible narrative...
+        assert!(!messages.iter().any(|m| matches!(
+            m,
+            AkhMessage::Narrative { text, .. } if text.contains("Two plus two")
+        )));
+        // ...and is not replayed to the model as part of the conversation.
+        let seen = backend
+            .conversations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !serde_json::to_string(&*seen)
+                .unwrap()
+                .contains("Two plus two"),
+            "reasoning must stay out of the conversation the model sees"
+        );
     }
 }

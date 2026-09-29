@@ -207,12 +207,12 @@ to route that channel except into the answer's `content`, so the raw `<|channel>
   a stated request that can't be honored is a misconfiguration worth failing loudly on.
 - **Record.** The parser (or `null` when disabled), how it was chosen, the registry source and the
   available names are recorded under `session.json` → `reasoning`.
-- **akhomed side.** The `openai` backend already routes a streamed `delta.reasoning_content` to
-  the reasoning/thinking channel (`src/agent/openai_backend.rs`, `chat_stream`); the non-streaming
-  path does not currently read `message.reasoning_content` from `choices[0].message`, so a
-  non-streaming turn on a pod with the reasoning parser enabled still gets clean `content` (the
-  parser strips the channel out of `content` either way) but drops the separated reasoning text
-  rather than surfacing it as a thinking step.
+- **akhomed side.** The `openai` backend routes a streamed `delta.reasoning_content` (or
+  `reasoning`) to the reasoning/thinking channel (`src/agent/openai_backend.rs`, `chat_stream`).
+  The non-streaming path reads `message.reasoning_content` / `message.reasoning` into
+  `AssistantTurn::reasoning`; the agentic loop emits it as a thinking step (`AkhMessage::Reasoning`)
+  ahead of the answer, never merged into the visible content and never replayed to the model
+  (Anima WI 01a0e270-314e).
 
 ## KV cache dtype
 

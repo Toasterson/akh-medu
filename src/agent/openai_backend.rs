@@ -417,17 +417,14 @@ fn merge_adjacent_same_role(messages: Vec<Value>) -> Vec<Value> {
 /// to an empty object rather than dropping the call — the tool's own validation
 /// then produces a far better diagnostic than a silently vanished call would.
 ///
-/// Only `message.content` becomes the returned content — `message.reasoning_content`
-/// (present when the server runs with `--reasoning-parser`, e.g. Lilith's
-/// pod, see `docs/ops/lilith-serve.md` "Reasoning parser") is read on the
-/// streaming path (`chat_stream`, which surfaces it as [`StreamEvent::Thinking`])
-/// but not here: [`AssistantTurn`] carries no separate reasoning field for the
-/// non-streaming turn to populate. This is not a leak — a configured reasoning
-/// parser keeps `content` itself clean of the `<|channel>thought…<channel|>`
-/// markers regardless — it just means a non-streaming turn's separated
-/// reasoning text is dropped rather than surfaced as a thinking step, unlike
-/// its streaming counterpart.
-fn parse_message(msg: &Value) -> (String, Vec<ToolCall>) {
+/// Only `message.content` becomes [`ParsedMessage::content`]. The separated
+/// reasoning text a server emits when run with `--reasoning-parser` (e.g.
+/// Lilith's pod, see `docs/ops/lilith-serve.md` "Reasoning parser"), under
+/// `message.reasoning_content` or `message.reasoning`, lands in
+/// [`ParsedMessage::reasoning`] and is never merged into the content: the
+/// caller surfaces it as a thinking step, like the streaming path does with
+/// [`StreamEvent::Thinking`].
+fn parse_message(msg: &Value) -> ParsedMessage {
     let content = msg
         .get("content")
         .and_then(Value::as_str)
@@ -456,7 +453,32 @@ fn parse_message(msg: &Value) -> (String, Vec<ToolCall>) {
         })
         .unwrap_or_default();
 
-    (content, tool_calls)
+    ParsedMessage {
+        content,
+        reasoning: reasoning_text(msg).unwrap_or_default().to_string(),
+        tool_calls,
+    }
+}
+
+/// A non-streaming `choices[0].message`, split into its channels.
+#[derive(Debug, Default)]
+struct ParsedMessage {
+    /// `message.content`: the user-facing answer text.
+    content: String,
+    /// `message.reasoning_content` / `message.reasoning`; empty when absent.
+    reasoning: String,
+    tool_calls: Vec<ToolCall>,
+}
+
+/// The separated reasoning text of a message or streaming delta.
+///
+/// vLLM's reasoning parsers use `reasoning_content` (older releases) or
+/// `reasoning` (newer ones); the first non-empty one wins.
+fn reasoning_text(node: &Value) -> Option<&str> {
+    ["reasoning_content", "reasoning"]
+        .into_iter()
+        .filter_map(|key| node.get(key).and_then(Value::as_str))
+        .find(|text| !text.is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -583,12 +605,19 @@ impl OpenAiClient {
                 }
             })?;
 
-        let (content, tool_calls) = parse_message(msg);
+        let ParsedMessage {
+            content,
+            reasoning,
+            tool_calls,
+        } = parse_message(msg);
         let (prompt_tokens, completion_tokens) = usage_of(&parsed);
 
         metrics.note_chunk(content.len());
         if !content.is_empty() {
             metrics.note_content_delta();
+        }
+        if !reasoning.is_empty() {
+            metrics.note_thinking_delta();
         }
         if !tool_calls.is_empty() {
             metrics.note_tool_call_chunk();
@@ -604,6 +633,7 @@ impl OpenAiClient {
             tool_calls,
             prompt_tokens,
             completion_tokens,
+            reasoning,
         })
     }
 
@@ -707,12 +737,10 @@ impl OpenAiClient {
                     visible = true;
                 }
             }
-            if let Some(text) = delta.get("reasoning_content").and_then(Value::as_str) {
-                if !text.is_empty() {
-                    metrics.note_thinking_delta();
-                    on_event(StreamEvent::Thinking(text.to_string()));
-                    visible = true;
-                }
+            if let Some(text) = reasoning_text(delta) {
+                metrics.note_thinking_delta();
+                on_event(StreamEvent::Thinking(text.to_string()));
+                visible = true;
             }
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
                 for tc in calls {
@@ -760,6 +788,8 @@ impl OpenAiClient {
             tool_calls,
             prompt_tokens,
             completion_tokens,
+            // Streaming thinking already went out as `StreamEvent::Thinking`.
+            reasoning: String::new(),
         })
     }
 
@@ -1536,7 +1566,11 @@ mod tests {
                 "function": {"name": "grep", "arguments": "{\"pattern\":\"fn main\"}"},
             }],
         });
-        let (content, calls) = parse_message(&msg);
+        let ParsedMessage {
+            content,
+            tool_calls: calls,
+            ..
+        } = parse_message(&msg);
         assert!(content.is_empty());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "grep");
@@ -1548,7 +1582,7 @@ mod tests {
         let msg = json!({
             "tool_calls": [{"function": {"name": "grep", "arguments": "{oops"}}],
         });
-        let (_c, calls) = parse_message(&msg);
+        let calls = parse_message(&msg).tool_calls;
         assert_eq!(
             calls.len(),
             1,
@@ -1559,19 +1593,59 @@ mod tests {
 
     /// A non-streaming response from a server with `--reasoning-parser`
     /// enabled (Lilith's pod, Anima WI 01a0e270-314e) carries the separated
-    /// reasoning text in a sibling `reasoning_content` field. It must never
-    /// leak into, or be concatenated with, the returned content — even
-    /// though `AssistantTurn` currently has nowhere else to put it (unlike
-    /// the streaming path's `StreamEvent::Thinking`).
+    /// reasoning text in a sibling `reasoning_content` field. It is returned
+    /// in its own channel and never leaks into, or is concatenated with, the
+    /// content.
     #[test]
-    fn non_streaming_reasoning_content_never_contaminates_content() {
+    fn non_streaming_reasoning_content_is_separate_from_content() {
         let msg = json!({
             "content": "The answer is 4.",
             "reasoning_content": "The user asked 2+2, so I should compute 2+2=4.",
         });
-        let (content, calls) = parse_message(&msg);
-        assert_eq!(content, "The answer is 4.");
-        assert!(calls.is_empty());
+        let parsed = parse_message(&msg);
+        assert_eq!(parsed.content, "The answer is 4.");
+        assert_eq!(
+            parsed.reasoning,
+            "The user asked 2+2, so I should compute 2+2=4."
+        );
+        assert!(parsed.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn non_streaming_reasoning_alias_is_accepted() {
+        let msg = json!({"content": "4", "reasoning": "add them"});
+        let parsed = parse_message(&msg);
+        assert_eq!(parsed.content, "4");
+        assert_eq!(parsed.reasoning, "add them");
+    }
+
+    #[test]
+    fn reasoning_content_wins_over_alias_and_null_or_empty_is_absent() {
+        let both = json!({"reasoning_content": "a", "reasoning": "b"});
+        assert_eq!(reasoning_text(&both), Some("a"));
+        let empty_first = json!({"reasoning_content": "", "reasoning": "b"});
+        assert_eq!(reasoning_text(&empty_first), Some("b"));
+        let null = json!({"content": "x", "reasoning_content": null});
+        assert_eq!(reasoning_text(&null), None);
+        assert!(parse_message(&null).reasoning.is_empty());
+        assert!(parse_message(&json!({"content": "x"})).reasoning.is_empty());
+    }
+
+    #[test]
+    fn reasoning_travels_with_tool_calls_without_touching_them() {
+        let msg = json!({
+            "content": "",
+            "reasoning_content": "need to grep",
+            "tool_calls": [{
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "grep", "arguments": "{}"},
+            }],
+        });
+        let parsed = parse_message(&msg);
+        assert!(parsed.content.is_empty());
+        assert_eq!(parsed.reasoning, "need to grep");
+        assert_eq!(parsed.tool_calls.len(), 1);
     }
 
     #[test]

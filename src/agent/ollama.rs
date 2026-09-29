@@ -326,6 +326,14 @@ pub struct AssistantTurn {
     pub prompt_tokens: u64,
     /// Completion (output) tokens billed for this turn (Ollama `eval_count`).
     pub completion_tokens: u64,
+    /// Chain-of-thought the backend returned *separately* from `content` on a
+    /// **non-streaming** response (OpenAI-compatible `reasoning_content` /
+    /// `reasoning`, as produced by vLLM `--reasoning-parser`). Empty when the
+    /// backend has none, and always empty on streaming turns, whose thinking
+    /// already went out as [`StreamEvent::Thinking`] deltas. It is a
+    /// trace-only channel: consumers surface it as a thinking step and never
+    /// merge it into `content` or replay it into the conversation.
+    pub reasoning: String,
 }
 
 /// One incremental piece of a streaming chat turn, delivered to the
@@ -751,6 +759,7 @@ impl OllamaClient {
                 .collect(),
             prompt_tokens: chat_resp.prompt_eval_count,
             completion_tokens: chat_resp.eval_count,
+            ..Default::default()
         })
     }
 
@@ -1073,6 +1082,7 @@ impl OllamaClient {
             tool_calls,
             prompt_tokens,
             completion_tokens,
+            ..Default::default()
         })
     }
 

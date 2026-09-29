@@ -1123,8 +1123,10 @@ migrate_on_start = true
         );
 
         // Custom value sits above the tables and round-trips.
-        let mut config = AkhomedConfig::default();
-        config.redb_quarantine_keep = crate::redb_quarantine::QuarantineKeep::new(5).unwrap();
+        let config = AkhomedConfig {
+            redb_quarantine_keep: crate::redb_quarantine::QuarantineKeep::new(5).unwrap(),
+            ..Default::default()
+        };
         config.save(&path).unwrap();
         assert_eq!(
             AkhomedConfig::load(&path)
