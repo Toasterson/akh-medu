@@ -11,6 +11,9 @@ CPU-only, stdlib-only harness over `lilith/cos-snapshot@1` roots written by
 - `reward`         the `cos-v1` reduction and sibling-contrast pairs
 - `splits`         time-window / Anima-Plan splits + P6.3-compatible decontamination
 - `floors`         the frozen `exam-floors-v1.json`
+- `runner`         model-driven `EpisodeRunner`: prompt, broker, answer parsing
+- `model_adapters` OpenAI-compatible and Anthropic chat adapters (same tools, same messages)
+- `baseline`       batch/resume driver, baseline summary, paired `compare`
 - `dojo_report`    how many episodes the snapshots recorded so far support
 
 Modules import each other as the top-level package `dojo`; entry points put
