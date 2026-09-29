@@ -67,3 +67,44 @@ class SplitLeakError(DojoError):
         "a split assignment would let sealed-period evidence reach train/dev; shorten the label "
         "horizon, or move the episode to the sealed split"
     )
+
+
+class ModelError(DojoError):
+    """The model endpoint failed (transport, HTTP status, or an unreadable reply).
+
+    The runner turns this into a failed episode with the reason recorded; it never
+    aborts the batch."""
+
+    code = "lilith::dojo::model"
+    help = (
+        "check the endpoint host, the key source and the model id; a 5xx or 429 is retried a few "
+        "times already, so re-run the same command to retry only the failed episodes (resume keeps "
+        "the completed ones)"
+    )
+
+
+class SecretSourceError(DojoError):
+    code = "lilith::dojo::secret_source"
+    help = (
+        "name an environment variable with --key-env, or a file with --key-file (mode 0600: "
+        "`chmod 600 <file>`); the key itself is never accepted on the command line"
+    )
+
+
+class BrokerError(DojoError):
+    code = "lilith::dojo::broker"
+    help = "the replay servers do not share one receipt log; build them with `replay_server.episode_servers`"
+
+
+class RunProvenanceError(DojoError):
+    code = "lilith::dojo::run_provenance"
+    help = (
+        "commit or stash the tracked changes so the run names a real commit, or pass --allow-dirty "
+        "for a throwaway trial run (the summary then records `git_dirty: true`); resuming needs the "
+        "same model, prompt, snapshots and seed, otherwise use a fresh --out directory"
+    )
+
+
+class CompareError(DojoError):
+    code = "lilith::dojo::compare"
+    help = "compare needs `baseline-summary.json` files written by `runner.py run`; check the paths"
