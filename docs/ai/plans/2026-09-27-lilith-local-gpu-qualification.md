@@ -21,6 +21,12 @@ to the local GPUs**: the RX 7900 XTX on hephaistos now, and the RTX 3090 once it
 | Runpod `akh-medu-lilith-serve` (H100) | Test sessions: Stage 0 checks, candidate smoke after training, exam live tier | ≤ 2 h per session; idle stop after 20 min; ≤ 6 GPU-hours per week and ≤ 25% of the remaining credit per month. Training has priority on credit |
 | Local 7900 XTX (hephaistos, Vulkan GGUF, proven at 23–26 tok/s) or 3090 | Everyday Chief-of-Staff serving and the C8 canary, once qualified (§4) | Local power only |
 
+> **2026-09-29 ([ADR 121](../decisions/121-lilith-serving-on-hephaistos-llama-cpp.md)):** the operator moved
+> everyday serving to hephaistos now, ahead of §4 qualification, for the frozen parent only: llama.cpp
+> `llama-server` (HIP, gfx1100), Q8_0 GGUF, 2 slots x 65536 tokens; Runpod is for training and test
+> sessions. Runbook: [lilith-serve-hephaistos.md](../../ops/lilith-serve-hephaistos.md). Serving a
+> trained adapter still waits for the §4a LoRA-to-GGUF export and adapter-as-served parity check.
+
 ## 2. Memory arithmetic (Gemma 4 12B, from the pinned parent's config)
 
 The architecture:

@@ -463,6 +463,15 @@ control commands), discovered via the PID record's ACP socket/TCP endpoints.
   `cos_declaration` intact. The typed `lilith/cos-*@1` contracts have JSON
   Schema twins in `skills/chief-of-staff/schemas/`.
 
+  **Model serving** ([ADR 121](decisions/121-lilith-serving-on-hephaistos-llama-cpp.md),
+  2026-09-29): her `openai` backend points at llama.cpp `llama-server` on hephaistos
+  (Q8_0 GGUF of the pinned parent, `http://192.168.1.114:8080/v1`, LAN-only bearer key);
+  Runpod is training and test only. `config/lilith.json` `serving` (rendered as
+  `lilith_serving` in `config/t3-acp.json`) selects hephaistos (T3 only health-checks)
+  or runpod (T3 starts the pod). A plain-`http://` base URL is accepted only with
+  `allow_insecure_lan_http` and only for a literal private IP. Scripts:
+  `scripts/lilith/hephaistos/`; runbook `docs/ops/lilith-serve-hephaistos.md`.
+
 ## Core Service, Autonomy and Delegation (Phase 53, ADR 113)
 
 Phase 53 ([ADR 113](decisions/113-full-akh-always.md), plan

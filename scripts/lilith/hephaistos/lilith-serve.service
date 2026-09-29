@@ -1,0 +1,38 @@
+# Lilith's model server on hephaistos (ADR 121). Installed by scripts/lilith/hephaistos/install_service.sh.
+# The API key is not here and not in the environment: llama-server reads /etc/lilith-serve/api-key
+# (0600, owned by the service user) through --api-key-file, so it is on no command line.
+[Unit]
+Description=Lilith model server (llama.cpp llama-server, pinned Gemma 4 12B parent, Q8_0)
+Documentation=https://code.aopc.cloud/toasterson/akh-medu/src/branch/main/docs/ops/lilith-serve-hephaistos.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=900
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=lilith-serve
+Group=lilith-serve
+SupplementaryGroups=render video
+EnvironmentFile=/etc/lilith-serve/server.env
+ExecStart=/opt/lilith-serve/bin/run_server.sh
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=900
+TimeoutStopSec=60
+KillSignal=SIGINT
+# Hardening that is safe for a ROCm process. No PrivateDevices (needs /dev/kfd and /dev/dri) and no
+# MemoryDenyWriteExecute (the HIP runtime maps code pages writable and executable).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/lilith-serve/cache
+ProtectControlGroups=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

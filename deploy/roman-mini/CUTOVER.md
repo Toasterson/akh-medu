@@ -539,8 +539,12 @@ The `memory_hygiene` daemon task can be switched off per akh with
 ## 12. Add Lilith (Lilith C2, ADR 116)
 
 Lilith is the operator's Chief of Staff. She runs as a fourth workspace in this
-core (supervisor placement decision, 2026-09-28). Her model is the Runpod vLLM
-endpoint (`--served-model-name lilith`), reached over its HTTPS proxy URL.
+core (supervisor placement decision, 2026-09-28). Since 2026-09-29 her model is
+llama.cpp's `llama-server` on hephaistos (alias `lilith`), reached over the LAN at
+`http://192.168.1.114:8080/v1` ([ADR 121](../../docs/ai/decisions/121-lilith-serving-on-hephaistos-llama-cpp.md),
+[runbook](../../docs/ops/lilith-serve-hephaistos.md): build, convert, install and verify the
+server there first). The Runpod vLLM pod (HTTPS proxy URL) remains a test and training-era
+alternative, `"serving": "runpod"`.
 `configure_core.py` renders her only once `config/lilith.json` exists. She
 auto-starts only once every input below exists. A missing input leaves her
 rendered but out of `daemon.auto_start`, with a printed warning, and the Romans
@@ -550,18 +554,21 @@ Render inputs (all under `$ROOT`, mode 0600, written from a login session):
 
 | Input | Content | Source |
 |---|---|---|
-| `config/lilith.json` | `{"budget": {"minor_units": N, "currency": "USD"}}`; optional `context_window` (default 32768), `base_url_file` and `serve_checkout` (the main checkout T3 starts her serve pod from; default `~/.local/share/akh-medu/lilith-main`) | operator decision (her spend ceiling) |
-| `secrets/lilith-base-url` | the vLLM base URL, `https://…proxy.runpod.net/v1` | 1Password item `lilith-serve-endpoint`, field `base_url` |
-| `secrets/lilith-openai-key` | the vLLM `--api-key` → env `LILITH_OPENAI_KEY` | the serve pod's key |
+| `config/lilith.json` | `{"budget": {"minor_units": N, "currency": "USD"}, "serving": "hephaistos", "allow_insecure_lan_http": true}`; optional `context_window` (default 49152), `base_url_file` and `serve_checkout` (used only with `"serving": "runpod"`: the main checkout T3 starts her serve pod from; default `~/.local/share/akh-medu/lilith-main`). `serving` is `hephaistos` (default) or `runpod`; it is rendered into `config/t3-acp.json` as `lilith_serving`. `allow_insecure_lan_http` is the explicit opt-in for a plain `http://` base URL, accepted only for a literal private-network IP (RFC 1918, loopback), never a DNS name | operator decision (her spend ceiling; ADR 121) |
+| `secrets/lilith-base-url` | the model server's base URL: `http://192.168.1.114:8080/v1` (hephaistos), or `https://…proxy.runpod.net/v1` (Runpod test pod) | written by the supervisor; for Runpod, 1Password item `lilith-serve-endpoint`, field `base_url` |
+| `secrets/lilith-openai-key` | the server's API key → env `LILITH_OPENAI_KEY` | hephaistos: `ssh … 'sudo cat /etc/lilith-serve/api-key' > secrets/lilith-openai-key` (runbook step 5); Runpod: the serve pod's key |
 | `secrets/anima-lilith-pat` | her own Anima PAT → env `LILITH_ANIMA_TOKEN` (MCP server `anima`) | minted for Lilith, never Toasty's |
 | `secrets/board-lilith.json` | `{"bearer_token": "…", "agent": {"id": "<uuid>", "handle": "lilith", "role": "agent", "created_at": "…"}}` of her own Board agent, same shape as the Romans' `secrets/board-<role>.json`. `bearer_token` → env `ROMAN_BOARD_LILITH` (MCP server `djehuty`). `agent.id` → `[board] agent_id` (`daemon.rs`: without it, board inbox ingest is disabled for the akh; she has no reactor seeds yet, so the inbox is how she hears the operator on her CoS thread). A file present without `agent.id` renders her with a warning and inbox ingest off, not blocked from auto-start; a non-UUID `agent.id` fails the whole render closed. | Board registration for `lilith`; fetch `agent.id` with `GET /v1/agents/me` using her bearer token once registered |
 | `lilith/ancestry/akh-medu.git` | her dedicated clone for `git merge-base --is-ancestor <sha> origin/main` | see below |
 
 ```sh
 umask 077
-# the 1Password item holds the proxy URL without the /v1 segment the renderer requires
-u=$(op-service-account read 'op://Homelab/lilith-serve-endpoint/base_url') && printf '%s/v1\n' "${u%/}" > "$ROOT/secrets/lilith-base-url"
-printf '{"budget": {"minor_units": %s, "currency": "USD"}}\n' "$BUDGET_CENTS" > "$ROOT/config/lilith.json"
+# hephaistos (default): plain HTTP on the LAN, needs the explicit opt-in below
+printf '%s\n' 'http://192.168.1.114:8080/v1' > "$ROOT/secrets/lilith-base-url"
+printf '{"budget": {"minor_units": %s, "currency": "USD"}, "serving": "hephaistos", "allow_insecure_lan_http": true}\n' "$BUDGET_CENTS" > "$ROOT/config/lilith.json"
+# Runpod test pod instead: the 1Password item holds the proxy URL without the /v1 segment the renderer requires
+#   u=$(op-service-account read 'op://Homelab/lilith-serve-endpoint/base_url') && printf '%s/v1\n' "${u%/}" > "$ROOT/secrets/lilith-base-url"
+#   and set "serving": "runpod" (and drop allow_insecure_lan_http) in config/lilith.json
 git clone --bare https://code.aopc.cloud/toasterson/akh-medu.git "$ROOT/lilith/ancestry/akh-medu.git"
 git -C "$ROOT/lilith/ancestry/akh-medu.git" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
 git -C "$ROOT/lilith/ancestry/akh-medu.git" fetch origin
@@ -572,7 +579,12 @@ The clone has to stay fresh, or her ancestry checks refuse new main SHAs
 commit.
 
 Her workspace uses `backend = "openai"`, `model = "lilith"` and
-`[openai_endpoint]` (`api_key = "env:LILITH_OPENAI_KEY"`). Her
+`[openai_endpoint]` (`api_key = "env:LILITH_OPENAI_KEY"`). A plain `http://` base URL
+is rendered only with `allow_insecure_lan_http` and only for a literal private IP; any
+other `http://` URL fails the whole render closed. akhomed's OpenAI backend accepts
+`http://` (it uses `ureq`, no scheme restriction). Note the macOS Local Network
+privacy section above: the LaunchDaemon `akhomed` needs its approval to reach a LAN
+address, and a `curl` from a login shell does not prove it. Her
 `[chief_of_staff]` table points at:
 
 - the installed `core-data/akh-medu/workspaces/lilith/kg/skills/chief-of-staff/permission-profile.json`;
@@ -623,7 +635,8 @@ Expected results:
   did not load and she runs read-only. The log line says why (the profile,
   the clone or the log path).
 - `/v1/akhs/lilith/tools` answers.
-- `/models` lists `lilith`.
+- `/models` lists `lilith`. (From a login shell this proves the server and key, not the
+  daemon's Local Network approval; her first turn does.)
 - The Romans' startup lines are unchanged.
 
 To roll back, remove `config/lilith.json` and render again. She drops out of
@@ -661,11 +674,19 @@ exists, keeps every unrelated provider instance, and backs the settings up to
 add her to `config/sessions.json` (she is not on akhsessd). T3 watches its
 settings live, so no T3 restart is needed.
 
-**Cold start.** Her model runs on the Runpod serve pod, which is normally
-stopped ([docs/ops/lilith-serve.md](../../docs/ops/lilith-serve.md)). When T3
+**When her server is down (`lilith_serving` = `hephaistos`, the default).** When T3
 starts `roman-lilith`, the entrypoint asks her endpoint's `/health`
-(`secrets/lilith-base-url` minus `/v1`, `User-Agent: curl/8.7.1`, 3 s timeout).
-If it is down, it spawns `lilith_serve.py start` from `lilith_serve` once,
+(`secrets/lilith-base-url` minus `/v1`, `User-Agent: curl/8.7.1`, 3 s timeout). If
+hephaistos is off or `lilith-serve.service` is down it writes one line to
+`$ROOT/logs/lilith-serve-start.log` (at most one per ten minutes) and starts nothing:
+no pod is billed and nothing tries to power hephaistos on. Her turns fail with the
+backend error until the operator brings the box up
+([runbook](../../docs/ops/lilith-serve-hephaistos.md)).
+
+**Cold start (`lilith_serving` = `runpod`, training-era tests only).** Her model runs on
+the Runpod serve pod, which is normally stopped
+([docs/ops/lilith-serve.md](../../docs/ops/lilith-serve.md)). The entrypoint asks the same
+`/health`. If it is down, it spawns `lilith_serve.py start` from `lilith_serve` once,
 detached (lock and 5-minute retry cooldown under `$ROOT/state/lilith/`), and
 carries on. The ACP handshake never waits. Until vLLM is up, her turns fail with
 the backend error. **The first message after a cold start takes about 8-10

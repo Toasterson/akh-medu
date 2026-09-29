@@ -1,4 +1,5 @@
-"""T3 entrypoint: role resolution and Lilith's on-demand serve-pod start (ADR 116, Lilith C2)."""
+"""T3 entrypoint: role resolution, and Lilith's model server (ADR 116 Lilith C2, ADR 121): health-check
+only on hephaistos, on-demand Runpod pod start only when `lilith_serving` is `runpod`."""
 import importlib.util
 import json
 import os
@@ -71,7 +72,8 @@ class RoleTests(unittest.TestCase):
                 self.assertEqual(ep.allowed_roles({"akhs": bad}), ep.ROMANS)
 
     def test_the_models_label_for_lilith(self):
-        self.assertEqual(ep.MODEL_LABELS["lilith"], "Gemma 4 12B (Lilith) via vLLM on Runpod, in-process in akhomed")
+        self.assertEqual(ep.MODEL_LABELS["lilith"],
+                         "Gemma 4 12B (Lilith) on hephaistos (llama.cpp), in-process in akhomed")
 
 
 class ScriptTests(unittest.TestCase):
@@ -136,7 +138,9 @@ class ConfigureT3Tests(unittest.TestCase):
         self.assertFalse((root / "bin/roman-lilith").exists())
 
 
-class LilithServeTests(unittest.TestCase):
+class LilithRunpodServeTests(unittest.TestCase):
+    """`lilith_serving` = "runpod": the training-era on-demand pod start (unchanged behaviour)."""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -147,7 +151,8 @@ class LilithServeTests(unittest.TestCase):
         script = self.checkout / "scripts/lilith/serve/lilith_serve.py"
         script.parent.mkdir(parents=True)
         script.write_text("")
-        self.settings = {"akhs": ["janus", "lilith"], "lilith_serve": str(self.checkout)}
+        self.settings = {"akhs": ["janus", "lilith"], "lilith_serving": "runpod",
+                         "lilith_serve": str(self.checkout)}
         Popen.calls = []
 
     def tearDown(self):
@@ -226,7 +231,8 @@ class LilithServeTests(unittest.TestCase):
         self.assertEqual(self.ensure(Opener(502)), "spawned")
 
     def test_missing_checkout_is_logged_not_fatal(self):
-        for settings in ({"akhs": ["lilith"]}, {"lilith_serve": str(self.root / "nowhere")}):
+        for settings in ({"akhs": ["lilith"], "lilith_serving": "runpod"},
+                         {"lilith_serving": "runpod", "lilith_serve": str(self.root / "nowhere")}):
             with self.subTest(settings=settings):
                 self.assertEqual(self.ensure(Opener(502), settings), "skipped")
         self.assertEqual(Popen.calls, [])
@@ -255,6 +261,94 @@ class LilithServeTests(unittest.TestCase):
         self.assertEqual(ep.ensure_lilith_serving(self.root, self.settings, opener=Opener(502), popen=fake_serve),
                          "spawned")
         self.assertIn("lilith::serve::budget weekly limit reached", self.log())
+
+
+class LilithHephaistosServeTests(unittest.TestCase):
+    """`lilith_serving` = "hephaistos" (the default): health-check only, nothing is ever started."""
+
+    URL = "http://192.168.1.114:8080/v1"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        for d in ("secrets", "logs"):
+            (self.root / d).mkdir()
+        (self.root / "secrets/lilith-base-url").write_text(self.URL + "\n")
+        # A Runpod checkout that WOULD be started if the setting were "runpod".
+        self.checkout = self.root / "checkout"
+        script = self.checkout / "scripts/lilith/serve/lilith_serve.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("")
+        self.settings = {"akhs": ["janus", "lilith"], "lilith_serving": "hephaistos",
+                         "lilith_serve": str(self.checkout)}
+        Popen.calls = []
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def ensure(self, opener, settings=None, now=time.time):
+        return ep.ensure_lilith_serving(self.root, self.settings if settings is None else settings,
+                                        opener=opener, popen=Popen, now=now)
+
+    def log(self):
+        path = self.root / "logs/lilith-serve-start.log"
+        return path.read_text() if path.exists() else ""
+
+    def test_health_check_goes_to_the_lan_address(self):
+        opener = Opener(200)
+        self.assertEqual(self.ensure(opener), "up")
+        self.assertEqual(opener.requests[0].full_url, "http://192.168.1.114:8080/health")
+        self.assertEqual(Popen.calls, [])
+
+    def test_a_down_server_is_logged_and_nothing_is_started(self):
+        for down in (Opener(503), Opener(502), Opener(error=OSError("No route to host")), Opener(403)):
+            with self.subTest(down=down.status):
+                self.assertEqual(self.ensure(down, now=lambda: 1_000_000.0), "down")
+                self.assertEqual(Popen.calls, [])
+                self.assertFalse((self.root / "state/lilith/t3-serve-start.pid").exists())
+        log = self.log()
+        self.assertIn("her model server on hephaistos is not answering /health", log)
+        self.assertIn("Nothing was started", log)
+        self.assertIn("docs/ops/lilith-serve-hephaistos.md", log)
+        self.assertNotIn("lilith_serve.py", log)
+
+    def test_hephaistos_is_the_default_when_the_setting_is_absent(self):
+        settings = {"akhs": ["lilith"], "lilith_serve": str(self.checkout)}
+        self.assertEqual(self.ensure(Opener(503), settings), "down")
+        self.assertEqual(Popen.calls, [])
+
+    def test_the_down_line_is_logged_once_per_cooldown(self):
+        clock = [2_000_000.0]
+        for _ in range(3):
+            self.assertEqual(self.ensure(Opener(503), now=lambda: clock[0]), "down")
+            clock[0] += 60
+        self.assertEqual(self.log().count("not answering /health"), 1)
+        clock[0] += ep.HEPHAISTOS_LOG_COOLDOWN_SECONDS
+        self.assertEqual(self.ensure(Opener(503), now=lambda: clock[0]), "down")
+        self.assertEqual(self.log().count("not answering /health"), 2)
+
+    def test_a_missing_base_url_file_counts_as_down_and_starts_nothing(self):
+        (self.root / "secrets/lilith-base-url").unlink()
+        self.assertEqual(self.ensure(Opener(200)), "down")
+        self.assertEqual(Popen.calls, [])
+
+    def test_an_unknown_setting_never_starts_a_pod(self):
+        for bad in ("Runpod ", "vulkan", "", None, 1):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.ensure(Opener(503), {**self.settings, "lilith_serving": bad}), "skipped")
+        self.assertEqual(Popen.calls, [])
+        self.assertIn("unknown lilith_serving", self.log())
+
+    def test_an_unreadable_state_dir_does_not_break_the_check(self):
+        (self.root / "state").write_text("a file where the state directory should be")
+        self.assertEqual(self.ensure(Opener(503)), "down")
+        self.assertEqual(self.ensure(Opener(200)), "up")
+
+    def test_switching_to_runpod_starts_the_pod_path_again(self):
+        settings = {**self.settings, "lilith_serving": "runpod"}
+        self.assertEqual(self.ensure(Opener(502), settings), "spawned")
+        (argv, _), = Popen.calls
+        self.assertEqual(argv[-1], "start")
 
 
 if __name__ == "__main__":

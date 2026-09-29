@@ -5,10 +5,14 @@ No Grok model/API is used. Ignore CLI permission flags: the daemon owns grants.
 The executable basename selects an operator-provisioned, individually scoped
 credential; project cwd and T3 filesystem capabilities never become agent tools.
 
-Lilith (ADR 116, Lilith C2) is served by a Runpod pod that is normally stopped.
-When T3 starts her transport and her endpoint is down, this script starts
-`lilith_serve.py start` detached (budget-checked by that script) and carries on:
-the ACP handshake never waits for the model load.
+Lilith (ADR 116, Lilith C2; ADR 121) is served by llama-server on hephaistos, the operator's
+Linux box (`lilith_serving` = "hephaistos" in config/t3-acp.json, the default). T3 only
+health-checks it: when it is down this script logs one clear line and starts nothing, because
+the box is the operator's and nothing here may power it on or bill anything. With
+`lilith_serving` = "runpod" (training-era tests) her endpoint is a Runpod pod that is normally
+stopped: when T3 starts her transport and her endpoint is down, this script starts
+`lilith_serve.py start` detached (budget-checked by that script) and carries on. Either way the
+ACP handshake never waits for the model.
 """
 import json
 import os
@@ -20,8 +24,12 @@ import urllib.request
 
 ROMANS = ('janus', 'minerva', 'vesta')
 LILITH = 'lilith'
-MODEL_LABELS = {LILITH: 'Gemma 4 12B (Lilith) via vLLM on Runpod, in-process in akhomed'}
+MODEL_LABELS = {LILITH: 'Gemma 4 12B (Lilith) on hephaistos (llama.cpp), in-process in akhomed'}
 DEFAULT_MODEL_LABEL = 'GLM-5.3 on Ollama Cloud, in-process in akhomed'
+# Where her model is served (config/t3-acp.json `lilith_serving`, rendered from config/lilith.json).
+SERVING_HEPHAISTOS = 'hephaistos'
+SERVING_RUNPOD = 'runpod'
+DEFAULT_SERVING = SERVING_HEPHAISTOS
 # Runpod's proxy answers Python's default User-Agent with 403.
 HEALTH_USER_AGENT = 'curl/8.7.1'
 HEALTH_TIMEOUT_SECONDS = 3
@@ -32,6 +40,8 @@ SERVE_LOCK_MAX_AGE_SECONDS = 35 * 60
 # A start that refused or failed exits within seconds; do not re-ask (each `start` reads the
 # Runpod key from 1Password, whose account-wide read allowance is shared) for this long.
 SERVE_RETRY_COOLDOWN_SECONDS = 5 * 60
+# While hephaistos is down every T3 session start would log the same line; once per this long.
+HEPHAISTOS_LOG_COOLDOWN_SECONDS = 10 * 60
 
 
 def allowed_roles(settings):
@@ -49,7 +59,8 @@ def resolve_role(argv0, settings):
 
 
 def lilith_healthy(root, opener=urllib.request.urlopen):
-    """True when her vLLM answers `/health`. Any failure (no URL file, network, non-2xx) is 'down'."""
+    """True when her model server answers `/health` (llama-server, vLLM). Any failure (no URL file,
+    network, non-2xx; llama-server answers 503 while it loads the model) is 'down'."""
     try:
         base = (root / 'secrets' / 'lilith-base-url').read_text().strip().rstrip('/').removesuffix('/v1')
         if not base:
@@ -110,40 +121,82 @@ def _take_lock(lock_path, now):
 
 def ensure_lilith_serving(root, settings, opener=urllib.request.urlopen, popen=subprocess.Popen,
                           now=time.time):
-    """Start her serve pod in the background when her endpoint is down.
+    """Make sure her model server is up, as far as this script may.
 
-    Returns 'up', 'spawned', 'locked' (a start is already in flight), or 'skipped'
-    (no checkout or script; the reason is in the log). Never raises: a refusal from
-    `lilith_serve.py start` (budget, zero GPU) lands in ROOT/logs/lilith-serve-start.log
-    because the child writes its stdout/stderr there, and her turn fails with the
-    backend error until the pod is ready (first message after a cold start: ~8-10 min).
+    `settings['lilith_serving']` (default 'hephaistos'):
+    - 'hephaistos': health-check only. Returns 'up', or 'down' after logging one clear line to
+      ROOT/logs/lilith-serve-start.log (the log lines are throttled to one per cooldown). It never
+      starts a pod, never powers the box on and spawns nothing: the repo has no wake mechanism for
+      hephaistos, and inventing one here is not this script's job.
+    - 'runpod': starts her Runpod serve pod in the background when her endpoint is down. Returns
+      'up', 'spawned', 'locked' (a start is already in flight), or 'skipped' (no checkout or
+      script; the reason is in the log). A refusal from `lilith_serve.py start` (budget, zero GPU)
+      lands in the same log because the child writes its stdout/stderr there, and her turn fails
+      with the backend error until the pod is ready (first message after a cold start: ~8-10 min).
+    - anything else: 'skipped', logged. An unknown value must never start a billable pod.
+
+    Never raises: the ACP handshake must not depend on the model server.
     """
     log_path = root / 'logs' / 'lilith-serve-start.log'
+    serving = None
     try:
+        serving = settings.get('lilith_serving', DEFAULT_SERVING)
+        if serving not in (SERVING_HEPHAISTOS, SERVING_RUNPOD):
+            _log(log_path, f'unknown lilith_serving {serving!r} in config/t3-acp.json '
+                           '(hephaistos or runpod); starting nothing')
+            return 'skipped'
         if lilith_healthy(root, opener):
             return 'up'
-        checkout = settings.get('lilith_serve')
-        script = Path(checkout).expanduser() / SERVE_SCRIPT if checkout else None
-        if script is None or not script.is_file():
-            _log(log_path, f'endpoint is down but no lilith_serve.py to start ({script}); '
-                           'set lilith_serve in config/t3-acp.json (serve_checkout in config/lilith.json)')
-            return 'skipped'
-        state = root / 'state' / 'lilith'
-        state.mkdir(parents=True, exist_ok=True, mode=0o700)
-        lock = state / 't3-serve-start.pid'
-        if not _take_lock(lock, now()):
-            return 'locked'
-        env = dict(os.environ)
-        env['PATH'] = '/opt/homebrew/bin:/usr/local/bin:' + env.get('PATH', '/usr/bin:/bin')
-        _log(log_path, f'endpoint is down; starting {script} start (detached)')
-        with open(log_path, 'a') as log:
-            child = popen([SERVE_PYTHON, str(script), 'start'], stdin=subprocess.DEVNULL, stdout=log,
-                          stderr=subprocess.STDOUT, start_new_session=True, close_fds=True, env=env)
-        lock.write_text(str(child.pid))
-        return 'spawned'
-    except Exception as error:  # the ACP handshake must not depend on the pod
-        _log(log_path, f'could not start the serve pod: {type(error).__name__}: {error}')
+        if serving == SERVING_HEPHAISTOS:
+            _note_hephaistos_down(root, log_path, now())
+            return 'down'
+        return _spawn_runpod_serve(root, settings, log_path, popen, now)
+    except Exception as error:  # the ACP handshake must not depend on the model server
+        what = 'start the serve pod' if serving == SERVING_RUNPOD else 'check her model server'
+        _log(log_path, f'could not {what}: {type(error).__name__}: {error}')
         return 'skipped'
+
+
+def _note_hephaistos_down(root, log_path, now):
+    """One log line per cooldown: each T3 session start would otherwise append another."""
+    stamp = root / 'state' / 'lilith' / 't3-hephaistos-down.stamp'
+    try:
+        if now - stamp.stat().st_mtime < HEPHAISTOS_LOG_COOLDOWN_SECONDS:
+            return
+    except OSError:
+        pass
+    _log(log_path, 'her model server on hephaistos is not answering /health. Nothing was started: '
+                   'hephaistos is the operator\'s box. Check that it is powered on and that '
+                   'lilith-serve.service is active (docs/ops/lilith-serve-hephaistos.md); her turns fail '
+                   'with the backend error until then')
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        stamp.write_text(str(now))
+        os.utime(stamp, (now, now))
+    except OSError:
+        pass
+
+
+def _spawn_runpod_serve(root, settings, log_path, popen, now):
+    checkout = settings.get('lilith_serve')
+    script = Path(checkout).expanduser() / SERVE_SCRIPT if checkout else None
+    if script is None or not script.is_file():
+        _log(log_path, f'endpoint is down but no lilith_serve.py to start ({script}); '
+                       'set lilith_serve in config/t3-acp.json (serve_checkout in config/lilith.json)')
+        return 'skipped'
+    state = root / 'state' / 'lilith'
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = state / 't3-serve-start.pid'
+    if not _take_lock(lock, now()):
+        return 'locked'
+    env = dict(os.environ)
+    env['PATH'] = '/opt/homebrew/bin:/usr/local/bin:' + env.get('PATH', '/usr/bin:/bin')
+    _log(log_path, f'endpoint is down; starting {script} start (detached)')
+    with open(log_path, 'a') as log:
+        child = popen([SERVE_PYTHON, str(script), 'start'], stdin=subprocess.DEVNULL, stdout=log,
+                      stderr=subprocess.STDOUT, start_new_session=True, close_fds=True, env=env)
+    lock.write_text(str(child.pid))
+    return 'spawned'
 
 
 def main(argv):
