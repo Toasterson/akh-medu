@@ -7,7 +7,12 @@
 > acceptance. Preserves ADR 113 full-Akh ownership and ADR 114 structural live /
 > learned shadow decisions. This is a planned capability, not a runtime release.
 
-> Last updated: 2026-09-29 (**Quarantined redb retention** — bounded
+> Last updated: 2026-09-29 (**Per-akh SQLite databases** — opt-in
+> `[database] layout = "per_akh"`: host tables in the configured file, each
+> akh in `akh.<name>.sqlite3` with one connection, `akhomed store
+> split-per-akh`, and SQLite contention reported as contention instead of
+> split-brain; [ADR 120](decisions/120-per-akh-sqlite-databases.md), see the
+> Phase 38 section). Prior: 2026-09-29 (**Quarantined redb retention** — bounded
 > pruning of `akh-medu.pre-residency-*.redb`, see ADR 049 wake notes in the
 > Phase 38 section). Prior: 2026-09-28 (**Lilith C1** — `ToolCallGuard` seam and the
 > Chief-of-Staff guard, contracts and skill pack; see "Permission layer"
@@ -664,7 +669,31 @@ keeps the stores above as an in-process cache. 38a–38c are implemented.
   `akh` client never compiles SeaORM. Runtime-optional: with no `[postgres]`
   config section the daemon logs a warning and runs in legacy local-only mode.
 - `[postgres]` config: `url`, `pool_size`, `connect_timeout_secs`,
-  `migrate_on_start` (`DATABASE_URL` overrides `url`).
+  `migrate_on_start`, `layout` (`DATABASE_URL` overrides `url`).
+- **Per-akh SQLite layout** (`crates/akhomed-store/src/layout.rs`, `split.rs`,
+  [ADR 120](decisions/120-per-akh-sqlite-databases.md)): `[database] layout`
+  is `"shared"` (default, PostgreSQL's only option) or `"per_akh"` (SQLite
+  only; refused at startup otherwise). Under `per_akh`, the configured file
+  keeps the host tables (`workspaces_*`, `akhomed_schema_registry`,
+  `seaql_migrations`). Each akh's tables (`TABLE_HOMES`: identity + residency
+  epoch, state, symbols, facts, WAL, episodes, provenance, cognitive tables,
+  akh config) live in `<host dir>/akh.<name>.sqlite3`, addressed by the
+  workspace name from which both UUIDv5 ids derive. Every file carries the
+  full schema and migrates under its own `.migrate.lock`. `ServerState::akh_store`
+  routes every akh-scoped read and write to that file through one pooled
+  connection. The residency session shares the connection (so one akh's
+  snapshot and WAL queue instead of racing for the write lock). Its lock files
+  stay at `<host>.akh-<uuid>.lock`. `snapshot::wake_split` hydrates from the akh
+  file and converges schema packs from the host. A host file that still holds
+  the akh is refused (`layout::unmigrated`). The offline `akhomed store
+  split-per-akh` copies a shared file into this layout, verifying row counts
+  and a SHA-256 digest per table per akh, and writes evidence. It refuses while
+  the source's lock files are held and never writes the source. SQLite
+  `BUSY`/`LOCKED` is typed as `StoreError::LockContention`
+  (`akhomed_store::sqlite_busy`). On SQLite the snapshot ticker logs contention
+  (including pool timeouts) instead of the ADR-049 split-brain text, which
+  remains for PostgreSQL. The Roman renderer opts in via
+  `config/per-akh-databases.json` (CUTOVER.md §13).
 - **Quarantined host-local redb retention** (`src/redb_quarantine.rs`, ADR 049):
   before every authoritative hydrate `akhomed` moves the workspace's local
   `akh-medu.redb` aside as `akh-medu.pre-residency-<epoch>[-<attempt>].redb`.
