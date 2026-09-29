@@ -371,6 +371,9 @@ def release(config: render.Config, op: OnePassword, *, slot: int | None = None, 
     with _locked(slots):
         n = _find_slot(config, op, slot, run)
         before = published(op.fields(slots.state_item), n)
+        # Observe both documents before publishing revocation. OpenBao CAS must
+        # not lazily adopt a competing writer's new keypair version afterward.
+        op.fields(slots.item(n))
         keys = render.generate_keypair()
         rotated_at = _iso(now())
         # 1) Publish first: the hub drops the old key on its next pass after

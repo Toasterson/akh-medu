@@ -207,6 +207,11 @@ def cmd_list(config: render.Config, peers_state: Path, *, live: bool, dry_run: b
 
 def _op(config: render.Config) -> "slots.OnePassword":
     assert config.slots is not None
+    if config.slots.backend == "openbao":
+        from openbao import OpenBao
+        section = config.slots
+        return OpenBao(section.openbao_config, [section.hub_item, section.state_item,
+                                              *[section.item(n) for n in range(1, section.count + 1)]])
     return slots.OnePassword(command=config.slots.op_command, vault=config.slots.vault)
 
 
