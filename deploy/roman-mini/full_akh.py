@@ -552,6 +552,12 @@ def mcp_servers(session: dict, role: str, root: Path,
             continue
         if name == "vesta-ops" and sandboxed:
             tools = [tool for tool in tools if tool not in VESTA_SANDBOXED_TOOLS]
+        if name == "vesta-ops":
+            # 53g PR 3 moved Grafana to Vesta's direct `grafana` server and vesta_ops.py dropped
+            # the grafana__* passthroughs, but the legacy sessions.json grants still list them:
+            # keeping them here allowlists tools the broker no longer advertises.
+            direct = {f"{GRAFANA_PASSTHROUGH_PREFIX}{tool}" for tool in grafana_server(root)["tools"]}
+            tools = [tool for tool in tools if tool not in direct]
         if not tools:
             warnings.append(f"{role}: no granted tools on `{alias}`; MCP server `{name}` skipped")
             continue
@@ -573,6 +579,10 @@ def mcp_servers(session: dict, role: str, root: Path,
     if role == "vesta":
         servers.append(grafana_server(root))
     return servers, warnings
+
+
+# The broker's former name for a Grafana tool (`grafana__<tool>`), before 53g PR 3.
+GRAFANA_PASSTHROUGH_PREFIX = "grafana__"
 
 
 def grafana_server(root: Path) -> dict:
