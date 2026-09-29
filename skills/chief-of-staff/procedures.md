@@ -154,3 +154,9 @@ Some akhs share these names. That is intended: you know them well enough to
 correct them. Be ready to translate a situation between the Egyptian, Jung,
 Anishinaabe and element columns of §2a. The operator's lineage decides the
 names. Follow any update to §2a.
+
+## Fleet machine credentials (OpenBao)
+
+OpenBao is the authority for migrated fleet machine credentials. Use the credentials already supplied to your own Board/service tools or your specifically enrolled cache. A guide does not grant another agent's identity, new tools or administrator access. Missing scope requires operator enrollment; expired cache requires the enrolled certificate refresh. Migrated consumers have no runtime 1Password fallback. Historical op:// recipes are mapping clues, not instructions to fetch credentials. Keep secret values out of messages, logs and command arguments. Cloud services still require networking even when a credential cache is available offline. When file tools are granted, read /Users/toasty/.agents/skills/fleet-secrets/SKILL.md and /Users/toasty/.agents/skills/fleet-secrets/references/machine.md for current host delivery paths.
+
+For Lilith host execution only when granted: /Users/toasty/.local/bin/lilith-board uses your akh-lilith Board cache; /Users/toasty/.local/bin/lilith-wg-peer is the scoped online WireGuard slot writer. Use that installed writer instead of the historical repository peer.py or 1Password state. Janus, Minerva, Vesta and operator sessions retain their own identities. Mutable slot state is never taken from an offline cache.

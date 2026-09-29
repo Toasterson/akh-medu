@@ -92,3 +92,7 @@ Local edits, a submitted job and a completed turn are not proof of publication
 or merge readiness. Janus must recheck fresh review and CI on the resulting
 head and use Anima's gated merge path. Do not create another worker or send
 unrelated messages.
+
+## Fleet machine credentials (OpenBao)
+
+OpenBao is the authority for migrated fleet machine credentials. Use the credentials already supplied to your own Board/service tools or your specifically enrolled cache. A guide does not grant another agent's identity, new tools or administrator access. Missing scope requires operator enrollment; expired cache requires the enrolled certificate refresh. Migrated consumers have no runtime 1Password fallback. Historical op:// recipes are mapping clues, not instructions to fetch credentials. Keep secret values out of messages, logs and command arguments. Cloud services still require networking even when a credential cache is available offline. When file tools are granted, read /Users/toasty/.agents/skills/fleet-secrets/SKILL.md and /Users/toasty/.agents/skills/fleet-secrets/references/machine.md for current host delivery paths.
