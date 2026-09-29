@@ -416,8 +416,22 @@ class AcpEpisodeRunner:
         info = result.get("agentInfo")
         return dict(info) if isinstance(info, Mapping) else {}
 
+    # `_akh/tools` answers stale=True while the previous episode's turn is still settling
+    # (cancellation, post-turn bookkeeping). Wait for the akh to go idle before verifying its
+    # surface; any other answer (stale missing, or still stale at the deadline) is refused.
+    IDLE_WAIT_S = 120.0
+    IDLE_POLL_S = 2.0
+
+    def _list_own_tools(self, client: AcpClient) -> dict:
+        deadline = time.monotonic() + self.IDLE_WAIT_S
+        while True:
+            listed = client.request("_akh/tools", {"workspace": self.config.akh}) or {}
+            if listed.get("stale") is not True or time.monotonic() >= deadline:
+                return listed
+            time.sleep(self.IDLE_POLL_S)
+
     def _preflight(self, client: AcpClient) -> tuple[int, int]:
-        listed = client.request("_akh/tools", {"workspace": self.config.akh}) or {}
+        listed = self._list_own_tools(client)
         if listed.get("stale") is not False:
             raise IsolationRefusal(
                 f"akh {self.config.akh!r} could not list its tools (stale={listed.get('stale')!r}); a turn is in "
