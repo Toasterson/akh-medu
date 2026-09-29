@@ -44,7 +44,7 @@ ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 # The newest Opus id the repo names (docs/ai/plans/2026-04-25-phase39-distributed-inference.md).
 # The exam plan (§3) names the judge "Opus 5.5" but no API id for it appears in the repo, so the
 # operator passes `--model` for the teacher run; this default only keeps the CLI usable.
-DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7"
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"  # Opus 5.5, the exam plan's teacher
 RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504, 529})
 
 

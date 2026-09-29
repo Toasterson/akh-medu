@@ -89,9 +89,8 @@ python3 scripts/lilith/dojo/runner.py compare runs/c4/parent-sealed runs/c4/teac
   the floors sha and the prompt sha. The endpoint is recorded as host only.
 - Re-running the same command resumes: completed episodes are skipped and errored ones are retried. A
   resume with a different model, prompt, snapshots, seed or commit is refused. Use a fresh `--out`.
-- The teacher default model id is the newest Opus the repo names (`claude-opus-4-7`); the exam plan's
-  "Opus 5.5" has no id in the repo, so pass `--model` explicitly. Some newer Anthropic models reject
-  `temperature`: add `--omit-temperature`.
+- The teacher default is Opus 5.5 (`claude-opus-5-5`), the exam plan's teacher. Some newer Anthropic
+  models reject `temperature`: add `--omit-temperature`.
 - Files in `--out`: `episodes.jsonl` (steps, receipts, transcript, usage), `verification.jsonl` (verdict,
   weight, hard constraints), `provenance.json`, `baseline-summary.json` (per family: n, errors, mean weight
   and bootstrap 95% CI, fabrication / rule-break / unannounced counts, contract-validity rate, language-check
