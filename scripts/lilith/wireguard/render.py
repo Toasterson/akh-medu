@@ -145,6 +145,8 @@ class SlotsSection:
     talos_repo: Path | None
     talos_ref: str
     talos_allowlist_path: str
+    backend: str = "onepassword"
+    openbao_config: Path | None = None
 
     def item(self, n: int) -> str:
         return f"{self.item_prefix}{n}"
@@ -258,6 +260,8 @@ def _load_variant_c(raw: dict, path: Path) -> Config:
         s = raw["slots"]
         talos_repo = s.get("talos_repo")
         slots = SlotsSection(
+            backend=str(s.get("backend", "onepassword")),
+            openbao_config=Path(str(s["openbao_config"])).expanduser() if s.get("openbao_config") else None,
             count=int(s["count"]),
             first_address=str(s["first_address"]),
             vault=str(s["vault"]),
@@ -279,6 +283,8 @@ def _load_variant_c(raw: dict, path: Path) -> Config:
     hub_ip = ipaddress.ip_interface(hub.tunnel_address).ip
     if hub_ip not in subnet:
         raise ValueError(f"hub.tunnel_address {hub.tunnel_address} is outside tunnel.subnet {tunnel.subnet}")
+    if slots.backend not in ("onepassword", "openbao") or (slots.backend == "openbao" and slots.openbao_config is None):
+        raise ValueError("slots.backend must be onepassword or openbao with openbao_config")
     if slots.count < 1:
         raise ValueError("slots.count must be at least 1")
     for n in range(1, slots.count + 1):

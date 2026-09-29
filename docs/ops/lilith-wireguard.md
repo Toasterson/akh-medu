@@ -418,3 +418,43 @@ path and should be preferred over any table-level rollback.
 | `scripts/lilith/wireguard/peer.py` | Variant C: `slot-status` / `slot-assign` / `slot-release` (see above). Superseded A/B: `add` / `remove` / `list` pod peers on the hub over SSH (`wg set` live + persisted config + nft reload). Never writes a pod private key to disk; prints the pod-side bundle to stdout once. `--dry-run` everywhere. |
 | `scripts/lilith/wireguard/pod-client.sh` | Runs inside the pod: picks kernel/onetun/wireproxy, brings the tunnel up, health-checks the allowlist, fails closed. |
 | `scripts/lilith/wireguard/test_render.py` | Rendering determinism, allowlist→nft correctness (including a regression test for the hostname-vs-IP self/remote bug caught while building this), peer `/32` allocation/removal, and "no private key material ends up under the repo" checks. Runs `shellcheck` on `pod-client.sh` when available. |
+
+
+## OpenBao slot backend
+
+Variant C supports an explicit `[slots] backend = "openbao"` with
+`openbao_config = "/private/path/openbao.json"`. Existing configurations retain
+`onepassword` until the writer and ESO reader are cut over together. There is
+no automatic fallback: a failed OpenBao call cannot change the other authority.
+
+The private JSON file contains `url` (verified HTTPS), `ca_file`, `cert_file`,
+`key_file`, `role`, and an `items` object mapping the configured hub item, public
+state item and each slot item to explicit `secret/data/...` KV v2 API paths.
+All configuration and certificate/key files must be absolute, owner-only regular
+files (0600). Enroll a dedicated certificate role with at most one-hour tokens.
+Give the supervisor read/update only on its public state and slot documents,
+and read only on a hub document containing the public key. It does not need
+access to the hub private key. The ESO certificate reads only public state;
+slot private keys never enter the hub cluster.
+
+KV documents contain the same string fields as their prior 1Password items,
+including run and rotation bookkeeping. Every update uses KV compare-and-set
+against the version observed by the current operation. Release observes both
+documents before publishing revocation, so a second supervisor cannot silently
+overwrite a newer keypair after its own state update. The two KV writes are not
+a multi-document transaction; interruption may leave a disabled, mismatched slot
+that requires repair. Concurrent changes fail
+the whole operation and require a fresh invocation. An interrupted release
+retains the existing fail-closed sequence: publish the replacement public key
+as disabled first, then store the replacement slot keypair. Repair it by
+re-running release; never silently restore an old private key.
+
+Before cutover, locate every active supervisor invocation, enroll its identity,
+import and verify complete current documents, and verify the supervisor can
+read its assigned paths but cannot read unrelated secrets. Publish this code
+through main before installing it. Change ESO and supervisor configuration in
+the same coordinated maintenance window and verify the rendered peers stay
+unchanged before testing slot operations. Do not switch the ESO reader while
+any active writer still publishes to 1Password. A rollback must first copy the
+latest authority's state and keys deliberately; stale 1Password items are not a
+safe automatic fallback after rotations.
