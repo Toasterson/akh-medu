@@ -248,3 +248,6 @@ Each record gets a keep/drop decision with a reason. Nothing enters the CoS corp
 - **Asking before every T2 action.** Superseded by answer 2.
 - **Scalar LLM-judge RL.** Rejected per ADR 110.
 - **Serving on hephaistos Vulkan.** Kept as a fallback only; answer 1 selects Runpod.
+  **Amended 2026-09-29 ([ADR 121](121-lilith-serving-on-hephaistos-llama-cpp.md)):** until new hardware
+  arrives, everyday interaction is served on hephaistos with llama.cpp (Q8_0); Runpod is for training
+  and test sessions only.

@@ -1,0 +1,52 @@
+{
+  "schema": "lilith/hephaistos-pins@1",
+  "parent": {
+    "repo": "google/gemma-4-12B-it",
+    "revision": "5926caa4ec0cac5cbfadaf4077420520de1d5205",
+    "nfs_relative_dir": "hephaistos-20260927/lilith/parent-gemma4-12b-5926caa4",
+    "sha256sums_source": "SHA256SUMS on the akh-medu-runs share (hash-verified by the 2026-09-27 migration); weights, config and tokenizer are the same pins as scripts/lilith/runpod/bootstrap.sh",
+    "files": {
+      "chat_template.jinja": {
+        "sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0",
+        "size": 17466
+      },
+      "config.json": {
+        "sha256": "478c46e8d2c52d5c2d85bf67e3b3e8c90e7c9d91086cee27e3c267907e936bd9",
+        "size": 4423
+      },
+      "generation_config.json": {
+        "sha256": "a8349d9bd64cc5841297fcb5002f0fdc4749c473c8f1b10ea337f9ce4ee7014e",
+        "size": 260
+      },
+      "model.safetensors": {
+        "sha256": "5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d",
+        "size": 23919549408
+      },
+      "processor_config.json": {
+        "sha256": "6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9",
+        "size": 1382
+      },
+      "tokenizer.json": {
+        "sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+        "size": 32169626
+      },
+      "tokenizer_config.json": {
+        "sha256": "09e6222fd7049dae603d0f61a8b10af5a813f22dca10e6cdc6918f76d7661104",
+        "size": 2102
+      }
+    }
+  },
+  "llama_cpp": {
+    "repo": "https://github.com/ggml-org/llama.cpp",
+    "tag": "v0.5.0",
+    "commit": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+    "gpu_target": "gfx1100",
+    "converter_transformers": "5.17.0",
+    "converter_transformers_reason": "llama.cpp's own requirements pin transformers 4.57.6, whose AutoTokenizer raises AttributeError on the parent's tokenizer_config.json (extra_special_tokens is a list, a transformers 5 format; the parent was written by transformers 5.10.0.dev0). Verified 2026-09-29 on the pinned converter: 4.57.6 fails, 5.17.0 exports the vocabulary and chat template."
+  },
+  "gguf": {
+    "quant": "q8_0",
+    "filename": "lilith-parent-q8_0.gguf",
+    "nfs_relative_parent": "hephaistos-20260927/models"
+  }
+}

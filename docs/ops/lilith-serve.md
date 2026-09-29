@@ -10,6 +10,14 @@
 > Code: `scripts/lilith/serve/` (`serve_pod.sh`, `serve_adapter.py`, `log_redact.py`,
 > `lilith_serve.py`, `test_lilith_serve.py`), `deploy/lilith/it.akh.lilith-serve-idle.plist.template`.
 
+> **Since 2026-09-29 this pod is a test and training-era surface, not Lilith's everyday server.**
+> She is served on hephaistos with llama.cpp (Q8_0): [lilith-serve-hephaistos.md](lilith-serve-hephaistos.md),
+> [ADR 121](../ai/decisions/121-lilith-serving-on-hephaistos-llama-cpp.md). Runpod is used only for
+> training and for test sessions of this pod. T3 no longer starts this pod unless
+> `"serving": "runpod"` is set in `config/lilith.json` (rendered as `lilith_serving` in
+> `config/t3-acp.json`); the default is `hephaistos`, where T3 only health-checks. Everything below
+> still describes the pod accurately.
+
 ## What it is
 
 One Runpod pod, `akh-medu-lilith-serve` (EU-FR-1, 1x H100 80GB, network volume `c6kdciozex`),
@@ -17,8 +25,9 @@ serves Lilith through vLLM's OpenAI API with served model name `lilith`. The pod
 once and afterwards only **stopped and started**. The `lilith` akh points its
 `chat_backing = "openai"` at the pod's proxy URL.
 
-Runpod serving is a **test surface** (operator decision 2026-09-27). Everyday serving moves to
-the local RTX 3090 / RX 7900 XTX once they qualify (C6b). The supervisor enforces these limits:
+Runpod serving is a **test surface** (operator decision 2026-09-27). Everyday serving is on
+hephaistos (operator decision 2026-09-29, ADR 121) until new hardware arrives. The supervisor
+enforces these limits:
 
 | Limit | Value | Enforced by |
 |---|---|---|
@@ -143,9 +152,12 @@ Report the spend from `ledger` with every run report (ADR 116: the supervisor re
 The ledger counts serving only, at the pod's `costPerHr` (default $3.49/h). Volume storage and
 training are billed separately.
 
-## Chatting with Lilith in T3 (on-demand start)
+## Chatting with Lilith in T3 (on-demand start, `serving = "runpod"` only)
 
-The operator chats with Lilith in T3 through the provider `roman-lilith` (setup:
+This section applies only when `config/lilith.json` says `"serving": "runpod"`. With the default
+`hephaistos`, T3's entrypoint only health-checks the LAN endpoint and never starts a pod
+([lilith-serve-hephaistos.md](lilith-serve-hephaistos.md)). The operator chats with Lilith in T3
+through the provider `roman-lilith` (setup:
 `deploy/roman-mini/CUTOVER.md` step 12, "Chat with Lilith in T3"). Because the pod is normally
 stopped, T3's entrypoint (`deploy/roman-mini/t3_entrypoint.py`, installed as `bin/roman-lilith`)
 starts it on demand:
@@ -325,4 +337,5 @@ adapter modes, key enforced, bodies redacted, refusals.
 - The `lilith` akh itself (identity, tools over the C6a tunnel, session recording, correction
   tags). That is the other half of C2. The serve pod does not need the tunnel, because the akh
   calls the public proxy URL with the key.
-- Local serving (C6b) and C8's weekly canary.
+- Local serving: see [lilith-serve-hephaistos.md](lilith-serve-hephaistos.md) (ADR 121). C8's
+  weekly canary is still open.

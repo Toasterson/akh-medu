@@ -15,6 +15,7 @@ them here if the final shapes differ.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -154,12 +155,14 @@ MAX_PROCEDURES_BYTES = 64 * 1024
 # ── Lilith C2 (ADR 116): the Chief of Staff as a workspace of this core ──────
 #
 # Placement decision (supervisor, 2026-09-28): Lilith runs as a workspace in
-# the Mac's full akhomed next to the Romans (ADR 113). Her model is a Runpod
-# vLLM endpoint reached over its HTTPS proxy URL. She is rendered only once
-# the operator writes LILITH_CONFIG_FILE; absent it, every rendered file is
+# the Mac's full akhomed next to the Romans (ADR 113). Her model is an
+# OpenAI-compatible server: since 2026-09-29 llama.cpp's llama-server on
+# hephaistos over the plain-HTTP LAN (ADR 121), and a Runpod vLLM pod behind
+# its HTTPS proxy URL for training-era tests. She is rendered only once the
+# operator writes LILITH_CONFIG_FILE; absent it, every rendered file is
 # byte-identical to the Roman-only deployment.
 LILITH = "lilith"
-LILITH_MODEL = "lilith"  # vLLM --served-model-name
+LILITH_MODEL = "lilith"  # the served model name (vLLM --served-model-name, llama-server --alias)
 # vLLM now serves 65536 (serve_pod.sh LILITH_SERVE_MAX_MODEL_LEN default,
 # raised from 32768 2026-09-28 after a live 96 KB `list_plans` tool result
 # overshot the old window — see the in-turn tool-result budget in
@@ -170,7 +173,19 @@ LILITH_MODEL = "lilith"  # vLLM --served-model-name
 # believes fits is never rejected by vLLM for actually being larger.
 LILITH_CONTEXT_WINDOW = 49152
 LILITH_CONFIG_FILE = "config/lilith.json"
-LILITH_CONFIG_KEYS = {"budget", "base_url_file", "context_window", "serve_checkout"}
+LILITH_CONFIG_KEYS = {"budget", "base_url_file", "context_window", "serve_checkout", "serving",
+                      "allow_insecure_lan_http"}
+# Where her model is served (ADR 121). `hephaistos`: llama-server on the operator's Linux box; T3
+# only health-checks it and never starts anything billable. `runpod`: the on-demand Runpod pod of
+# ADR 116 (training-era tests); T3 starts it with lilith_serve.py. Rendered into config/t3-acp.json
+# as `lilith_serving`.
+LILITH_SERVING = ("hephaistos", "runpod")
+LILITH_DEFAULT_SERVING = "hephaistos"
+# `http://` is accepted for her base URL only with the explicit opt-in `allow_insecure_lan_http`
+# and only for a literal address in these networks (RFC 1918, loopback, IPv6 unique-local). A DNS
+# name is never accepted over http: it could resolve anywhere.
+LILITH_PLAIN_HTTP_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7"))
 # T3 chat with Lilith (ADR 116, Lilith C2): her ACP client principal, and the
 # main checkout whose scripts/lilith/serve/lilith_serve.py the T3 entrypoint
 # starts on demand (her Runpod serve pod is normally stopped).
@@ -260,6 +275,7 @@ class LilithSettings:
     budget: dict
     context_window: int
     serve_checkout: str = LILITH_SERVE_CHECKOUT
+    serving: str = LILITH_DEFAULT_SERVING
 
     def inference(self) -> Inference:
         return Inference("openai", LILITH_MODEL, "openai_endpoint", {
@@ -1077,9 +1093,10 @@ WORKSPACE_COMMENTS = {
                   "contained Codex workers as akhsessd sessions with per-incident grants. `enabled`\n"
                   "keeps the generic `delegate` tool off; [delegation.native.escalation] gates the\n"
                   "escalation tools. Worker instructions are the skillpacks under skills/.",
-    "openai_endpoint": "Lilith C2 (ADR 116): her own vLLM on Runpod, reached over its HTTPS proxy URL\n"
-                       "(1Password item lilith-serve-endpoint). The key is resolved from the environment\n"
-                       "(daemon_credentials.py maps secrets/lilith-openai-key).",
+    "openai_endpoint": "Lilith C2 (ADR 116, ADR 121): her own OpenAI-compatible model server, at the base URL in\n"
+                       "secrets/lilith-base-url (llama.cpp on hephaistos over the LAN; a Runpod vLLM pod for\n"
+                       "tests). The key is resolved from the environment (daemon_credentials.py maps\n"
+                       "secrets/lilith-openai-key).",
     "chief_of_staff": "ADR 116: the CosGuard around every tool call. The log lies outside every root she\n"
                       "can write; the repository is her dedicated clone for the origin/main ancestry check.",
 }
@@ -1096,6 +1113,42 @@ LILITH_WORKSPACE_COMMENTS = {
 # ── Lilith C2: render inputs, MCP servers, Chief-of-Staff table ──────────────
 
 
+def plain_http_allowed_host(hostname: str) -> bool:
+    """True for a literal IP address inside LILITH_PLAIN_HTTP_NETWORKS (never for a DNS name)."""
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return any(address in network for network in LILITH_PLAIN_HTTP_NETWORKS if address.version == network.version)
+
+
+def lilith_base_url_problem(base_url: str, *, allow_insecure_lan_http: bool = False) -> str | None:
+    """Why `base_url` cannot be Lilith's `[openai_endpoint] base_url`, or None when it can.
+
+    Always: a host, no credentials, query or fragment, and the /v1 version segment at the end.
+    `https` is always accepted. `http` only with `allow_insecure_lan_http` and only for a literal
+    RFC 1918 / loopback / unique-local IP (ADR 121: llama-server on hephaistos, no TLS on the LAN).
+    """
+    try:
+        parsed = urlparse(base_url)
+        hostname = parsed.hostname
+        parsed.port  # noqa: B018 - raises ValueError on a malformed port
+    except ValueError:
+        return "it is not a valid URL"
+    if (parsed.scheme not in ("http", "https") or not hostname or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or not parsed.path.rstrip("/").endswith("/v1")):
+        return ("https or (opted in) http, no credentials, query or fragment, ending in the /v1 version "
+                "segment (e.g. https://<pod>-8000.proxy.runpod.net/v1 or http://192.168.1.114:8080/v1)")
+    if parsed.scheme == "http":
+        if not plain_http_allowed_host(hostname):
+            return (f"plain http is only accepted for a literal private-network IP address (RFC 1918, loopback), "
+                    f"not {hostname!r}; use https, or the LAN IP address itself")
+        if not allow_insecure_lan_http:
+            return ("plain http needs the explicit opt-in `\"allow_insecure_lan_http\": true` in "
+                    f"{LILITH_CONFIG_FILE}: the bearer key crosses the LAN unencrypted (ADR 121)")
+    return None
+
+
 def lilith_settings(root: Path) -> LilithSettings | None:
     """Lilith's render inputs, or None when she is not configured.
 
@@ -1104,10 +1157,20 @@ def lilith_settings(root: Path) -> LilithSettings | None:
       spend ceiling her CosGuard enforces. Required: spending is an operator
       decision, so there is no default.
     - `base_url_file` (optional, default `<root>/secrets/lilith-base-url`):
-      absolute path of the 0600 file holding the Runpod proxy base URL
-      (1Password item `lilith-serve-endpoint`, field `base_url`). The URL is
-      read here, at render time, because `[openai_endpoint] base_url` takes no
-      `env:` indirection.
+      absolute path of the 0600 file holding her model server's base URL, ending
+      in `/v1`: `http://192.168.1.114:8080/v1` for llama-server on hephaistos
+      (ADR 121), or the Runpod proxy URL (1Password item
+      `lilith-serve-endpoint`, field `base_url`, plus `/v1`) for a test pod. The
+      URL is read here, at render time, because `[openai_endpoint] base_url`
+      takes no `env:` indirection.
+    - `serving` (optional, `hephaistos` (default) or `runpod`): where the model
+      runs. Written to `config/t3-acp.json` as `lilith_serving`; T3's entrypoint
+      starts a Runpod pod on demand only for `runpod`.
+    - `allow_insecure_lan_http` (optional bool, default false): the explicit
+      opt-in for a plain `http://` base URL. Even then only a literal
+      RFC 1918 / loopback / unique-local IP address is accepted, never a DNS
+      name. There is no TLS on the LAN path (the lab gateway is plain HTTP too),
+      so the bearer key crosses the LAN in the clear; see ADR 121.
     - `context_window` (optional, default 49152; headroom below vLLM's 65536
       serving window for output + estimation error — see
       `LILITH_CONTEXT_WINDOW`).
@@ -1147,6 +1210,12 @@ def lilith_settings(root: Path) -> LilithSettings | None:
     if (not isinstance(serve_checkout, str) or not serve_checkout
             or not (serve_checkout.startswith("~/") or Path(serve_checkout).is_absolute())):
         raise RenderError(f"{path}: `serve_checkout` must be an absolute path or start with ~/")
+    serving = settings.get("serving", LILITH_DEFAULT_SERVING)
+    if serving not in LILITH_SERVING:
+        raise RenderError(f"{path}: `serving` must be one of {list(LILITH_SERVING)}, not {serving!r}")
+    allow_http = settings.get("allow_insecure_lan_http", False)
+    if not isinstance(allow_http, bool):
+        raise RenderError(f"{path}: `allow_insecure_lan_http` must be true or false")
     url_file = Path(settings.get("base_url_file") or root / LILITH_BASE_URL_FILE)
     if not url_file.is_absolute():
         raise RenderError(f"{path}: `base_url_file` must be an absolute path")
@@ -1157,14 +1226,11 @@ def lilith_settings(root: Path) -> LilithSettings | None:
             f"printf '%s/v1\\n' \"${{u%/}}\" > {url_file} (the item holds the proxy URL without /v1); "
             f"or remove {LILITH_CONFIG_FILE} to render the Romans only")
     base_url = url_file.read_text().strip()
-    parsed = urlparse(base_url)
-    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
-            or parsed.query or parsed.fragment or not parsed.path.rstrip("/").endswith("/v1")):
-        raise RenderError(
-            f"{url_file} must hold the vLLM base URL: https, no credentials, query or fragment, "
-            "ending in the /v1 version segment (e.g. https://<pod>-8000.proxy.runpod.net/v1)")
+    problem = lilith_base_url_problem(base_url, allow_insecure_lan_http=allow_http)
+    if problem:
+        raise RenderError(f"{url_file} must hold the model server's base URL: {problem}")
     return LilithSettings(base_url=base_url.rstrip("/"), budget=dict(budget), context_window=context_window,
-                          serve_checkout=serve_checkout)
+                          serve_checkout=serve_checkout, serving=serving)
 
 
 # ── Lilith C4 dojo teacher (ADR 116, ADR 110) ─────────────────────────────────

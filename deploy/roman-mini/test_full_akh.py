@@ -1666,6 +1666,84 @@ class DojoTeacherRenderTests(RenderFixture):
 
 
 @NEEDS_TOMLLIB
+class LilithServingTests(RenderFixture):
+    """ADR 121: her model server is llama-server on hephaistos, plain HTTP on the LAN."""
+
+    LAN = "http://192.168.1.114:8080/v1"
+
+    def configure(self, url=LILITH_URL, **settings):
+        lilith_fixture(self.root, repository=not (self.root / fa.LILITH_REPOSITORY).exists(), **settings)
+        (self.root / fa.LILITH_BASE_URL_FILE).write_text(url + "\n")
+
+    def test_serving_defaults_to_hephaistos_in_t3_acp(self):
+        self.configure()
+        self.render()
+        t3 = json.loads(self.text("config/t3-acp.json"))
+        self.assertEqual(t3["lilith_serving"], "hephaistos")
+        self.assertEqual(t3["lilith_serve"], fa.LILITH_SERVE_CHECKOUT)
+
+    def test_runpod_serving_is_rendered_when_asked_for(self):
+        self.configure(serving="runpod")
+        self.render()
+        self.assertEqual(json.loads(self.text("config/t3-acp.json"))["lilith_serving"], "runpod")
+
+    def test_an_unknown_serving_target_fails_the_render(self):
+        for bad in ("vulkan", "Hephaistos", "", None, 1, ["runpod"]):
+            with self.subTest(bad=bad):
+                self.configure(serving=bad)
+                with self.assertRaisesRegex(fa.RenderError, "serving"):
+                    self.render()
+
+    def test_no_lilith_means_no_serving_key(self):
+        self.render()
+        self.assertNotIn("lilith_serving", json.loads(self.text("config/t3-acp.json")))
+
+    def test_plain_http_lan_url_renders_only_with_the_opt_in(self):
+        self.configure(url=self.LAN)
+        with self.assertRaisesRegex(fa.RenderError, "allow_insecure_lan_http"):
+            self.render()
+        self.configure(url=self.LAN, allow_insecure_lan_http=True)
+        self.render()
+        ws = self.toml("core-config/akh-medu/workspaces/lilith.toml")
+        self.assertEqual(ws["openai_endpoint"]["base_url"], self.LAN)
+        self.assertEqual(ws["openai_endpoint"]["api_key"], "env:LILITH_OPENAI_KEY")
+
+    def test_the_opt_in_must_be_a_boolean(self):
+        for bad in ("yes", 1, "true", None):
+            with self.subTest(bad=bad):
+                self.configure(url=self.LAN, allow_insecure_lan_http=bad)
+                with self.assertRaisesRegex(fa.RenderError, "allow_insecure_lan_http"):
+                    self.render()
+
+    def test_https_needs_no_opt_in_and_the_opt_in_never_widens_hosts(self):
+        self.configure(allow_insecure_lan_http=True)
+        self.render()  # the Runpod https URL is fine with the flag set
+        for url in ("http://abc-8000.proxy.runpod.net/v1", "http://hephaistos.lab.home:8080/v1",
+                    "http://localhost:8080/v1", "http://8.8.8.8:8080/v1", "http://172.32.0.1:8080/v1",
+                    "http://169.254.1.1:8080/v1", "http://192.168.1.114@evil.example/v1"):
+            with self.subTest(url=url):
+                self.configure(url=url, allow_insecure_lan_http=True)
+                with self.assertRaisesRegex(fa.RenderError, "base URL"):
+                    self.render()
+
+    def test_the_private_networks_accepted_over_http(self):
+        for host in ("10.1.2.3", "172.16.0.9", "172.31.255.1", "192.168.1.114", "127.0.0.1", "[::1]", "[fd12:3456::1]"):
+            with self.subTest(host=host):
+                self.assertIsNone(fa.lilith_base_url_problem(f"http://{host}:8080/v1", allow_insecure_lan_http=True))
+                self.assertIn("allow_insecure_lan_http",
+                              fa.lilith_base_url_problem(f"http://{host}:8080/v1", allow_insecure_lan_http=False))
+
+    def test_url_shape_is_still_checked_for_plain_http(self):
+        for url in ("http://192.168.1.114:8080", "http://192.168.1.114:8080/v1?x=1", "http://user:pw@192.168.1.114/v1",
+                    "http://192.168.1.114:notaport/v1", "ftp://192.168.1.114/v1", "http:///v1", ""):
+            with self.subTest(url=url):
+                self.assertIsNotNone(fa.lilith_base_url_problem(url, allow_insecure_lan_http=True))
+
+    def test_the_config_keys_are_documented_as_allowed(self):
+        self.assertTrue({"serving", "allow_insecure_lan_http"} <= fa.LILITH_CONFIG_KEYS)
+
+
+@NEEDS_TOMLLIB
 class LilithBoardAgentIdTests(RenderFixture):
     """`[board] agent_id` (daemon.rs ~2275: without it, board inbox ingest is
     disabled for the akh) is wired for Lilith only. The Romans' board events

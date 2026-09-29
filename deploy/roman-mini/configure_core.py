@@ -26,7 +26,8 @@ Renders (existing unrelated keys and secrets are preserved; rerunning is safe):
                                             source (retarget_events.py); shadow unless --live (PR 6)
 - core-data/…/workspaces/<r>/kg/skills/laya-intervention   the PR 6 skillpack (activate via ACP)
 - config/t3-acp.json                        T3 transport -> akhomed ACP (t3_entrypoint.py); lists the
-                                            hosted `akhs` and, with Lilith, her `lilith_serve` checkout
+                                            hosted `akhs` and, with Lilith, `lilith_serving`
+                                            (hephaistos|runpod) and her `lilith_serve` checkout
 - secrets/t3-lilith.key + bin/roman-lilith  Lilith's T3 client key (created once) and provider binary
 - launchd/dev.roman-akhs.core.plist         execs through daemon_credentials.py core
 - skills/{astra-escalation,mergiraf}/       Janus's worker skillpacks (53g PR 7)
@@ -525,8 +526,10 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
               # The roles t3_entrypoint.py accepts: every akh this core hosts.
               "akhs": list(rendered.akhs)}
     if rendered.lilith is not None:
-        # Her serve pod is normally stopped; the entrypoint starts it on demand
-        # from this checkout (docs/ops/lilith-serve.md).
+        # `lilith_serving` says where her model runs (ADR 121): hephaistos (the entrypoint
+        # only health-checks it) or runpod (a pod that is normally stopped; the entrypoint
+        # starts it on demand from this checkout, docs/ops/lilith-serve.md).
+        t3_acp["lilith_serving"] = rendered.lilith.serving
         t3_acp["lilith_serve"] = rendered.lilith.serve_checkout
     _save_json(config / "t3-acp.json", t3_acp)
 
