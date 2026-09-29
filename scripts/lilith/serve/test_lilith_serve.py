@@ -579,6 +579,33 @@ class IdleWatchTests(Harness):
         self.assertEqual([ls.retry_interval(60, n) for n in range(6)], [60, 60, 120, 240, 300, 300])
         self.assertEqual(ls.retry_interval(600, 3), 600)   # a long base interval is never shortened
 
+    def test_an_external_stop_noticed_late_bills_only_until_it_was_last_seen_running(self):
+        ctx = self.created()
+        self.clock.advance(minutes=5)          # session ids have second resolution
+        ls.cmd_start(ctx, wait_seconds=60)
+        pod_id = ctx.state().pod_id
+        ls.watch_tick(ctx, ls.Vllm(ctx.state().base_url, lambda: None))     # seen running now
+        seen = self.clock.now()
+        self.cloud.pods[pod_id]["desiredStatus"] = "EXITED"                 # stopped from inside the pod
+        self.clock.advance(hours=20)                                        # the supervisor was down
+        outcome = ls.watch_tick(ctx, ls.Vllm(ctx.state().base_url, lambda: None))
+        self.assertEqual(outcome, ls.TickOutcome.EXTERNAL_STOP)
+        span = [s for s in ctx.ledger.spans()][-1]
+        self.assertEqual(span.reason, "external")
+        self.assertLessEqual((span.stop - seen).total_seconds(), ctx.policy.pod_check_s)
+
+    def test_ledger_correction_only_shortens_a_closed_session(self):
+        ctx = self.created()
+        span = ctx.ledger.spans()[-1]
+        mid = span.start + (span.stop - span.start) / 2
+        out = ls.cmd_ledger_correct(ctx, span.session, ls.iso(mid), "runpodctl stop from inside the pod")
+        self.assertEqual(ctx.ledger.spans()[-1].stop, mid)
+        self.assertEqual(out["recorded_stop"], ls.iso(span.stop))
+        with self.assertRaises(ls.UsageError):
+            ls.cmd_ledger_correct(ctx, span.session, ls.iso(span.stop + ls.dt.timedelta(hours=1)), "extend")
+        with self.assertRaises(ls.UsageError):
+            ls.cmd_ledger_correct(ctx, span.session, ls.iso(mid), "  ")
+
     def test_parse_metrics_sums_labelled_series(self):
         text = ('vllm:request_success_total{finished_reason="stop"} 4.0\n'
                 'vllm:request_success_total{finished_reason="length"} 1.0\n'
