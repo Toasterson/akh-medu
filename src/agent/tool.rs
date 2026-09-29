@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::audit::{AuditEntry, AuditKind, AuditLedger};
@@ -304,6 +304,10 @@ pub struct ToolRegistry {
     guard: Mutex<Option<Arc<dyn super::permission::ToolCallGuard>>>,
     /// Optional execution tracker for emitting ToolCall events over ACP.
     tracker: Mutex<Option<Arc<super::tool_execution_tracker::ToolExecutionTracker>>>,
+    /// Set by [`Self::seal_to_session_tools`] (`tool_surface = "session-only"`):
+    /// the persistent catalog is empty and stays empty; a turn sees only the
+    /// MCP servers its ACP client pushed for that session.
+    sealed: AtomicBool,
 }
 
 /// One synchronous turn's tool-registry overlay.
@@ -397,7 +401,36 @@ impl ToolRegistry {
             asker: Mutex::new(None),
             guard: Mutex::new(None),
             tracker: Mutex::new(None),
+            sealed: AtomicBool::new(false),
         }
+    }
+
+    /// Seal the persistent catalog (`tool_surface = "session-only"`, the
+    /// Lilith C4 dojo teacher): remove every registered tool and refuse every
+    /// later [`Self::register`], so the only tools a turn can advertise or
+    /// call are the thread-scoped proxies of the MCP servers the ACP client
+    /// pushed for its session. Returns the names removed, sorted.
+    ///
+    /// One-way by design: nothing unseals a registry, so no later code path
+    /// (skill activation, a reactor, a lazily attached server) can give the
+    /// akh a tool of its own back.
+    pub fn seal_to_session_tools(&self) -> Vec<String> {
+        self.sealed.store(true, Ordering::SeqCst);
+        let mut removed: Vec<String> = {
+            let mut tools = self.tools.lock().unwrap();
+            let names = tools.keys().cloned().collect();
+            tools.clear();
+            names
+        };
+        self.manifests.lock().unwrap().clear();
+        self.unadvertised.lock().unwrap().clear();
+        removed.sort();
+        removed
+    }
+
+    /// Whether [`Self::seal_to_session_tools`] has run.
+    pub fn is_sealed(&self) -> bool {
+        self.sealed.load(Ordering::SeqCst)
     }
 
     fn with_session_state<R>(&self, f: impl FnOnce(Option<&ToolSessionState>) -> R) -> R {
@@ -500,6 +533,14 @@ impl ToolRegistry {
     pub fn register(&self, tool: Box<dyn Tool>) {
         let manifest = tool.manifest();
         let name = manifest.name.clone();
+        if self.is_sealed() {
+            tracing::warn!(
+                tool = %name,
+                "refused to register a tool: this akh's registry is sealed to session-pushed \
+                 MCP servers (tool_surface = \"session-only\")"
+            );
+            return;
+        }
         let mut unadv = self.unadvertised.lock().unwrap();
         if tool.advertise_to_llm() {
             unadv.remove(&name);
@@ -975,6 +1016,74 @@ mod tests {
         assert!(body.len() <= 200 && body.is_char_boundary(body.len()));
         // ASCII shorter than the cap is returned unchanged.
         assert_eq!(truncate_summary("hello", 200), "hello");
+    }
+
+    /// A read-only test tool named `name`.
+    struct Named(&'static str);
+    impl Tool for Named {
+        fn signature(&self) -> ToolSignature {
+            ToolSignature {
+                name: self.0.into(),
+                description: self.0.into(),
+                parameters: vec![],
+            }
+        }
+        fn execute(&self, _e: &crate::engine::Engine, _i: ToolInput) -> AgentResult<ToolOutput> {
+            Ok(ToolOutput::ok(self.0))
+        }
+        fn manifest(&self) -> ToolManifest {
+            ToolManifest {
+                name: self.0.into(),
+                description: self.0.into(),
+                parameters: vec![],
+                danger: DangerInfo {
+                    effect: ToolEffect::ReadOnly,
+                    level: DangerLevel::Safe,
+                    capabilities: HashSet::new(),
+                    description: self.0.into(),
+                    shadow_triggers: vec![],
+                },
+                source: ToolSource::Native,
+            }
+        }
+    }
+
+    #[test]
+    fn sealed_registry_keeps_only_session_pushed_tools() {
+        // Lilith C4 dojo teacher (`tool_surface = "session-only"`): nothing of
+        // the akh's own survives the seal, nothing registers after it, and the
+        // session overlay (client-pushed MCP proxies) still works.
+        let reg = ToolRegistry::new();
+        reg.register(Box::new(Named("http_fetch")));
+        reg.register(Box::new(Named("kg_query")));
+        assert_eq!(reg.seal_to_session_tools(), vec!["http_fetch", "kg_query"]);
+        assert!(reg.is_sealed());
+        assert!(reg.list().is_empty() && reg.list_manifests().is_empty());
+        assert!(reg.list_advertised_manifests().is_empty());
+
+        reg.register(Box::new(Named("web_search")));
+        assert!(
+            reg.get("web_search").is_none(),
+            "a sealed registry refuses new tools"
+        );
+        assert!(reg.list_advertised_manifests().is_empty());
+
+        {
+            let mut scope = reg.session_scope(None, None);
+            scope.register(Box::new(Named("mcp__anima__get_wi_loop_state")));
+            let advertised: Vec<String> = reg
+                .list_advertised_manifests()
+                .into_iter()
+                .map(|m| m.name)
+                .collect();
+            assert_eq!(advertised, vec!["mcp__anima__get_wi_loop_state"]);
+            assert!(reg.get("mcp__anima__get_wi_loop_state").is_some());
+            assert!(reg.get("http_fetch").is_none());
+        }
+        assert!(
+            reg.list_advertised_manifests().is_empty(),
+            "the overlay ends with the turn"
+        );
     }
 
     #[test]
