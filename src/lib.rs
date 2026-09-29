@@ -80,6 +80,7 @@ pub mod pipeline;
 pub mod provenance;
 pub mod reason;
 pub mod reasoning;
+pub mod redb_quarantine;
 pub mod registry;
 
 /// Phase 38j.1: typed metric-instrument registry for the akhomed daemon.

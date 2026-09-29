@@ -7,7 +7,9 @@
 > acceptance. Preserves ADR 113 full-Akh ownership and ADR 114 structural live /
 > learned shadow decisions. This is a planned capability, not a runtime release.
 
-> Last updated: 2026-09-28 (**Lilith C1** — `ToolCallGuard` seam and the
+> Last updated: 2026-09-29 (**Quarantined redb retention** — bounded
+> pruning of `akh-medu.pre-residency-*.redb`, see ADR 049 wake notes in the
+> Phase 38 section). Prior: 2026-09-28 (**Lilith C1** — `ToolCallGuard` seam and the
 > Chief-of-Staff guard, contracts and skill pack; see "Permission layer"
 > below).
 >
@@ -663,6 +665,15 @@ keeps the stores above as an in-process cache. 38a–38c are implemented.
   config section the daemon logs a warning and runs in legacy local-only mode.
 - `[postgres]` config: `url`, `pool_size`, `connect_timeout_secs`,
   `migrate_on_start` (`DATABASE_URL` overrides `url`).
+- **Quarantined host-local redb retention** (`src/redb_quarantine.rs`, ADR 049):
+  before every authoritative hydrate `akhomed` moves the workspace's local
+  `akh-medu.redb` aside as `akh-medu.pre-residency-<epoch>[-<attempt>].redb`.
+  After the hydrate *succeeds* (never before, so a failed wake keeps every copy)
+  only the newest `redb_quarantine_keep` images per workspace are kept (top-level
+  host-config scalar, default 3; `0` is refused at load since it would delete the
+  just-quarantined image). Only exact-pattern regular files are removed, symlinks
+  are never followed; each pruned file and the total reclaimed are logged.
+  Pruning is best-effort and never fails the wake.
 
 **Sub-phase 38b (implemented) — the mutation WAL.** Every successful
 assert/retract streams to `akhomed_mutation_log` within seconds; wake (38c)

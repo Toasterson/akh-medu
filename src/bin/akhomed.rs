@@ -229,6 +229,45 @@ fn quarantine_local_redb(
     Ok(Some(backup))
 }
 
+/// Log the outcome of a post-hydrate quarantine prune (best-effort: nothing
+/// here can fail the wake).
+fn log_quarantine_prune(
+    name: &str,
+    keep: akh_medu::redb_quarantine::QuarantineKeep,
+    outcome: Result<
+        akh_medu::redb_quarantine::PruneReport,
+        akh_medu::redb_quarantine::QuarantineRetentionError,
+    >,
+) {
+    match outcome {
+        Ok(report) => {
+            for image in &report.pruned {
+                tracing::info!(
+                    workspace = %name,
+                    path = %image.path.display(),
+                    bytes = image.bytes,
+                    "pruned old quarantined redb"
+                );
+            }
+            for failure in &report.failures {
+                tracing::warn!(workspace = %name, error = %failure, "could not prune quarantined redb");
+            }
+            if !report.pruned.is_empty() {
+                tracing::info!(
+                    workspace = %name,
+                    pruned = report.pruned.len(),
+                    reclaimed_bytes = report.reclaimed_bytes(),
+                    keep = keep.get(),
+                    "quarantined redb retention applied"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(workspace = %name, error = %error, "could not apply quarantined redb retention");
+        }
+    }
+}
+
 /// RAII token marking a workspace as mid-wake; clears the name on drop so an
 /// early `?`-return still releases the single-flight slot.
 struct WakeGuard {
@@ -1336,17 +1375,25 @@ impl ServerState {
             );
         }
 
-        let engine = akh_medu::snapshot::wake(
+        let hydrated = akh_medu::snapshot::wake(
             &ws_paths.kg_dir,
             akh_id,
             akh_medu::wal::workspace_id_for(name),
             &pool,
         )
         .await
-        .map_err(|error| format!("authoritative hydration failed for \"{name}\": {error}"))?;
-        let triples = engine.all_triples().len();
-        let symbols = engine.all_symbols().len();
-        drop(engine);
+        .map(|engine| {
+            let counts = (engine.all_triples().len(), engine.all_symbols().len());
+            drop(engine);
+            counts
+        })
+        .map_err(|error| format!("authoritative hydration failed for \"{name}\": {error}"));
+        // ADR 049: bounded retention of quarantined images. Pruned only after
+        // the hydrate succeeded, so a failed wake leaves every copy in place.
+        let keep = self.config.read().await.redb_quarantine_keep;
+        let ((triples, symbols), pruned) =
+            akh_medu::redb_quarantine::prune_after_hydrate(hydrated, &ws_paths.kg_dir, keep)?;
+        log_quarantine_prune(name, keep, pruned);
 
         if let Err(error) =
             akhomed_store::touch_last_seen(&pool, akh_id, akhomed_store::chrono::Utc::now()).await
