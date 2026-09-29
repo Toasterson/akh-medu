@@ -715,30 +715,23 @@ def board_identity(events: dict, role: str) -> dict:
     return {"url": endpoint["url"], "auth": auth}
 
 
-def lilith_board_agent_id(root: Path) -> tuple[str | None, list[str]]:
-    """Lilith's own Board agent id, for `[board] agent_id` (daemon.rs ~2275:
-    without it, board inbox ingest is disabled for the akh). Lilith has no
-    reactor seeds yet, so the inbox is how she hears the operator on her CoS
-    thread.
+def board_agent_id(root: Path, role: str) -> tuple[str | None, list[str]]:
+    """An akh's own Board agent id, for `[board] agent_id` (daemon.rs ~2275: without it,
+    board inbox ingest is disabled for the akh, and self-message suppression needs it).
 
-    Read from `secrets/board-lilith.json`, the same
-    `{"bearer_token": "...", "agent": {"id": "<uuid>", "handle": ..., ...}}`
-    shape as the Romans' `secrets/board-<role>.json`. `bearer_token` is never
-    read or returned here.
+    Operator decision 2026-09-29: every akh's inbox is on, so the akhs can talk to each
+    other on the Board (Lilith's since C2; the Romans' now too). Their board events also
+    arrive through akheventd routes; self-message suppression keys on this id.
 
-    Only the Romans' `board_identity()` above stays untouched: their board
-    events already arrive through akheventd routes, so turning on inbox
-    ingest for them risks handling a message twice. That is a separate
-    operator decision, out of scope for Lilith's C2 wiring.
+    Read from `secrets/board-<role>.json`:
+    `{"bearer_token": "...", "agent": {"id": "<uuid>", "handle": ..., ...}}`.
+    `bearer_token` is never read or returned here.
 
-    Returns `(agent_id, warnings)`. A missing file or a file without
-    `agent.id` is a warning, not a RenderError: `lilith_missing_inputs`
-    already keeps Lilith out of `daemon.auto_start` until the secrets file
-    exists, and this must not block that auto-start once it does. A
-    non-UUID `agent.id` is a RenderError: that is corrupt input, not a
-    step the operator has simply not reached yet.
+    Returns `(agent_id, warnings)`. A missing file or a file without `agent.id` is a
+    warning (inbox ingest stays off for that akh), never a RenderError, so it cannot block
+    auto-start. A non-UUID `agent.id` is a RenderError: corrupt input.
     """
-    path = root / LILITH_BOARD_SECRETS_FILE
+    path = root / "secrets" / f"board-{role}.json"
     if not path.is_file():
         return None, []
     try:
@@ -747,13 +740,26 @@ def lilith_board_agent_id(root: Path) -> tuple[str | None, list[str]]:
         identity = None
     agent = identity.get("agent") if isinstance(identity, dict) else None
     agent_id = agent.get("id") if isinstance(agent, dict) else None
-    fix = (f"{path} needs `agent.id` (a UUID) from `GET /v1/agents/me` using her board token; "
-           "board inbox ingest for lilith stays off until then")
+    fix = (f"{path} needs `agent.id` (a UUID) from `GET /v1/agents/me` using its board token; "
+           f"board inbox ingest for {role} stays off until then")
     if agent_id is None:
         return None, [fix]
     if not isinstance(agent_id, str) or not _UUID.match(agent_id):
         raise RenderError(f"{path}: `agent.id` {agent_id!r} is not a UUID; {fix}")
     return agent_id, []
+
+
+def lilith_board_agent_id(root: Path) -> tuple[str | None, list[str]]:
+    """Lilith's Board agent id (`board_agent_id` for `lilith`)."""
+    return board_agent_id(root, LILITH)
+
+
+def with_board_agent_id(board: dict, agent_id: str | None) -> dict:
+    """`[board]` with `agent_id` placed between the scalars and the inline `auth` table
+    (akh TOML ordering: scalars before any sub-table)."""
+    if agent_id is None:
+        return board
+    return {"url": board["url"], "agent_id": agent_id, "auth": board["auth"]}
 
 
 MCP_SERVERS_PLACEHOLDER = "{mcp_servers}"
