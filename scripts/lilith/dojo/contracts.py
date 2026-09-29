@@ -118,7 +118,16 @@ _RECEIPTS = {
     },
 }
 _LANGUAGE = {"type": "string", "pattern": r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$"}
-_WI = {"type": "string", "minLength": 1}
+# A tracker identifier, never prose: the work item's (or plan's) id or short code exactly as a
+# read receipt shows it. Structural, not a format guess: one token without whitespace. A sentence
+# in an identifier field is then a contract violation (validity) instead of a "fabricated"
+# reference, and the description tells the model what the field holds.
+WI_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"  # one identifier token: no whitespace, no prose
+_WI = {
+    "type": "string",
+    "pattern": WI_ID_PATTERN,
+    "description": "a tracker identifier exactly as a read receipt shows it (UUID or short code), never a sentence",
+}
 
 
 class ParkCause(enum.StrEnum):
@@ -344,3 +353,8 @@ class PermissionProfile:
 
     def server_tier(self, server: str, tool: str) -> Tier:
         return self.tier(f"mcp__{server}__{tool}")
+
+
+def is_tracker_id(value: Any) -> bool:
+    """True for a string shaped like a tracker identifier (see `_WI`)."""
+    return isinstance(value, str) and re.search(WI_ID_PATTERN, value) is not None

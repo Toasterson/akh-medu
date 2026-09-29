@@ -280,7 +280,10 @@ def check_message_claims(msg: SendMessage, ev: Evidence) -> ClaimCheck:
     for i in range(total):
         check.add(i < backed, "cited receipt not issued")
     for wid in msg.payload.get("about") or []:
-        check.add(ev.mentions(str(wid)), f"about:{wid}")
+        # A non-identifier (prose) is a contract violation, scored by validity; only an
+        # identifier-shaped reference can be a fabricated one.
+        if C.is_tracker_id(wid):
+            check.add(ev.mentions(str(wid)), f"about:{wid}")
     return check
 
 
