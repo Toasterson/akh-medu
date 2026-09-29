@@ -683,6 +683,126 @@ locally).
 at the session cap. To stop it now:
 `/opt/homebrew/bin/python3 ~/.local/share/akh-medu/lilith-main/scripts/lilith/serve/lilith_serve.py stop`.
 
+## 13. Per-akh databases (ADR 120)
+
+- **ADR:** [120](../../docs/ai/decisions/120-per-akh-sqlite-databases.md)
+- **Why:** all four akhs share `state/core/akh.sqlite3` and one pooled
+  connection (`pool_size = 1`), plus one WAL connection each. A long snapshot
+  of one akh (persists reached 100 s) starves the others' snapshots
+  (`Connection pool timed out`), and a WAL flush that lands inside another
+  writer's transaction fails at once with `(code: 5) database is locked`,
+  whatever the busy_timeout (a read-then-write SQLite transaction cannot
+  wait). The per-akh layout gives each akh its own file and one connection
+  shared by its snapshot and WAL; no akh ever waits on another.
+- **Opt-in:** the file `config/per-akh-databases.json` =
+  `{"evidence": "<split evidence JSON>"}`. Without it `configure_core.py`
+  renders the shared file exactly as before. With it, the render fails closed
+  unless the evidence is a verified split of `state/core/akh.sqlite3` into
+  `state/core/host.sqlite3`, and then renders `[database] url` and the core
+  plist's `DATABASE_URL` (which overrides the url) as `host.sqlite3` with
+  `layout = "per_akh"`.
+- **Needs:** a core built from `origin/main` that contains ADR 120 (step 1,
+  `bin/akhomed store split-per-akh --help` succeeds). An older binary ignores
+  `layout` and would open `host.sqlite3` as a shared store with no akh in it.
+
+| File | Holds |
+|---|---|
+| `state/core/host.sqlite3` | host tables: workspace registry, membership, active microtheories, schema-pack registry |
+| `state/core/akh.<name>.sqlite3` | one per akh (janus, minerva, vesta, lilith): identity + residency epoch, WAL, snapshot tables, episodes, provenance |
+| `state/core/host.sqlite3.akh-<uuid>.lock` | residency lock files (anchored at the host file; never unlink) |
+| `state/core/akh.sqlite3` | the old shared file, never modified by the split; kept for rollback |
+
+```sh
+ROOT="$HOME/Library/Application Support/roman-akhs"
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+BK="$ROOT/backups/per-akh-$TS"
+EVIDENCE="$ROOT/evidence/per-akh-split-$TS.json"
+SPLIT=("$ROOT/bin/akhomed" store split-per-akh
+       --source "$ROOT/state/core/akh.sqlite3" --host "$ROOT/state/core/host.sqlite3")
+
+# 1. The installed core can split (built from origin/main with ADR 120).
+"$ROOT/bin/akhomed" store split-per-akh --help >/dev/null && echo split-capable
+
+# 2. Dry run while the core still runs: read-only, prints per-akh row counts,
+#    lists the held lock files (the real run refuses while they are held).
+"${SPLIT[@]}" --dry-run
+
+# 3. Stop the core, then back up the shared file and the config.
+sudo launchctl bootout system/dev.roman-akhs.core
+mkdir -p "$BK" && chmod 700 "$BK"
+sqlite3 "$ROOT/state/core/akh.sqlite3" ".backup '$BK/akh.sqlite3'"
+sqlite3 "$BK/akh.sqlite3" 'pragma integrity_check;'               # ok
+shasum -a 256 "$ROOT/state/core/akh.sqlite3" "$BK/akh.sqlite3" | tee "$BK/SHA256SUMS"
+cp -p "$ROOT/core-config/akh-medu/config.toml" "$ROOT/launchd/dev.roman-akhs.core.plist" "$BK/"
+
+# 4. Migrate. Creates host.sqlite3 + akh.<name>.sqlite3 (0600), one transaction
+#    per file, verifies rows + SHA-256 per table per akh, hashes the source
+#    before/after, writes the evidence. Refuses if any target already exists.
+"${SPLIT[@]}" --evidence "$EVIDENCE"
+
+# 5. Verify.
+python3 - "$EVIDENCE" <<'PY'
+import json, sys
+e = json.load(open(sys.argv[1]))
+assert e["verified"] and e["source"]["sha256_before"] == e["source"]["sha256_after"], "not verified"
+for akh in e["akhs"]:
+    rows = sum(t["target_rows"] for t in akh["tables"])
+    bad = [t["table"] for t in akh["tables"] if t["source_sha256"] != t["target_sha256"]]
+    print(akh["name"], rows, "rows", "OK" if not bad else f"MISMATCH {bad}")
+print("orphans left in source:", e["orphans_left_in_source"] or "none")
+PY
+for f in "$ROOT/state/core/host.sqlite3" "$ROOT/state/core/"akh.*.sqlite3; do
+  printf '%s %s\n' "$(sqlite3 "$f" 'pragma integrity_check;')" "$f"      # ok …
+done
+ls -l "$ROOT/state/core/host.sqlite3" "$ROOT/state/core/"akh.*.sqlite3     # -rw------- (the glob skips akh.sqlite3)
+
+# 6. Opt in and re-render (same clean $REPO checkout the installed core was
+#    built from; --plan first: only [database] url/layout and the comment change).
+umask 077
+printf '{"evidence": "%s"}\n' "$EVIDENCE" > "$ROOT/config/per-akh-databases.json"
+cd "$REPO" && python3 deploy/roman-mini/configure_core.py --root "$ROOT" --plan
+python3 deploy/roman-mini/configure_core.py --root "$ROOT" --binaries "$CARGO_TARGET_DIR/release" --repo "$REPO"
+plutil -extract EnvironmentVariables.DATABASE_URL raw "$ROOT/launchd/dev.roman-akhs.core.plist"   # …/host.sqlite3?mode=rwc
+
+# 7. Start.
+sudo cp "$ROOT/launchd/dev.roman-akhs.core.plist" /Library/LaunchDaemons/
+sudo chown root:wheel /Library/LaunchDaemons/dev.roman-akhs.core.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/dev.roman-akhs.core.plist
+
+# 8. Check: layout line, one store per akh, snapshots persisting, no contention.
+grep -a 'backing store layout' "$ROOT/logs/core.out.log" | tail -1
+grep -a 'opened per-akh SQLite store' "$ROOT/logs/core.out.log" | tail -4
+grep -a 'snapshot persisted' "$ROOT/logs/core.out.log" | tail -8
+grep -ac 'SQLite lock contention\|database is locked\|Connection pool timed out' "$ROOT/logs/core.out.log"   # compare with the count before step 7
+```
+
+A per-akh core pointed at the old shared file refuses to open an akh that is
+still in it (`akhomed_store::layout::unmigrated`) instead of starting it empty.
+Step 3 of this runbook and `cutover.sh` back up only `akh.sqlite3`; once the
+per-akh layout is live, back up `host.sqlite3` and every `akh.<name>.sqlite3`
+the same way (`sqlite3 <file> ".backup …"`).
+
+**Rollback** (any time; the old `akh.sqlite3` was never modified):
+
+```sh
+sudo launchctl bootout system/dev.roman-akhs.core
+rm "$ROOT/config/per-akh-databases.json"
+cd "$REPO" && python3 deploy/roman-mini/configure_core.py --root "$ROOT" --binaries "$CARGO_TARGET_DIR/release" --repo "$REPO"
+sudo cp "$ROOT/launchd/dev.roman-akhs.core.plist" /Library/LaunchDaemons/
+sudo launchctl bootstrap system /Library/LaunchDaemons/dev.roman-akhs.core.plist
+```
+
+Everything the akhs wrote after step 7 lives only in the per-akh files and is
+not in `akh.sqlite3`; there is no reverse split. Leave the per-akh files in
+place (do not delete them) so that state can be recovered by hand, and move
+them aside before a second split attempt (the split refuses existing targets).
+Never unlink `*.lock` files.
+
+**Retire the shared file** only after 24 h on the per-akh layout and with the
+evidence verified: stop nothing, then
+`mv "$ROOT/state/core/akh.sqlite3" "$BK/akh.sqlite3.retired"` (and its `-wal`
+/ `-shm` if present). The per-akh core never opens it.
+
 ## Rollback
 
 Use this at any step before 11.

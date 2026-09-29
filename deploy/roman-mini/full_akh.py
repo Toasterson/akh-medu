@@ -91,6 +91,12 @@ SKILLS = {"escalation_skill": "astra-escalation", "merge_repair_skill": "mergira
 # (janus_delegation_switch, below); absent it, Janus keeps the local akhsessd
 # path above unchanged.
 JANUS_DELEGATION_FILE = "config/janus-delegation.json"
+# ADR 120: the operator's opt-in to per-akh SQLite databases (see
+# `database_settings` and CUTOVER.md "Per-akh databases").
+PER_AKH_DATABASES_FILE = "config/per-akh-databases.json"
+SHARED_DATABASE = "state/core/akh.sqlite3"
+HOST_DATABASE = "state/core/host.sqlite3"
+SPLIT_EVIDENCE_SCHEMA = "akhomed.store.split_per_akh.v1"
 JANUS_DELEGATION_KEYS = {"sessions_url", "token_file", "runtime_profile", "projects"}
 
 # Vesta-only direct Grafana MCP server (PR 3 of the step-2 plan): no broker,
@@ -1239,14 +1245,95 @@ def with_board_endpoint(events: dict, role: str, token_env: str) -> dict:
 # ── Host config, core.json, events ───────────────────────────────────────────
 
 
+def sqlite_url(path: Path) -> str:
+    return "sqlite://" + str(path) + "?mode=rwc"
+
+
+@dataclass(frozen=True)
+class DatabaseSettings:
+    """The core's `[database]` url and layout (ADR 120). `layout` None keeps
+    the key out of the host config, so the shared render is byte-identical."""
+    url: str
+    layout: str | None = None
+    evidence: Path | None = None
+
+
+def _same_file(a: str | Path, b: Path) -> bool:
+    return os.path.realpath(str(a)) == os.path.realpath(str(b))
+
+
+def database_settings(root: Path) -> DatabaseSettings:
+    """Shared `state/core/akh.sqlite3`, or the per-akh layout once the operator
+    opts in with `config/per-akh-databases.json` (ADR 120).
+
+    The switch file holds one key, `evidence`: the path (absolute, or relative
+    to the deployment root) of the evidence JSON written by
+    `akhomed store split-per-akh --source <root>/state/core/akh.sqlite3
+    --host <root>/state/core/host.sqlite3 --evidence <path>`. The render
+    fails closed unless that evidence exists, is verified, split exactly those
+    two files, and the host file is present: switching the layout without the
+    split would start every akh from an empty file. With the switch, the host
+    config and the core's DATABASE_URL point at `state/core/host.sqlite3` with
+    `layout = "per_akh"`; the akh files `state/core/akh.<name>.sqlite3` sit
+    beside it. Remove the file (and re-render) to roll back to the shared file.
+    """
+    shared = DatabaseSettings(url=sqlite_url(root / SHARED_DATABASE))
+    path = root / PER_AKH_DATABASES_FILE
+    if not path.exists():
+        return shared
+    try:
+        settings = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise RenderError(f"{path} is not valid JSON ({error}); fix or remove it") from error
+    if not isinstance(settings, dict):
+        raise RenderError(f"{path} must be a JSON object")
+    unknown = sorted(set(settings) - {"evidence"})
+    if unknown:
+        raise RenderError(f"{path} has unknown keys {unknown}; allowed: ['evidence']")
+    evidence_value = settings.get("evidence")
+    if not isinstance(evidence_value, str) or not evidence_value.strip():
+        raise RenderError(f"{path} needs `evidence`: the split evidence JSON written by "
+                          "`akhomed store split-per-akh` (CUTOVER.md \"Per-akh databases\")")
+    evidence_path = Path(evidence_value)
+    if not evidence_path.is_absolute():
+        evidence_path = root / evidence_path
+    if not evidence_path.is_file():
+        raise RenderError(f"the split evidence {evidence_path} does not exist; run the split first "
+                          f"(CUTOVER.md \"Per-akh databases\") or remove {PER_AKH_DATABASES_FILE}")
+    try:
+        evidence = json.loads(evidence_path.read_text())
+    except json.JSONDecodeError as error:
+        raise RenderError(f"{evidence_path} is not valid JSON ({error})") from error
+    if not isinstance(evidence, dict) or evidence.get("schema") != SPLIT_EVIDENCE_SCHEMA:
+        raise RenderError(f"{evidence_path} is not a {SPLIT_EVIDENCE_SCHEMA} evidence file")
+    if evidence.get("verified") is not True:
+        raise RenderError(f"{evidence_path} does not record a verified split; rerun the split")
+    source = (evidence.get("source") or {}).get("path")
+    host = (evidence.get("host") or {}).get("path")
+    if not isinstance(source, str) or not _same_file(source, root / SHARED_DATABASE):
+        raise RenderError(f"{evidence_path} split {source!r}, not {root / SHARED_DATABASE}")
+    if not isinstance(host, str) or not _same_file(host, root / HOST_DATABASE):
+        raise RenderError(f"{evidence_path} wrote host {host!r}, not {root / HOST_DATABASE}")
+    if not (root / HOST_DATABASE).is_file():
+        raise RenderError(f"{root / HOST_DATABASE} is missing although {evidence_path} records it; "
+                          f"rerun the split or remove {PER_AKH_DATABASES_FILE}")
+    return DatabaseSettings(url=sqlite_url(root / HOST_DATABASE), layout="per_akh",
+                            evidence=evidence_path)
+
+
 def render_host_config(database_url: str, acp_principals: list[dict],
-                       acp_port: int = ACP_TCP_PORT, auto_start: list[str] | None = None) -> dict:
+                       acp_port: int = ACP_TCP_PORT, auto_start: list[str] | None = None,
+                       database_layout: str | None = None) -> dict:
     """The host config. `auto_start` defaults to the Romans; Lilith joins it
-    only once her secrets and ancestry clone exist (configure_core.py)."""
+    only once her secrets and ancestry clone exist (configure_core.py).
+    `database_layout` ("per_akh", ADR 120) is rendered only when set."""
+    database = {"url": database_url, "migrate_on_start": True, "pool_size": 1,
+                "wal_flush_interval_secs": 1, "snapshot_interval_secs": 30}
+    if database_layout is not None:
+        database["layout"] = database_layout
     return {
         "deployment": "deployed",
-        "database": {"url": database_url, "migrate_on_start": True, "pool_size": 1,
-                     "wal_flush_interval_secs": 1, "snapshot_interval_secs": 30},
+        "database": database,
         "daemon": {"auto_start": list(auto_start if auto_start is not None else ROLES)},
         "exec": {"kind": "none"},
         "acp": {"unix": True, "tcp_bind": "127.0.0.1", "tcp_port": acp_port,

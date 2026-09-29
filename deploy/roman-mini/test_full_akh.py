@@ -1592,6 +1592,105 @@ class LilithBoardAgentIdTests(RenderFixture):
 
 
 @NEEDS_TOMLLIB
+def split_evidence(root: Path, **overrides) -> Path:
+    """A verified ADR 120 split evidence file for the fixture root, as written by
+    `akhomed store split-per-akh`, plus the host database it records."""
+    (root / "state/core").mkdir(parents=True, exist_ok=True)
+    (root / fa.HOST_DATABASE).write_bytes(b"SQLite format 3\x00")
+    evidence = {"schema": fa.SPLIT_EVIDENCE_SCHEMA, "verified": True, "layout": "per_akh",
+                "source": {"path": str(root / fa.SHARED_DATABASE)},
+                "host": {"path": str(root / fa.HOST_DATABASE), "tables": []},
+                "akhs": [{"name": r, "path": str(root / f"state/core/akh.{r}.sqlite3"), "tables": []}
+                         for r in ROLES]}
+    evidence.update(overrides)
+    path = root / "evidence/per-akh-split.json"
+    path.write_text(json.dumps(evidence))
+    return path
+
+
+@NEEDS_TOMLLIB
+class PerAkhDatabaseTests(RenderFixture):
+    """ADR 120: config/per-akh-databases.json opts the core into per-akh SQLite
+    files, gated on the split evidence; without it nothing changes."""
+
+    HOST = "core-config/akh-medu/config.toml"
+
+    def plist_env(self):
+        plist = plistlib.loads((self.root / "launchd/dev.roman-akhs.core.plist").read_bytes())
+        return plist["EnvironmentVariables"]
+
+    def switch(self, evidence):
+        (self.root / fa.PER_AKH_DATABASES_FILE).write_text(json.dumps({"evidence": str(evidence)}))
+
+    def test_without_the_switch_the_shared_file_is_rendered(self):
+        self.render()
+        database = self.toml(self.HOST)["database"]
+        self.assertEqual(database["url"], fa.sqlite_url(self.root / fa.SHARED_DATABASE))
+        self.assertNotIn("layout", database)
+        self.assertEqual(self.plist_env()["DATABASE_URL"], database["url"])
+
+    def test_switch_renders_the_host_file_with_per_akh_layout(self):
+        self.switch(split_evidence(self.root))
+        warnings = self.render()
+        database = self.toml(self.HOST)["database"]
+        self.assertEqual(database["url"], fa.sqlite_url(self.root / fa.HOST_DATABASE))
+        self.assertEqual(database["layout"], "per_akh")
+        self.assertEqual(database["snapshot_interval_secs"], 30)
+        # DATABASE_URL overrides [database] url in akhomed, so both must move.
+        self.assertEqual(self.plist_env()["DATABASE_URL"], database["url"])
+        self.assertIn("ADR 120 per-akh layout", self.text(self.HOST))
+        self.assertTrue(any("per-akh databases" in w for w in warnings), warnings)
+
+    def test_switch_accepts_an_evidence_path_relative_to_the_root(self):
+        split_evidence(self.root)
+        self.switch("evidence/per-akh-split.json")
+        self.render()
+        self.assertEqual(self.toml(self.HOST)["database"]["layout"], "per_akh")
+
+    def test_switch_changes_only_the_database_table(self):
+        self.render()
+        shared = self.text(self.HOST)
+        self.switch(split_evidence(self.root))
+        self.render()
+        per_akh = self.text(self.HOST)
+        changed = [line for line in per_akh.splitlines() if line not in shared.splitlines()]
+        self.assertTrue(all(line.startswith(("url = ", "layout = ", "#")) for line in changed), changed)
+        for role in ROLES:
+            self.assertEqual(golden(self.root, f"core-config/akh-medu/workspaces/{role}.toml"),
+                             (GOLDEN / f"{role}.toml").read_text())
+
+    def test_bad_switches_fail_closed_before_writing(self):
+        good = split_evidence(self.root)
+        cases = [
+            ("not json", "not valid JSON"),
+            (json.dumps(["x"]), "JSON object"),
+            (json.dumps({"evidence": str(good), "extra": 1}), "unknown keys"),
+            (json.dumps({}), "needs `evidence`"),
+            (json.dumps({"evidence": str(self.root / "evidence/missing.json")}), "does not exist"),
+        ]
+        for text, message in cases:
+            with self.subTest(message=message):
+                (self.root / fa.PER_AKH_DATABASES_FILE).write_text(text)
+                with self.assertRaisesRegex(fa.RenderError, re.escape(message)):
+                    self.render()
+                self.assertFalse((self.root / self.HOST).exists())
+        evidence_cases = [
+            ({"schema": "other"}, "is not a"),
+            ({"verified": False}, "verified split"),
+            ({"source": {"path": str(self.root / "state/core/other.sqlite3")}}, "not " + str(self.root)),
+            ({"host": {"path": str(self.root / "state/core/elsewhere.sqlite3")}}, "wrote host"),
+        ]
+        for overrides, message in evidence_cases:
+            with self.subTest(message=message):
+                self.switch(split_evidence(self.root, **overrides))
+                with self.assertRaisesRegex(fa.RenderError, re.escape(message)):
+                    self.render()
+        self.switch(split_evidence(self.root))
+        (self.root / fa.HOST_DATABASE).unlink()
+        with self.assertRaisesRegex(fa.RenderError, "is missing"):
+            self.render()
+
+
 class PlanTests(RenderFixture):
     def tree(self):
         return {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.root.rglob("*") if p.is_file()}
