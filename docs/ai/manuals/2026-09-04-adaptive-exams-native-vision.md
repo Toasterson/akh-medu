@@ -683,8 +683,12 @@ preserved because it is part of the candidate corpus fingerprint. Use
 attempts are revalidated rather than overwritten.
 
 Pair a paid GPU run with `stop_runpod_after_pipeline.py`. The guard pins its
-1Password wrapper and `runpodctl`, holds only the `op://` reference while
-waiting, and obtains the actual key just in time. It stops (never deletes) the
+enrolled `~/.local/bin/agent-tools` wrapper and `runpodctl`, holds only the
+`runpod` cache profile name while waiting, and obtains the actual key just in
+time from OpenBao-backed delivery. Override the wrapper with `--agent-tools`
+when its installed path differs. There is no 1Password fallback. Legacy guard
+launches using `--credential-ref`/`--op-wrapper` must be recreated with the new
+arguments; schema-v1 launches cannot resume under schema v2. It stops (never deletes) the
 pod after the candidate is staged locally, after a terminal pipeline failure,
 or when the cost deadline expires. This prevents a failed watcher from leaving
 unbounded paid compute behind while preserving the stopped pod and its volume

@@ -3,7 +3,7 @@
 
 The guard holds no credential while waiting.  At successful staging, terminal
 pipeline failure, or the configured deadline, it verifies its pinned tools and
-uses the machine-local 1Password wrapper to inject ``RUNPOD_API_KEY`` only into
+uses the enrolled OpenBao cache wrapper to inject ``RUNPOD_API_KEY`` only into
 the short-lived ``runpodctl pod stop`` process.
 """
 
@@ -36,8 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cross-host-run", type=Path, required=True)
     parser.add_argument("--pod-id", required=True)
-    parser.add_argument("--credential-ref", required=True)
-    parser.add_argument("--op-wrapper", type=Path, required=True)
+    parser.add_argument("--agent-tools", type=Path, default=Path.home() / ".local/bin/agent-tools")
     parser.add_argument("--runpodctl", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--poll-seconds", type=int, default=30)
@@ -46,8 +45,6 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not POD_ID.fullmatch(args.pod_id):
         parser.error("pod id contains unsupported characters")
-    if not args.credential_ref.startswith("op://"):
-        parser.error("credential-ref must be a 1Password secret reference")
     if args.poll_seconds < 5 or args.maximum_wait_hours <= 0:
         parser.error("poll must be >=5 seconds and wait budget positive")
     return args
@@ -67,12 +64,12 @@ def file_identity(path: Path) -> dict[str, Any]:
 def launch_configuration(args: argparse.Namespace) -> dict[str, Any]:
     cross_host = args.cross_host_run.resolve(strict=True)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "cross_host_run": str(cross_host),
         "cross_host_launch_config": file_identity(cross_host / "launch-config.json"),
         "pod_id": args.pod_id,
-        "credential_ref": args.credential_ref,
-        "op_wrapper": file_identity(args.op_wrapper),
+        "secret_profile": "runpod",
+        "agent_tools": file_identity(args.agent_tools),
         "runpodctl": file_identity(args.runpodctl),
         "poll_seconds": args.poll_seconds,
         "maximum_wait_hours": args.maximum_wait_hours,
@@ -81,7 +78,7 @@ def launch_configuration(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def verify_pins(config: dict[str, Any]) -> None:
-    for key in ("cross_host_launch_config", "op_wrapper", "runpodctl"):
+    for key in ("cross_host_launch_config", "agent_tools", "runpodctl"):
         identity = config[key]
         if loop.sha256_file(Path(identity["path"])) != identity["sha256"]:
             raise RuntimeError(f"pinned cost-guard input changed: {identity['path']}")
@@ -100,10 +97,10 @@ def trigger_reason(cross_host: Path) -> str | None:
 
 def stop_command(config: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
     environment = os.environ.copy()
-    environment["RUNPOD_API_KEY"] = config["credential_ref"]
+    environment.pop("RUNPOD_API_KEY", None)
     command = [
-        config["op_wrapper"]["path"],
-        "run",
+        config["agent_tools"]["path"],
+        config["secret_profile"],
         "--",
         config["runpodctl"]["path"],
         "pod",
