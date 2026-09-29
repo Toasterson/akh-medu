@@ -1424,6 +1424,62 @@ class LilithRenderTests(RenderFixture):
                 self.assertIn("NOT auto-started", warning)
                 self.assertIn(str(self.root / missing), warning)
 
+    def test_t3_chat_principal_key_and_provider_binary(self):
+        lilith_fixture(self.root)
+        self.assertFalse((self.root / fa.LILITH_T3_KEY_FILE).exists())
+        self.render()
+        host = self.toml("core-config/akh-medu/config.toml")
+        principals = {p["id"]: p for p in host["acp"]["principals"]}
+        self.assertEqual(principals["t3-lilith"], {"id": "t3-lilith", "token_file": str(self.root / fa.LILITH_T3_KEY_FILE),
+                                                   "akhs": ["lilith"]})
+        self.assertEqual(set(principals["t3-janus"]), set(principals["t3-lilith"]))
+        key = self.root / fa.LILITH_T3_KEY_FILE
+        self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+        secret = key.read_text().strip()
+        self.assertGreaterEqual(len(secret), 48)
+        # Her key opens the ACP listener, and is never overwritten by a re-render.
+        self.assertIn(secret, self.text("secrets/acp-clients.keys").splitlines())
+        self.render()
+        self.assertEqual(key.read_text().strip(), secret)
+        entrypoint = self.root / "bin/roman-lilith"
+        self.assertEqual(entrypoint.read_text(), (SOURCE / "t3_entrypoint.py").read_text())
+        self.assertEqual(entrypoint.stat().st_mode & 0o777, 0o700)
+
+    def test_existing_t3_key_is_kept(self):
+        lilith_fixture(self.root)
+        (self.root / fa.LILITH_T3_KEY_FILE).write_text("operator-chosen-" + "x" * 40 + "\n")
+        self.render()
+        self.assertEqual((self.root / fa.LILITH_T3_KEY_FILE).read_text(), "operator-chosen-" + "x" * 40 + "\n")
+
+    def test_t3_acp_json_lists_the_hosted_akhs_and_her_serve_checkout(self):
+        lilith_fixture(self.root)
+        self.render()
+        t3 = json.loads(self.text("config/t3-acp.json"))
+        self.assertEqual(t3["akhs"], list(ROLES) + ["lilith"])
+        self.assertEqual(t3["lilith_serve"], fa.LILITH_SERVE_CHECKOUT)
+        lilith_fixture(self.root, repository=False, serve_checkout="/srv/lilith-main")
+        self.render()
+        self.assertEqual(json.loads(self.text("config/t3-acp.json"))["lilith_serve"], "/srv/lilith-main")
+        lilith_fixture(self.root, repository=False, serve_checkout="relative/dir")
+        with self.assertRaises(fa.RenderError):
+            self.render()
+
+    def test_without_lilith_nothing_of_her_t3_surface_is_rendered(self):
+        self.render()
+        t3 = json.loads(self.text("config/t3-acp.json"))
+        self.assertEqual(t3["akhs"], list(ROLES))
+        self.assertNotIn("lilith_serve", t3)
+        self.assertFalse((self.root / fa.LILITH_T3_KEY_FILE).exists())
+        self.assertFalse((self.root / "bin/roman-lilith").exists())
+        principals = self.toml("core-config/akh-medu/config.toml")["acp"]["principals"]
+        self.assertNotIn("t3-lilith", [p["id"] for p in principals])
+
+    def test_plan_creates_no_key_and_no_binary(self):
+        lilith_fixture(self.root)
+        configure_core.plan(self.root, self.prov, source=SOURCE)
+        self.assertFalse((self.root / fa.LILITH_T3_KEY_FILE).exists())
+        self.assertFalse((self.root / "bin/roman-lilith").exists())
+
     def test_staged_events_carry_her_board_identity(self):
         lilith_fixture(self.root)
         self.render()

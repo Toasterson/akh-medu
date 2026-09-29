@@ -548,7 +548,7 @@ Render inputs (all under `$ROOT`, mode 0600, written from a login session):
 
 | Input | Content | Source |
 |---|---|---|
-| `config/lilith.json` | `{"budget": {"minor_units": N, "currency": "USD"}}`; optional `context_window` (default 32768) and `base_url_file` | operator decision (her spend ceiling) |
+| `config/lilith.json` | `{"budget": {"minor_units": N, "currency": "USD"}}`; optional `context_window` (default 32768), `base_url_file` and `serve_checkout` (the main checkout T3 starts her serve pod from; default `~/.local/share/akh-medu/lilith-main`) | operator decision (her spend ceiling) |
 | `secrets/lilith-base-url` | the vLLM base URL, `https://…proxy.runpod.net/v1` | 1Password item `lilith-serve-endpoint`, field `base_url` |
 | `secrets/lilith-openai-key` | the vLLM `--api-key` → env `LILITH_OPENAI_KEY` | the serve pod's key |
 | `secrets/anima-lilith-pat` | her own Anima PAT → env `LILITH_ANIMA_TOKEN` (MCP server `anima`) | minted for Lilith, never Toasty's |
@@ -626,6 +626,62 @@ Expected results:
 
 To roll back, remove `config/lilith.json` and render again. She drops out of
 `auto_start`, and her workspace file and state stay in place.
+
+### Chat with Lilith in T3
+
+T3 talks to her through the provider `roman-lilith` ("Lilith · Chief of Staff"),
+the same transport as the Romans: `bin/roman-lilith` is a copy of
+`t3_entrypoint.py` that execs `akh-acp --akhomed ... --akh lilith --t3-compat`
+with her own scoped ACP principal `t3-lilith` (key `secrets/t3-lilith.key`).
+
+What `configure_core.py` does once `config/lilith.json` exists: it renders the
+`t3-lilith` principal (scoped to `lilith` only) into the host config's
+`[acp] principals`, creates `secrets/t3-lilith.key` (`secrets.token_urlsafe(48)`,
+0600) only if it is missing (never overwritten), adds it to
+`secrets/acp-clients.keys`, installs `bin/roman-lilith` (0700), and writes
+`akhs` (the roles the entrypoint accepts) and `lilith_serve` (her serve
+checkout) into `config/t3-acp.json`. The entrypoint refuses any role that is
+not in `akhs`. After the render, restart the core as in step 12 so it loads the
+new principal and key.
+
+Install the T3 provider entry (the supervisor does this, not the repo):
+
+```sh
+# Keep the Romans' bin/roman-<role> copies current too (they are plain copies):
+for r in janus minerva vesta; do install -m 700 deploy/roman-mini/t3_entrypoint.py "$ROOT/bin/roman-$r"; done
+# T3's settings file on this Mac is ~/.t3/userdata/settings.json (README "Install T3 entries"):
+python3 deploy/roman-mini/configure_t3.py "$ROOT" ~/.t3/userdata/settings.json
+```
+
+`configure_t3.py` adds `roman-lilith` next to the Romans when `config/lilith.json`
+exists, keeps every unrelated provider instance, and backs the settings up to
+`$ROOT/evidence/t3-settings-before-romans.json` on the first run. It does not
+add her to `config/sessions.json` (she is not on akhsessd). T3 watches its
+settings live, so no T3 restart is needed.
+
+**Cold start.** Her model runs on the Runpod serve pod, which is normally
+stopped ([docs/ops/lilith-serve.md](../../docs/ops/lilith-serve.md)). When T3
+starts `roman-lilith`, the entrypoint asks her endpoint's `/health`
+(`secrets/lilith-base-url` minus `/v1`, `User-Agent: curl/8.7.1`, 3 s timeout).
+If it is down, it spawns `lilith_serve.py start` from `lilith_serve` once,
+detached (lock and 5-minute retry cooldown under `$ROOT/state/lilith/`), and
+carries on. The ACP handshake never waits. Until vLLM is up, her turns fail with
+the backend error. **The first message after a cold start takes about 8-10
+minutes** (resume plus vLLM model load); send it again once
+`curl -s -o /dev/null -w '%{http_code}' -A curl/8.7.1 "$(sed 's#/v1$##' $ROOT/secrets/lilith-base-url)/health"`
+prints 200.
+
+**Budget refusals.** `start` enforces the serve budget (2 h session, 6 GPU-hours
+per week, monthly share, $5 credit reserve, 10-minute minimum) and refuses with a
+named limit. The refusal is in `$ROOT/logs/lilith-serve-start.log`, the pod stays
+stopped, and her turns keep failing with the backend error. Read it with
+`tail -n 20 $ROOT/logs/lilith-serve-start.log`; the options are in the runbook's
+failure-modes table (wait for the reset, ask the operator to top up, or serve
+locally).
+
+**Stopping the pod.** The idle-watch LaunchAgent stops it after 20 minutes idle or
+at the session cap. To stop it now:
+`/opt/homebrew/bin/python3 ~/.local/share/akh-medu/lilith-main/scripts/lilith/serve/lilith_serve.py stop`.
 
 ## Rollback
 

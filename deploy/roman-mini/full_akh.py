@@ -161,7 +161,13 @@ LILITH_MODEL = "lilith"  # vLLM --served-model-name
 # believes fits is never rejected by vLLM for actually being larger.
 LILITH_CONTEXT_WINDOW = 49152
 LILITH_CONFIG_FILE = "config/lilith.json"
-LILITH_CONFIG_KEYS = {"budget", "base_url_file", "context_window"}
+LILITH_CONFIG_KEYS = {"budget", "base_url_file", "context_window", "serve_checkout"}
+# T3 chat with Lilith (ADR 116, Lilith C2): her ACP client principal, and the
+# main checkout whose scripts/lilith/serve/lilith_serve.py the T3 entrypoint
+# starts on demand (her Runpod serve pod is normally stopped).
+LILITH_T3_PRINCIPAL = "t3-lilith"
+LILITH_T3_KEY_FILE = "secrets/t3-lilith.key"
+LILITH_SERVE_CHECKOUT = "~/.local/share/akh-medu/lilith-main"
 # The Runpod proxy URL (1Password item `lilith-serve-endpoint`, field
 # `base_url`), written by the operator at render time. Never in this repo.
 LILITH_BASE_URL_FILE = "secrets/lilith-base-url"
@@ -244,6 +250,7 @@ class LilithSettings:
     base_url: str
     budget: dict
     context_window: int
+    serve_checkout: str = LILITH_SERVE_CHECKOUT
 
     def inference(self) -> Inference:
         return Inference("openai", LILITH_MODEL, "openai_endpoint", {
@@ -1079,6 +1086,10 @@ def lilith_settings(root: Path) -> LilithSettings | None:
     - `context_window` (optional, default 49152; headroom below vLLM's 65536
       serving window for output + estimation error — see
       `LILITH_CONTEXT_WINDOW`).
+    - `serve_checkout` (optional, default `~/.local/share/akh-medu/lilith-main`):
+      the origin/main checkout holding `scripts/lilith/serve/lilith_serve.py`,
+      which the T3 entrypoint runs (`start`) when her serve pod is down. Written
+      to `config/t3-acp.json` as `lilith_serve`; `~` is expanded at run time.
 
     Absent file: None, and nothing about Lilith is rendered. A present but
     malformed file (or a missing/invalid base URL) fails the whole render
@@ -1107,6 +1118,10 @@ def lilith_settings(root: Path) -> LilithSettings | None:
     context_window = settings.get("context_window", LILITH_CONTEXT_WINDOW)
     if not isinstance(context_window, int) or isinstance(context_window, bool) or context_window <= 0:
         raise RenderError(f"{path}: `context_window` must be a positive integer")
+    serve_checkout = settings.get("serve_checkout", LILITH_SERVE_CHECKOUT)
+    if (not isinstance(serve_checkout, str) or not serve_checkout
+            or not (serve_checkout.startswith("~/") or Path(serve_checkout).is_absolute())):
+        raise RenderError(f"{path}: `serve_checkout` must be an absolute path or start with ~/")
     url_file = Path(settings.get("base_url_file") or root / LILITH_BASE_URL_FILE)
     if not url_file.is_absolute():
         raise RenderError(f"{path}: `base_url_file` must be an absolute path")
@@ -1123,7 +1138,8 @@ def lilith_settings(root: Path) -> LilithSettings | None:
         raise RenderError(
             f"{url_file} must hold the vLLM base URL: https, no credentials, query or fragment, "
             "ending in the /v1 version segment (e.g. https://<pod>-8000.proxy.runpod.net/v1)")
-    return LilithSettings(base_url=base_url.rstrip("/"), budget=dict(budget), context_window=context_window)
+    return LilithSettings(base_url=base_url.rstrip("/"), budget=dict(budget), context_window=context_window,
+                          serve_checkout=serve_checkout)
 
 
 def lilith_missing_inputs(root: Path) -> list[str]:
@@ -1249,9 +1265,15 @@ HOST_COMMENTS = {
 def acp_principals(session: dict, root: Path, akhs: tuple[str, ...] = ROLES) -> list[dict]:
     """T3 client keys scoped to their own akh, plus the operator (per phase53/fixups).
 
-    The operator reaches every akh this core hosts (`akhs`)."""
+    The operator reaches every akh this core hosts (`akhs`). Lilith is not on
+    akhsessd, so her `t3-lilith` principal (token `secrets/t3-lilith.key`,
+    scoped to her alone) is added here whenever she is hosted, unless the
+    session config already lists one."""
     principals = [Inline(id=p["id"], token_file=p["token_file"], akhs=list(p["akhs"]))
                   for p in session.get("principals", []) if p["id"].startswith("t3-")]
+    if LILITH in akhs and not any(p["id"] == LILITH_T3_PRINCIPAL for p in principals):
+        principals.append(Inline(id=LILITH_T3_PRINCIPAL, token_file=str(root / LILITH_T3_KEY_FILE),
+                                 akhs=[LILITH]))
     principals.append(Inline(id="operator", token_file=str(root / "secrets/operator.key"),
                              akhs=list(akhs), control=True))
     return principals
