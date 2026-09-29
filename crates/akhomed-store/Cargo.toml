@@ -33,6 +33,9 @@ toml = "0.8"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
+# Per-table content digests in the per-akh split evidence (ADR 120)
+sha2 = "0.10"
+
 # Error handling (miette + thiserror per project convention)
 miette = { version = "7", features = ["fancy"] }
 thiserror = "2"

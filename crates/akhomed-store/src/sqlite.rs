@@ -13,7 +13,11 @@ use sea_orm::{
     ActiveValue::{NotSet, Set},
     DatabaseConnection, EntityTrait, TransactionTrait,
 };
-use std::{fs::File, path::PathBuf, str::FromStr};
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 use uuid::Uuid;
 
 fn failure(error: impl std::fmt::Display) -> StoreError {
@@ -94,6 +98,12 @@ pub(crate) async fn connect(opts: &PoolOptions) -> StoreResult<DatabaseConnectio
     Ok(sea_orm::SqlxSqliteConnector::from_sqlx_sqlite_pool(pool))
 }
 
+/// The residency lock file for akh `id` anchored at database `anchor`:
+/// `<anchor>.akh-<id>.lock`. Lock files are never unlinked.
+pub(crate) fn residency_lock_path(anchor: &Path, id: Uuid) -> PathBuf {
+    PathBuf::from(format!("{}.akh-{id}.lock", anchor.display()))
+}
+
 pub(crate) struct LocalSession {
     db: DatabaseConnection,
     path: PathBuf,
@@ -111,11 +121,32 @@ impl LocalSession {
             held: None,
         })
     }
+
+    /// A session whose data (epoch, WAL rows) goes through `db` — the akh's
+    /// own store connection under the per-akh layout (ADR 120), so the WAL
+    /// and the snapshot share one connection and queue on its pool instead of
+    /// racing for the file's write lock — while its residency lock file is
+    /// anchored at `anchor` (the host database): `<host>.akh-<uuid>.lock`.
+    pub(crate) fn with_connection(db: DatabaseConnection, anchor: &Path) -> StoreResult<Self> {
+        let parent = anchor
+            .parent()
+            .ok_or_else(|| failure("residency lock anchor has no parent directory"))?;
+        let file_name = anchor
+            .file_name()
+            .ok_or_else(|| failure("residency lock anchor has no file name"))?;
+        let path = parent.canonicalize().map_err(failure)?.join(file_name);
+        Ok(Self {
+            db,
+            path,
+            held: None,
+        })
+    }
+
     pub(crate) fn acquire(&mut self, id: Uuid) -> StoreResult<bool> {
         if let Some((owner, _)) = self.held {
             return Ok(owner == id);
         }
-        let lock = PathBuf::from(format!("{}.akh-{id}.lock", self.path.display()));
+        let lock = residency_lock_path(&self.path, id);
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]

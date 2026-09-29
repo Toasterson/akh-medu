@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use sea_orm::sqlx::postgres::PgConnection;
 use sea_orm::sqlx::{Connection, Row};
-use sea_orm::{ConnectOptions, Database, DatabaseConnection};
+use sea_orm::{ConnectOptions, ConnectionTrait as _, Database, DatabaseConnection};
 use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
@@ -75,6 +75,29 @@ impl StablePgSession {
             sqlite: None,
             state: Mutex::new(StablePgSessionState {
                 connection: Some(connection),
+                locked_akh: None,
+            }),
+        })
+    }
+
+    /// A local SQLite residency session writing through `db` (the akh's own
+    /// store under the per-akh layout, ADR 120) with its lock file anchored
+    /// at `anchor` (the host database). SQLite only.
+    pub fn sqlite_on_connection(
+        db: DatabaseConnection,
+        anchor: &std::path::Path,
+    ) -> StoreResult<Self> {
+        if db.get_database_backend() != sea_orm::DatabaseBackend::Sqlite {
+            return Err(StoreError::Conflict {
+                message: "a connection-sharing residency session requires SQLite".into(),
+            });
+        }
+        Ok(Self {
+            sqlite: Some(Mutex::new(crate::sqlite::LocalSession::with_connection(
+                db, anchor,
+            )?)),
+            state: Mutex::new(StablePgSessionState {
+                connection: None,
                 locked_akh: None,
             }),
         })
