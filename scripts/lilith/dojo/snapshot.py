@@ -22,6 +22,9 @@ from typing import Any, Iterator, Mapping
 from dojo.errors import ObjectIntegrityError, SnapshotFormatError, UnknownSnapshotError
 
 SCHEMA = "lilith/cos-snapshot@1"
+PRIMARY_ANIMA_COLLECTOR = "anima"
+EXTRA_PROJECT_PREFIX = "anima:"
+DEFAULT_PROJECT_ID = "019d9844-ce74-7993-a9f0-c953b8f04a4e"  # Akh-Medu
 TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 MAIN_REF = "refs/heads/main"
 
@@ -121,6 +124,8 @@ class RecordedResponse:
     call: str
     args: Mapping[str, Any]
     sha256: str
+    # Additive since multi-project capture; absent in older snapshots (all Akh-Medu).
+    project_id: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -223,7 +228,7 @@ class Snapshot:
         out = []
         for cname, cresult in sorted(self.manifest.get("collectors", {}).items()):
             for r in cresult.get("responses", []):
-                out.append(RecordedResponse(cname, r["call"], r.get("args") or {}, r["sha256"]))
+                out.append(RecordedResponse(cname, r["call"], r.get("args") or {}, r["sha256"], r.get("project_id")))
         return tuple(out)
 
     @cached_property
@@ -253,8 +258,28 @@ class Snapshot:
     def find(self, call: str, args: Mapping[str, Any]) -> RecordedResponse | None:
         return self._index.get((call, canonical_args(args)))
 
-    def by_call(self, call: str) -> Iterator[RecordedResponse]:
-        return (r for r in self.responses if r.call == call)
+    def by_call(self, call: str, collector: str | None = None) -> Iterator[RecordedResponse]:
+        """Responses for `call`. Without `collector`, only the primary (Akh-Medu) Anima
+        collector and the non-Anima ones: extra-project collectors are named
+        `anima:<project_id>` and are read explicitly via `collector=` so their work items
+        never leak into the Akh-Medu families."""
+        if collector is not None:
+            return (r for r in self.responses if r.call == call and r.collector == collector)
+        return (r for r in self.responses if r.call == call and not r.collector.startswith(EXTRA_PROJECT_PREFIX))
+
+    @cached_property
+    def project_collectors(self) -> dict[str, str]:
+        """project id -> Anima collector name, for every project this snapshot captured."""
+        out: dict[str, str] = {}
+        for cname, cresult in sorted(self.manifest.get("collectors", {}).items()):
+            if cname == PRIMARY_ANIMA_COLLECTOR:
+                pid = (cresult.get("extra") or {}).get("project_id") or DEFAULT_PROJECT_ID
+            elif cname.startswith(EXTRA_PROJECT_PREFIX):
+                pid = (cresult.get("extra") or {}).get("project_id") or cname[len(EXTRA_PROJECT_PREFIX):]
+            else:
+                continue
+            out[pid] = cname
+        return out
 
     def answer(self, call: str, args: Mapping[str, Any]) -> tuple[Any, ObjectRef] | None:
         response = self.find(call, args)
@@ -307,8 +332,12 @@ class Snapshot:
 
     @cached_property
     def work_items(self) -> dict[str, WorkItemState]:
+        return self.work_items_of()
+
+    def work_items_of(self, collector: str | None = None) -> dict[str, WorkItemState]:
+        """Work items of one Anima collector (`None` = the primary Akh-Medu one)."""
         items: dict[str, WorkItemState] = {}
-        for response in self.by_call("list_work_items"):
+        for response in self.by_call("list_work_items", collector):
             ref = self.ref(response)
             for wi in _walk_pages(self.load_object(response.sha256)):
                 if not isinstance(wi, dict) or not wi.get("id"):
@@ -391,9 +420,9 @@ class Snapshot:
                     return str(entry["sha"]), self.ref(response)
         return None
 
-    def plans(self) -> dict[str, dict]:
+    def plans(self, collector: str | None = None) -> dict[str, dict]:
         out: dict[str, dict] = {}
-        for response in self.by_call("list_plans"):
+        for response in self.by_call("list_plans", collector):
             for plan in _walk_pages(self.load_object(response.sha256)):
                 if isinstance(plan, dict) and plan.get("id"):
                     out[plan["id"]] = plan

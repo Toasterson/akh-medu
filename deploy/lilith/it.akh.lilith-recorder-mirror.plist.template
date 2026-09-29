@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for a macOS LaunchAgent that runs the one-shot snapshot mirror
+  (scripts/lilith/cos_mirror.py) every 2 hours: it copies completed Lilith
+  Chief-of-Staff snapshots from the recorder's LOCAL root to the NFS share
+  and verifies them. The recorder itself keeps writing locally because writing
+  the NFS share directly from launchd hit EINTR.
+
+  Ordering: install this ~1 hour after the recorder job (launchd StartInterval
+  keeps the relative offset), so the mirror normally sees a finished snapshot.
+  The order is not load-bearing: the mirror copies only snapshots whose
+  manifest.json exists (the recorder writes it last, atomically), copies
+  objects before manifests, is idempotent, and never deletes on either side.
+
+  If the NFS share is not mounted the job exits 2 with a message in the log
+  and tries again next interval; it never writes under an unmounted /Volumes path.
+
+  This file is a template, not installed automatically. See
+  scripts/lilith/README-recorder.md ("Mirroring to the NFS share") for the
+  substitution + install steps.
+
+  Placeholders to substitute before installing:
+    __HOME__            e.g. /Users/toasty
+    __REPO_ROOT__        e.g. /Users/toasty/.local/share/akh-medu/recorder-main  (a clean origin/main checkout)
+    __PYTHON_BIN__        e.g. /opt/homebrew/bin/python3 (3.11+)
+    __SNAPSHOT_ROOT__     the recorder's LOCAL root, e.g. /Users/toasty/Library/Application Support/akh-medu/lilith/cos-snapshots
+    __MIRROR_DEST__       e.g. /Volumes/akh-medu-runs/lilith/cos-snapshots
+    __MIRROR_MOUNT__      e.g. /Volumes/akh-medu-runs
+    __LOG_DIR__           e.g. /Users/toasty/Library/Logs/akh-medu
+-->
+<plist version="1.0"><dict>
+<key>Label</key><string>it.akh.lilith-recorder-mirror</string>
+<key>ProgramArguments</key><array>
+  <string>__PYTHON_BIN__</string>
+  <string>__REPO_ROOT__/scripts/lilith/cos_mirror.py</string>
+</array>
+<key>WorkingDirectory</key><string>__REPO_ROOT__</string>
+<key>EnvironmentVariables</key><dict>
+  <key>HOME</key><string>__HOME__</string>
+  <key>PATH</key><string>/usr/bin:/bin:/opt/homebrew/bin</string>
+  <key>LILITH_SNAPSHOT_ROOT</key><string>__SNAPSHOT_ROOT__</string>
+  <key>LILITH_MIRROR_DEST</key><string>__MIRROR_DEST__</string>
+  <key>LILITH_MIRROR_MOUNT</key><string>__MIRROR_MOUNT__</string>
+</dict>
+<key>RunAtLoad</key><true/>
+<key>StartInterval</key><integer>7200</integer>
+<key>KeepAlive</key><false/>
+<key>ThrottleInterval</key><integer>60</integer>
+<key>ExitTimeOut</key><integer>1800</integer>
+<key>ProcessType</key><string>Background</string>
+<key>StandardOutPath</key><string>__LOG_DIR__/lilith-recorder-mirror.log</string>
+<key>StandardErrorPath</key><string>__LOG_DIR__/lilith-recorder-mirror.log</string>
+</dict></plist>
