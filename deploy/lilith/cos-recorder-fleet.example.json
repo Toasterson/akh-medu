@@ -1,0 +1,11 @@
+{
+  "_comment": "Example fleet config for cos_recorder.py (--fleet-config / LILITH_FLEET_CONFIG). GET-only. secrets_file points at a token file on the deployment host; no credentials belong in this repo. Ports are the Roman akhs' loopback services on the Mac mini.",
+  "endpoints": [
+    {"name": "sessions", "url": "http://127.0.0.1:18431/v1/sessions?compact=true",
+     "secrets_file": "/Users/toasty/Library/Application Support/roman-akhs/secrets/operator.key"},
+    {"name": "deliveries-pending", "url": "http://127.0.0.1:18435/v1/deliveries?pending=true",
+     "secrets_file": "/Users/toasty/Library/Application Support/roman-akhs/secrets/operator.key"},
+    {"name": "monitor-roman-alerts", "url": "http://127.0.0.1:18435/v1/monitors/roman-alerts",
+     "secrets_file": "/Users/toasty/Library/Application Support/roman-akhs/secrets/observer.key"}
+  ]
+}

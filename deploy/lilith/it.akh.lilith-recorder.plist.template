@@ -14,8 +14,19 @@
     __HOME__            e.g. /Users/toasty
     __REPO_ROOT__        e.g. /Users/toasty/ws/akh-medu
     __PYTHON_BIN__        e.g. /usr/bin/python3 (must be 3.11+)
-    __SNAPSHOT_ROOT__     e.g. /Volumes/akh-medu-runs/lilith/cos-snapshots
+    __SNAPSHOT_ROOT__     the LOCAL root, e.g. /Users/toasty/Library/Application Support/akh-medu/lilith/cos-snapshots
+                          (never the NFS share: writing it from launchd hit EINTR; the mirror job
+                          it.akh.lilith-recorder-mirror copies completed snapshots across)
     __LOG_DIR__           e.g. /Users/toasty/Library/Logs/akh-medu
+    __ANIMA_PROJECT_IDS__ comma-separated Anima project ids; the Akh-Medu project first, then the
+                          illumos family (list in scripts/lilith/README-recorder.md)
+    __ANIMA_DETAIL_PROJECT_IDS__ the subset of those captured with the cheaper `detail` profile
+                          (all but the Akh-Medu project, in the deployed set)
+    __BOARD_SECRETS__     Agent Board token file, e.g.
+                          /Users/toasty/Library/Application Support/roman-akhs/secrets/board-lilith.json
+                          (read through GET-only calls; leave the variable out to disable the board collector)
+    __FLEET_CONFIG__      fleet endpoints JSON (see deploy/lilith/cos-recorder-fleet.example.json);
+                          leave the variable out to disable the fleet collector
 -->
 <plist version="1.0"><dict>
 <key>Label</key><string>it.akh.lilith-recorder</string>
@@ -29,6 +40,10 @@
   <key>HOME</key><string>__HOME__</string>
   <key>PATH</key><string>__HOME__/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
   <key>LILITH_SNAPSHOT_ROOT</key><string>__SNAPSHOT_ROOT__</string>
+  <key>LILITH_ANIMA_PROJECT_IDS</key><string>__ANIMA_PROJECT_IDS__</string>
+  <key>LILITH_ANIMA_DETAIL_PROJECT_IDS</key><string>__ANIMA_DETAIL_PROJECT_IDS__</string>
+  <key>LILITH_BOARD_SECRETS</key><string>__BOARD_SECRETS__</string>
+  <key>LILITH_FLEET_CONFIG</key><string>__FLEET_CONFIG__</string>
 </dict>
 <key>RunAtLoad</key><true/>
 <key>StartInterval</key><integer>7200</integer>

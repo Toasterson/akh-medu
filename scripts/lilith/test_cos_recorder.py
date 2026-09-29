@@ -302,65 +302,7 @@ def test_git_collector_fails_closed_on_subprocess_error(tmp_path):
     assert result.responses == []
 
 
-# --- Board collector -------------------------------------------------------------
-
-def test_board_collector_skips_without_env(monkeypatch, tmp_path):
-    monkeypatch.delenv("BOARD_MCP_URL", raising=False)
-    monkeypatch.delenv("BOARD_TOKEN", raising=False)
-    ctx = m.SnapshotContext(root=tmp_path, timestamp="t", previous_work_items={})
-    result = m.BoardCollector().collect(ctx)
-    assert result.status == "skipped"
-    assert "BOARD_MCP_URL" in result.extra["reason"]
-
-
-def test_board_collector_records_contract_when_configured(monkeypatch, tmp_path):
-    monkeypatch.setenv("BOARD_MCP_URL", "http://board.fake/mcp")
-    monkeypatch.setenv("BOARD_TOKEN", "board-token")
-    monkeypatch.delenv("BOARD_READ_TOOLS", raising=False)
-
-    def handler(method, params):
-        if method == "initialize":
-            return {}
-        if method == "tools/list":
-            return {"tools": [{"name": "list_threads"}]}
-        raise AssertionError("no tool calls expected without BOARD_READ_TOOLS")
-
-    result = m.BoardCollector(transport=ScriptedTransport(handler)).collect(
-        m.SnapshotContext(root=tmp_path, timestamp="t", previous_work_items={})
-    )
-    assert result.status == "ok"
-    assert result.tool_contract_sha256 is not None
-    assert result.extra["called_tools"] == 0
-
-
-def test_board_collector_calls_allowlisted_tools(monkeypatch, tmp_path):
-    monkeypatch.setenv("BOARD_MCP_URL", "http://board.fake/mcp")
-    monkeypatch.setenv("BOARD_TOKEN", "board-token")
-    monkeypatch.setenv("BOARD_READ_TOOLS", "list_threads")
-
-    def handler(method, params):
-        if method == "initialize":
-            return {}
-        if method == "tools/list":
-            return {"tools": [{"name": "list_threads"}, {"name": "post_message"}]}
-        if method == "tools/call":
-            assert params["name"] == "list_threads"
-            return tool_call_envelope({"threads": []})
-        raise AssertionError(method)
-
-    result = m.BoardCollector(transport=ScriptedTransport(handler)).collect(
-        m.SnapshotContext(root=tmp_path, timestamp="t", previous_work_items={})
-    )
-    assert result.status == "ok"
-    assert result.extra["called_tools"] == 1
-    assert result.responses[0].call == "list_threads"
-
-
-# --- Fleet collector -------------------------------------------------------------
-
-def test_fleet_collector_is_not_configured(tmp_path):
-    result = m.FleetCollector().collect(m.SnapshotContext(root=tmp_path, timestamp="t", previous_work_items={}))
-    assert result.status == "not_configured"
+# (board + fleet collector tests live in test_cos_recorder_collectors.py)
 
 
 # --- Orchestration: fail-closed, manifest schema, atomicity -----------------
@@ -479,7 +421,7 @@ def test_resolve_root_prefers_cli_then_env(monkeypatch):
 
 
 def test_main_run_writes_snapshot_and_prints_summary(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(m, "DEFAULT_COLLECTORS", (_OkCollector(),))
+    monkeypatch.setattr(m, "build_collectors", lambda *a, **k: (_OkCollector(),))
     rc = m.main(["run", "--root", str(tmp_path)])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
@@ -500,3 +442,211 @@ def test_thread_targets_include_all_live_items_even_if_unchanged():
     current = [{"id": "a", "current_phase": "working", "status": "open"},
                {"id": "b", "current_phase": "done", "status": "done"}]
     assert m._thread_targets(current, previous) == ["a"]
+
+
+# --- Thread absence: explicit absent result, not an error ---------------------
+
+def _thread_handler(detail_by_id, thread_errors, call_log):
+    """Fake Anima with per-item detail and a configurable get_thread error."""
+    base = make_anima_handler([])
+
+    def handler(method, params):
+        if method == "tools/call":
+            name, args = params["name"], params.get("arguments", {})
+            call_log.append((name, args))
+            if name == "get_work_item_detail" and args["id"] in detail_by_id:
+                return tool_call_envelope(detail_by_id[args["id"]])
+            if name == "get_thread" and args["work_item_id"] in thread_errors:
+                return None  # replaced below by the error path
+        return base(method, params)
+
+    return handler
+
+
+class ErrorTransport(ScriptedTransport):
+    """ScriptedTransport that can answer a chosen tools/call with a JSON-RPC error object."""
+
+    def __init__(self, handler, errors):
+        super().__init__(handler)
+        self.errors = errors  # (tool, arg-value) -> error dict
+
+    def post(self, url, headers, body):
+        payload = json.loads(body)
+        if payload["method"] == "tools/call":
+            name, args = payload["params"]["name"], payload["params"].get("arguments", {})
+            key = (name, args.get("work_item_id") or args.get("id"))
+            if key in self.errors:
+                self.calls.append({"method": "tools/call", "params": payload["params"], "headers": headers})
+                envelope = {"jsonrpc": "2.0", "id": payload["id"], "error": self.errors[key]}
+                return {"Mcp-Session-Id": "sess-1"}, json.dumps(envelope).encode()
+        return super().post(url, headers, body)
+
+
+def _run_threads(tmp_path, detail_by_id, errors, previous=None):
+    log = []
+    transport = ErrorTransport(_thread_handler(detail_by_id, set(), log), errors)
+    collector = m.AnimaCollector(project_id="proj", mcp_url="http://fake", pat_resolver=lambda: "t", transport=transport)
+    ctx = m.SnapshotContext(root=tmp_path, timestamp="t", previous_work_items=previous or {"w1": WI1, "w2": WI2, "w3": WI3})
+    return collector.collect(ctx), log
+
+
+def _thread_records(result):
+    return {r.args["work_item_id"]: r for r in result.responses if r.call == "get_thread"}
+
+
+def test_live_item_without_thread_messages_skips_get_thread_and_records_absence(tmp_path):
+    detail = {"w2": {"work_item": {"id": "w2"}, "thread_messages": [], "thread_messages_elided": False}}
+    result, log = _run_threads(tmp_path, detail, {})
+    assert result.status == "ok" and result.errors == []
+    assert [a for n, a in log if n == "get_thread"] == []  # structural signal: no call at all
+    record = _thread_records(result)["w2"]
+    assert record.thread_state == "none"
+    assert json.loads((tmp_path / "objects" / f"{record.sha256}.json").read_text()) == {"thread": None, "thread_state": "none"}
+    assert record.to_dict()["thread_state"] == "none"
+
+
+def test_live_item_with_thread_messages_fetches_thread(tmp_path):
+    detail = {"w2": {"work_item": {"id": "w2"}, "thread_messages": [{"content": "hi"}], "thread_messages_elided": False}}
+    result, log = _run_threads(tmp_path, detail, {})
+    assert [a["work_item_id"] for n, a in log if n == "get_thread"] == ["w2"]
+    assert _thread_records(result)["w2"].thread_state is None
+    assert result.extra["thread_states"] == {"present": 1}
+
+
+def test_elided_thread_messages_still_fetch_thread(tmp_path):
+    detail = {"w2": {"thread_messages": [], "thread_messages_elided": True}}
+    _, log = _run_threads(tmp_path, detail, {})
+    assert [a["work_item_id"] for n, a in log if n == "get_thread"] == ["w2"]
+
+
+ABSENT = {"code": -32603, "message": "Thread not found"}
+
+
+def test_thread_not_found_contract_is_absence_not_error(tmp_path):
+    # no structural signal in this detail -> get_thread is called, and the documented
+    # API contract (tool + code + message) classifies the answer as absent.
+    result, log = _run_threads(tmp_path, {}, {("get_thread", "w2"): ABSENT})
+    assert result.status == "ok" and result.errors == []
+    assert _thread_records(result)["w2"].thread_state == "none"
+
+
+def test_other_get_thread_errors_stay_errors(tmp_path):
+    for err in (
+        {"code": -32603, "message": "database unavailable"},  # same code, different message
+        {"code": -32000, "message": "Thread not found"},  # same message, different code
+    ):
+        result, _ = _run_threads(tmp_path, {}, {("get_thread", "w2"): err})
+        assert result.status == "partial"
+        assert any("get_thread" in e for e in result.errors)
+        assert "w2" not in _thread_records(result)
+
+
+def test_thread_absent_contract_is_tool_specific():
+    err = m.McpToolError("get_work_item_detail", -32603, "Thread not found", "x")
+    assert err.is_thread_absent() is False
+    assert m.McpToolError("get_thread", -32603, "Thread not found", "x").is_thread_absent() is True
+
+
+# --- Multiple Anima projects -------------------------------------------------
+
+def test_collector_names_default_project_is_anima_others_prefixed():
+    assert m.AnimaCollector().name == "anima"
+    assert m.AnimaCollector(project_id="p-illumos").name == "anima:p-illumos"
+
+
+def test_parse_project_ids_default_env_and_cli_precedence():
+    assert m.parse_project_ids(None, None) == [m.ANIMA_PROJECT_ID]
+    assert m.parse_project_ids(None, "a, b,a") == ["a", "b"]
+    assert m.parse_project_ids(["x,y", "z"], "ignored") == ["x", "y", "z"]
+
+
+def test_records_carry_project_id_and_previous_items_merge_across_projects(tmp_path):
+    call_log = []
+    transport = ScriptedTransport(make_anima_handler(call_log))
+    collectors = [
+        m.AnimaCollector(project_id=pid, mcp_url="http://fake", pat_resolver=lambda: "t", transport=transport)
+        for pid in (m.ANIMA_PROJECT_ID, "p-illumos")
+    ]
+    manifest = m.run_snapshot(tmp_path, collectors)
+    assert set(manifest["collectors"]) == {"anima", "anima:p-illumos"}
+    for cname, pid in (("anima", m.ANIMA_PROJECT_ID), ("anima:p-illumos", "p-illumos")):
+        records = manifest["collectors"][cname]["responses"]
+        assert records and all(r["project_id"] == pid for r in records)
+        assert manifest["collectors"][cname]["extra"]["project_id"] == pid
+        listed = [r for r in records if r["call"] == "list_work_items"]
+        assert all(r["args"]["project_id"] == pid for r in listed)
+    previous = m.load_previous_work_items(tmp_path, m.find_previous_snapshot(tmp_path))
+    assert set(previous) == {"w1", "w2", "w3"}
+
+
+# --- Gap report: time gaps, statuses, error kinds --------------------------------
+
+def test_error_kind_groups_by_call_and_structured_code():
+    assert m.error_kind("get_thread({'work_item_id': 'x'}): tool call 'get_thread' failed: {'code': -32603, 'message': 'a'}") == "get_thread/code -32603"
+    assert m.error_kind("board_threads({}): GET /v1/threads failed (HTTP 503): b''") == "board_threads/http 503"
+    assert m.error_kind("no responses captured") == "collector/other"
+
+
+def test_gap_report_time_gaps_status_counts_and_markdown(tmp_path):
+    ok = {"anima": {"status": "ok", "responses": [], "errors": []}, "board": {"status": "not_configured", "responses": [], "errors": []}}
+    bad = {"anima": {"status": "partial", "responses": [], "errors": ["get_thread({}): tool call failed: {'code': -32603}"]}}
+    _write_manifest(tmp_path, "20260927T230000Z", ok)  # before the day: anchors the first gap
+    _write_manifest(tmp_path, "20260928T010000Z", ok)  # 2h after previous
+    _write_manifest(tmp_path, "20260928T060000Z", bad)  # 5h gap
+    _write_manifest(tmp_path, "20260928T080000Z", ok)  # 2h
+    report = m.gap_report(tmp_path, "2026-09-28")
+    assert [(g["from"][:13], g["hours"]) for g in report["time_gaps"]] == [("2026-09-28T01", 5.0), ("2026-09-28T08", 16.0)]
+    assert report["collector_status_counts"]["anima"] == {"ok": 2, "partial": 1}
+    assert report["collector_status_counts"]["board"] == {"not_configured": 2}
+    assert report["error_kinds"] == {"get_thread/code -32603": 1}
+    markdown = m.render_markdown(report)
+    assert "Gaps over 2.5 h: 2" in markdown and "get_thread/code -32603" in markdown and "| anima |" in markdown
+
+
+def test_gap_report_range_and_cli_outputs(tmp_path, capsys):
+    ok = {"anima": {"status": "ok", "responses": [], "errors": []}}
+    _write_manifest(tmp_path, "20260928T000000Z", ok)
+    _write_manifest(tmp_path, "20260929T000000Z", ok)
+    report = m.gap_report_range(tmp_path, "2026-09-28", "2026-09-29")
+    assert report["snapshot_count"] == 2 and len(report["expected_slots"]) == 24
+    md_path = tmp_path / "out" / "gap.md"
+    rc = m.main(["gap-report", "--since", "2026-09-28", "--until", "2026-09-29", "--root", str(tmp_path), "--markdown-out", str(md_path)])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["snapshot_count"] == 2
+    assert md_path.read_text().startswith("# Lilith CoS recorder gap report")
+    assert m.main(["gap-report", "--day", "2026-09-28", "--root", str(tmp_path), "--format", "markdown"]) == 0
+    assert "## Collector status" in capsys.readouterr().out
+
+
+# --- "detail" profile: the cheap capture for large extra projects ------------------
+
+def test_detail_profile_skips_per_item_calls_and_threads_unless_elided(tmp_path):
+    log = []
+    detail = {
+        "w2": {"work_item": {"id": "w2"}, "thread_messages": [{"content": "hi"}], "thread_messages_elided": False},
+    }
+    transport = ErrorTransport(_thread_handler(detail, set(), log), {})
+    collector = m.AnimaCollector(project_id="proj", mcp_url="http://fake", pat_resolver=lambda: "t", transport=transport, profile="detail")
+    ctx = m.SnapshotContext(root=tmp_path, timestamp="t", previous_work_items={"w1": WI1, "w2": WI2, "w3": WI3})
+    result = collector.collect(ctx)
+    names = [n for n, _ in log]
+    assert result.status == "ok" and result.extra["profile"] == "detail"
+    assert names.count("get_work_item_detail") == 1  # the one live item
+    for skipped in ("get_wi_loop_state", "list_sessions", "list_changes", "get_scheduling_state", "get_thread"):
+        assert skipped not in names  # thread already in the detail, not elided
+
+
+def test_detail_profile_fetches_thread_when_detail_elided(tmp_path):
+    log = []
+    detail = {"w2": {"work_item": {"id": "w2"}, "thread_messages": [{"content": "x"}], "thread_messages_elided": True}}
+    transport = ErrorTransport(_thread_handler(detail, set(), log), {})
+    collector = m.AnimaCollector(project_id="proj", mcp_url="http://fake", pat_resolver=lambda: "t", transport=transport, profile="detail")
+    ctx = m.SnapshotContext(root=tmp_path, timestamp="t", previous_work_items={"w1": WI1, "w2": WI2, "w3": WI3})
+    collector.collect(ctx)
+    assert [a["work_item_id"] for n, a in log if n == "get_thread"] == ["w2"]
+
+
+def test_unknown_profile_is_rejected():
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        m.AnimaCollector(profile="everything")
