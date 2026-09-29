@@ -28,8 +28,10 @@ enum StoreCommand {
     /// Creates `--host` plus `akh.<name>.sqlite3` beside it for every akh in
     /// the source, copies each akh's rows in one transaction per file,
     /// verifies row counts and SHA-256 digests per table, and writes an
-    /// evidence JSON. The source is opened read-only and never modified; the
-    /// run refuses while an akhomed holds the source's lock files.
+    /// evidence JSON plus a split marker beside the new host. The source is
+    /// opened read-only and never modified. Both the dry run and the real run
+    /// refuse a source that is open elsewhere, has a non-empty WAL, or fails
+    /// `PRAGMA quick_check`: run this only with the core stopped.
     SplitPerAkh(SplitArgs),
 }
 
@@ -48,7 +50,8 @@ struct SplitArgs {
     #[arg(long)]
     evidence: Option<PathBuf>,
     /// Print what would be copied (per akh, per table) and exit. Read-only;
-    /// works while the daemon runs.
+    /// refuses a source that is in use (stop the core, or dry-run a copy made
+    /// while it was stopped).
     #[arg(long)]
     dry_run: bool,
     /// Leave rows that belong to no akh in the source instead of refusing.
@@ -175,14 +178,7 @@ fn print_plan(plan: &akhomed_store::split::SplitPlan) {
     println!("dry run — nothing is created or modified");
     println!("source {} (read-only)", plan.source.display());
     println!("host   {} (would be created)", plan.host.display());
-    if plan.in_use.is_empty() {
-        println!("in use: no lock file beside the source is held");
-    } else {
-        println!("in use: the real run refuses until these are released (stop akhomed):");
-        for lock in &plan.in_use {
-            println!("  {}", lock.display());
-        }
-    }
+    println!("source is quiescent (no other process has it open, WAL empty) and quick_check ok");
     println!("migrations: {}", plan.source_migrations.len());
     println!("host tables:");
     print_rows(plan.host_tables.iter().map(|t| (t.table.as_str(), t.rows)));

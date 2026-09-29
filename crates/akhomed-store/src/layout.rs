@@ -17,7 +17,12 @@
 //! file under its own `.migrate.lock`); a table outside a file's home set just
 //! stays empty there. Residency lock files are anchored at the host path
 //! (`<host>.akh-<uuid>.lock`) in both layouts, beside the file the deployment
-//! configures. Under `PerAkh` each akh's file has exactly one connection in
+//! configures. The shared layout's `akh.sqlite3.akh-*.lock` and a per-akh
+//! host's `host.sqlite3.akh-*.lock` are different files, so a shared-layout
+//! daemon and a per-akh daemon do NOT exclude each other: run exactly one core
+//! per deployment (the Roman core has a single launchd label). A split writes
+//! [`SplitMarker`] beside the new host; a per-akh daemon refuses to recreate a
+//! listed akh's missing file. Under `PerAkh` each akh's file has exactly one connection in
 //! the daemon, shared by its residency session (epoch, WAL) and its store
 //! (snapshot, harvest, librarian, recall), so writers of one akh queue on that
 //! connection instead of racing for SQLite's write lock.
@@ -150,6 +155,87 @@ pub enum LayoutError {
         host: PathBuf,
         akh_file: PathBuf,
     },
+
+    /// A split created this akh's file and it is gone. Creating a fresh empty
+    /// file would silently restart the akh from nothing.
+    #[error(
+        "the per-akh file {akh_file} of akh {name:?} is missing, but the split recorded in \
+         {marker} created it; refusing to start the akh from an empty file"
+    )]
+    #[diagnostic(
+        code(akhomed_store::layout::akh_file_missing),
+        help(
+            "Options: (1) restore akh.<name>.sqlite3 from a backup taken with the core stopped; \
+             (2) roll back to the shared file (deploy/roman-mini/CUTOVER.md \"Per-akh \
+             databases\", rollback); (3) if this akh should deliberately start empty, remove \
+             its name from the marker's `akhs` list, then start the core again."
+        )
+    )]
+    AkhFileMissing {
+        name: String,
+        akh_file: PathBuf,
+        marker: PathBuf,
+    },
+
+    /// The split marker beside the host file cannot be read.
+    #[error("split marker {path} is unreadable: {detail}")]
+    #[diagnostic(
+        code(akhomed_store::layout::marker),
+        help(
+            "The marker is written by `akhomed store split-per-akh` and lists the akhs the \
+             split created. Restore it from the split's evidence directory or backup; do \
+             not delete it to silence this error (it guards against a lost akh file)."
+        )
+    )]
+    MarkerUnreadable { path: PathBuf, detail: String },
+}
+
+/// Schema of the split marker written beside the host database.
+pub const SPLIT_MARKER_SCHEMA: &str = "akhomed.store.per_akh_split_marker.v1";
+
+/// The split marker path for host database `host`: `<host>.per-akh-split.json`.
+pub fn split_marker_path(host: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.per-akh-split.json", host.display()))
+}
+
+/// Written by `akhomed store split-per-akh` beside the new host file: the akhs
+/// whose files the split created. A per-akh daemon refuses to create a fresh
+/// file for a listed akh whose file is missing ([`LayoutError::AkhFileMissing`]).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SplitMarker {
+    pub schema: String,
+    pub akhs: Vec<String>,
+    pub evidence: PathBuf,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl SplitMarker {
+    /// Read the marker beside `host`, `Ok(None)` when there is none.
+    pub fn read(host: &Path) -> Result<Option<Self>, LayoutError> {
+        let path = split_marker_path(host);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(LayoutError::MarkerUnreadable {
+                    path,
+                    detail: error.to_string(),
+                });
+            }
+        };
+        let marker: Self =
+            serde_json::from_str(&text).map_err(|error| LayoutError::MarkerUnreadable {
+                path: path.clone(),
+                detail: error.to_string(),
+            })?;
+        if marker.schema != SPLIT_MARKER_SCHEMA {
+            return Err(LayoutError::MarkerUnreadable {
+                path,
+                detail: format!("schema {:?}, expected {SPLIT_MARKER_SCHEMA}", marker.schema),
+            });
+        }
+        Ok(Some(marker))
+    }
 }
 
 /// A validated akh name usable as a per-akh file-name component.
@@ -457,6 +543,20 @@ impl StoreTopology {
             return Ok(host.clone());
         }
         let options = self.akh_options(name)?;
+        // A missing file is created by the migration below. That is right for
+        // an akh born after the split, never for one the split created.
+        if let (Some(host_path), Some(akh_file)) = (self.host_path(), self.akh_path(name))
+            && !akh_file.exists()
+            && let Some(marker) = SplitMarker::read(host_path)?
+            && marker.akhs.iter().any(|akh| akh == name.as_str())
+        {
+            return Err(LayoutError::AkhFileMissing {
+                name: name.as_str().to_owned(),
+                akh_file,
+                marker: split_marker_path(host_path),
+            }
+            .into());
+        }
         let akh_id = name.akh_id();
         let legacy = akh::Entity::find()
             .select_only()

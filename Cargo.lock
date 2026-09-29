@@ -427,6 +427,7 @@ name = "akhomed-store"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "miette 7.6.0",
  "sea-orm",
  "sea-orm-migration",

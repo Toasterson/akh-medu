@@ -44,6 +44,11 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Non-intrusive "is this SQLite file open elsewhere" probe for the split
+# tool (fcntl F_GETLK on the -shm DMS byte; ADR 120).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "akhomed-migrate"
 path = "src/bin/akhomed-migrate.rs"

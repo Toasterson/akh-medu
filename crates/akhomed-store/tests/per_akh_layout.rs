@@ -466,7 +466,6 @@ async fn split_copies_verifies_and_leaves_the_source_untouched() {
 
     // Dry run: per-akh counts, nothing created.
     let plan = split::plan(&request(&source, &host)).await.unwrap();
-    assert!(plan.in_use.is_empty());
     assert!(plan.orphans.is_empty(), "{:?}", plan.orphans);
     let janus = plan.akhs.iter().find(|a| a.name == "janus").unwrap();
     assert_eq!(count(&janus.tables, "akhomed_symbols"), 120);
@@ -491,13 +490,14 @@ async fn split_copies_verifies_and_leaves_the_source_untouched() {
                 .await
                 .unwrap()
         );
-        let dry = split::plan(&request(&source, &host)).await.unwrap();
-        assert_eq!(dry.in_use.len(), 1, "dry run reports, does not refuse");
         let refused = split::execute(&request(&source, &host), &evidence_path)
             .await
             .unwrap_err();
         assert!(
-            matches!(refused, SplitError::SourceInUse { .. }),
+            matches!(
+                refused,
+                SplitError::SourceInUse { .. } | SplitError::SourceNotQuiescent { .. }
+            ),
             "{refused:?}"
         );
         assert!(!host.exists());
@@ -625,6 +625,151 @@ async fn split_copies_verifies_and_leaves_the_source_untouched() {
         matches!(&refused, StoreError::Layout(e) if matches!(**e, LayoutError::UnmigratedAkh { .. })),
         "{refused:?}"
     );
+}
+
+#[tokio::test]
+async fn split_marker_refuses_a_lost_akh_file_but_not_a_new_akh() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("akh.sqlite3");
+    shared_source(&source).await;
+    let host = dir.path().join("host.sqlite3");
+    split::execute(&request(&source, &host), &dir.path().join("e.json"))
+        .await
+        .unwrap();
+    let marker = akhomed_store::layout::SplitMarker::read(&host)
+        .unwrap()
+        .expect("the split writes a marker beside the host");
+    assert_eq!(marker.akhs, ["janus", "vesta"]);
+
+    let topology =
+        StoreTopology::new(options(&host, Duration::from_secs(5)), StoreLayout::PerAkh).unwrap();
+    let host_db = akhomed_store::connect(topology.host()).await.unwrap();
+    let vesta = dir.path().join("akh.vesta.sqlite3");
+    std::fs::rename(&vesta, dir.path().join("moved-away.sqlite3")).unwrap();
+    let refused = topology
+        .open_akh_store(&AkhStoreName::new("vesta").unwrap(), &host_db)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, StoreError::Layout(e) if matches!(**e, LayoutError::AkhFileMissing { .. })),
+        "{refused:?}"
+    );
+    assert!(!vesta.exists(), "no empty file is created for a split akh");
+    // An akh born after the split gets a fresh file.
+    topology
+        .open_akh_store(&AkhStoreName::new("newbie").unwrap(), &host_db)
+        .await
+        .unwrap();
+    assert!(dir.path().join("akh.newbie.sqlite3").exists());
+}
+
+#[tokio::test]
+async fn split_refuses_a_corrupt_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("akh.sqlite3");
+    shared_source(&source).await;
+    // Overwrite a page in the middle of the file with garbage.
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let len = std::fs::metadata(&source).unwrap().len();
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap();
+        file.seek(SeekFrom::Start(len / 2 / 4096 * 4096)).unwrap();
+        file.write_all(&[0xA5; 4096]).unwrap();
+    }
+    let host = dir.path().join("host.sqlite3");
+    let dry = split::plan(&request(&source, &host)).await.unwrap_err();
+    assert!(matches!(dry, SplitError::SourceCorrupt { .. }), "{dry:?}");
+    let refused = split::execute(&request(&source, &host), &dir.path().join("e.json"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, SplitError::SourceCorrupt { .. }),
+        "{refused:?}"
+    );
+    assert!(!host.exists(), "nothing is created from a damaged source");
+}
+
+#[tokio::test]
+async fn split_refuses_a_pending_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("akh.sqlite3");
+    shared_source(&source).await;
+    let wal = dir.path().join("akh.sqlite3-wal");
+    std::fs::write(&wal, b"not empty").unwrap();
+    let host = dir.path().join("host.sqlite3");
+    let refused = split::plan(&request(&source, &host)).await.unwrap_err();
+    assert!(
+        matches!(refused, SplitError::SourceNotQuiescent { .. }),
+        "{refused:?}"
+    );
+    let help = miette::Diagnostic::help(&refused).unwrap().to_string();
+    assert!(
+        help.contains("stop the core or dry-run a copy made while it was stopped")
+            || help.contains("Stop the core or dry-run a copy made while it was stopped"),
+        "{help}"
+    );
+    std::fs::remove_file(&wal).unwrap();
+    split::plan(&request(&source, &host)).await.unwrap();
+}
+
+/// Child half of `dry_run_refuses_a_source_open_in_another_process`: open
+/// the database the way akhomed does and hold it.
+#[tokio::test]
+async fn split_live_source_child() {
+    let Ok(url) = std::env::var("AKH_TEST_SPLIT_CHILD_URL") else {
+        return;
+    };
+    let db = akhomed_store::connect(&PoolOptions::new(url))
+        .await
+        .unwrap();
+    snapshots::current_watermark(&db, Uuid::nil())
+        .await
+        .unwrap();
+    std::fs::write(
+        std::env::var("AKH_TEST_SPLIT_CHILD_READY").unwrap(),
+        "ready",
+    )
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    drop(db);
+}
+
+#[tokio::test]
+async fn dry_run_refuses_a_source_open_in_another_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("akh.sqlite3");
+    shared_source(&source).await;
+    let ready = dir.path().join("ready");
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "split_live_source_child"])
+        .env("AKH_TEST_SPLIT_CHILD_URL", sqlite_url(&source))
+        .env("AKH_TEST_SPLIT_CHILD_READY", &ready)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !ready.exists() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let host = dir.path().join("host.sqlite3");
+    let dry = split::plan(&request(&source, &host)).await;
+    let real = split::execute(&request(&source, &host), &dir.path().join("e.json")).await;
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(ready.exists(), "child did not open the database");
+    let dry = dry.unwrap_err();
+    assert!(
+        matches!(&dry, SplitError::SourceNotQuiescent { reason, .. } if reason.contains("-shm lock")),
+        "{dry:?}"
+    );
+    assert!(
+        matches!(real, Err(SplitError::SourceNotQuiescent { .. })),
+        "{real:?}"
+    );
+    assert!(!host.exists());
 }
 
 #[tokio::test]

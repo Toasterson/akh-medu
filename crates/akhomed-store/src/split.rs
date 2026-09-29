@@ -1,26 +1,37 @@
 //! Offline split of a shared-layout SQLite store into the per-akh layout
 //! (ADR 120).
 //!
-//! [`plan`] reads the source read-only and reports, per akh and per table, the
-//! rows a split would copy (`--dry-run`). [`execute`] then:
+//! Both [`plan`] (`--dry-run`) and [`execute`] refuse a source that is in use
+//! or not quiescent ([`ensure_quiescent`]): another process has it open (a
+//! non-intrusive `F_GETLK` probe of the `-shm` lock SQLite holds for every open
+//! connection), its `-wal` is not empty, or it has a hot `-journal`. Never
+//! open a live akhomed database with any SQLite client (ADR 120): stop the
+//! core, or work on a copy made while it was stopped. Both also refuse a source
+//! whose `PRAGMA quick_check` is not `ok`.
 //!
-//! 1. refuses while any residency or migration lock file beside the source is
-//!    held (the daemon is running), and keeps every one of them locked until
-//!    it finishes, so a daemon cannot start mid-copy;
+//! [`plan`] then reports, per akh and per table, the rows a split would copy.
+//! [`execute`]:
+//!
+//! 1. additionally refuses while any residency or migration lock file beside
+//!    the source is held, and keeps every one of them locked until it
+//!    finishes, so a daemon cannot start mid-copy;
 //! 2. refuses existing targets, unknown tables, schema versions this build
 //!    does not know, akh rows whose id does not derive from their name, and
 //!    rows it cannot attribute to an akh (unless told to leave those behind);
 //! 3. creates the new host file and one `akh.<name>.sqlite3` per akh beside
 //!    it, runs the migrations on each, and copies rows in **one transaction per
 //!    file**, value-for-value (SQLite storage classes preserved);
-//! 4. re-reads every target table and compares its row count and a SHA-256
+//! 4. checks that the rows read per table equal the planned `COUNT(*)`, then
+//!    re-reads every target table and compares its row count and a SHA-256
 //!    content digest with the source rows;
 //! 5. hashes the source file (and its `-wal`) before and after, and fails if
 //!    either changed;
-//! 6. writes an evidence JSON (0600) describing all of the above.
+//! 6. writes the split marker beside the new host
+//!    ([`crate::layout::SplitMarker`]) and an evidence JSON (0600) describing
+//!    all of the above.
 //!
-//! The source is opened read-only (`immutable` when it has no pending WAL)
-//! and is never modified or deleted; the operator removes it after the
+//! The source is opened read-only and `immutable` (it has no pending WAL by
+//! then) and is never modified or deleted; the operator removes it after the
 //! cutover. On any failure the target files this run created are deleted.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,12 +70,39 @@ pub enum SplitError {
     #[diagnostic(
         code(akhomed_store::split::source_in_use),
         help(
-            "Stop the akhomed that serves this file first (Roman core: \
-             `sudo launchctl bootout system/dev.roman-akhs.core`), then rerun. \
-             `--dry-run` works while the daemon runs; the real split does not."
+            "Stop the core or dry-run a copy made while it was stopped (Roman core: \
+             `sudo launchctl bootout system/dev.roman-akhs.core`). Never open a live \
+             akhomed database with any SQLite client, including this tool's dry run."
         )
     )]
     SourceInUse { lock: PathBuf },
+
+    /// The source is not quiescent: it is open elsewhere, or has a non-empty
+    /// WAL or a hot journal, so the core is running or did not stop cleanly.
+    #[error("source database {path} is not quiescent: {reason}")]
+    #[diagnostic(
+        code(akhomed_store::split::source_live),
+        help(
+            "Stop the core or dry-run a copy made while it was stopped (Roman core: \
+             `sudo launchctl bootout system/dev.roman-akhs.core`, then wait for the process \
+             to exit; a clean stop checkpoints and removes the WAL). If the core is stopped \
+             and the WAL is still not empty, it did not stop cleanly: start and stop it once \
+             more. Never open a live akhomed database with any SQLite client."
+        )
+    )]
+    SourceNotQuiescent { path: PathBuf, reason: String },
+
+    /// The source failed SQLite's structural check.
+    #[error("source database {path} failed PRAGMA quick_check: {detail}")]
+    #[diagnostic(
+        code(akhomed_store::split::source_corrupt),
+        help(
+            "Nothing was created. Do not split a damaged store: restore it from a backup \
+             taken while the core was stopped (its `pragma integrity_check` must print ok), \
+             or recover it first, then rerun."
+        )
+    )]
+    SourceCorrupt { path: PathBuf, detail: String },
 
     /// The source file does not exist.
     #[error("source database {path} does not exist")]
@@ -268,9 +306,6 @@ impl AkhPlan {
 pub struct SplitPlan {
     pub source: PathBuf,
     pub host: PathBuf,
-    /// Lock files beside the source currently held by another process. A
-    /// dry-run reports them; [`execute`] refuses.
-    pub in_use: Vec<PathBuf>,
     pub source_migrations: Vec<String>,
     pub host_tables: Vec<TableCount>,
     pub akhs: Vec<AkhPlan>,
@@ -611,6 +646,67 @@ fn has_pending_wal(db: &Path) -> bool {
     std::fs::metadata(wal_path(db)).is_ok_and(|m| m.len() > 0)
 }
 
+/// Byte SQLite's unix VFS read-locks in `<db>-shm` for as long as any
+/// connection has the database open in WAL mode (`UNIX_SHM_DMS`).
+#[cfg(unix)]
+const SHM_DMS_OFFSET: i64 = 128;
+
+/// Whether another process holds SQLite's `-shm` lock on `db`, asked with
+/// `F_GETLK`: nothing is locked or written. A missing `-shm` means no
+/// WAL-mode connection is open.
+#[cfg(unix)]
+fn shm_in_use(db: &Path) -> SplitResult<bool> {
+    use std::os::fd::AsRawFd as _;
+    let shm = PathBuf::from(format!("{}-shm", db.display()));
+    let file = match File::open(&shm) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(SplitError::Io { path: shm, source }),
+    };
+    // SAFETY: `flock` is plain old data; zeroed is a valid initial value.
+    let mut probe: libc::flock = unsafe { std::mem::zeroed() };
+    probe.l_type = libc::F_WRLCK as _;
+    probe.l_whence = libc::SEEK_SET as _;
+    probe.l_start = SHM_DMS_OFFSET as _;
+    probe.l_len = 1;
+    // SAFETY: valid open fd and a valid, exclusively borrowed `flock`.
+    let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut probe) };
+    if rc != 0 {
+        return Err(SplitError::Io {
+            path: shm,
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    Ok(i32::from(probe.l_type) != libc::F_UNLCK as i32)
+}
+
+#[cfg(not(unix))]
+fn shm_in_use(db: &Path) -> SplitResult<bool> {
+    // No non-intrusive probe here: an existing -shm counts as in use.
+    Ok(PathBuf::from(format!("{}-shm", db.display())).exists())
+}
+
+/// Refuse a source that is open elsewhere or not cleanly closed. All checks
+/// are non-intrusive: nothing is opened with SQLite and no lock is taken.
+pub fn ensure_quiescent(db: &Path) -> SplitResult<()> {
+    let not_quiescent = |reason: &str| SplitError::SourceNotQuiescent {
+        path: db.to_path_buf(),
+        reason: reason.to_owned(),
+    };
+    if shm_in_use(db)? {
+        return Err(not_quiescent(
+            "another process has it open (SQLite's -shm lock is held)",
+        ));
+    }
+    if has_pending_wal(db) {
+        return Err(not_quiescent("its -wal is not empty"));
+    }
+    if PathBuf::from(format!("{}-journal", db.display())).exists() {
+        return Err(not_quiescent("it has a -journal (interrupted transaction)"));
+    }
+    Ok(())
+}
+
 impl Source {
     async fn open(path: &Path, busy_timeout: Duration) -> SplitResult<Self> {
         if !path.is_file() {
@@ -618,10 +714,10 @@ impl Source {
                 path: path.to_path_buf(),
             });
         }
-        // Without a pending WAL the file is complete on its own: open it
-        // `immutable`, so SQLite takes no locks and creates no -shm/-wal.
-        // With one, a plain read-only open reads the WAL too.
-        let immutable = !has_pending_wal(path);
+        // `ensure_quiescent` ran first: no pending WAL, no other connection.
+        // The file is complete on its own, so open it `immutable`: SQLite
+        // takes no locks and creates no -shm/-wal.
+        let immutable = true;
         let options = SqliteConnectOptions::new()
             .filename(path)
             .read_only(true)
@@ -633,6 +729,18 @@ impl Source {
             .connect()
             .await
             .map_err(sqlite_err(format!("opening {} read-only", path.display())))?;
+
+        let corrupt = |detail: String| SplitError::SourceCorrupt {
+            path: path.to_path_buf(),
+            detail,
+        };
+        let check: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
+            .fetch_all(&mut conn)
+            .await
+            .map_err(|error| corrupt(error.to_string()))?;
+        if check != ["ok"] {
+            return Err(corrupt(check.join("; ")));
+        }
 
         let tables: Vec<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_master WHERE type = 'table' \
@@ -711,7 +819,7 @@ impl Source {
         Ok(Self {
             conn,
             opened: if immutable {
-                "read_only_immutable"
+                "read_only_immutable_quick_check_ok"
             } else {
                 "read_only"
             },
@@ -819,8 +927,10 @@ fn try_lock_all(locks: &[PathBuf]) -> SplitResult<(Vec<File>, Vec<PathBuf>)> {
     Ok((held, busy))
 }
 
-/// Plan a split: read-only, creates nothing. Works while the daemon runs;
-/// held lock files are reported in [`SplitPlan::in_use`].
+/// Plan a split: read-only, creates nothing. Refuses a source in use or not
+/// quiescent ([`ensure_quiescent`]) exactly like [`execute`]; a copy made
+/// while the core was stopped has neither lock files nor a live `-shm` beside
+/// it and is accepted. The dry run takes no lock.
 pub async fn plan(req: &SplitRequest) -> SplitResult<SplitPlan> {
     let source_path = absolute(&req.source)?;
     let host_path = absolute(&req.host)?;
@@ -828,10 +938,12 @@ pub async fn plan(req: &SplitRequest) -> SplitResult<SplitPlan> {
         host: host_path.clone(),
         ..req.clone()
     })?;
-    let (held, in_use) = try_lock_all(&lock_files_beside(&source_path)?)?;
-    drop(held);
+    if !source_path.is_file() {
+        return Err(SplitError::SourceMissing { path: source_path });
+    }
+    ensure_quiescent(&source_path)?;
     let mut source = Source::open(&source_path, req.busy_timeout).await?;
-    let plan = build_plan(&mut source, source_path, host_path, &topology, in_use).await;
+    let plan = build_plan(&mut source, source_path, host_path, &topology).await;
     let _ = source.conn.close().await;
     plan
 }
@@ -841,7 +953,6 @@ async fn build_plan(
     source_path: PathBuf,
     host_path: PathBuf,
     topology: &StoreTopology,
-    in_use: Vec<PathBuf>,
 ) -> SplitResult<SplitPlan> {
     let mut host_tables = Vec::new();
     for table in source.host_tables() {
@@ -890,7 +1001,6 @@ async fn build_plan(
     Ok(SplitPlan {
         source: source_path,
         host: host_path,
-        in_use,
         source_migrations: source.migrations.clone(),
         host_tables,
         akhs,
@@ -966,7 +1076,7 @@ async fn copy_target(
     source: &mut SqliteConnection,
     options: &PoolOptions,
     path: &Path,
-    tables: &[(String, RowFilter)],
+    tables: &[(String, RowFilter, u64)],
 ) -> SplitResult<TargetEvidence> {
     crate::run_migrations_locked(options).await?;
     let db = crate::connect(options).await?;
@@ -981,7 +1091,7 @@ async fn copy_target(
         "starting the copy into {}",
         path.display()
     )))?;
-    for (table, filter) in tables {
+    for (table, filter, planned) in tables {
         let shape = TableShape::read(source, table).await?;
         let target_shape = TableShape::read(&mut transaction, table).await?;
         if let Some(missing) = shape
@@ -996,6 +1106,16 @@ async fn copy_target(
             });
         }
         let (rows, digest) = read_rows(source, &shape, *filter).await?;
+        if rows.len() as u64 != *planned {
+            return Err(SplitError::Verification {
+                table: table.clone(),
+                path: path.to_path_buf(),
+                detail: format!(
+                    "planned {planned} row(s) by COUNT(*), read {} from the source",
+                    rows.len()
+                ),
+            });
+        }
         insert_rows(&mut transaction, &shape, &rows).await?;
         staged.push((shape, rows.len() as u64, digest));
     }
@@ -1063,6 +1183,7 @@ pub async fn execute(req: &SplitRequest, evidence_path: &Path) -> SplitResult<Sp
     };
     let topology = topology_for(&req)?;
 
+    ensure_quiescent(&source_path)?;
     // Lock every lock file beside the source and keep them locked to the end.
     let (_source_locks, busy) = try_lock_all(&lock_files_beside(&source_path)?)?;
     if let Some(lock) = busy.into_iter().next() {
@@ -1078,7 +1199,6 @@ pub async fn execute(req: &SplitRequest, evidence_path: &Path) -> SplitResult<Sp
         source_path.clone(),
         host_path.clone(),
         &topology,
-        Vec::new(),
     )
     .await?;
     if !plan.orphans.is_empty() && !req.allow_orphans {
@@ -1101,6 +1221,10 @@ pub async fn execute(req: &SplitRequest, evidence_path: &Path) -> SplitResult<Sp
         return Err(SplitError::TargetExists {
             path: evidence_path,
         });
+    }
+    let marker_path = crate::layout::split_marker_path(&host_path);
+    if marker_path.exists() {
+        return Err(SplitError::TargetExists { path: marker_path });
     }
 
     let mut created = Created {
@@ -1141,10 +1265,19 @@ pub async fn execute(req: &SplitRequest, evidence_path: &Path) -> SplitResult<Sp
     }
 
     created.track_db(&host_path);
-    let host_tables: Vec<(String, RowFilter)> = source
+    let planned = |counts: &[TableCount], table: &str| {
+        counts
+            .iter()
+            .find(|c| c.table == table)
+            .map_or(0, |c| c.rows)
+    };
+    let host_tables: Vec<(String, RowFilter, u64)> = source
         .host_tables()
         .into_iter()
-        .map(|t| (t, RowFilter::All))
+        .map(|t| {
+            let rows = planned(&plan.host_tables, &t);
+            (t, RowFilter::All, rows)
+        })
         .collect();
     let host = copy_target(&mut source.conn, topology.host(), &host_path, &host_tables).await?;
 
@@ -1156,9 +1289,15 @@ pub async fn execute(req: &SplitRequest, evidence_path: &Path) -> SplitResult<Sp
             .akh_path(&name)
             .expect("per-akh topology resolves akh paths");
         created.track_db(&path);
-        let tables: Vec<(String, RowFilter)> = akh_tables
+        let counts = plan
+            .akhs
             .iter()
-            .map(|(t, key)| (t.clone(), filter_for(&name, *key)))
+            .find(|a| a.name == name.as_str())
+            .map(|a| a.tables.as_slice())
+            .unwrap_or_default();
+        let tables: Vec<(String, RowFilter, u64)> = akh_tables
+            .iter()
+            .map(|(t, key)| (t.clone(), filter_for(&name, *key), planned(counts, t)))
             .collect();
         let target = copy_target(&mut source.conn, &options, &path, &tables).await?;
         akhs.push(AkhEvidence {
@@ -1206,7 +1345,16 @@ pub async fn execute(req: &SplitRequest, evidence_path: &Path) -> SplitResult<Sp
         orphans_left_in_source: plan.orphans,
         verified: true,
     };
-    write_evidence(&evidence_path, &evidence)?;
+    let marker = crate::layout::SplitMarker {
+        schema: crate::layout::SPLIT_MARKER_SCHEMA.to_owned(),
+        akhs: evidence.akhs.iter().map(|a| a.name.clone()).collect(),
+        evidence: evidence_path.clone(),
+        created_at: evidence.finished_at,
+    };
+    created.paths.push(marker_path.clone());
+    write_json_new(&marker_path, &marker)?;
+    created.paths.push(evidence_path.clone());
+    write_json_new(&evidence_path, &evidence)?;
     created.keep = true;
     drop(target_locks);
     Ok(evidence)
@@ -1224,8 +1372,9 @@ fn restrict(path: &Path) -> SplitResult<()> {
     Ok(())
 }
 
-fn write_evidence(path: &Path, evidence: &SplitEvidence) -> SplitResult<()> {
-    let text = serde_json::to_string_pretty(evidence).map_err(|error| SplitError::Io {
+/// Write `value` as pretty JSON to a new 0600 file (never overwrites).
+fn write_json_new(path: &Path, value: &impl Serialize) -> SplitResult<()> {
+    let text = serde_json::to_string_pretty(value).map_err(|error| SplitError::Io {
         path: path.to_path_buf(),
         source: std::io::Error::other(error),
     })?;
