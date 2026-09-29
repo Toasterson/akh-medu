@@ -334,13 +334,9 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
             # yet (her wakes are a later slice), exec as the Romans use.
             servers = fa.lilith_mcp_servers(session)
             prompt = fa.system_prompt(source / "roles", role, servers, cos_source, files=spec.prompt_files)
-            board = fa.board_identity(events, role)
-            agent_id, id_warnings = fa.lilith_board_agent_id(root)
+            agent_id, id_warnings = fa.board_agent_id(root, role)
             warnings.extend(id_warnings)
-            if agent_id is not None:
-                # Scalars before any sub-table (akh TOML ordering gotcha): url,
-                # agent_id, then the auth inline table.
-                board = {"url": board["url"], "agent_id": agent_id, "auth": board["auth"]}
+            board = fa.with_board_agent_id(fa.board_identity(events, role), agent_id)
             doc = fa.render_workspace(existing, role, prompt, servers, board,
                                       exec_table={"kind": "none"}, inference=spec.inference,
                                       chief_of_staff=fa.render_chief_of_staff(root, lilith))
@@ -359,8 +355,11 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
         # vesta-remediation skillpack instead of roles/addenda/vesta.md.
         prompt = fa.system_prompt(source / "roles", role, servers, fa.role_skill(source, role, root),
                                   files=spec.prompt_files)
+        agent_id, id_warnings = fa.board_agent_id(root, role)
+        warnings.extend(id_warnings)
         doc = fa.render_workspace(existing, role, prompt, servers,
-                                  fa.board_identity(events, role), delegation=delegation,
+                                  fa.with_board_agent_id(fa.board_identity(events, role), agent_id),
+                                  delegation=delegation,
                                   monitoring=fa.monitoring_config(session, role, root, observer_retired=live),
                                   exec_table=fa.render_exec(role, fa.vesta_sandbox(root)),
                                   inference=spec.inference)

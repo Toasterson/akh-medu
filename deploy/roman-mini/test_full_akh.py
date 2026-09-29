@@ -1583,12 +1583,26 @@ class LilithBoardAgentIdTests(RenderFixture):
         with self.assertRaisesRegex(fa.RenderError, "not a UUID"):
             self.render()
 
-    def test_romans_board_stays_unchanged(self):
+    def test_romans_without_an_agent_id_keep_url_and_auth(self):
         lilith_fixture(self.root)
         self.render()
         for role in ROLES:
             ws = self.toml(f"core-config/akh-medu/workspaces/{role}.toml")
             self.assertEqual(set(ws["board"]), {"url", "auth"})
+
+    def test_every_roman_inbox_is_on_when_its_board_identity_has_an_id(self):
+        # Operator decision 2026-09-29: all inboxes on, so the akhs can talk to each other.
+        lilith_fixture(self.root)
+        ids = {}
+        for n, role in enumerate(ROLES):
+            ids[role] = f"01a0abc4-90b1-7f43-8b13-2f7c9e6a1d{n:02d}"
+            (self.root / f"secrets/board-{role}.json").write_text(
+                json.dumps({"bearer_token": "b" * 40, "agent": {"id": ids[role], "handle": f"akh-{role}"}}))
+        self.render()
+        for role in ROLES:
+            board = self.toml(f"core-config/akh-medu/workspaces/{role}.toml")["board"]
+            self.assertEqual(board["agent_id"], ids[role])
+            self.assertEqual(list(board)[:2], ["url", "agent_id"])
 
 
 @NEEDS_TOMLLIB
