@@ -1594,14 +1594,25 @@ class LilithBoardAgentIdTests(RenderFixture):
 @NEEDS_TOMLLIB
 def split_evidence(root: Path, **overrides) -> Path:
     """A verified ADR 120 split evidence file for the fixture root, as written by
-    `akhomed store split-per-akh`, plus the host database it records."""
-    (root / "state/core").mkdir(parents=True, exist_ok=True)
+    `akhomed store split-per-akh`, plus the files it records: the (synthetic)
+    shared source, the host database, its split marker and every akh file."""
+    core = root / "state/core"
+    core.mkdir(parents=True, exist_ok=True)
+    shared = root / fa.SHARED_DATABASE
+    if not shared.exists():
+        shared.write_bytes(b"SQLite format 3\x00synthetic shared store")
     (root / fa.HOST_DATABASE).write_bytes(b"SQLite format 3\x00")
+    Path(str(root / fa.HOST_DATABASE) + fa.SPLIT_MARKER_SUFFIX).write_text("{}")
+    akhs = []
+    for r in ROLES:
+        path = core / f"akh.{r}.sqlite3"
+        path.write_bytes(b"SQLite format 3\x00")
+        akhs.append({"name": r, "path": str(path), "tables": []})
+    sha = hashlib.sha256(shared.read_bytes()).hexdigest()
     evidence = {"schema": fa.SPLIT_EVIDENCE_SCHEMA, "verified": True, "layout": "per_akh",
-                "source": {"path": str(root / fa.SHARED_DATABASE)},
+                "source": {"path": str(shared), "sha256_before": sha, "sha256_after": sha},
                 "host": {"path": str(root / fa.HOST_DATABASE), "tables": []},
-                "akhs": [{"name": r, "path": str(root / f"state/core/akh.{r}.sqlite3"), "tables": []}
-                         for r in ROLES]}
+                "akhs": akhs}
     evidence.update(overrides)
     path = root / "evidence/per-akh-split.json"
     path.write_text(json.dumps(evidence))
@@ -1688,6 +1699,52 @@ class PerAkhDatabaseTests(RenderFixture):
         self.switch(split_evidence(self.root))
         (self.root / fa.HOST_DATABASE).unlink()
         with self.assertRaisesRegex(fa.RenderError, "is missing"):
+            self.render()
+
+    def switch_file(self, **settings):
+        (self.root / fa.PER_AKH_DATABASES_FILE).write_text(json.dumps(settings))
+
+    def test_stale_evidence_is_refused(self):
+        evidence = split_evidence(self.root)
+        self.switch(evidence)
+        shared = self.root / fa.SHARED_DATABASE
+        # The core ran on the shared file after the split: its bytes changed.
+        shared.write_bytes(shared.read_bytes() + b"later write")
+        with self.assertRaisesRegex(fa.RenderError, "stale"):
+            self.render()
+
+    def test_a_non_empty_shared_wal_is_refused(self):
+        self.switch(split_evidence(self.root))
+        Path(str(self.root / fa.SHARED_DATABASE) + "-wal").write_bytes(b"frames")
+        with self.assertRaisesRegex(fa.RenderError, "-wal is not empty"):
+            self.render()
+        Path(str(self.root / fa.SHARED_DATABASE) + "-wal").write_bytes(b"")
+        self.render()
+        self.assertEqual(self.toml(self.HOST)["database"]["layout"], "per_akh")
+
+    def test_missing_akh_file_or_marker_is_refused(self):
+        self.switch(split_evidence(self.root))
+        (self.root / "state/core/akh.vesta.sqlite3").unlink()
+        with self.assertRaisesRegex(fa.RenderError, "akh.vesta.sqlite3"):
+            self.render()
+        self.switch(split_evidence(self.root))
+        Path(str(self.root / fa.HOST_DATABASE) + fa.SPLIT_MARKER_SUFFIX).unlink()
+        with self.assertRaisesRegex(fa.RenderError, "split marker"):
+            self.render()
+
+    def test_retired_source_is_explicit(self):
+        evidence = split_evidence(self.root)
+        self.switch_file(evidence=str(evidence), source_retired=True)
+        with self.assertRaisesRegex(fa.RenderError, "still exists"):
+            self.render()
+        (self.root / fa.SHARED_DATABASE).unlink()
+        self.render()
+        self.assertEqual(self.toml(self.HOST)["database"]["layout"], "per_akh")
+        self.switch(evidence)
+        with self.assertRaisesRegex(fa.RenderError, "source_retired"):
+            self.render()
+        self.switch_file(evidence=str(evidence), source_retired="yes")
+        with self.assertRaisesRegex(fa.RenderError, "true or false"):
             self.render()
 
 

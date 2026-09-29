@@ -14,6 +14,7 @@ them here if the final shapes differ.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -97,6 +98,8 @@ PER_AKH_DATABASES_FILE = "config/per-akh-databases.json"
 SHARED_DATABASE = "state/core/akh.sqlite3"
 HOST_DATABASE = "state/core/host.sqlite3"
 SPLIT_EVIDENCE_SCHEMA = "akhomed.store.split_per_akh.v1"
+SPLIT_MARKER_SUFFIX = ".per-akh-split.json"
+PER_AKH_SWITCH_KEYS = {"evidence", "source_retired"}
 JANUS_DELEGATION_KEYS = {"sessions_url", "token_file", "runtime_profile", "projects"}
 
 # Vesta-only direct Grafana MCP server (PR 3 of the step-2 plan): no broker,
@@ -1258,6 +1261,14 @@ class DatabaseSettings:
     evidence: Path | None = None
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _same_file(a: str | Path, b: Path) -> bool:
     return os.path.realpath(str(a)) == os.path.realpath(str(b))
 
@@ -1266,13 +1277,18 @@ def database_settings(root: Path) -> DatabaseSettings:
     """Shared `state/core/akh.sqlite3`, or the per-akh layout once the operator
     opts in with `config/per-akh-databases.json` (ADR 120).
 
-    The switch file holds one key, `evidence`: the path (absolute, or relative
-    to the deployment root) of the evidence JSON written by
-    `akhomed store split-per-akh --source <root>/state/core/akh.sqlite3
-    --host <root>/state/core/host.sqlite3 --evidence <path>`. The render
-    fails closed unless that evidence exists, is verified, split exactly those
-    two files, and the host file is present: switching the layout without the
-    split would start every akh from an empty file. With the switch, the host
+    The switch file holds `evidence`: the path (absolute, or relative to the
+    deployment root) of the evidence JSON written by `akhomed store
+    split-per-akh --source <root>/state/core/akh.sqlite3 --host
+    <root>/state/core/host.sqlite3 --evidence <path>`, and optionally
+    `source_retired` (default false; set true only after the shared file was
+    moved away, CUTOVER.md §13). The render fails closed unless that evidence
+    is verified, split exactly those two files, and is current: the host file,
+    its split marker and every akh file the evidence lists exist, and — until
+    the source is retired — the shared file still hashes to the evidence's
+    `sha256_after` with an empty or absent `-wal` (a core that ran on the shared
+    file after the split makes the evidence stale). The file hashing reads
+    bytes only; it never opens the database with SQLite. With the switch, the host
     config and the core's DATABASE_URL point at `state/core/host.sqlite3` with
     `layout = "per_akh"`; the akh files `state/core/akh.<name>.sqlite3` sit
     beside it. Remove the file (and re-render) to roll back to the shared file.
@@ -1287,9 +1303,12 @@ def database_settings(root: Path) -> DatabaseSettings:
         raise RenderError(f"{path} is not valid JSON ({error}); fix or remove it") from error
     if not isinstance(settings, dict):
         raise RenderError(f"{path} must be a JSON object")
-    unknown = sorted(set(settings) - {"evidence"})
+    unknown = sorted(set(settings) - PER_AKH_SWITCH_KEYS)
     if unknown:
-        raise RenderError(f"{path} has unknown keys {unknown}; allowed: ['evidence']")
+        raise RenderError(f"{path} has unknown keys {unknown}; allowed: {sorted(PER_AKH_SWITCH_KEYS)}")
+    retired = settings.get("source_retired", False)
+    if not isinstance(retired, bool):
+        raise RenderError(f"{path}: `source_retired` must be true or false")
     evidence_value = settings.get("evidence")
     if not isinstance(evidence_value, str) or not evidence_value.strip():
         raise RenderError(f"{path} needs `evidence`: the split evidence JSON written by "
@@ -1317,6 +1336,38 @@ def database_settings(root: Path) -> DatabaseSettings:
     if not (root / HOST_DATABASE).is_file():
         raise RenderError(f"{root / HOST_DATABASE} is missing although {evidence_path} records it; "
                           f"rerun the split or remove {PER_AKH_DATABASES_FILE}")
+    marker = Path(str(root / HOST_DATABASE) + SPLIT_MARKER_SUFFIX)
+    if not marker.is_file():
+        raise RenderError(f"the split marker {marker} is missing; the split writes it next to "
+                          f"{HOST_DATABASE}. Restore it or rerun the split")
+    akhs = evidence.get("akhs")
+    if not isinstance(akhs, list):
+        raise RenderError(f"{evidence_path} lists no akhs")
+    missing = [str(a.get("path")) for a in akhs
+               if not isinstance(a, dict) or not isinstance(a.get("path"), str) or not Path(a["path"]).is_file()]
+    if missing:
+        raise RenderError(f"akh files recorded in {evidence_path} are missing: {', '.join(missing)}; "
+                          "restore them from a backup taken with the core stopped, or roll back "
+                          f"(remove {PER_AKH_DATABASES_FILE})")
+    shared = root / SHARED_DATABASE
+    if retired:
+        if shared.exists():
+            raise RenderError(f"{path} says source_retired, but {shared} still exists; move it "
+                              "away first (CUTOVER.md §13 \"Retire the shared file\") or drop "
+                              "`source_retired`")
+    else:
+        if not shared.is_file():
+            raise RenderError(f"{shared} is missing; if it was retired on purpose set "
+                              f"\"source_retired\": true in {path}")
+        wal = Path(str(shared) + "-wal")
+        if wal.exists() and wal.stat().st_size > 0:
+            raise RenderError(f"{wal} is not empty: a core has used {shared} since it was checkpointed, "
+                              "so the split evidence may be stale. Stop the core and rerun the split")
+        expected = (evidence.get("source") or {}).get("sha256_after")
+        if _sha256_file(shared) != expected:
+            raise RenderError(f"{shared} changed after the split recorded in {evidence_path} "
+                              "(sha256 differs from sha256_after): the evidence is stale. Rerun the "
+                              "split with the core stopped (move the old targets aside first)")
     return DatabaseSettings(url=sqlite_url(root / HOST_DATABASE), layout="per_akh",
                             evidence=evidence_path)
 
