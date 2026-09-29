@@ -97,6 +97,17 @@ pub enum SnapshotError {
 /// Convenience result alias.
 pub type SnapshotResult<T> = std::result::Result<T, SnapshotError>;
 
+impl SnapshotError {
+    /// The backing-store error underneath, if this failure came from the store
+    /// (callers classify it, e.g. SQLite lock contention vs. a real fault).
+    pub fn store_error(&self) -> Option<&akhomed_store::StoreError> {
+        match self {
+            SnapshotError::Store(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 /// An owned, lock-free capture of an Akh's state, ready to persist.
 ///
 /// Produced synchronously by [`capture_snapshot`] (holding the agent lock only
@@ -839,6 +850,20 @@ pub async fn wake(
     workspace_id: Uuid,
     db: &DatabaseConnection,
 ) -> SnapshotResult<Arc<Engine>> {
+    wake_split(data_dir, akh_id, workspace_id, db, db).await
+}
+
+/// [`wake`] with the akh's tables and the host-level tables in different
+/// databases (the per-akh SQLite layout, ADR 120): the relational image and
+/// WAL tail come from `db`, the schema-pack activations converged in step 7
+/// from `host_db`. Under the shared layout both are the same pool.
+pub async fn wake_split(
+    data_dir: &Path,
+    akh_id: Uuid,
+    workspace_id: Uuid,
+    db: &DatabaseConnection,
+    host_db: &DatabaseConnection,
+) -> SnapshotResult<Arc<Engine>> {
     use akhomed_store::snapshots as ops;
 
     // 1. The runtime-state row is mandatory — without it there is nothing to wake.
@@ -1044,7 +1069,7 @@ pub async fn wake(
     //    and does not fail the wake (the akh still comes up; it just may be
     //    missing a pack's types until the next wake or an explicit install).
     let packs_converged =
-        crate::schema::registry_pg::converge_workspace(&engine, db, workspace_id).await;
+        crate::schema::registry_pg::converge_workspace(&engine, host_db, workspace_id).await;
     if packs_converged > 0 {
         tracing::info!(
             akh = %akh_id,

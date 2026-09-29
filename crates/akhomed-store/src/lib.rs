@@ -16,6 +16,7 @@
 
 pub mod entity;
 pub mod error;
+pub mod layout;
 pub mod memberships;
 pub mod migration;
 pub mod mutations;
@@ -23,9 +24,13 @@ mod pool;
 pub mod repair;
 pub mod schema_registry;
 pub mod snapshots;
+pub mod split;
 mod sqlite;
 
-pub use error::{StoreError, StoreResult};
+pub use error::{StoreError, StoreResult, is_sqlite_lock_contention, is_sqlx_lock_contention};
+pub use layout::{
+    AkhStoreName, LayoutError, StoreLayout, StoreTopology, akh_id_for, workspace_id_for,
+};
 pub use memberships::{
     clear_last_seen, get_last_seen, join_workspace, leave_workspace, list_members,
     release_akh_lock, touch_last_seen, try_acquire_akh_lock,

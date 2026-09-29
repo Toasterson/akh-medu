@@ -279,6 +279,34 @@ pub struct PostgresConfig {
     /// snapshot (a final snapshot on shutdown still runs). Default: 300 (5 min).
     #[serde(default = "default_snapshot_interval_secs")]
     pub snapshot_interval_secs: u64,
+
+    /// Physical layout of a SQLite backing store (ADR 120). `"shared"` (the
+    /// default, and the only choice for PostgreSQL) keeps every table in
+    /// `url`. `"per_akh"` keeps the host-level tables in `url` and each akh's
+    /// tables in `akh.<name>.sqlite3` beside it, so one akh's snapshot or WAL
+    /// flush never waits on another's. Split an existing shared file first
+    /// with `akhomed store split-per-akh` (deploy/roman-mini/CUTOVER.md).
+    /// Omitted from saved configs while it is the default.
+    #[serde(default, skip_serializing_if = "DatabaseLayout::is_shared")]
+    pub layout: DatabaseLayout,
+}
+
+/// How the backing store's tables map onto database files (ADR 120).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseLayout {
+    /// Every table in the one configured database.
+    #[default]
+    Shared,
+    /// SQLite only: host tables in `url`, each akh's tables in its own file.
+    PerAkh,
+}
+
+impl DatabaseLayout {
+    /// `true` for the default layout (used to omit it when saving).
+    pub fn is_shared(&self) -> bool {
+        *self == Self::Shared
+    }
 }
 
 fn default_pg_pool_size() -> u32 {
@@ -986,6 +1014,39 @@ auto_start = []
 "#;
         let config: AkhomedConfig = toml::from_str(toml_str).unwrap();
         assert!(config.daemon.auto_start.is_empty());
+    }
+
+    #[test]
+    fn database_layout_defaults_to_shared_and_is_not_saved() {
+        let toml_str = r#"
+[database]
+url = "sqlite:///srv/state/core/akh.sqlite3?mode=rwc"
+"#;
+        let config: AkhomedConfig = toml::from_str(toml_str).unwrap();
+        let database = config.postgres.as_ref().unwrap();
+        assert_eq!(database.layout, DatabaseLayout::Shared);
+        let saved = toml::to_string_pretty(&config).unwrap();
+        assert!(!saved.contains("layout"), "{saved}");
+    }
+
+    #[test]
+    fn database_layout_per_akh_round_trips() {
+        let toml_str = r#"
+[database]
+url = "sqlite:///srv/state/core/host.sqlite3?mode=rwc"
+layout = "per_akh"
+"#;
+        let config: AkhomedConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.postgres.as_ref().unwrap().layout,
+            DatabaseLayout::PerAkh
+        );
+        let saved = toml::to_string_pretty(&config).unwrap();
+        assert!(saved.contains("layout = \"per_akh\""), "{saved}");
+        let bad = toml::from_str::<AkhomedConfig>(
+            "[database]\nurl = \"sqlite:///x\"\nlayout = \"per-akh\"\n",
+        );
+        assert!(bad.is_err(), "an unknown layout spelling is refused");
     }
 
     #[test]

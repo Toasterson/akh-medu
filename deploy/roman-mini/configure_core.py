@@ -246,6 +246,7 @@ class Rendered:
     auto_start: list
     warnings: list = field(default_factory=list)
     lilith: object = None  # fa.LilithSettings when she is configured
+    database: object = None  # fa.DatabaseSettings (ADR 120 layout switch)
 
 
 def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=False):
@@ -253,8 +254,9 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
 
     Reads config/{sessions,events,core}.json, the existing workspace TOMLs
     (their unrelated keys are preserved) and the operator's switch files
-    (janus-delegation.json, vesta-sandbox.json, lilith.json). A malformed
-    switch raises RenderError here, before `render()` writes a single file.
+    (janus-delegation.json, vesta-sandbox.json, lilith.json,
+    per-akh-databases.json). A malformed switch raises RenderError here,
+    before `render()` writes a single file.
     """
     if tomllib is None:
         raise SystemExit(
@@ -297,16 +299,29 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
             auto_start.append(fa.LILITH)
     akhs = tuple(specs)
 
-    url = "sqlite://" + str(root / "state/core/akh.sqlite3") + "?mode=rwc"
+    # ADR 120: config/per-akh-databases.json switches the core onto the
+    # per-akh layout (host.sqlite3 + akh.<name>.sqlite3), gated on the split
+    # evidence; without it the shared akh.sqlite3 render is unchanged.
+    database = fa.database_settings(root)
+    if database.layout is not None:
+        warnings.append(f"per-akh databases (ADR 120): [database] and DATABASE_URL point at "
+                        f"{fa.HOST_DATABASE} with layout = \"per_akh\" (split evidence "
+                        f"{database.evidence}); {fa.SHARED_DATABASE} stays for rollback only")
     retargeted = fa.retarget_events(events, root)
     staged = fa.render_anima_events(fa.render_monitoring_events(retargeted, root), live=live)
     retired_routes = [r for r in retargeted.get("routes", []) if fa.legacy_route(r)] if live else []
     retired_servers = (fa.LAYA_SERVER,) if live else ()
 
     toml = {}
-    host = fa.render_host_config(url, fa.acp_principals(session, root, akhs), acp_port, auto_start)
+    host = fa.render_host_config(database.url, fa.acp_principals(session, root, akhs), acp_port,
+                                 auto_start, database_layout=database.layout)
+    host_comments = dict(fa.HOST_COMMENTS)
+    if database.layout is not None:
+        host_comments["database"] = (
+            "ADR 120 per-akh layout: host-level tables here, each akh in state/core/akh.<name>.sqlite3.\n"
+            f"Split evidence: {database.evidence}. Rollback: CUTOVER.md \"Per-akh databases\".")
     toml[root / "core-config/akh-medu/config.toml"] = fa.dump_toml(
-        host, fa.HOST_COMMENTS,
+        host, host_comments,
         header="Rendered by deploy/roman-mini/configure_core.py (Phase 53f, ADR 113).\n"
                f"akhomed-main-{provenance.short} = {provenance.commit}")
 
@@ -353,7 +368,8 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
                                   header=f"{role}: full akh (ADR 113). Rendered by configure_core.py.")
         seeds[role] = fa.reactor_seeds(staged, session, role, source=source, retired=retired_routes)
     return Rendered(toml=toml, seeds=seeds, staged=staged, core=fa.render_core_config(core, root, akhs),
-                    akhs=akhs, specs=specs, auto_start=auto_start, warnings=warnings, lilith=lilith)
+                    akhs=akhs, specs=specs, auto_start=auto_start, warnings=warnings, lilith=lilith,
+                    database=database)
 
 
 def plan(root, provenance, source=None, acp_port=fa.ACP_TCP_PORT, live=False):
@@ -425,7 +441,7 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
     fa.private_dir(root / "secrets")
     config = root / "config"
     session = json.loads((config / "sessions.json").read_text())
-    url = "sqlite://" + str(root / "state/core/akh.sqlite3") + "?mode=rwc"
+    url = rendered.database.url
 
     # Skillpacks ship next to the rendered config so the operator can read
     # exactly the procedures a role runs with: Janus's escalation and

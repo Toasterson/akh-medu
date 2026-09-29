@@ -32,19 +32,17 @@ use akhomed_store::uuid::Uuid;
 
 use crate::mutation::{MutationKind, MutationRecord, MutationSink};
 
-/// Namespace for deriving stable per-workspace UUIDs (UUIDv5). Fixed constant
-/// so the same workspace name always maps to the same Akh/workspace id across
-/// restarts and hosts.
-const AKH_NAMESPACE: Uuid = Uuid::from_u128(0x616b_685f_6d65_6475_5f76_3500_0000_0001);
-
-/// Stable workspace UUID for a workspace name.
+/// Stable workspace UUID for a workspace name (UUIDv5 in the fixed
+/// [`akhomed_store::layout::AKH_NAMESPACE`], so the same name maps to the
+/// same id across restarts and hosts). The store owns the derivation because
+/// the per-akh layout (ADR 120) names files after it.
 pub fn workspace_id_for(name: &str) -> Uuid {
-    Uuid::new_v5(&AKH_NAMESPACE, format!("workspace:{name}").as_bytes())
+    akhomed_store::workspace_id_for(name)
 }
 
 /// Stable Akh UUID for a workspace name (one Akh per workspace, for now).
 pub fn akh_id_for(name: &str) -> Uuid {
-    Uuid::new_v5(&AKH_NAMESPACE, format!("akh:{name}").as_bytes())
+    akhomed_store::akh_id_for(name)
 }
 
 /// Tunables for the WAL buffer + flusher.
