@@ -25,7 +25,9 @@ Renders (existing unrelated keys and secrets are preserved; rerunning is safe):
 - config/events.akh-target.json             staged akheventd routes + roman-alerts monitor + roman-anima
                                             source (retarget_events.py); shadow unless --live (PR 6)
 - core-data/…/workspaces/<r>/kg/skills/laya-intervention   the PR 6 skillpack (activate via ACP)
-- config/t3-acp.json                        T3 transport -> akhomed ACP (t3_entrypoint.py)
+- config/t3-acp.json                        T3 transport -> akhomed ACP (t3_entrypoint.py); lists the
+                                            hosted `akhs` and, with Lilith, her `lilith_serve` checkout
+- secrets/t3-lilith.key + bin/roman-lilith  Lilith's T3 client key (created once) and provider binary
 - launchd/dev.roman-akhs.core.plist         execs through daemon_credentials.py core
 - skills/{astra-escalation,mergiraf}/       Janus's worker skillpacks (53g PR 7)
 - secrets/sessions-janus-delegation.key     akhsessd client token for Janus's delegation (local
@@ -243,6 +245,7 @@ class Rendered:
     specs: dict           # role -> fa.RoleSpec
     auto_start: list
     warnings: list = field(default_factory=list)
+    lilith: object = None  # fa.LilithSettings when she is configured
 
 
 def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=False):
@@ -350,7 +353,7 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
                                   header=f"{role}: full akh (ADR 113). Rendered by configure_core.py.")
         seeds[role] = fa.reactor_seeds(staged, session, role, source=source, retired=retired_routes)
     return Rendered(toml=toml, seeds=seeds, staged=staged, core=fa.render_core_config(core, root, akhs),
-                    akhs=akhs, specs=specs, auto_start=auto_start, warnings=warnings)
+                    akhs=akhs, specs=specs, auto_start=auto_start, warnings=warnings, lilith=lilith)
 
 
 def plan(root, provenance, source=None, acp_port=fa.ACP_TCP_PORT, live=False):
@@ -465,7 +468,10 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
     # ACP shared secret: one accepted token per line (akhomed reads
     # AKHOMED_SHARED_SECRET_FILE). Until per-principal ACP scoping lands
     # (phase53/fixups) any of these keys can open a session on any Roman.
-    keys = [Path(p["token_file"]) for p in fa.acp_principals(session, root)]
+    if fa.LILITH in rendered.specs:
+        # T3 chat with Lilith: her scoped client key, created once, never overwritten.
+        _ensure_key(root / fa.LILITH_T3_KEY_FILE)
+    keys = [Path(p["token_file"]) for p in fa.acp_principals(session, root, rendered.akhs)]
     missing = [str(k) for k in keys if not k.exists()]
     if missing:
         raise fa.RenderError("ACP client key files are missing: " + ", ".join(missing))
@@ -475,9 +481,15 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
     if acp_binary is None:
         warnings.append("no akh-acp built from main was installed; T3 keeps bin/akh-acp, which must "
                         "support --akhomed before the transport switch works")
-    _save_json(config / "t3-acp.json", {
-        "mode": "akhomed", "endpoint": f"tcp://127.0.0.1:{acp_port}",
-        "health_url": f"http://{fa.CORE_LISTEN}/healthz", "binary": str(acp_path)})
+    t3_acp = {"mode": "akhomed", "endpoint": f"tcp://127.0.0.1:{acp_port}",
+              "health_url": f"http://{fa.CORE_LISTEN}/healthz", "binary": str(acp_path),
+              # The roles t3_entrypoint.py accepts: every akh this core hosts.
+              "akhs": list(rendered.akhs)}
+    if rendered.lilith is not None:
+        # Her serve pod is normally stopped; the entrypoint starts it on demand
+        # from this checkout (docs/ops/lilith-serve.md).
+        t3_acp["lilith_serve"] = rendered.lilith.serve_checkout
+    _save_json(config / "t3-acp.json", t3_acp)
 
     release = {"binary": str(binary), "versioned_binary": str(versioned_binary) if versioned_binary else None,
                "commit": provenance.commit, "short": provenance.short,
@@ -508,6 +520,12 @@ def render(root, provenance, binary, binary_sha256, acp_binary=None, source=None
     for name in ("daemon_credentials.py", "t3_entrypoint.py"):
         if (source / name).exists() and (root / "bin").is_dir():
             shutil.copy2(source / name, root / "bin" / name)
+    if fa.LILITH in rendered.specs and (source / "t3_entrypoint.py").exists() and (root / "bin").is_dir():
+        # T3's `roman-lilith` provider binary: the same file, its role is the basename.
+        # (The Romans' roman-<role> copies are installed by cutover.sh / configure_t3.py.)
+        entrypoint = root / "bin" / f"roman-{fa.LILITH}"
+        shutil.copy2(source / "t3_entrypoint.py", entrypoint)
+        entrypoint.chmod(0o700)
     return warnings
 
 

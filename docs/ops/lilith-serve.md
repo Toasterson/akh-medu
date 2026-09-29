@@ -143,6 +143,37 @@ Report the spend from `ledger` with every run report (ADR 116: the supervisor re
 The ledger counts serving only, at the pod's `costPerHr` (default $3.49/h). Volume storage and
 training are billed separately.
 
+## Chatting with Lilith in T3 (on-demand start)
+
+The operator chats with Lilith in T3 through the provider `roman-lilith` (setup:
+`deploy/roman-mini/CUTOVER.md` step 12, "Chat with Lilith in T3"). Because the pod is normally
+stopped, T3's entrypoint (`deploy/roman-mini/t3_entrypoint.py`, installed as `bin/roman-lilith`)
+starts it on demand:
+
+1. On a real session start (not `--version` or `models`), it reads `secrets/lilith-base-url`,
+   strips `/v1`, and asks `GET /health` with `User-Agent: curl/8.7.1` (Runpod's proxy 403s
+   Python's default) and a 3 s timeout.
+2. Down (any error or non-2xx): it runs `/opt/homebrew/bin/python3
+   <lilith_serve>/scripts/lilith/serve/lilith_serve.py start` detached (`start_new_session`),
+   stdout and stderr appended to `$ROOT/logs/lilith-serve-start.log`, and continues. The
+   checkout is `lilith_serve` in `config/t3-acp.json` (`serve_checkout` in `config/lilith.json`,
+   default `~/.local/share/akh-medu/lilith-main`).
+3. A pid lock, `$ROOT/state/lilith/t3-serve-start.pid`, stops a second T3 session from starting a
+   second `start` while one is in flight. It also imposes a 5-minute cooldown after any start
+   attempt. A refused `start` exits within seconds, and each attempt reads the Runpod key from
+   1Password, whose read allowance is shared account-wide.
+
+Consequences:
+
+- **The first message after a cold start takes about 8-10 minutes** (pod resume plus vLLM load).
+  Until then her turns fail with the backend error; retry once `/health` answers 200. Turns
+  while the pod is already up behave normally.
+- **Budget refusals** (exit 3 `lilith::serve::budget`, and zero-GPU exit 4) are written to
+  `lilith-serve-start.log` with the named limit and its reset, and never crash the entrypoint.
+  The pod stays stopped.
+- The session opened by `start` is supervised by the idle-watch like any other (20 min idle,
+  2 h cap). To stop early: `lilith_serve.py stop`.
+
 ## Adapter or frozen parent
 
 - **Default (Stage 0): the frozen parent.** There is no `adapters/active/active.json`.
