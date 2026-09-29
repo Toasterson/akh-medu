@@ -160,11 +160,22 @@ def test_refuses_when_the_tool_surface_cannot_be_verified(park_world, tmp_path):
     item = the_p_item(park_world)
     servers, _ = servers_for(park_world, item, tmp_path)
     with FakeAkhomed(park_akh, PeerState(stale=True)) as peer, ReplayMcpGateway() as gateway:
+        still_busy = teacher(peer, gateway)
+        still_busy.IDLE_WAIT_S, still_busy.IDLE_POLL_S = 0.2, 0.05
         with pytest.raises(T.IsolationRefusal, match="stale"):
-            teacher(peer, gateway).run_traced(item.spec, servers)
+            still_busy.run_traced(item.spec, servers)
     with FakeAkhomed(park_akh, PeerState(mcp_http=False)) as peer, ReplayMcpGateway() as gateway:
         with pytest.raises(T.IsolationRefusal, match="mcpCapabilities.http"):
             teacher(peer, gateway).run_traced(item.spec, servers)
+
+
+def test_waits_for_the_previous_turn_to_settle_before_verifying(park_world, tmp_path):
+    item = the_p_item(park_world)
+    servers, _ = servers_for(park_world, item, tmp_path)
+    with FakeAkhomed(park_akh, PeerState(stale_for=2)) as peer, ReplayMcpGateway() as gateway:
+        settling = teacher(peer, gateway)
+        settling.IDLE_POLL_S = 0.01
+        assert settling.run_traced(item.spec, servers).trace.status == "ok"
 
 
 def test_a_foreign_tool_mid_turn_cancels_and_refuses(park_world, tmp_path):

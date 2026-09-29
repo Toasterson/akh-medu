@@ -27,6 +27,7 @@ TOKEN = "dojo-teacher-token-0123456789abcdef"
 class PeerState:
     own_tools: list[str] = dataclasses.field(default_factory=list)
     stale: bool = False
+    stale_for: int = 0          # answer stale=True for the first N `_akh/tools` calls
     mcp_http: bool = True
     symbols: int = 10
     triples: int = 20
@@ -164,6 +165,12 @@ class FakeAkhomed:
         self._stop = False
         self._lock = threading.Lock()
 
+    def _settling(self) -> bool:
+        if self.state.stale_for > 0:
+            self.state.stale_for -= 1
+            return True
+        return False
+
     @property
     def endpoint(self) -> str:
         return f"tcp://127.0.0.1:{self._server.getsockname()[1]}"
@@ -235,7 +242,8 @@ class FakeAkhomed:
                 continue
             if method == "_akh/tools":
                 conn.send({"jsonrpc": "2.0", "id": rid, "result": {
-                    "workspace": params.get("workspace"), "stale": self.state.stale,
+                    "workspace": params.get("workspace"),
+                    "stale": self.state.stale or self._settling(),
                     "tools": [{"name": n, "description": n} for n in self.state.own_tools]}})
             elif method == "_akh/health":
                 conn.send({"jsonrpc": "2.0", "id": rid, "result": {
