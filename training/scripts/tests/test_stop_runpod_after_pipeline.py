@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPTS = Path(__file__).parents[1]
@@ -32,19 +33,20 @@ class RunpodCostGuardTests(unittest.TestCase):
                 guard.trigger_reason(root), "candidate_staged_locally"
             )
 
-    def test_command_is_stop_only_and_secret_is_still_a_reference(self) -> None:
+    def test_command_is_stop_only_and_uses_enrolled_cache(self) -> None:
         config = {
-            "credential_ref": "op://Homelab/Runpod API Key/credential",
+            "secret_profile": "runpod",
             "pod_id": "4ypc4li9y537f2",
-            "op_wrapper": {"path": "/safe/op-service-account"},
+            "agent_tools": {"path": "/safe/agent-tools"},
             "runpodctl": {"path": "/safe/runpodctl"},
         }
-        command, environment = guard.stop_command(config)
+        with patch.dict(os.environ, {"RUNPOD_API_KEY": "inherited-secret"}):
+            command, environment = guard.stop_command(config)
         self.assertEqual(
             command,
             [
-                "/safe/op-service-account",
-                "run",
+                "/safe/agent-tools",
+                "runpod",
                 "--",
                 "/safe/runpodctl",
                 "pod",
@@ -55,11 +57,8 @@ class RunpodCostGuardTests(unittest.TestCase):
             ],
         )
         self.assertNotIn("delete", command)
-        self.assertEqual(
-            environment["RUNPOD_API_KEY"],
-            "op://Homelab/Runpod API Key/credential",
-        )
-        self.assertNotEqual(environment["RUNPOD_API_KEY"], os.environ.get("RUNPOD_API_KEY"))
+        self.assertNotIn("RUNPOD_API_KEY", environment)
+        self.assertNotIn("inherited-secret", command)
 
 
 if __name__ == "__main__":
