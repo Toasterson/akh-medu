@@ -292,12 +292,28 @@ class Broker:
         if found is None:
             return self._protocol_error(f"unknown tool {call.name!r}; tools are named mcp__<server>__<tool> from the list you were given")
         server, tool, _ = found
-        arguments = dict(call.arguments)
+        return self.call(server, tool, call.arguments)
+
+    def has_server(self, server: str) -> bool:
+        return server in self.servers
+
+    def server_tools(self, server: str) -> list[dict]:
+        """The server's `tools/list` entries verbatim (what an MCP client of this broker sees)."""
+        return [entry for s, _, entry in self._tools.values() if s == server]
+
+    def call(self, server: str, tool: str, raw_arguments: Mapping[str, Any]) -> Dispatched:
+        """Route one call to `server`: strip `cos_declaration`, call, render the result in the one
+        encoding every model reads. Shared by the in-process loop and the MCP gateway
+        (`acp_teacher.ReplayMcpGateway`), so both paths hand the model the same bytes."""
+        name = tool_name(server, tool)
+        if name not in self._tools:
+            return self._protocol_error(f"unknown tool {name!r}; tools are named mcp__<server>__<tool> from the list you were given")
+        arguments = dict(raw_arguments)
         declaration = arguments.pop(DECLARATION_ARG, None)
         response = self._request(self.servers[server], "tools/call", {"name": tool, "arguments": arguments})
         if response is None or "result" not in response:
             message = ((response or {}).get("error") or {}).get("message", "no response")
-            return self._protocol_error(f"{call.name}: {message}")
+            return self._protocol_error(f"{name}: {message}")
         result = response["result"]
         meta = result.get("_meta") or {}
         receipt_id = meta.get("lilith/receipt")
@@ -525,36 +541,43 @@ class ModelEpisodeRunner:
 
     def _finish(self, spec: EpisodeSpec, reply: AssistantReply, turn_ms: int, now: int, trace: RunTrace,
                 steps: list[StepRecord]) -> None:
-        parsed = parse_answer(reply.content)
-        if not parsed.objects:
-            trace.answer_status = "unparseable"
-            trace.answer_notes.append(parsed.problem or "no answer")
-            return
-        kinds: list[str] = []
-        for index, obj in enumerate(parsed.objects):
-            budget = StepBudget(tokens=reply.usage.completion_tokens if index == 0 else 0,
-                                wall_ms=turn_ms if index == 0 else 0)
-            if _is_message(obj):
-                message, problem = _to_message(obj, now)
-                if message is None:
-                    trace.answer_notes.append(problem or "invalid message")
-                    kinds.append("invalid-message")
-                    continue
-                steps.append(StepRecord(spec.episode_id, len(steps), message, budget))
-                schema = C.schema_for(message.protocol)
-                errors = C.validate(dict(message.payload), schema) if schema else [f"unknown protocol {message.protocol}"]
-                trace.schema_errors.extend(errors)
-                expected = message.protocol in EXPECTED_CONTRACTS[spec.family]
-                trace.contract_ok = trace.contract_ok or (expected and not errors)
-                kinds.append("message")
-            else:
-                steps.append(StepRecord(spec.episode_id, len(steps), EmitDocument(obj), budget))
-                errors = C.validate_document(obj)
-                trace.schema_errors.extend(errors)
-                expected = obj.get("contract") in EXPECTED_CONTRACTS[spec.family]
-                trace.contract_ok = trace.contract_ok or (expected and not errors)
-                kinds.append("document")
-        trace.answer_status = kinds[0] if len(kinds) == 1 else "multiple"
+        finish_answer(spec, reply.content, reply.usage.completion_tokens, turn_ms, now, trace, steps)
+
+
+def finish_answer(spec: EpisodeSpec, content: str, completion_tokens: int, turn_ms: int, now: int, trace: RunTrace,
+                  steps: list[StepRecord]) -> None:
+    """The final message (no tool call) into `EmitDocument` / `SendMessage` steps. Shared by every
+    runner so the answer is read the same way whichever transport produced it."""
+    parsed = parse_answer(content)
+    if not parsed.objects:
+        trace.answer_status = "unparseable"
+        trace.answer_notes.append(parsed.problem or "no answer")
+        return
+    kinds: list[str] = []
+    for index, obj in enumerate(parsed.objects):
+        budget = StepBudget(tokens=completion_tokens if index == 0 else 0,
+                            wall_ms=turn_ms if index == 0 else 0)
+        if _is_message(obj):
+            message, problem = _to_message(obj, now)
+            if message is None:
+                trace.answer_notes.append(problem or "invalid message")
+                kinds.append("invalid-message")
+                continue
+            steps.append(StepRecord(spec.episode_id, len(steps), message, budget))
+            schema = C.schema_for(message.protocol)
+            errors = C.validate(dict(message.payload), schema) if schema else [f"unknown protocol {message.protocol}"]
+            trace.schema_errors.extend(errors)
+            expected = message.protocol in EXPECTED_CONTRACTS[spec.family]
+            trace.contract_ok = trace.contract_ok or (expected and not errors)
+            kinds.append("message")
+        else:
+            steps.append(StepRecord(spec.episode_id, len(steps), EmitDocument(obj), budget))
+            errors = C.validate_document(obj)
+            trace.schema_errors.extend(errors)
+            expected = obj.get("contract") in EXPECTED_CONTRACTS[spec.family]
+            trace.contract_ok = trace.contract_ok or (expected and not errors)
+            kinds.append("document")
+    trace.answer_status = kinds[0] if len(kinds) == 1 else "multiple"
 
 
 def _assistant_entry(reply: AssistantReply) -> dict:

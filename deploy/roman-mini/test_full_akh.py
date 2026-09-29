@@ -1558,6 +1558,113 @@ class LilithRenderTests(RenderFixture):
         self.assertEqual(dc.LILITH_CONFIG, fa.LILITH_CONFIG_FILE)
 
 
+# ── Lilith C4 dojo teacher (ADR 116) ───────────────────────────────────────
+
+
+@NEEDS_TOMLLIB
+class DojoTeacherRenderTests(RenderFixture):
+    """The sealed dojo teacher (docs/ai/plans/2026-09-29-lilith-c4-teacher-via-akh.md): rendered
+    only behind config/dojo-teacher.json, reaches nothing but its ACP session, and leaves every
+    other output unchanged."""
+
+    WS = "core-config/akh-medu/workspaces/dojo-teacher.toml"
+    HOST = "core-config/akh-medu/config.toml"
+
+    def configure(self, **settings):
+        (self.root / fa.DOJO_TEACHER_CONFIG_FILE).write_text(json.dumps(settings))
+
+    def test_absent_switch_renders_nothing(self):
+        self.render()
+        self.assertFalse((self.root / self.WS).exists())
+        self.assertFalse((self.root / fa.DOJO_TEACHER_KEY_FILE).exists())
+        host = self.toml(self.HOST)
+        self.assertNotIn(fa.DOJO_TEACHER, host["daemon"]["auto_start"])
+        self.assertNotIn(fa.DOJO_TEACHER_PRINCIPAL, [p["id"] for p in host["acp"]["principals"]])
+
+    def test_workspace_is_sealed(self):
+        self.configure()
+        self.render()
+        ws = self.toml(self.WS)
+        self.assertEqual(ws["name"], "dojo-teacher")
+        self.assertEqual(ws["tool_surface"], "session-only")
+        self.assertEqual((ws["backend"], ws["model"]), ("ollama", fa.MODEL))
+        self.assertEqual(ws["ollama_endpoint"], fa.OLLAMA_CLOUD)
+        self.assertIs(ws["capture_transcripts"], False)
+        self.assertEqual(ws["context_strategy"], "passthrough")
+        self.assertEqual(ws["autonomy"], {"enabled": False, "tasks": {}})
+        self.assertEqual(ws["exec"], {"kind": "none"})
+        self.assertEqual(ws["mcp"], {"require_pushed_mcp": True, "servers": []})
+        for absent in ("board", "monitoring", "delegation", "chief_of_staff", "agent_runtime",
+                       "related_workspaces", "shared_partitions", "openclaw_import", "extra_read_roots"):
+            self.assertNotIn(absent, ws)
+        self.assertEqual(ws["system_prompt"], fa.DOJO_TEACHER_PROMPT)
+
+    def test_principal_reaches_the_teacher_alone(self):
+        self.configure(model="deepseek-v4.1", reasoning_effort="high")
+        self.render()
+        host = self.toml(self.HOST)
+        principals = {p["id"]: p for p in host["acp"]["principals"]}
+        teacher = principals[fa.DOJO_TEACHER_PRINCIPAL]
+        self.assertEqual(teacher["akhs"], ["dojo-teacher"])
+        self.assertNotIn("control", teacher)
+        self.assertTrue(teacher["token_file"].endswith(fa.DOJO_TEACHER_KEY_FILE))
+        for pid, principal in principals.items():
+            if pid not in (fa.DOJO_TEACHER_PRINCIPAL, "operator"):
+                self.assertNotIn("dojo-teacher", principal["akhs"], pid)
+        self.assertIn("dojo-teacher", principals["operator"]["akhs"])
+        self.assertIn("dojo-teacher", host["daemon"]["auto_start"])
+        key = self.root / fa.DOJO_TEACHER_KEY_FILE
+        self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+        self.assertIn(key.read_text().strip(), self.text("secrets/acp-clients.keys").splitlines())
+        # an ACP-only instrument: no T3 role, no core /v1 scope, no events, no seeds
+        self.assertNotIn("dojo-teacher", json.loads(self.text("config/t3-acp.json"))["akhs"])
+        for principal in json.loads(self.text("config/core.json"))["principals"]:
+            self.assertNotIn("dojo-teacher", principal.get("akhs", []), principal["id"])
+        self.assertFalse((self.root / "config/reactor-seeds/dojo-teacher.json").exists())
+        ws = self.toml(self.WS)
+        self.assertEqual((ws["model"], ws["reasoning_effort"]), ("deepseek-v4.1", "high"))
+
+    def test_rerender_drops_stale_channels_and_keeps_engine_sizing(self):
+        self.configure()
+        path = self.root / self.WS
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('name = "dojo-teacher"\ndimension = 4096\nrelated_workspaces = ["janus"]\n'
+                        'shared_partitions = ["roman"]\ncapture_transcripts = true\n'
+                        '[[mcp.servers]]\nname = "anima"\nurl = "https://anima.example/mcp"\n')
+        self.render()
+        ws = self.toml(self.WS)
+        self.assertEqual(ws["dimension"], 4096)
+        self.assertNotIn("related_workspaces", ws)
+        self.assertNotIn("shared_partitions", ws)
+        self.assertEqual(ws["mcp"]["servers"], [])
+        self.assertIs(ws["capture_transcripts"], False)
+
+    def test_malformed_switch_fails_before_writing(self):
+        for body, needle in (("{", "not valid JSON"), ('{"modle": "x"}', "unknown keys"),
+                             ('{"model": "a b"}', "model"), ('{"reasoning_effort": "extreme"}', "reasoning_effort"),
+                             ("[]", "JSON object")):
+            with self.subTest(body=body):
+                (self.root / fa.DOJO_TEACHER_CONFIG_FILE).write_text(body)
+                with self.assertRaisesRegex(fa.RenderError, needle):
+                    self.render()
+                self.assertFalse((self.root / self.WS).exists())
+
+    def test_romans_and_golden_teacher_stay_byte_identical(self):
+        self.configure()
+        self.render()
+        for role in ROLES:
+            rel = f"core-config/akh-medu/workspaces/{role}.toml"
+            with self.subTest(role=role):
+                self.assertEqual(golden(self.root, rel), (GOLDEN / f"{role}.toml").read_text())
+        # dojo-teacher.toml is also the fixture the Rust lib test loads through
+        # AkhConfig::load_checked (tool_surface validation included).
+        if os.environ.get("ROMAN_GOLDEN_REGEN") == "1":
+            (GOLDEN / "dojo-teacher.toml").write_text(golden(self.root, self.WS))
+        self.assertEqual(golden(self.root, self.WS), (GOLDEN / "dojo-teacher.toml").read_text())
+        rust = (SOURCE.parents[1] / "src/akh_config_roman_fixture_tests.rs").read_text()
+        self.assertIn('include_str!("../deploy/roman-mini/fixtures/golden/dojo-teacher.toml")', rust)
+
+
 @NEEDS_TOMLLIB
 class LilithBoardAgentIdTests(RenderFixture):
     """`[board] agent_id` (daemon.rs ~2275: without it, board inbox ingest is

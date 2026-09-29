@@ -74,6 +74,8 @@ PROVENANCE_FILE = "provenance.json"
 SUMMARY_FILE = "baseline-summary.json"
 BOOTSTRAP_RESAMPLES = 2000
 RECORDER_DEFAULT_ROOT = "/Volumes/akh-medu-runs/lilith/cos-snapshots"
+DEFAULT_ACP_ENDPOINT = "tcp://127.0.0.1:18444"  # the Mac core akhomed's ACP listener (full_akh.ACP_TCP_PORT)
+DEFAULT_TEACHER_AKH = "dojo-teacher"
 ANSWERED = frozenset({"document", "message", "multiple"})
 
 
@@ -151,7 +153,7 @@ def snapshot_root_sha256(store: SnapshotStore) -> str:
 
 IDENTITY_KEYS = ("runner", "dojo", "git_sha", "snapshot_root_sha256", "floors_sha256", "prompt_sha256",
                  "system_prompt_sha256", "model_kind", "model_id", "endpoint_host", "temperature", "max_tokens",
-                 "max_rounds", "episode_token_cap", "seed", "split", "families", "limit")
+                 "max_rounds", "episode_token_cap", "seed", "split", "families", "limit", "teacher")
 
 
 def check_resume(out: Path, provenance: Mapping[str, Any]) -> None:
@@ -336,9 +338,11 @@ class BatchConfig:
     runner: RunnerConfig = RunnerConfig()
 
 
-def run_batch(store: SnapshotStore, chosen: Sequence[Chosen], adapter: ModelAdapter, system: SystemPrompt,
+def run_batch(store: SnapshotStore, chosen: Sequence[Chosen], adapter: ModelAdapter | None, system: SystemPrompt,
               oracle, config: BatchConfig, provenance: Mapping[str, Any], label: str,
-              progress=lambda line: None) -> dict:
+              progress=lambda line: None, episode_runner=None) -> dict:
+    """`episode_runner` replaces the in-process model loop (the ACP teacher, `acp_teacher.py`); it
+    has the same `run_traced(spec, tools) -> RunResult`. Without it `adapter` drives the loop."""
     out = config.out
     out.mkdir(parents=True, exist_ok=True)
     check_resume(out, provenance)
@@ -348,7 +352,9 @@ def run_batch(store: SnapshotStore, chosen: Sequence[Chosen], adapter: ModelAdap
     progress(f"{len(chosen)} episodes selected, {len(chosen) - len(todo)} already complete, {len(todo)} to run")
     for snapshot_id in {c.spec.snapshot_id for c in todo}:  # warm the shared store before threads start
         store.get(snapshot_id).tool_contract()
-    runner = ModelEpisodeRunner(adapter, system, config.runner)
+    if episode_runner is None and adapter is None:
+        raise DojoError("run_batch needs a model adapter or an episode runner")
+    runner = episode_runner if episode_runner is not None else ModelEpisodeRunner(adapter, system, config.runner)
     lock = threading.Lock()
     run_id = str(provenance.get("started_at", ""))
 
@@ -538,7 +544,13 @@ def _add_run_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--limit", type=int, default=None, help="episodes per family")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--concurrency", type=int, default=1)
-    p.add_argument("--model-kind", choices=["openai", "anthropic"], required=True)
+    p.add_argument("--model-kind", choices=["openai", "anthropic", "acp"], required=True,
+                   help="acp: the teacher arm through a sealed dojo akh over ACP (acp_teacher.py)")
+    p.add_argument("--acp-endpoint", default=None,
+                   help=f"acp: akhomed's loopback ACP listener (default {DEFAULT_ACP_ENDPOINT})")
+    p.add_argument("--akh", default=None, help=f"acp: the sealed teacher akh (default {DEFAULT_TEACHER_AKH})")
+    p.add_argument("--akh-config", type=Path, default=None,
+                   help="acp: the teacher's rendered workspace TOML, read to verify tool_surface and record its model")
     p.add_argument("--base-url", default=None)
     p.add_argument("--base-url-file", type=Path, default=None)
     p.add_argument("--model", default=None)
@@ -558,6 +570,70 @@ def _add_run_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--dry-run", action="store_true", help="select episodes, size the prompt, call no model")
 
 
+def _acp_run(args: argparse.Namespace, store: SnapshotStore, chosen, system: SystemPrompt, oracle, families,
+             selection) -> int:
+    """`--model-kind acp`: the teacher akh over ACP. Episodes run one at a time (the memory check
+    between episodes is exact only then); the akh is probed before provenance is written."""
+    from dojo import acp_teacher as T
+    from dojo.mcp_gateway import ReplayMcpGateway
+
+    if args.concurrency != 1:
+        raise DojoError("--model-kind acp runs one episode at a time",
+                        help="drop --concurrency (or pass 1): the isolation check compares the teacher akh's memory "
+                             "before and after every episode, which concurrent episodes would blur")
+    endpoint = args.acp_endpoint or DEFAULT_ACP_ENDPOINT
+    akh = args.akh or DEFAULT_TEACHER_AKH
+    declared = T.read_teacher_config(args.akh_config, akh) if args.akh_config else None
+    secret = load_secret(env=args.key_env, file=args.key_file)
+    runner_config = RunnerConfig(max_rounds=args.max_rounds, episode_token_cap=args.episode_token_cap)
+    with ReplayMcpGateway() as gateway:
+        runner = T.AcpEpisodeRunner(T.tcp_connector(endpoint), secret, system, gateway,
+                                    T.AcpTeacherConfig(akh=akh, endpoint_host=T.endpoint_host(endpoint),
+                                                       turn_timeout_s=args.timeout, runner=runner_config))
+        probe = runner.probe()  # refuses a teacher with tools of its own before anything is written
+        provenance = {
+            **_base_provenance(args, store, system, families, selection),
+            "model_kind": T.KIND,
+            "model_id": runner.model_id,
+            "endpoint_host": runner.endpoint_host,
+            "temperature": None,
+            "max_tokens": None,
+            "teacher": {**probe, "declared": declared},
+        }
+        config = BatchConfig(args.out, 1, runner_config)
+        summary = run_batch(store, chosen, None, system, oracle, config, provenance, args.label or runner.model_id,
+                            progress=lambda line: print(line, file=sys.stderr, flush=True), episode_runner=runner)
+    interrupted = summary.pop("_interrupted", False)
+    print(render_summary(summary))
+    if interrupted:
+        return 130
+    return 1 if summary["overall"]["errors"] else 0
+
+
+def _base_provenance(args: argparse.Namespace, store: SnapshotStore, system: SystemPrompt, families,
+                     selection) -> dict:
+    return {
+        "schema": "lilith/dojo-run@1",
+        "runner": RUNNER_VERSION,
+        "dojo": DOJO_VERSION,
+        **git_provenance(args.repo, args.allow_dirty),
+        "snapshot_root_sha256": snapshot_root_sha256(store),
+        "snapshots": len(store.ids),
+        "floors_sha256": floors_mod.FLOORS_V1_SHA256,
+        "system_prompt_sha256": system.sha256,
+        "prompt_sha256": prompt_bundle_sha256(system),
+        "prompt_sources": dict(system.sources),
+        "max_rounds": args.max_rounds,
+        "episode_token_cap": args.episode_token_cap,
+        "seed": args.seed,
+        "split": args.split,
+        "families": [f.value for f in families],
+        "limit": args.limit,
+        "selection": selection,
+        "started_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     root = args.root or Path(os.environ.get("LILITH_SNAPSHOT_ROOT", RECORDER_DEFAULT_ROOT))
     store = SnapshotStore(root)
@@ -574,32 +650,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.out is None:
         raise DojoError("--out is required", help="give a fresh directory, or an earlier run's directory to resume it")
     if args.key_env is None and args.key_file is None:
-        raise DojoError("no key source", help="pass --key-env NAME or --key-file PATH")
+        raise DojoError("no key source", help="pass --key-env NAME or --key-file PATH (for acp: the ACP principal's "
+                                              "token file, e.g. secrets/dojo-teacher.key)")
+    if args.model_kind == "acp":
+        return _acp_run(args, store, chosen, system, oracle, families, selection)
     adapter = build_adapter(args)
     provenance = {
-        "schema": "lilith/dojo-run@1",
-        "runner": RUNNER_VERSION,
-        "dojo": DOJO_VERSION,
-        **git_provenance(args.repo, args.allow_dirty),
-        "snapshot_root_sha256": snapshot_root_sha256(store),
-        "snapshots": len(store.ids),
-        "floors_sha256": floors_mod.FLOORS_V1_SHA256,
-        "system_prompt_sha256": system.sha256,
-        "prompt_sha256": prompt_bundle_sha256(system),
-        "prompt_sources": dict(system.sources),
+        **_base_provenance(args, store, system, families, selection),
         "model_kind": adapter.kind,
         "model_id": adapter.model_id,
         "endpoint_host": adapter.endpoint_host,
         "temperature": None if args.omit_temperature else args.temperature,
         "max_tokens": args.max_tokens,
-        "max_rounds": args.max_rounds,
-        "episode_token_cap": args.episode_token_cap,
-        "seed": args.seed,
-        "split": args.split,
-        "families": [f.value for f in families],
-        "limit": args.limit,
-        "selection": selection,
-        "started_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
     }
     config = BatchConfig(args.out, args.concurrency,
                          RunnerConfig(max_rounds=args.max_rounds, episode_token_cap=args.episode_token_cap))
