@@ -27,9 +27,7 @@ pub mod snapshots;
 pub mod split;
 mod sqlite;
 
-pub use error::{
-    StoreError, StoreResult, is_sqlite_lock_contention, is_sqlx_lock_contention,
-};
+pub use error::{StoreError, StoreResult, is_sqlite_lock_contention, is_sqlx_lock_contention};
 pub use layout::{
     AkhStoreName, LayoutError, StoreLayout, StoreTopology, akh_id_for, workspace_id_for,
 };

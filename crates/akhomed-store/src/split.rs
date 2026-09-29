@@ -32,7 +32,9 @@ use std::time::Duration;
 
 use miette::Diagnostic;
 use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
-use sea_orm::sqlx::{self, ConnectOptions as _, Connection as _, Row as _, TypeInfo as _, ValueRef as _};
+use sea_orm::sqlx::{
+    self, ConnectOptions as _, Connection as _, Row as _, TypeInfo as _, ValueRef as _,
+};
 use sea_orm_migration::MigratorTrait as _;
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -58,8 +60,8 @@ pub enum SplitError {
         code(akhomed_store::split::source_in_use),
         help(
             "Stop the akhomed that serves this file first (Roman core: \
-             `sudo launchctl bootout system/<core label>`), then rerun. `--dry-run` \
-             works while the daemon runs; the real split does not."
+             `sudo launchctl bootout system/dev.roman-akhs.core`), then rerun. \
+             `--dry-run` works while the daemon runs; the real split does not."
         )
     )]
     SourceInUse { lock: PathBuf },
@@ -412,8 +414,12 @@ impl TableShape {
         let mut columns = Vec::with_capacity(rows.len());
         let mut pk: Vec<(i64, String)> = Vec::new();
         for row in &rows {
-            let name: String = row.try_get("name").map_err(sqlite_err("reading table_info"))?;
-            let ordinal: i64 = row.try_get("pk").map_err(sqlite_err("reading table_info"))?;
+            let name: String = row
+                .try_get("name")
+                .map_err(sqlite_err("reading table_info"))?;
+            let ordinal: i64 = row
+                .try_get("pk")
+                .map_err(sqlite_err("reading table_info"))?;
             if ordinal > 0 {
                 pk.push((ordinal, name.clone()));
             }
@@ -448,7 +454,11 @@ impl TableShape {
 #[derive(Debug, Clone, Copy)]
 enum RowFilter {
     All,
-    Akh { key: AkhKey, akh_id: Uuid, workspace_id: Uuid },
+    Akh {
+        key: AkhKey,
+        akh_id: Uuid,
+        workspace_id: Uuid,
+    },
 }
 
 impl RowFilter {
@@ -486,7 +496,11 @@ async fn count_rows(
     table: &str,
     filter: RowFilter,
 ) -> SplitResult<u64> {
-    let sql = format!("SELECT COUNT(*) FROM {}{}", quote_ident(table), filter.clause());
+    let sql = format!(
+        "SELECT COUNT(*) FROM {}{}",
+        quote_ident(table),
+        filter.clause()
+    );
     let mut query = sqlx::query_scalar::<_, i64>(&sql);
     if let Some(bytes) = filter.bind() {
         query = query.bind(bytes);
@@ -662,7 +676,9 @@ impl Source {
             let mut seen = BTreeSet::new();
             for row in rows {
                 let id_bytes: Vec<u8> = row.try_get("id").map_err(sqlite_err("reading akh id"))?;
-                let name: String = row.try_get("name").map_err(sqlite_err("reading akh name"))?;
+                let name: String = row
+                    .try_get("name")
+                    .map_err(sqlite_err("reading akh name"))?;
                 let akh_id = Uuid::from_slice(&id_bytes).map_err(|_| SplitError::Identity {
                     akh_id: Uuid::nil(),
                     name: name.clone(),
@@ -694,7 +710,11 @@ impl Source {
 
         Ok(Self {
             conn,
-            opened: if immutable { "read_only_immutable" } else { "read_only" },
+            opened: if immutable {
+                "read_only_immutable"
+            } else {
+                "read_only"
+            },
             tables,
             migrations,
             akhs,
@@ -718,8 +738,7 @@ impl Source {
         self.tables
             .iter()
             .filter(|t| {
-                *t != "seaql_migrations"
-                    && crate::layout::table_home(t) == Some(TableHome::Host)
+                *t != "seaql_migrations" && crate::layout::table_home(t) == Some(TableHome::Host)
             })
             .cloned()
             .collect()
@@ -914,7 +933,8 @@ impl Created {
     fn track_db(&mut self, db: &Path) {
         self.paths.push(db.to_path_buf());
         for suffix in ["-wal", "-shm", ".migrate.lock"] {
-            self.paths.push(PathBuf::from(format!("{}{suffix}", db.display())));
+            self.paths
+                .push(PathBuf::from(format!("{}{suffix}", db.display())));
         }
     }
 }
@@ -957,13 +977,13 @@ async fn copy_target(
         .map_err(sqlite_err(format!("opening {}", path.display())))?;
 
     let mut staged = Vec::with_capacity(tables.len());
-    let mut transaction = conn
-        .begin()
-        .await
-        .map_err(sqlite_err(format!("starting the copy into {}", path.display())))?;
+    let mut transaction = conn.begin().await.map_err(sqlite_err(format!(
+        "starting the copy into {}",
+        path.display()
+    )))?;
     for (table, filter) in tables {
         let shape = TableShape::read(source, table).await?;
-        let target_shape = TableShape::read(&mut *transaction, table).await?;
+        let target_shape = TableShape::read(&mut transaction, table).await?;
         if let Some(missing) = shape
             .columns
             .iter()
@@ -976,7 +996,7 @@ async fn copy_target(
             });
         }
         let (rows, digest) = read_rows(source, &shape, *filter).await?;
-        insert_rows(&mut *transaction, &shape, &rows).await?;
+        insert_rows(&mut transaction, &shape, &rows).await?;
         staged.push((shape, rows.len() as u64, digest));
     }
     transaction
@@ -986,7 +1006,7 @@ async fn copy_target(
 
     let mut evidence = Vec::with_capacity(staged.len());
     for (shape, source_rows, source_sha256) in staged {
-        let (rows, target_sha256) = read_rows(&mut *conn, &shape, RowFilter::All).await?;
+        let (rows, target_sha256) = read_rows(&mut conn, &shape, RowFilter::All).await?;
         let target_rows = rows.len() as u64;
         if target_rows != source_rows || target_sha256 != source_sha256 {
             return Err(SplitError::Verification {
@@ -1092,7 +1112,11 @@ pub async fn execute(req: &SplitRequest, evidence_path: &Path) -> SplitResult<Sp
     // started against the new host cannot claim an akh mid-copy.
     let mut target_locks = Vec::new();
     for name in &source.akhs {
-        let lock = PathBuf::from(format!("{}.akh-{}.lock", host_path.display(), name.akh_id()));
+        let lock = PathBuf::from(format!(
+            "{}.akh-{}.lock",
+            host_path.display(),
+            name.akh_id()
+        ));
         let existed = lock.exists();
         let mut open = std::fs::OpenOptions::new();
         open.read(true).write(true).create(true).truncate(false);
@@ -1161,7 +1185,10 @@ pub async fn execute(req: &SplitRequest, evidence_path: &Path) -> SplitResult<Sp
 
     let evidence = SplitEvidence {
         schema: EVIDENCE_SCHEMA,
-        tool: format!("akhomed store split-per-akh (akhomed-store {})", env!("CARGO_PKG_VERSION")),
+        tool: format!(
+            "akhomed store split-per-akh (akhomed-store {})",
+            env!("CARGO_PKG_VERSION")
+        ),
         started_at,
         finished_at: chrono::Utc::now(),
         layout: StoreLayout::PerAkh.as_str(),
@@ -1202,8 +1229,17 @@ fn write_evidence(path: &Path, evidence: &SplitEvidence) -> SplitResult<()> {
         path: path.to_path_buf(),
         source: std::io::Error::other(error),
     })?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(io_err(parent))?;
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(parent).map_err(io_err(parent))?;
     }
     let mut open = std::fs::OpenOptions::new();
     open.write(true).create_new(true);

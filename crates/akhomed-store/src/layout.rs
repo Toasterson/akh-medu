@@ -238,9 +238,15 @@ pub const TABLE_HOMES: &[(&str, TableHome)] = &[
         "akhomed_facts",
         TableHome::Akh(AkhKey::WorkspaceId("workspace_id")),
     ),
-    ("akhomed_mutation_log", TableHome::Akh(AkhKey::AkhId("akh_id"))),
+    (
+        "akhomed_mutation_log",
+        TableHome::Akh(AkhKey::AkhId("akh_id")),
+    ),
     ("akhomed_episodes", TableHome::Akh(AkhKey::AkhId("akh_id"))),
-    ("akhomed_provenance", TableHome::Akh(AkhKey::AkhId("akh_id"))),
+    (
+        "akhomed_provenance",
+        TableHome::Akh(AkhKey::AkhId("akh_id")),
+    ),
     (
         "akhomed_provenance_input",
         TableHome::Akh(AkhKey::ProvenanceOfAkh),
@@ -264,8 +270,14 @@ pub const TABLE_HOMES: &[(&str, TableHome)] = &[
         "akhomed_goal_dependencies",
         TableHome::Akh(AkhKey::AkhId("akh_id")),
     ),
-    ("akhomed_failure_cases", TableHome::Akh(AkhKey::AkhId("akh_id"))),
-    ("akhomed_effort_cases", TableHome::Akh(AkhKey::AkhId("akh_id"))),
+    (
+        "akhomed_failure_cases",
+        TableHome::Akh(AkhKey::AkhId("akh_id")),
+    ),
+    (
+        "akhomed_effort_cases",
+        TableHome::Akh(AkhKey::AkhId("akh_id")),
+    ),
     (
         "akhomed_learned_methods",
         TableHome::Akh(AkhKey::AkhId("akh_id")),
@@ -286,7 +298,10 @@ pub const TABLE_HOMES: &[(&str, TableHome)] = &[
         "akhomed_competence_calibration",
         TableHome::Akh(AkhKey::AkhId("akh_id")),
     ),
-    ("akhomed_sleep_metrics", TableHome::Akh(AkhKey::AkhId("akh_id"))),
+    (
+        "akhomed_sleep_metrics",
+        TableHome::Akh(AkhKey::AkhId("akh_id")),
+    ),
     ("akhomed_schema_registry", TableHome::Host),
     ("workspaces_workspace", TableHome::Host),
     ("workspaces_workspace_seed_pack", TableHome::Host),
@@ -578,7 +593,16 @@ mod tests {
             assert!(AkhStoreName::new(ok).is_ok(), "{ok}");
         }
         let long = "a".repeat(64);
-        for bad in ["", "Janus", "-x", "../etc", "a/b", "a.b", "a b", long.as_str()] {
+        for bad in [
+            "",
+            "Janus",
+            "-x",
+            "../etc",
+            "a/b",
+            "a.b",
+            "a b",
+            long.as_str(),
+        ] {
             assert!(AkhStoreName::new(bad).is_err(), "{bad}");
         }
     }
@@ -590,7 +614,10 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), total, "duplicate table in TABLE_HOMES");
-        assert_eq!(table_home("akhomed_facts"), Some(TableHome::Akh(AkhKey::WorkspaceId("workspace_id"))));
+        assert_eq!(
+            table_home("akhomed_facts"),
+            Some(TableHome::Akh(AkhKey::WorkspaceId("workspace_id")))
+        );
         assert_eq!(table_home("workspaces_membership"), Some(TableHome::Host));
         assert_eq!(table_home("nope"), None);
     }

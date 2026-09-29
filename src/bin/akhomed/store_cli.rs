@@ -12,7 +12,10 @@ use clap::{Parser, Subcommand};
 
 /// `akhomed store` command line.
 #[derive(Debug, Parser)]
-#[command(name = "akhomed store", about = "Offline maintenance of akhomed's backing store")]
+#[command(
+    name = "akhomed store",
+    about = "Offline maintenance of akhomed's backing store"
+)]
 struct StoreCli {
     #[command(subcommand)]
     command: StoreCommand,
@@ -81,7 +84,8 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> i32 {
 
 async fn split(args: SplitArgs) -> Result<(), akhomed_store::split::SplitError> {
     use akhomed_store::split;
-    let source = split::sqlite_url_path(&args.source).unwrap_or_else(|| PathBuf::from(&args.source));
+    let source =
+        split::sqlite_url_path(&args.source).unwrap_or_else(|| PathBuf::from(&args.source));
     let request = split::SplitRequest {
         source,
         host: args.host.clone(),
@@ -91,7 +95,10 @@ async fn split(args: SplitArgs) -> Result<(), akhomed_store::split::SplitError> 
     if args.dry_run {
         let plan = split::plan(&request).await?;
         if args.json {
-            println!("{}", serde_json::to_string_pretty(&plan).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&plan).unwrap_or_default()
+            );
         } else {
             print_plan(&plan);
         }
@@ -102,7 +109,10 @@ async fn split(args: SplitArgs) -> Result<(), akhomed_store::split::SplitError> 
         .unwrap_or_else(|| PathBuf::from(format!("{}.split-evidence.json", args.host.display())));
     let evidence = split::execute(&request, &evidence_path).await?;
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&evidence).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&evidence).unwrap_or_default()
+        );
         return Ok(());
     }
     println!("split verified: {}", evidence.verified);
@@ -112,14 +122,35 @@ async fn split(args: SplitArgs) -> Result<(), akhomed_store::split::SplitError> 
         evidence.source.sha256_after
     );
     println!("host  {}", evidence.host.path.display());
-    print_rows(evidence.host.tables.iter().map(|t| (t.table.as_str(), t.target_rows)));
+    print_rows(
+        evidence
+            .host
+            .tables
+            .iter()
+            .map(|t| (t.table.as_str(), t.target_rows)),
+    );
     for akh in &evidence.akhs {
-        println!("akh {} ({}) -> {}", akh.name, akh.akh_id, akh.target.path.display());
-        print_rows(akh.target.tables.iter().map(|t| (t.table.as_str(), t.target_rows)));
+        println!(
+            "akh {} ({}) -> {}",
+            akh.name,
+            akh.akh_id,
+            akh.target.path.display()
+        );
+        print_rows(
+            akh.target
+                .tables
+                .iter()
+                .map(|t| (t.table.as_str(), t.target_rows)),
+        );
     }
     if !evidence.orphans_left_in_source.is_empty() {
         println!("orphans left in the source:");
-        print_rows(evidence.orphans_left_in_source.iter().map(|t| (t.table.as_str(), t.rows)));
+        print_rows(
+            evidence
+                .orphans_left_in_source
+                .iter()
+                .map(|t| (t.table.as_str(), t.rows)),
+        );
     }
     println!("evidence {}", evidence_path.display());
     println!(
@@ -156,13 +187,20 @@ fn print_plan(plan: &akhomed_store::split::SplitPlan) {
     println!("host tables:");
     print_rows(plan.host_tables.iter().map(|t| (t.table.as_str(), t.rows)));
     for akh in &plan.akhs {
-        println!("akh {} ({}) -> {}", akh.name, akh.akh_id, akh.path.display());
+        println!(
+            "akh {} ({}) -> {}",
+            akh.name,
+            akh.akh_id,
+            akh.path.display()
+        );
         print_rows(akh.tables.iter().map(|t| (t.table.as_str(), t.rows)));
     }
     if plan.orphans.is_empty() {
         println!("orphans: none");
     } else {
-        println!("orphans (rows attributed to no akh; the real run refuses without --allow-orphans):");
+        println!(
+            "orphans (rows attributed to no akh; the real run refuses without --allow-orphans):"
+        );
         print_rows(plan.orphans.iter().map(|t| (t.table.as_str(), t.rows)));
     }
 }

@@ -185,8 +185,7 @@ async fn shared_layout_contends_but_per_akh_snapshots_do_not() {
     // as lock contention, not as a generic database error.
     let dir = tempfile::tempdir().unwrap();
     let shared_path = dir.path().join("shared.sqlite3");
-    let shared =
-        StoreTopology::new(options(&shared_path, busy), StoreLayout::Shared).unwrap();
+    let shared = StoreTopology::new(options(&shared_path, busy), StoreLayout::Shared).unwrap();
     let host = host_store(&shared).await;
     let a = resident(&shared, &host, "alpha").await;
     let b = resident(&shared, &host, "beta").await;
@@ -206,7 +205,10 @@ async fn shared_layout_contends_but_per_akh_snapshots_do_not() {
         "akhomed_store::sqlite_busy"
     );
     let help = diagnostic.help().unwrap().to_string();
-    assert!(help.contains("per_akh") && help.contains("busy_timeout"), "{help}");
+    assert!(
+        help.contains("per_akh") && help.contains("busy_timeout"),
+        "{help}"
+    );
     drop(blocker);
     drop((a, b));
 
@@ -274,7 +276,10 @@ async fn two_akhs_snapshot_and_flush_concurrently_without_sqlite_busy() {
             snapshots::load_symbols(&r.db, akh_id).await.unwrap().len(),
             2_000
         );
-        assert_eq!(snapshots::current_watermark(&r.db, akh_id).await.unwrap(), 15);
+        assert_eq!(
+            snapshots::current_watermark(&r.db, akh_id).await.unwrap(),
+            15
+        );
     }
 }
 
@@ -320,15 +325,21 @@ async fn writer(r: &Resident) -> Result<(), StoreError> {
 async fn residency_locks_anchor_at_the_host_database() {
     let dir = tempfile::tempdir().unwrap();
     let host_path = dir.path().join("host.sqlite3");
-    let topology =
-        StoreTopology::new(options(&host_path, Duration::from_secs(5)), StoreLayout::PerAkh)
-            .unwrap();
+    let topology = StoreTopology::new(
+        options(&host_path, Duration::from_secs(5)),
+        StoreLayout::PerAkh,
+    )
+    .unwrap();
     let host = host_store(&topology).await;
     let owner = resident(&topology, &host, "vesta").await;
     let name = AkhStoreName::new("vesta").unwrap();
     let rival = topology.connect_residency(&name, &owner.db).await.unwrap();
     assert!(!rival.try_acquire_akh_lock(name.akh_id()).await.unwrap());
-    let lock = PathBuf::from(format!("{}.akh-{}.lock", host_path.display(), name.akh_id()));
+    let lock = PathBuf::from(format!(
+        "{}.akh-{}.lock",
+        host_path.display(),
+        name.akh_id()
+    ));
     assert!(lock.exists(), "residency lock sits beside the host file");
     // The fenced WAL writes land in the akh's own file.
     let rows = [MutationRow {
@@ -364,7 +375,7 @@ async fn shared_source(path: &Path) {
         let rows: Vec<MutationRow> = (0..symbols)
             .map(|n| MutationRow {
                 kind: if n % 5 == 0 { "turn" } else { "assert" }.into(),
-                payload: serde_json::json!({"n": n, "who": name, "pi": 3.141592653589793}),
+                payload: serde_json::json!({"n": n, "who": name, "ratio": 0.123_456_789_012_345_67}),
             })
             .collect();
         akhomed_store::append_mutations_fenced(&r.session, akh_id, workspace_id, r.epoch, &rows)
@@ -437,7 +448,7 @@ fn request(source: &Path, host: &Path) -> SplitRequest {
     }
 }
 
-fn count<'a>(tables: &'a [split::TableCount], table: &str) -> u64 {
+fn count(tables: &[split::TableCount], table: &str) -> u64 {
     tables
         .iter()
         .find(|t| t.table == table)
@@ -485,7 +496,10 @@ async fn split_copies_verifies_and_leaves_the_source_untouched() {
         let refused = split::execute(&request(&source, &host), &evidence_path)
             .await
             .unwrap_err();
-        assert!(matches!(refused, SplitError::SourceInUse { .. }), "{refused:?}");
+        assert!(
+            matches!(refused, SplitError::SourceInUse { .. }),
+            "{refused:?}"
+        );
         assert!(!host.exists());
     }
 
@@ -523,9 +537,15 @@ async fn split_copies_verifies_and_leaves_the_source_untouched() {
     let host_db = akhomed_store::connect(topology.host()).await.unwrap();
     for (name, symbols) in [("janus", 120usize), ("vesta", 40)] {
         let store_name = AkhStoreName::new(name).unwrap();
-        let db = topology.open_akh_store(&store_name, &host_db).await.unwrap();
+        let db = topology
+            .open_akh_store(&store_name, &host_db)
+            .await
+            .unwrap();
         let akh_id = store_name.akh_id();
-        assert_eq!(snapshots::load_symbols(&db, akh_id).await.unwrap().len(), symbols);
+        assert_eq!(
+            snapshots::load_symbols(&db, akh_id).await.unwrap().len(),
+            symbols
+        );
         assert_eq!(
             snapshots::load_workspace_facts(&db, store_name.workspace_id())
                 .await
@@ -533,12 +553,23 @@ async fn split_copies_verifies_and_leaves_the_source_untouched() {
                 .len(),
             symbols / 2
         );
-        let state = snapshots::load_akh_state(&db, akh_id).await.unwrap().unwrap();
+        let state = snapshots::load_akh_state(&db, akh_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            akhomed_store::get_harvest_watermark(&db, akh_id).await.unwrap(),
+            akhomed_store::get_harvest_watermark(&db, akh_id)
+                .await
+                .unwrap(),
             state.watermark - 1
         );
-        assert!(snapshots::load_mutation_tail(&db, akh_id, 0).await.unwrap().len() == symbols);
+        assert!(
+            snapshots::load_mutation_tail(&db, akh_id, 0)
+                .await
+                .unwrap()
+                .len()
+                == symbols
+        );
         // A new WAL append continues the akh's sequence past the copied rows.
         akhomed_store::append_mutations(
             &db,
@@ -560,7 +591,12 @@ async fn split_copies_verifies_and_leaves_the_source_untouched() {
             1
         );
     }
-    assert!(akhomed_store::get_pack(&host_db, "test", "1").await.unwrap().is_some());
+    assert!(
+        akhomed_store::get_pack(&host_db, "test", "1")
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // A second run refuses to overwrite its targets.
     let again = split::execute(
@@ -569,11 +605,17 @@ async fn split_copies_verifies_and_leaves_the_source_untouched() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(again, SplitError::TargetExists { .. }), "{again:?}");
+    assert!(
+        matches!(again, SplitError::TargetExists { .. }),
+        "{again:?}"
+    );
 
     // Pointing a per-akh daemon at the unsplit source is refused, not ignored.
-    let legacy =
-        StoreTopology::new(options(&source, Duration::from_secs(5)), StoreLayout::PerAkh).unwrap();
+    let legacy = StoreTopology::new(
+        options(&source, Duration::from_secs(5)),
+        StoreLayout::PerAkh,
+    )
+    .unwrap();
     let legacy_host = akhomed_store::connect(legacy.host()).await.unwrap();
     let refused = legacy
         .open_akh_store(&AkhStoreName::new("janus").unwrap(), &legacy_host)
@@ -613,12 +655,20 @@ async fn split_refuses_orphans_unless_allowed_and_cleans_up() {
     let refused = split::execute(&request(&source, &host), &dir.path().join("e.json"))
         .await
         .unwrap_err();
-    assert!(matches!(refused, SplitError::Orphans { rows: 1, .. }), "{refused:?}");
-    assert!(!host.exists(), "no target is created before the orphan check");
+    assert!(
+        matches!(refused, SplitError::Orphans { rows: 1, .. }),
+        "{refused:?}"
+    );
+    assert!(
+        !host.exists(),
+        "no target is created before the orphan check"
+    );
 
     let mut allow = request(&source, &host);
     allow.allow_orphans = true;
-    let evidence = split::execute(&allow, &dir.path().join("e.json")).await.unwrap();
+    let evidence = split::execute(&allow, &dir.path().join("e.json"))
+        .await
+        .unwrap();
     assert_eq!(evidence.orphans_left_in_source.len(), 1);
 }
 
@@ -630,5 +680,8 @@ async fn split_refuses_the_source_as_its_own_host() {
     let refused = split::execute(&request(&source, &source), &dir.path().join("e.json"))
         .await
         .unwrap_err();
-    assert!(matches!(refused, SplitError::HostIsSource { .. }), "{refused:?}");
+    assert!(
+        matches!(refused, SplitError::HostIsSource { .. }),
+        "{refused:?}"
+    );
 }

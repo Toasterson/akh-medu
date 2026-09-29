@@ -596,7 +596,8 @@ async fn snapshot_once(
 ) -> Result<(), SnapshotFailure> {
     use akhomed_store::sea_orm::ConnectionTrait as _;
     let sqlite = pool.get_database_backend() == akhomed_store::sea_orm::DatabaseBackend::Sqlite;
-    let store = |e: akhomed_store::StoreError| SnapshotFailure::from_store(&e, sqlite, e.to_string());
+    let store =
+        |e: akhomed_store::StoreError| SnapshotFailure::from_store(&e, sqlite, e.to_string());
     let snapshot = |e: akh_medu::snapshot::SnapshotError| match e.store_error() {
         Some(store_error) => SnapshotFailure::from_store(store_error, sqlite, e.to_string()),
         None => SnapshotFailure::Failed(e.to_string()),
@@ -966,7 +967,12 @@ impl ServerState {
         let db = topology
             .open_akh_store(&store_name, &host)
             .await
-            .map_err(|e| format!("cannot open the per-akh store of \"{name}\": {}", diagnostic_text(&e)))?;
+            .map_err(|e| {
+                format!(
+                    "cannot open the per-akh store of \"{name}\": {}",
+                    diagnostic_text(&e)
+                )
+            })?;
         tracing::info!(
             workspace = %name,
             path = %topology.akh_path(&store_name).unwrap_or_default().display(),
@@ -2032,14 +2038,14 @@ impl ServerState {
         // including the `akh sleep` + `akh wake` config-reload path on this very
         // host. Only ungraceful exits leave a stale heartbeat behind now, which
         // is exactly the case the 60s window is for.
-        if let Ok(Some(pool)) = self.akh_store(name).await {
-            if let Err(e) = akhomed_store::clear_last_seen(&pool, akh_id).await {
-                tracing::warn!(
-                    workspace = %name, error = %e,
-                    "could not clear the akh heartbeat on evict; the next wake may be \
-                     refused for up to 60s by the last_seen freshness guard"
-                );
-            }
+        if let Ok(Some(pool)) = self.akh_store(name).await
+            && let Err(e) = akhomed_store::clear_last_seen(&pool, akh_id).await
+        {
+            tracing::warn!(
+                workspace = %name, error = %e,
+                "could not clear the akh heartbeat on evict; the next wake may be \
+                 refused for up to 60s by the last_seen freshness guard"
+            );
         }
         self.handoffs
             .lock()
@@ -6305,7 +6311,9 @@ mod control_plane_tests {
             let subject = engine
                 .resolve_or_create_entity(&format!("{workspace}-subject"))
                 .unwrap();
-            let predicate = engine.resolve_or_create_relation("per-akh-predicate").unwrap();
+            let predicate = engine
+                .resolve_or_create_relation("per-akh-predicate")
+                .unwrap();
             let object = engine.resolve_or_create_entity("per-akh-object").unwrap();
             engine
                 .add_triple(&Triple::new(subject, predicate, object))
