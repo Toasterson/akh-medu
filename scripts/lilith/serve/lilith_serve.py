@@ -627,11 +627,18 @@ class Ledger:
         self.append({"event": "session_stop", "session": session, "pod_id": pod_id, "at": iso(at),
                      "reason": reason})
 
+    def correct(self, session: str, pod_id: str, stop_at: dt.datetime, reason: str, at: dt.datetime) -> None:
+        """Append-only correction of a session's stop time (the history stays; `spans` honours the
+        latest correction). Only ever shortens: see `cmd_ledger_correct`."""
+        self.append({"event": "session_correction", "session": session, "pod_id": pod_id,
+                     "stop_at": iso(stop_at), "reason": reason, "at": iso(at)})
+
     def spans(self) -> list[Span]:
         if not self.path.exists():
             return []
         starts: dict[str, dict[str, Any]] = {}
         stops: dict[str, dict[str, Any]] = {}
+        corrections: dict[str, dict[str, Any]] = {}
         order: list[str] = []
         for line in self.path.read_text().splitlines():
             if not line.strip():
@@ -642,11 +649,16 @@ class Ledger:
                 order.append(event["session"])
             elif event.get("event") == "session_stop":
                 stops.setdefault(event["session"], event)
+            elif event.get("event") == "session_correction":
+                corrections[event["session"]] = event
         spans = []
         for session in order:
             begin, end = starts[session], stops.get(session)
+            stop = None if end is None else parse_iso(end["at"])
+            if session in corrections and stop is not None:
+                stop = min(stop, parse_iso(corrections[session]["stop_at"]))
             spans.append(Span(session=session, pod_id=begin["pod_id"], start=parse_iso(begin["at"]),
-                              stop=None if end is None else parse_iso(end["at"]),
+                              stop=stop,
                               rate=float(begin.get("rate_usd_per_hr") or DEFAULT_RATE_USD_PER_HR),
                               reason=None if end is None else end.get("reason")))
         return spans
@@ -820,12 +832,16 @@ def open_session(ctx: Context, state: State, pod_id: str, now: dt.datetime, rate
     return session
 
 
-def close_session(ctx: Context, state: State, reason: str, now: dt.datetime) -> None:
+def close_session(ctx: Context, state: State, reason: str, now: dt.datetime,
+                  stopped_at: dt.datetime | None = None) -> None:
+    """Close the open session. `stopped_at` is when the pod really stopped, when that is earlier
+    than `now` (an external stop noticed late): billing ends there, not at the observation."""
     if state.session is None:
         return
-    ctx.ledger.stop(state.session.id, state.pod_id or "?", now, reason)
+    end = min(now, stopped_at) if stopped_at is not None else now
+    ctx.ledger.stop(state.session.id, state.pod_id or "?", end, reason)
     started = parse_iso(state.session.started_at)
-    hours = (now - started).total_seconds() / 3600
+    hours = (end - started).total_seconds() / 3600
     ctx.log(f"session {state.session.id} closed ({reason}) after {hours:.2f} h "
             f"(~${hours * state.session.rate_usd_per_hr:.2f})")
     state.session = None
@@ -1031,11 +1047,11 @@ def watch_tick(ctx: Context, probe: Vllm) -> TickOutcome:
             return TickOutcome.STOP_FAILED
         return outcome
 
-    elapsed = (now - parse_iso(session.started_at)).total_seconds()
-    if elapsed >= session.cap_seconds:
-        return stop("session_cap", TickOutcome.CAP_STOP)
-
+    # Check the pod before acting on the cap: after a supervisor outage the pod may have stopped
+    # long ago (externally, or by the on-pod backstop). Billing then ends at the last time it was
+    # seen running plus one check interval, never at the moment the outage ended.
     if not session.last_pod_check_at or (now - parse_iso(session.last_pod_check_at)).total_seconds() >= policy.pod_check_s:
+        confirmed = parse_iso(session.last_pod_check_at) if session.last_pod_check_at else parse_iso(session.started_at)
         session.last_pod_check_at = iso(now)
         try:
             pod = ctx.runpod.get_pod(state.pod_id)
@@ -1043,8 +1059,13 @@ def watch_tick(ctx: Context, probe: Vllm) -> TickOutcome:
             ctx.log(f"pod status check failed: {error}")
         else:
             if pod.desired_status != "RUNNING":
-                close_session(ctx, state, "external", now)
+                bound = confirmed + dt.timedelta(seconds=policy.pod_check_s)
+                close_session(ctx, state, "external", now, stopped_at=bound)
                 return TickOutcome.EXTERNAL_STOP
+
+    elapsed = (now - parse_iso(session.started_at)).total_seconds()
+    if elapsed >= session.cap_seconds:
+        return stop("session_cap", TickOutcome.CAP_STOP)
 
     try:
         metrics = probe.metrics()
@@ -1152,6 +1173,26 @@ def cmd_ledger(ctx: Context, offline: bool) -> dict[str, Any]:
         rate = (state.session.rate_usd_per_hr if state.session else None) or DEFAULT_RATE_USD_PER_HR
         out["budget"] = evaluate_budget(ctx.policy, usage, ctx.runpod.balance_usd(), rate, now).to_dict()
     return out
+
+
+def cmd_ledger_correct(ctx: Context, session: str, stop_at: str, reason: str) -> dict[str, Any]:
+    """Correct a closed session's stop time (append-only). Only shortens a recorded span, and
+    never before its start: a correction cannot hide real spend."""
+    span = next((s for s in ctx.ledger.spans() if s.session == session), None)
+    if span is None:
+        raise UsageError(f"no session {session} in the ledger", help="`ledger --json --offline` lists the usage")
+    if span.stop is None:
+        raise UsageError(f"session {session} is still open", help="stop it first; corrections apply to closed sessions")
+    when = parse_iso(stop_at)
+    if not span.start <= when <= span.stop:
+        raise UsageError(f"stop_at {stop_at} is outside the recorded span {iso(span.start)} .. {iso(span.stop)}",
+                         help="a correction may only shorten a session, never extend it or end it before it began")
+    if not reason.strip():
+        raise UsageError("a correction needs a reason", help="say what evidence gives the real stop time")
+    ctx.ledger.correct(session, span.pod_id, when, reason.strip(), ctx.clock.now())
+    hours = (when - span.start).total_seconds() / 3600
+    ctx.log(f"ledger: session {session} corrected to stop at {iso(when)} ({hours:.2f} h): {reason.strip()}")
+    return {"session": session, "stop_at": iso(when), "hours": round(hours, 3), "recorded_stop": iso(span.stop)}
 
 
 def cmd_recreate(ctx: Context, *, yes: bool, confirm: str | None, key_source: str, kv_cache_dtype: str) -> dict[str, Any]:
@@ -1314,6 +1355,10 @@ def main(argv: list[str] | None = None) -> int:
     ledger = sub.add_parser("ledger")
     ledger.add_argument("--json", action="store_true")
     ledger.add_argument("--offline", action="store_true", help="skip the Runpod balance query")
+    correct = sub.add_parser("ledger-correct", help="shorten a closed session to its real stop time (append-only)")
+    correct.add_argument("--session", required=True)
+    correct.add_argument("--stop-at", required=True, help="ISO-8601 UTC time the pod really stopped")
+    correct.add_argument("--reason", required=True, help="the evidence for that time")
     sub.add_parser("sync-endpoint", help=f"write the local pod id/base URL to 1Password {ENDPOINT_ITEM}")
     args = parser.parse_args(argv)
 
@@ -1344,6 +1389,8 @@ def main(argv: list[str] | None = None) -> int:
                                                    serve_key=ctx.serve_key).value}
         elif args.command == "ledger":
             result = cmd_ledger(ctx, args.offline)
+        elif args.command == "ledger-correct":
+            result = cmd_ledger_correct(ctx, args.session, args.stop_at, args.reason)
         else:
             result = cmd_sync_endpoint(ctx)
     except ServeError as error:
