@@ -32,6 +32,9 @@ use akh_medu::seeds::SeedRegistry;
 use akh_medu::vsa::Dimension;
 use akh_medu::workspace::WorkspaceManager;
 
+#[path = "akhomed/store_cli.rs"]
+mod store_cli;
+
 // ── Server state ──────────────────────────────────────────────────────────
 
 struct ServerState {
@@ -63,6 +66,16 @@ struct ServerState {
     /// a startup that fell back to local-only. Consumed by the mutation WAL
     /// flusher and snapshot writer (sub-phases 38b/38c).
     pg_pool: std::sync::RwLock<Option<Arc<akhomed_store::DatabaseConnection>>>,
+    /// ADR 120: `Some` when `[database] layout = "per_akh"`. Resolved once at
+    /// startup — a layout change needs a restart (and a split), never a live
+    /// `config set`.
+    per_akh: Option<akhomed_store::StoreTopology>,
+    /// ADR 120: each akh's own store under the per-akh layout, opened (and
+    /// migrated) on first use. One pool of one connection per akh file,
+    /// shared by its residency session, snapshot ticker, daemon and recall.
+    /// Empty under the shared layout, where [`Self::akh_store`] returns the
+    /// host pool.
+    akh_stores: tokio::sync::Mutex<HashMap<String, Arc<akhomed_store::DatabaseConnection>>>,
     /// ADR-049: the akh advisory lock, pinned to a **dedicated single
     /// connection** per loaded workspace.
     ///
@@ -580,7 +593,14 @@ async fn snapshot_once(
     akh_id: akhomed_store::uuid::Uuid,
     workspace_id: akhomed_store::uuid::Uuid,
     residency_epoch: i64,
-) -> Result<(), String> {
+) -> Result<(), SnapshotFailure> {
+    use akhomed_store::sea_orm::ConnectionTrait as _;
+    let sqlite = pool.get_database_backend() == akhomed_store::sea_orm::DatabaseBackend::Sqlite;
+    let store = |e: akhomed_store::StoreError| SnapshotFailure::from_store(&e, sqlite, e.to_string());
+    let snapshot = |e: akh_medu::snapshot::SnapshotError| match e.store_error() {
+        Some(store_error) => SnapshotFailure::from_store(store_error, sqlite, e.to_string()),
+        None => SnapshotFailure::Failed(e.to_string()),
+    };
     // Serialize sample-watermark -> capture -> DB-commit, and acquire this
     // guard before cloning the resident agent. Eviction/handoff takes the same
     // guard before dropping residency, so an old Arc can never be captured
@@ -596,13 +616,13 @@ async fn snapshot_once(
     // The akh row is the identity these rows hang off; ensure it exists.
     akhomed_store::ensure_akh(pool, akh_id, name, None)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(store)?;
     // Sample the recovery boundary before capturing. Any mutation committed
     // after this point has a larger sequence and is replayed, even if it races
     // between the in-memory copy and the async relational writes.
     let watermark = akhomed_store::snapshots::current_watermark(pool, akh_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(store)?;
     // Capture under the lock (sync), release, then persist lock-free.
     let started = std::time::Instant::now();
     let data = {
@@ -614,13 +634,13 @@ async fn snapshot_once(
             watermark,
             residency_epoch,
         )
-        .map_err(|e| e.to_string())?
+        .map_err(snapshot)?
     };
     let capture_ms = started.elapsed().as_millis();
     let persist_started = std::time::Instant::now();
     let result = akh_medu::snapshot::persist_snapshot(data, pool)
         .await
-        .map_err(|e| e.to_string());
+        .map_err(snapshot);
     let persist_ms = persist_started.elapsed().as_millis();
     let total_ms = started.elapsed().as_millis();
     if result.is_ok() {
@@ -633,6 +653,71 @@ async fn snapshot_once(
         );
     }
     result
+}
+
+/// Why one snapshot attempt failed, classified for the operator log (ADR 120).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotFailure {
+    /// SQLite write-lock contention, or waiting past the acquire timeout for
+    /// the SQLite store's single pooled connection. Contention between writers
+    /// of one file — never a residency conflict.
+    Contention(String),
+    /// Any other failure.
+    Failed(String),
+}
+
+impl SnapshotFailure {
+    fn from_store(error: &akhomed_store::StoreError, sqlite: bool, message: String) -> Self {
+        if error.is_lock_contention() || (sqlite && error.is_pool_timeout()) {
+            Self::Contention(message)
+        } else {
+            Self::Failed(message)
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Contention(message) | Self::Failed(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for SnapshotFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+/// Operator help logged with a SQLite contention failure (ADR 120).
+const SQLITE_CONTENTION_HELP: &str = "several writers share one SQLite database: \
+    split it with `akhomed store split-per-akh` and set `[database] layout = \"per_akh\"` \
+    (one file and one connection per akh; deploy/roman-mini/CUTOVER.md \"Per-akh databases\"), \
+    or raise `[database] connect_timeout_secs` (SQLite busy_timeout + pool acquire timeout); \
+    the snapshot is retried on the next tick";
+
+/// Render a diagnostic as `message — help` for the daemon's string errors.
+fn diagnostic_text(error: &dyn miette::Diagnostic) -> String {
+    match error.help() {
+        Some(help) => format!("{error} — {help}"),
+        None => error.to_string(),
+    }
+}
+
+/// ADR 120: the per-akh topology when `[database] layout = "per_akh"`,
+/// `Ok(None)` for the shared layout or no backing store.
+fn per_akh_topology(
+    config: &AkhomedConfig,
+) -> Result<Option<akhomed_store::StoreTopology>, akhomed_store::LayoutError> {
+    let Some(pg) = config.postgres.as_ref() else {
+        return Ok(None);
+    };
+    if pg.layout != akh_medu::config::DatabaseLayout::PerAkh {
+        return Ok(None);
+    }
+    let Some((opts, _)) = pg_pool_options(config) else {
+        return Ok(None);
+    };
+    akhomed_store::StoreTopology::new(opts, akhomed_store::StoreLayout::PerAkh).map(Some)
 }
 
 /// Background daemon state for a workspace.
@@ -742,6 +827,8 @@ impl ServerState {
         pg_pool: Option<Arc<akhomed_store::DatabaseConnection>>,
     ) -> Self {
         let (audit_tx, _) = tokio::sync::broadcast::channel(256);
+        // Validated (and refused on error) in `main` before any pool opens.
+        let per_akh = per_akh_topology(&config).ok().flatten();
         Self {
             paths,
             config: RwLock::new(config),
@@ -753,7 +840,9 @@ impl ServerState {
             akh_configs: Arc::new(RwLock::new(HashMap::new())),
             audit_broadcast: audit_tx,
             daemon_pauses: RwLock::new(HashMap::new()),
+            per_akh,
             pg_pool: std::sync::RwLock::new(pg_pool),
+            akh_stores: tokio::sync::Mutex::new(HashMap::new()),
             akh_lock_conns: RwLock::new(HashMap::new()),
             wal_flushers: RwLock::new(HashMap::new()),
             snapshot_tickers: RwLock::new(HashMap::new()),
@@ -845,6 +934,49 @@ impl ServerState {
             .clone()
     }
 
+    /// Whether the backing store is SQLite (host-local residency lock files,
+    /// so "another host" and "split-brain" wording does not apply).
+    fn store_is_sqlite(&self) -> bool {
+        use akhomed_store::sea_orm::ConnectionTrait as _;
+        self.pg_pool().is_some_and(|pool| {
+            pool.get_database_backend() == akhomed_store::sea_orm::DatabaseBackend::Sqlite
+        })
+    }
+
+    /// The database holding `name`'s own tables (ADR 120): the host pool
+    /// under the shared layout (exactly as before), the akh's own file under
+    /// `layout = "per_akh"`, opened and migrated on first use. `Ok(None)`
+    /// when no backing store is connected. Host-level tables (membership,
+    /// schema registry, active microtheories) always use [`Self::pg_pool`].
+    async fn akh_store(
+        &self,
+        name: &str,
+    ) -> Result<Option<Arc<akhomed_store::DatabaseConnection>>, String> {
+        let Some(host) = self.pg_pool() else {
+            return Ok(None);
+        };
+        let Some(topology) = self.per_akh.as_ref() else {
+            return Ok(Some(host));
+        };
+        let mut stores = self.akh_stores.lock().await;
+        if let Some(db) = stores.get(name) {
+            return Ok(Some(Arc::clone(db)));
+        }
+        let store_name = akhomed_store::AkhStoreName::new(name).map_err(|e| diagnostic_text(&e))?;
+        let db = topology
+            .open_akh_store(&store_name, &host)
+            .await
+            .map_err(|e| format!("cannot open the per-akh store of \"{name}\": {}", diagnostic_text(&e)))?;
+        tracing::info!(
+            workspace = %name,
+            path = %topology.akh_path(&store_name).unwrap_or_default().display(),
+            "opened per-akh SQLite store (ADR 120)"
+        );
+        let db = Arc::new(db);
+        stores.insert(name.to_string(), Arc::clone(&db));
+        Ok(Some(db))
+    }
+
     fn snapshot_publication_lock(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
         Arc::clone(
             self.snapshot_publication_locks
@@ -931,9 +1063,9 @@ impl ServerState {
         if loaded.is_empty() {
             return;
         }
-        let Some(pool) = self.pg_pool() else {
+        if self.pg_pool().is_none() {
             return;
-        };
+        }
         for name in loaded {
             self.handoffs
                 .lock()
@@ -971,9 +1103,14 @@ impl ServerState {
                 continue;
             };
 
-            let has_authoritative = match akhomed_store::snapshots::load_akh_state(&pool, akh_id)
-                .await
-            {
+            let akh_state = match self.akh_store(&name).await {
+                Ok(Some(pool)) => akhomed_store::snapshots::load_akh_state(&pool, akh_id)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Ok(None) => Err("backing store disconnected".to_string()),
+                Err(error) => Err(error),
+            };
+            let has_authoritative = match akh_state {
                 Ok(state) => state.is_some_and(|state| state.extra.is_some()),
                 Err(error) => {
                     engine.quiesce_mutations();
@@ -1093,7 +1230,13 @@ impl ServerState {
     /// when a Postgres backing store is configured. Best-effort: any failure
     /// logs and leaves the workspace in local-only mode (no WAL).
     async fn wire_wal(&self, name: &str, engine: &Engine, residency_epoch: i64) {
-        let pool = self.pg_pool();
+        let pool = match self.akh_store(name).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                tracing::warn!(workspace = %name, %error, "akh store unavailable; WAL disabled");
+                return;
+            }
+        };
         let Some(pool) = pool.as_ref() else {
             return;
         };
@@ -1210,6 +1353,10 @@ impl ServerState {
         let agents = Arc::clone(&self.agents);
         let publication_lock = self.snapshot_publication_lock(&name);
         let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let sqlite = {
+            use akhomed_store::sea_orm::ConnectionTrait as _;
+            pool.get_database_backend() == akhomed_store::sea_orm::DatabaseBackend::Sqlite
+        };
         let handle = tokio::spawn(async move {
             let akh_id = akh_medu::wal::akh_id_for(&name);
             let workspace_id = akh_medu::wal::workspace_id_for(&name);
@@ -1273,16 +1420,36 @@ impl ServerState {
 
                                 if should_log {
                                     if is_first_ever || is_new_error {
-                                        tracing::error!(
-                                            workspace = %name,
-                                            consecutive_failures,
-                                            error = %error_string,
-                                            error_debug = ?e,
-                                            "periodic snapshot failed (ADR-049: if this akh is \
-                                             resident on another host, this host should not have \
-                                             a snapshot ticker — check whether the split-brain \
-                                             guard was bypassed)"
-                                        );
+                                        match &e {
+                                            // ADR 120: contention between writers of
+                                            // one SQLite file, never a residency conflict.
+                                            SnapshotFailure::Contention(_) => tracing::error!(
+                                                workspace = %name,
+                                                consecutive_failures,
+                                                error = %error_string,
+                                                help = SQLITE_CONTENTION_HELP,
+                                                "periodic snapshot hit SQLite lock contention \
+                                                 (not a split-brain: another writer held the \
+                                                 database or its connection)"
+                                            ),
+                                            SnapshotFailure::Failed(_) if sqlite => tracing::error!(
+                                                workspace = %name,
+                                                consecutive_failures,
+                                                error = %error_string,
+                                                error_debug = ?e,
+                                                "periodic snapshot failed (SQLite backing store)"
+                                            ),
+                                            SnapshotFailure::Failed(_) => tracing::error!(
+                                                workspace = %name,
+                                                consecutive_failures,
+                                                error = %error_string,
+                                                error_debug = ?e.message(),
+                                                "periodic snapshot failed (ADR-049: if this akh is \
+                                                 resident on another host, this host should not have \
+                                                 a snapshot ticker — check whether the split-brain \
+                                                 guard was bypassed)"
+                                            ),
+                                        }
                                     } else {
                                         tracing::warn!(
                                             workspace = %name,
@@ -1310,7 +1477,7 @@ impl ServerState {
     /// Snapshot one workspace on demand (control-plane `_akh/akh/snapshot`).
     /// Loads the agent if needed, then captures + persists its state.
     async fn snapshot_workspace(&self, name: &str) -> Result<(), String> {
-        let pool = self.pg_pool();
+        let pool = self.akh_store(name).await?;
         let Some(pool) = pool.as_ref() else {
             return Err("no Postgres backing store configured (no [postgres] section)".into());
         };
@@ -1330,6 +1497,12 @@ impl ServerState {
             residency_epoch,
         )
         .await
+        .map_err(|failure| match failure {
+            SnapshotFailure::Contention(message) => {
+                format!("{message} — {SQLITE_CONTENTION_HELP}")
+            }
+            SnapshotFailure::Failed(message) => message,
+        })
     }
 
     /// Quarantine any reusable local redb and rebuild the canonical image from
@@ -1345,7 +1518,10 @@ impl ServerState {
         residency_epoch: i64,
         require_complete: bool,
     ) -> Result<Option<(usize, usize)>, String> {
-        let pool = self.pg_pool().ok_or_else(|| {
+        let host = self.pg_pool().ok_or_else(|| {
+            "no Postgres backing store configured (no [postgres] section)".to_string()
+        })?;
+        let pool = self.akh_store(name).await?.ok_or_else(|| {
             "no Postgres backing store configured (no [postgres] section)".to_string()
         })?;
         let akh_id = akh_medu::wal::akh_id_for(name);
@@ -1375,11 +1551,12 @@ impl ServerState {
             );
         }
 
-        let hydrated = akh_medu::snapshot::wake(
+        let hydrated = akh_medu::snapshot::wake_split(
             &ws_paths.kg_dir,
             akh_id,
             akh_medu::wal::workspace_id_for(name),
             &pool,
+            &host,
         )
         .await
         .map(|engine| {
@@ -1478,7 +1655,7 @@ impl ServerState {
         repair: bool,
         dry_run: bool,
     ) -> Result<serde_json::Value, String> {
-        let Some(pool) = self.pg_pool() else {
+        let Some(pool) = self.akh_store(name).await? else {
             return Err("no Postgres backing store configured (no [postgres] section)".into());
         };
         if dry_run && !repair {
@@ -1630,28 +1807,68 @@ impl ServerState {
             return Ok(residency.epoch);
         }
 
-        let Some(opts) = self.akh_lock_pool_options().await else {
-            return Ok(0);
-        };
-        let session = Arc::new(
-            akhomed_store::StablePgSession::connect(&opts)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "could not open the akh advisory-lock connection for \"{name}\" ({e}); \
+        let sqlite = self.store_is_sqlite();
+        let session = if let Some(topology) = self.per_akh.as_ref() {
+            // ADR 120: the residency session writes through the akh's own
+            // store connection; its lock file stays beside the host file.
+            let store = self.akh_store(name).await?.ok_or_else(|| {
+                format!("the backing store disappeared while claiming residency for \"{name}\"")
+            })?;
+            let store_name =
+                akhomed_store::AkhStoreName::new(name).map_err(|e| diagnostic_text(&e))?;
+            Arc::new(
+                topology
+                    .connect_residency(&store_name, &store)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "could not open the residency session for \"{name}\" ({}); \
+                             refusing to {op}",
+                            diagnostic_text(&e)
+                        )
+                    })?,
+            )
+        } else {
+            let Some(opts) = self.akh_lock_pool_options().await else {
+                return Ok(0);
+            };
+            Arc::new(
+                akhomed_store::StablePgSession::connect(&opts)
+                    .await
+                    .map_err(|e| {
+                        if sqlite {
+                            format!(
+                                "could not open the SQLite residency session for \"{name}\" \
+                                 ({e}); refusing to {op}. Check the [database] url and its \
+                                 directory permissions."
+                            )
+                        } else {
+                            format!(
+                                "could not open the akh advisory-lock connection for \"{name}\" ({e}); \
                  refusing to {op} to avoid split-brain. Check the Postgres backing store."
-                    )
-                })?,
-        );
+                            )
+                        }
+                    })?,
+            )
+        };
 
         match session.try_acquire_akh_lock(akh_id).await {
             Ok(true) => {
                 // The pooled connection may create the identity, but the
                 // fencing epoch must advance on the same physical session
                 // that owns the advisory lock.
-                let pool = self.pg_pool().ok_or_else(|| {
-                    format!("Postgres pool disappeared while claiming residency for \"{name}\"")
-                })?;
+                let pool = match self.akh_store(name).await {
+                    Ok(Some(pool)) => pool,
+                    Ok(None) => {
+                        return Err(format!(
+                            "Postgres pool disappeared while claiming residency for \"{name}\""
+                        ));
+                    }
+                    Err(error) => {
+                        let _ = session.release_akh_lock(akh_id).await;
+                        return Err(error);
+                    }
+                };
                 if let Err(error) = akhomed_store::ensure_akh(&pool, akh_id, name, None).await {
                     let _ = session.release_akh_lock(akh_id).await;
                     return Err(format!(
@@ -1673,10 +1890,21 @@ impl ServerState {
                 held.insert(name.to_string(), HeldResidency { session, epoch });
                 Ok(epoch)
             }
+            // SQLite residency is a host-local lock file: the holder is
+            // another akhomed process on this host, not another host.
+            Ok(false) if sqlite => Err(format!(
+                "refusing to {op} \"{name}\": another akhomed process on this host holds \
+                 the akh's residency lock file (<database>.akh-{akh_id}.lock). Stop the \
+                 other process (or wait for it to release the akh), then retry."
+            )),
             Ok(false) => Err(format!(
                 "refusing to {op} \"{name}\": another host already holds the akh's \
                  advisory lock (split-brain guard). Confirm no other akhomed is \
                  serving this akh, then retry."
+            )),
+            Err(e) if sqlite => Err(format!(
+                "could not take the SQLite residency lock file for \"{name}\" ({e}); \
+                 refusing to {op}. Check the permissions of the database directory."
             )),
             Err(e) => Err(format!(
                 "could not acquire the akh advisory lock for \"{name}\" ({e}); \
@@ -1804,8 +2032,8 @@ impl ServerState {
         // including the `akh sleep` + `akh wake` config-reload path on this very
         // host. Only ungraceful exits leave a stale heartbeat behind now, which
         // is exactly the case the 60s window is for.
-        if let Some(pool) = self.pg_pool().as_ref() {
-            if let Err(e) = akhomed_store::clear_last_seen(pool, akh_id).await {
+        if let Ok(Some(pool)) = self.akh_store(name).await {
+            if let Err(e) = akhomed_store::clear_last_seen(&pool, akh_id).await {
                 tracing::warn!(
                     workspace = %name, error = %e,
                     "could not clear the akh heartbeat on evict; the next wake may be \
@@ -1986,7 +2214,13 @@ impl ServerState {
         };
         let akh_id = akh_medu::wal::akh_id_for(name);
         let workspace_id = akh_medu::wal::workspace_id_for(name);
-        akhomed_store::ensure_akh(pool, akh_id, name, None)
+        // The identity row lives with the akh's own tables (ADR 120); the
+        // membership row is host-level.
+        let akh_store = self
+            .akh_store(name)
+            .await?
+            .ok_or_else(|| membership_needs_pg("join"))?;
+        akhomed_store::ensure_akh(&akh_store, akh_id, name, None)
             .await
             .map_err(|e| e.to_string())?;
         akhomed_store::join_workspace(
@@ -2082,8 +2316,28 @@ impl ServerState {
         akhomed_store::run_migrations_locked(&opts)
             .await
             .map_err(|e| e.to_string())?;
+        // ADR 120: every opened per-akh file migrates under its own lock too.
+        let mut akh_files = Vec::new();
+        if let Some(topology) = self.per_akh.as_ref() {
+            let names: Vec<String> = self.akh_stores.lock().await.keys().cloned().collect();
+            for name in names {
+                let store_name =
+                    akhomed_store::AkhStoreName::new(&name).map_err(|e| diagnostic_text(&e))?;
+                let akh_opts = topology
+                    .akh_options(&store_name)
+                    .map_err(|e| diagnostic_text(&e))?;
+                akhomed_store::run_migrations_locked(&akh_opts)
+                    .await
+                    .map_err(|e| format!("migrating the store of \"{name}\": {e}"))?;
+                akh_files.push(name);
+            }
+        }
         tracing::info!("akhomed-store migrations run via ACP control-plane");
-        Ok(serde_json::json!({ "migrated": true }))
+        if akh_files.is_empty() {
+            Ok(serde_json::json!({ "migrated": true }))
+        } else {
+            Ok(serde_json::json!({ "migrated": true, "per_akh": akh_files }))
+        }
     }
 
     /// Admit a compiled schema pack to the Postgres registry (`_akh/schema/admit`,
@@ -4061,7 +4315,10 @@ impl ServerState {
         // its effective executor placement.
         let settings = self.daemon_settings(ws_name).await;
 
-        let pool = self.pg_pool();
+        let pool = self.akh_store(ws_name).await.unwrap_or_else(|error| {
+            tracing::warn!(workspace = %ws_name, %error, "akh store unavailable; transcript harvest and librarian disabled");
+            None
+        });
         let global_cfg = self.config.read().await;
         let seshat_upstream = global_cfg.upstreams.seshat.clone();
         let heka_url = global_cfg.heka.as_ref().map(|h| h.url.clone());
@@ -4372,7 +4629,10 @@ async fn start_workspace_daemon(
         .await
         .insert(ws_name.to_string(), pause_handle.clone());
     let task_handle = pause_handle.clone();
-    let pool = state.pg_pool();
+    let pool = state.akh_store(ws_name).await.unwrap_or_else(|error| {
+        tracing::warn!(workspace = %ws_name, %error, "akh store unavailable; transcript harvest and librarian disabled");
+        None
+    });
     let global_cfg = state.config.read().await;
     let seshat_upstream = global_cfg.upstreams.seshat.clone();
     let heka_url = global_cfg.heka.as_ref().map(|h| h.url.clone());
@@ -5411,6 +5671,12 @@ fn raise_nofile_limit() {
 
 #[tokio::main]
 async fn main() {
+    // `akhomed store …` is offline maintenance (ADR 120): it runs before any
+    // config, telemetry or daemon state exists and exits.
+    if std::env::args().nth(1).as_deref() == Some("store") {
+        std::process::exit(store_cli::run(std::env::args().skip(1)).await);
+    }
+
     let _obs_guard = akh_medu::observability::init_observability("akhomed");
 
     #[cfg(unix)]
@@ -5581,6 +5847,21 @@ async fn main() {
         core_principals = ?core_principal_akhs,
         "resolved auto-start set (union)"
     );
+
+    // ADR 120: validate the store layout before opening anything. A per-akh
+    // layout on a non-SQLite URL is refused, never silently downgraded.
+    match per_akh_topology(&config) {
+        Ok(Some(topology)) => tracing::info!(
+            layout = "per_akh",
+            host = %topology.host_path().unwrap_or(std::path::Path::new("")).display(),
+            "backing store layout: host tables in the configured file, one akh.<name>.sqlite3 per akh beside it"
+        ),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("{:?}", miette::Report::new(error));
+            std::process::exit(1);
+        }
+    }
 
     // Phase 38: open the Postgres backing store (or fall back to local-only).
     let pg_pool = init_postgres(&config).await;
@@ -5957,6 +6238,205 @@ mod control_plane_tests {
         (tmp, state)
     }
 
+    /// ADR 120 config for a SQLite store at `host_path`.
+    fn sqlite_config(
+        host_path: &std::path::Path,
+        layout: akh_medu::config::DatabaseLayout,
+    ) -> AkhomedConfig {
+        AkhomedConfig {
+            postgres: Some(akh_medu::config::PostgresConfig {
+                url: format!("sqlite://{}?mode=rwc", host_path.display()),
+                pool_size: 1,
+                connect_timeout_secs: 10,
+                migrate_on_start: true,
+                wal_flush_interval_secs: 60,
+                wal_batch_size: 64,
+                wal_max_buffer_mb: 4,
+                snapshot_interval_secs: 0,
+                layout,
+            }),
+            ..Default::default()
+        }
+    }
+
+    async fn count_rows(db: &akhomed_store::DatabaseConnection, table: &str) -> i64 {
+        db.query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            format!("SELECT COUNT(*) AS n FROM {table}"),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "n")
+        .unwrap()
+    }
+
+    /// ADR 120: under `layout = "per_akh"` each akh's identity, WAL and
+    /// snapshot rows land in `akh.<name>.sqlite3` beside the host file (never
+    /// in the host), and a cold wake hydrates from the akh's own file while
+    /// the host keeps serving host-level tables.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn per_akh_sqlite_layout_isolates_akh_rows_and_wakes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let paths = AkhPaths {
+            config_dir: base.join("config"),
+            data_dir: base.join("data"),
+            state_dir: base.join("state"),
+            runtime_dir: base.join("run"),
+            cache_dir: base.join("cache"),
+        };
+        paths.ensure_dirs().unwrap();
+        let core = base.join("state/core");
+        let config = sqlite_config(
+            &core.join("host.sqlite3"),
+            akh_medu::config::DatabaseLayout::PerAkh,
+        );
+        let (opts, migrate) = pg_pool_options(&config).unwrap();
+        let host = try_connect_pg(&opts, migrate).await.unwrap();
+
+        let first = ServerState::new(paths.clone(), config.clone(), Some(Arc::clone(&host)));
+        for workspace in ["alpha", "beta"] {
+            first
+                .dispatch("_akh/workspace/create", &json!({ "name": workspace }))
+                .await
+                .unwrap();
+            let engine = first.get_engine(workspace).await.unwrap();
+            let subject = engine
+                .resolve_or_create_entity(&format!("{workspace}-subject"))
+                .unwrap();
+            let predicate = engine.resolve_or_create_relation("per-akh-predicate").unwrap();
+            let object = engine.resolve_or_create_entity("per-akh-object").unwrap();
+            engine
+                .add_triple(&Triple::new(subject, predicate, object))
+                .unwrap();
+            first.snapshot_workspace(workspace).await.unwrap();
+            first.flush_wal(workspace).await.unwrap();
+            assert!(core.join(format!("akh.{workspace}.sqlite3")).is_file());
+        }
+
+        // Nothing akh-scoped reaches the host file.
+        for table in [
+            "akhomed_akh",
+            "akhomed_akh_state",
+            "akhomed_symbols",
+            "akhomed_facts",
+            "akhomed_mutation_log",
+        ] {
+            assert_eq!(count_rows(&host, table).await, 0, "host {table}");
+        }
+        // Each akh file holds exactly its own akh.
+        for workspace in ["alpha", "beta"] {
+            let akh = first.akh_store(workspace).await.unwrap().unwrap();
+            assert_eq!(count_rows(&akh, "akhomed_akh").await, 1);
+            let name: String = akh
+                .query_one(Statement::from_string(
+                    DbBackend::Sqlite,
+                    "SELECT name FROM akhomed_akh".to_owned(),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get("", "name")
+                .unwrap();
+            assert_eq!(name, workspace);
+            assert!(count_rows(&akh, "akhomed_symbols").await > 0);
+            assert!(count_rows(&akh, "akhomed_mutation_log").await > 0);
+        }
+
+        // Sleep alpha, then wake it in a fresh daemon state from its own file.
+        first.evict_workspace("alpha").await.unwrap();
+        let second = ServerState::new(paths.clone(), config, Some(Arc::clone(&host)));
+        second
+            .dispatch("_akh/akh/wake", &json!({ "workspace": "alpha" }))
+            .await
+            .unwrap();
+        let restored = second.get_engine("alpha").await.unwrap();
+        assert!(restored.lookup_symbol("alpha-subject").is_ok());
+        assert!(restored.lookup_symbol("beta-subject").is_err());
+        assert_eq!(count_rows(&host, "akhomed_akh").await, 0);
+    }
+
+    /// ADR 120: a per-akh daemon pointed at an unsplit shared file refuses
+    /// to open the akh instead of silently starting it empty.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn per_akh_layout_refuses_an_unsplit_shared_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = tmp.path().join("akh.sqlite3");
+        let config = sqlite_config(&shared, akh_medu::config::DatabaseLayout::Shared);
+        let (opts, migrate) = pg_pool_options(&config).unwrap();
+        let host = try_connect_pg(&opts, migrate).await.unwrap();
+        akhomed_store::ensure_akh(&host, akh_medu::wal::akh_id_for("alpha"), "alpha", None)
+            .await
+            .unwrap();
+
+        let per_akh = sqlite_config(&shared, akh_medu::config::DatabaseLayout::PerAkh);
+        let paths = AkhPaths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            state_dir: tmp.path().join("state"),
+            runtime_dir: tmp.path().join("run"),
+            cache_dir: tmp.path().join("cache"),
+        };
+        paths.ensure_dirs().unwrap();
+        let state = ServerState::new(paths, per_akh, Some(host));
+        let error = state.akh_store("alpha").await.unwrap_err();
+        assert!(error.contains("split-per-akh"), "{error}");
+        assert!(!tmp.path().join("akh.alpha.sqlite3").exists());
+    }
+
+    #[test]
+    fn per_akh_layout_on_postgres_is_refused_at_startup() {
+        let mut config = sqlite_config(
+            std::path::Path::new("/tmp/unused.sqlite3"),
+            akh_medu::config::DatabaseLayout::PerAkh,
+        );
+        if let Some(database) = config.postgres.as_mut() {
+            database.url = "postgres://db.local/akh".into();
+        }
+        // DATABASE_URL would override the URL; this test only runs the
+        // resolution when it is unset.
+        if std::env::var_os("DATABASE_URL").is_none() {
+            assert!(matches!(
+                per_akh_topology(&config),
+                Err(akhomed_store::LayoutError::RequiresSqlite { .. })
+            ));
+        }
+        let shared = sqlite_config(
+            std::path::Path::new("/tmp/unused.sqlite3"),
+            akh_medu::config::DatabaseLayout::Shared,
+        );
+        assert!(per_akh_topology(&shared).unwrap().is_none());
+    }
+
+    #[test]
+    fn snapshot_failure_names_sqlite_contention_not_split_brain() {
+        let busy = akhomed_store::StoreError::LockContention {
+            source: akhomed_store::sea_orm::DbErr::Custom("database is locked".into()),
+        };
+        assert!(matches!(
+            SnapshotFailure::from_store(&busy, true, busy.to_string()),
+            SnapshotFailure::Contention(_)
+        ));
+        let pool_timeout = akhomed_store::StoreError::Db {
+            source: akhomed_store::sea_orm::DbErr::ConnectionAcquire(
+                akhomed_store::sea_orm::ConnAcquireErr::Timeout,
+            ),
+        };
+        // A pool timeout is contention on SQLite; on PostgreSQL it stays a
+        // plain failure with the historical ADR-049 wording.
+        assert!(matches!(
+            SnapshotFailure::from_store(&pool_timeout, true, pool_timeout.to_string()),
+            SnapshotFailure::Contention(_)
+        ));
+        assert!(matches!(
+            SnapshotFailure::from_store(&pool_timeout, false, pool_timeout.to_string()),
+            SnapshotFailure::Failed(_)
+        ));
+        assert!(SQLITE_CONTENTION_HELP.contains("per_akh"));
+        assert!(SQLITE_CONTENTION_HELP.contains("busy_timeout"));
+    }
+
     /// Phase 53j: `_akh/memory/{merge_predicates,hygiene}` over the ACP
     /// control plane, and the per-akh `[memory] contradiction_policy` reaching
     /// the engine on load.
@@ -6239,6 +6719,7 @@ mod control_plane_tests {
                 wal_batch_size: 64,
                 wal_max_buffer_mb: 4,
                 snapshot_interval_secs: 0,
+                layout: akh_medu::config::DatabaseLayout::Shared,
             }),
             ..Default::default()
         };
@@ -6347,6 +6828,7 @@ mod control_plane_tests {
                 wal_batch_size: 64,
                 wal_max_buffer_mb: 4,
                 snapshot_interval_secs: 0,
+                layout: akh_medu::config::DatabaseLayout::Shared,
             }),
             ..Default::default()
         };
@@ -6507,6 +6989,7 @@ mod control_plane_tests {
                 wal_batch_size: 64,
                 wal_max_buffer_mb: 4,
                 snapshot_interval_secs: 0,
+                layout: akh_medu::config::DatabaseLayout::Shared,
             }),
             ..Default::default()
         };
@@ -6683,6 +7166,7 @@ mod control_plane_tests {
                 wal_batch_size: 64,
                 wal_max_buffer_mb: 16,
                 snapshot_interval_secs: 300,
+                layout: akh_medu::config::DatabaseLayout::Shared,
             }),
             ..Default::default()
         };
