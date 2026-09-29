@@ -190,5 +190,5 @@ the tools the akh sends it, and the akh sends only the sealed catalog.
   The gateway, `finish_answer`, the isolation checks and the `Episode` assembly carry over unchanged.
 - Once the teacher has run, record the placement of the dojo system prompt and the `cos_declaration`
   delta in the C4 report, next to the per-family table.
-- ADR 113 gets an amendment line naming `tool_surface = "session-only"` as the one exception
-  (exam instruments only). This plan is the design record until then.
+- ADR 113 records `tool_surface = "session-only"` as its one exception (exam instruments only) in
+  its Consequences section.

@@ -359,8 +359,8 @@ class AcpEpisodeRunner:
     def _episode(self, spec: EpisodeSpec, tools: Mapping[str, ReplayTools], trace: RunTrace,
                  steps: list[StepRecord]) -> None:
         if spec.family is Family.CORRECTION:
-            raise ModelError("the correction family needs a recorded operator correction; none exists in the dojo yet",
-                             help="skip the family (--family names the ones to run)")
+            raise ModelError("the model runner cannot replay a recorded correction yet (the episodes exist: --corrections loads them)",
+                             help="select the family with --dry-run to size it, or skip it (--family names the ones to run)")
         broker = Broker(tools, self.config.runner.max_result_chars)
         allowed = frozenset(s.name for s in broker.tool_specs())
         now = _snapshot_now(tools)
