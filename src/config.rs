@@ -82,6 +82,16 @@ pub struct AkhomedConfig {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_legacy_exec: bool,
 
+    /// ADR 049: how many quarantined host-local redb images
+    /// (`akh-medu.pre-residency-<N>.redb`) to keep per workspace. Older ones
+    /// are pruned after a successful authoritative hydrate. Must be at least 1
+    /// (`0` is refused at load). A scalar, so it stays above every `[table]`.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::redb_quarantine::QuarantineKeep::is_default"
+    )]
+    pub redb_quarantine_keep: crate::redb_quarantine::QuarantineKeep,
+
     /// Daemon-related settings.
     #[serde(default)]
     pub daemon: DaemonSection,
@@ -1089,6 +1099,45 @@ migrate_on_start = true
         let loaded = AkhomedConfig::load(&path).unwrap();
         assert_eq!(loaded.daemon.auto_start, vec!["ws1", "ws2"]);
         assert_eq!(loaded.daemon.intervals.idle_cycle_secs, Some(15));
+    }
+
+    #[test]
+    fn redb_quarantine_keep_defaults_round_trips_and_refuses_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // Default: not written out, loads back as 3.
+        let config = AkhomedConfig::default();
+        config.save(&path).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("redb_quarantine_keep")
+        );
+        assert_eq!(
+            AkhomedConfig::load(&path)
+                .unwrap()
+                .redb_quarantine_keep
+                .get(),
+            3
+        );
+
+        // Custom value sits above the tables and round-trips.
+        let mut config = AkhomedConfig::default();
+        config.redb_quarantine_keep = crate::redb_quarantine::QuarantineKeep::new(5).unwrap();
+        config.save(&path).unwrap();
+        assert_eq!(
+            AkhomedConfig::load(&path)
+                .unwrap()
+                .redb_quarantine_keep
+                .get(),
+            5
+        );
+
+        // Zero is refused with a parse diagnostic.
+        std::fs::write(&path, "redb_quarantine_keep = 0\n").unwrap();
+        let err = AkhomedConfig::load(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }), "{err:?}");
     }
 
     #[cfg(unix)]
