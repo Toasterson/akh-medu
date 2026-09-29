@@ -2261,6 +2261,8 @@ const ENGINE_ONLY_METHODS: &[&str] = &[
     "_akh/triples/remove",
     "_akh/query/sparql",
     "_akh/memory/recall",
+    // ADR 116 slice C2: read-only captured turns (the WAL `kind="turn"` rows).
+    "_akh/transcripts/list",
     "_akh/infer/activate",
     "_akh/skills",
     "_akh/skills/inspect",
@@ -2354,6 +2356,8 @@ fn dispatch_akh(
                 // ACP data-plane op after IdentityAwakenTool's removal as an
                 // agent tool; see spec_C_identity_acp).
                 "identity",
+                // ADR 116 slice C2 — read-only transcript capture listing.
+                "transcripts",
             ];
             let mut methods = vec![
                 "_akh/health",
@@ -2411,6 +2415,7 @@ fn dispatch_akh(
                 // control-plane write, see `is_control_plane_write`).
                 "_akh/provider/gate",
                 "_akh/provider/gate/reset",
+                "_akh/transcripts/list",
             ];
             // Server-level control-plane (only when a backend is wired).
             if has_control {
@@ -2817,6 +2822,55 @@ fn dispatch_akh(
         //    mirrors the `memory_recall` tool the agent uses on itself: resolve
         //    the requested query symbols and recall by them, or fall back to a
         //    pure recency scan when none resolve.
+        // ── transcripts group (ADR 116 slice C2; read-only) ─────────────
+        // Captured `kind="turn"` rows (ADR 091) after a `seq` watermark, so an
+        // operator-side harvester never opens the store files. The payload is
+        // returned exactly as captured; `next_after_seq` is the watermark to
+        // pass on the next call (equal to `after_seq` when nothing is new).
+        "transcripts/list" => {
+            const DEFAULT_LIMIT: u64 = 200;
+            const MAX_LIMIT: u64 = 1000;
+            let after_seq = params
+                .get("after_seq")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0)
+                .max(0);
+            let limit = params
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(DEFAULT_LIMIT)
+                .clamp(1, MAX_LIMIT);
+            let Some(turns) = engine.turns_since(after_seq, limit) else {
+                return Err(AcpAppError(serde_json::json!({
+                    "message": format!(
+                        "transcript store unavailable for '{workspace}': no WAL-backed turn reader on this engine"
+                    ),
+                    "code": "akh::acp::transcripts_unavailable",
+                    "help": "the akh must be resident on the daemon that owns its store \
+                             (wake it, or start it via [daemon] auto_start); an akh opened \
+                             engine-only or in-memory has no captured turns to list",
+                })));
+            };
+            let next_after_seq = turns.last().map_or(after_seq, |t| t.seq);
+            let rows: Vec<serde_json::Value> = turns
+                .into_iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "seq": t.seq,
+                        "applied_at": t.applied_at,
+                        "payload": t.payload,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "workspace": workspace,
+                "after_seq": after_seq,
+                "next_after_seq": next_after_seq,
+                "count": rows.len(),
+                "turns": rows,
+            }))
+        }
+
         "memory/recall" => {
             let top_k = params
                 .get("top_k")
@@ -7283,6 +7337,121 @@ mod tests {
         })
         .expect("persistent engine");
         (data_dir, Arc::new(engine))
+    }
+
+    /// Serves a fixed set of captured turns, honouring the watermark and limit
+    /// like the real WAL-backed reader.
+    struct StubTurnReader(Vec<crate::mutation::TurnRecord>);
+
+    impl crate::mutation::TurnBodyReader for StubTurnReader {
+        fn turn_body(&self, _seq: i64) -> Option<String> {
+            None
+        }
+        fn turns_since(
+            &self,
+            after_seq: i64,
+            limit: u64,
+        ) -> Option<Vec<crate::mutation::TurnRecord>> {
+            Some(
+                self.0
+                    .iter()
+                    .filter(|t| t.seq > after_seq)
+                    .take(limit as usize)
+                    .cloned()
+                    .collect(),
+            )
+        }
+    }
+
+    fn stub_turn(seq: i64) -> crate::mutation::TurnRecord {
+        crate::mutation::TurnRecord {
+            seq,
+            applied_at: format!("2026-09-30T10:00:{seq:02}+00:00"),
+            payload: serde_json::json!({
+                "v": 1, "workspace": "lilith", "user_prompt": format!("q{seq}"),
+                "agent_answer": "a", "tools": [],
+            }),
+        }
+    }
+
+    #[test]
+    fn transcripts_list_pages_by_watermark_and_is_advertised() {
+        let (_dir, engine) = persistent_engine();
+        engine
+            .set_turn_body_reader(Arc::new(StubTurnReader((1..=5).map(stub_turn).collect())))
+            .ok()
+            .expect("install reader");
+
+        let first = dispatch_akh(
+            &engine,
+            "lilith",
+            false,
+            "_akh/transcripts/list",
+            &serde_json::json!({"limit": 2}),
+        )
+        .unwrap();
+        assert_eq!(first["count"], 2, "{first}");
+        assert_eq!(first["next_after_seq"], 2, "{first}");
+        assert_eq!(first["turns"][0]["payload"]["user_prompt"], "q1");
+
+        let rest = dispatch_akh(
+            &engine,
+            "lilith",
+            false,
+            "_akh/transcripts/list",
+            &serde_json::json!({"after_seq": 2}),
+        )
+        .unwrap();
+        assert_eq!(rest["count"], 3, "{rest}");
+        assert_eq!(rest["next_after_seq"], 5, "{rest}");
+
+        let drained = dispatch_akh(
+            &engine,
+            "lilith",
+            false,
+            "_akh/transcripts/list",
+            &serde_json::json!({"after_seq": 5}),
+        )
+        .unwrap();
+        assert_eq!(drained["count"], 0, "{drained}");
+        assert_eq!(
+            drained["next_after_seq"], 5,
+            "an empty page keeps the watermark"
+        );
+
+        let caps = dispatch_akh(
+            &engine,
+            "lilith",
+            false,
+            "_akh/meta/capabilities",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        let methods = caps["methods"].as_array().unwrap();
+        assert!(
+            methods.iter().any(|m| m == "_akh/transcripts/list"),
+            "{caps}"
+        );
+        assert!(ENGINE_ONLY_METHODS.contains(&"_akh/transcripts/list"));
+    }
+
+    #[test]
+    fn transcripts_list_without_a_store_is_a_diagnostic_not_an_empty_list() {
+        let (_dir, engine) = persistent_engine();
+        let err = dispatch_akh(
+            &engine,
+            "lilith",
+            false,
+            "_akh/transcripts/list",
+            &serde_json::json!({}),
+        )
+        .expect_err("no turn reader installed");
+        let json = err.into_json();
+        assert_eq!(json["code"], "akh::acp::transcripts_unavailable", "{json}");
+        assert!(
+            json["help"].as_str().unwrap().contains("resident"),
+            "{json}"
+        );
     }
 
     fn add_provenanced_triple(

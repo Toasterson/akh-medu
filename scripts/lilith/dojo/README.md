@@ -58,8 +58,9 @@ The episode weight is the `cos-v1` weight of the answer step (the step that carr
 0 when the episode holds any hard constraint or has no answer step. Errored episodes are not scored: the
 summary reports `errors`, `mean_weight` over scored episodes and `mean_weight_errors_as_zero`.
 `--limit N` is per family; selection is deterministic in (snapshot root, split, family, limit, seed), so
-parent, teacher and candidate get the same episodes. The correction family is skipped (it needs recorded
-operator corrections). Put `--split sealed` for exam baselines; dev/train are for iterating.
+parent, teacher and candidate get the same episodes. The correction family is skipped by `--family all`; with `--corrections FILE`
+(the C2 `corrections.jsonl`, see `docs/ops/lilith-c2-sessions.md`) `--family correction` selects its episodes
+(sizing with `--dry-run`; the model runner cannot replay a correction turn yet). Put `--split sealed` for exam baselines; dev/train are for iterating.
 
 ```sh
 # (a) frozen Gemma on the serve pod. The pod serves the frozen parent while no certified adapter is active.
@@ -137,7 +138,7 @@ first `--limit 3` run gives real numbers in the summary's `tokens` and `latency_
 
 ```sh
 uv run --with pytest python -m pytest scripts/lilith/dojo/tests -q     # add --with blake3 for native parity
-python3 scripts/lilith/dojo/dojo_report.py --root "$LILITH_SNAPSHOT_ROOT" --repo .
+python3 scripts/lilith/dojo/dojo_report.py --root "$LILITH_SNAPSHOT_ROOT" --repo . [--corrections /Volumes/akh-medu-runs/lilith/c2/corrections.jsonl]
 ```
 
 The fixtures are synthetic and written with the recorder's own storage functions. No private data is

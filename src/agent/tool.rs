@@ -870,7 +870,7 @@ impl std::fmt::Debug for ToolRegistry {
 /// output (web/file content) and params that can place a multibyte character
 /// across byte `max_len`, where a naive `&s[..max_len]` would panic — and this
 /// runs in the registry's audit wrapper around *every* tool call.
-fn truncate_summary(s: &str, max_len: usize) -> String {
+pub(crate) fn truncate_summary(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {

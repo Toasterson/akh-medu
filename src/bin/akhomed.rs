@@ -819,6 +819,34 @@ impl akh_medu::mutation::TurnBodyReader for PgTurnBodyReader {
             }
         }
     }
+
+    fn turns_since(
+        &self,
+        after_seq: i64,
+        limit: u64,
+    ) -> Option<Vec<akh_medu::mutation::TurnRecord>> {
+        let fut = akhomed_store::load_turns_since(&self.pool, self.akh_id, after_seq, limit);
+        let result = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| self.handle.block_on(fut))
+        } else {
+            self.handle.block_on(fut)
+        };
+        match result {
+            Ok(rows) => Some(
+                rows.into_iter()
+                    .map(|row| akh_medu::mutation::TurnRecord {
+                        seq: row.seq,
+                        applied_at: row.applied_at.to_rfc3339(),
+                        payload: row.payload,
+                    })
+                    .collect(),
+            ),
+            Err(e) => {
+                tracing::warn!(after_seq, error = %e, "transcript list lookup failed");
+                None
+            }
+        }
+    }
 }
 
 impl ServerState {
