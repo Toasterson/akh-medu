@@ -7,7 +7,12 @@
 > acceptance. Preserves ADR 113 full-Akh ownership and ADR 114 structural live /
 > learned shadow decisions. This is a planned capability, not a runtime release.
 
-> Last updated: 2026-09-29 (**Per-akh SQLite databases** — opt-in
+> Last updated: 2026-09-30 (**Lilith C2 transcript read surface** — read-only
+> ACP `_akh/transcripts/list` over the ADR 091 `kind="turn"` WAL rows (watermark
+> paging; engine-only, per-akh authorised) and receipts in the turn's tool trace,
+> for the operator-side session harvester `scripts/lilith/c2/`; see
+> [ADR 116](decisions/116-lilith-chief-of-staff-guided-rl.md),
+> [runbook](../ops/lilith-c2-sessions.md)). Previously 2026-09-29 (**Per-akh SQLite databases** — opt-in
 > `[database] layout = "per_akh"`: host tables in the configured file, each
 > akh in `akh.<name>.sqlite3` with one connection, `akhomed store
 > split-per-akh`, and SQLite contention reported as contention instead of

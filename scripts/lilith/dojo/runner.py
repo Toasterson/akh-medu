@@ -139,7 +139,7 @@ FAMILY_TASKS: Mapping[Family, str] = {
         "Choose the voice of your crew that this situation needs, with the reason. Answer with the "
         "captain-selection document."
     ),
-    Family.CORRECTION: "This family needs a recorded operator correction, which the dojo does not have yet.",
+    Family.CORRECTION: "This family replays a recorded operator correction; the model runner cannot serve it yet.",
 }
 
 # What counts as "the family contract" for the contract-validity rate.
@@ -478,8 +478,8 @@ class ModelEpisodeRunner:
     def _loop(self, spec: EpisodeSpec, tools: Mapping[str, ReplayTools], log, trace: RunTrace,
               steps: list[StepRecord]) -> None:
         if spec.family is Family.CORRECTION:
-            raise ModelError("the correction family needs a recorded operator correction; none exists in the dojo yet",
-                             help="skip the family (--family names the ones to run)")
+            raise ModelError("the model runner cannot replay a recorded correction yet (the episodes exist: --corrections loads them)",
+                             help="select the family with --dry-run to size it, or skip it (--family names the ones to run)")
         broker = Broker(tools, self.config.max_result_chars)
         specs = broker.tool_specs()
         now = _snapshot_now(tools)

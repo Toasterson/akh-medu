@@ -240,6 +240,28 @@ pub trait TurnBodyReader: Send + Sync {
     /// (best-effort: recall must fall back to the existing summary/label path,
     /// never error, on a missing body).
     fn turn_body(&self, seq: i64) -> Option<String>;
+
+    /// Read captured turns with `seq > after_seq`, ascending, at most `limit`
+    /// (the read-only `_akh/transcripts/list` surface; ADR 116 slice C2).
+    ///
+    /// `None` means this reader cannot list (the default, and any lookup that
+    /// failed): callers must report "transcript store unavailable" rather than
+    /// an empty transcript.
+    fn turns_since(&self, after_seq: i64, limit: u64) -> Option<Vec<TurnRecord>> {
+        let _ = (after_seq, limit);
+        None
+    }
+}
+
+/// One captured `kind="turn"` WAL row, as the read surface returns it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnRecord {
+    /// `mutation_log.seq`; the harvester's watermark unit.
+    pub seq: i64,
+    /// RFC 3339 time the row was applied to the store.
+    pub applied_at: String,
+    /// The turn payload exactly as captured (ADR 091 schema, additive fields allowed).
+    pub payload: serde_json::Value,
 }
 
 #[cfg(test)]

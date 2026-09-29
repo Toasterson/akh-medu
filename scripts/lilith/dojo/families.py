@@ -48,6 +48,7 @@ from dojo.episode import (
     ToolCall,
     Voice,
 )
+from dojo.errors import DojoError
 from dojo.language import check_reply_language
 from dojo.replay_server import GIT_TOOLS, AncestryOracle
 from dojo.snapshot import (
@@ -1020,3 +1021,36 @@ def load_illumos_pack(path: Path) -> tuple[IllumosPackEntry, ...]:
             raw = json.loads(line)
             entries.append(IllumosPackEntry(raw["work_item_id"], raw["subsystem"], raw.get("source", "operator")))
     return tuple(entries)
+
+
+CORRECTION_REQUIRED = ("episode_ref", "snapshot_id", "corrected_signature")
+
+
+def load_corrections(path: Path) -> tuple[CorrectionRecord, ...]:
+    """Operator corrections harvested by `c2/harvest_sessions.py` (`corrections.jsonl`).
+
+    One JSON object per line; the five `CorrectionRecord` fields are read and any
+    extra key (session id, turn seqs) is ignored. A record that cannot become an
+    episode (missing field, non-string signature) is refused with its line number
+    rather than silently dropped.
+    """
+    records = []
+    for number, line in enumerate(Path(path).read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise DojoError(f"{path}:{number}: not JSON ({error.msg})",
+                            help="regenerate the file with c2/harvest_sessions.py; it writes one JSON object per line") from None
+        missing = [k for k in CORRECTION_REQUIRED if not isinstance(raw.get(k), str) or not raw[k]]
+        if missing:
+            raise DojoError(f"{path}:{number}: correction record lacks {', '.join(missing)}",
+                            help="records without a recorder snapshot belong in corrections-unmatched.jsonl, not here")
+        expected = raw.get("expected_tool")
+        records.append(CorrectionRecord(
+            raw["episode_ref"], raw["snapshot_id"], raw["corrected_signature"],
+            expected if isinstance(expected, str) and expected else None,
+            tuple(sorted(str(i) for i in raw.get("subject_ids") or ())),
+        ))
+    return tuple(records)

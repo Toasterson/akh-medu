@@ -376,6 +376,7 @@ impl Agent {
             &answer,
             &turn.trace,
             turn.session.as_ref().and_then(|s| s.model.as_deref()),
+            is_dispatch,
         );
         AgenticTurnOutcome::Completed
     }

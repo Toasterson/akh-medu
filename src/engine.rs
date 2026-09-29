@@ -856,6 +856,19 @@ impl Engine {
         self.turn_body_reader.get().and_then(|r| r.turn_body(seq))
     }
 
+    /// List captured turns with `seq > after_seq` (ascending, at most `limit`)
+    /// through the installed turn reader. `None` when no reader is installed
+    /// or the lookup failed; see [`crate::mutation::TurnBodyReader::turns_since`].
+    pub fn turns_since(
+        &self,
+        after_seq: i64,
+        limit: u64,
+    ) -> Option<Vec<crate::mutation::TurnRecord>> {
+        self.turn_body_reader
+            .get()
+            .and_then(|r| r.turns_since(after_seq, limit))
+    }
+
     /// Allocate a new symbol with the given kind and label.
     pub fn create_symbol(
         &self,

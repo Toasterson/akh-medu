@@ -371,6 +371,10 @@ fn backend_repository_witness(
     )
 }
 
+/// Byte caps for the receipt fields a turn's tool trace carries (ADR 116 C2).
+const TRACE_ARGS_MAX_BYTES: usize = 1000;
+const TRACE_OUTPUT_MAX_BYTES: usize = 4000;
+
 fn verified_write(tool: &str, args: &Value, success: bool) -> bool {
     success
         && (tool == "edit"
@@ -1336,7 +1340,15 @@ impl Agent {
                 // ADR 091: capture the completed turn to the WAL (raw
                 // staging; a no-op if no sink is installed or capture is
                 // opted out).
-                self.emit_turn_wal(engine, agent_id, user_prompt, answer, &tool_trace);
+                self.emit_turn_wal_with_model(
+                    engine,
+                    agent_id,
+                    user_prompt,
+                    answer,
+                    &tool_trace,
+                    self.model_manager.as_deref().map(|m| m.model()),
+                    is_autonomous_dispatch,
+                );
                 // Ordinary streaming already emitted the answer as deltas.
                 // Controlled streaming held it provisionally until this host
                 // post-condition passed, so release the accepted answer now.
@@ -1598,7 +1610,9 @@ impl Agent {
         // outer Agent slot stays available while a permission prompt or remote
         // MCP request blocks, and the same stable handle covers a repair retry.
         let registry = self.tool_registry_handle();
+        let call_started = std::time::Instant::now();
         let exec_result = registry.execute(&exec_name, input, engine);
+        let call_duration_ms = call_started.elapsed().as_millis() as u64;
         let (success, result) = match exec_result {
             Ok(o) => (o.success, o.result),
             Err(e) => {
@@ -1678,7 +1692,18 @@ impl Agent {
             note_prefix.push_str(&format!("[repaired args: {note}] "));
         }
 
-        let mut trace = json!({"tool": exec_name.clone(), "ok": success, "wrote": verified_write(&exec_name, &exec_args, success)});
+        // ADR 116 slice C2: the trace doubles as the captured receipt. The
+        // additive fields (bounded so a turn row stays small) let the operator-
+        // side harvester read what each call was given and what it returned
+        // without opening any store; earlier readers only look at tool/ok/wrote.
+        let mut trace = json!({
+            "tool": exec_name.clone(),
+            "ok": success,
+            "wrote": verified_write(&exec_name, &exec_args, success),
+            "args": crate::agent::tool::truncate_summary(&exec_args.to_string(), TRACE_ARGS_MAX_BYTES),
+            "output": crate::agent::tool::truncate_summary(&result, TRACE_OUTPUT_MAX_BYTES),
+            "duration_ms": call_duration_ms,
+        });
         if let Some(verified) = study_note_evidence_verified {
             trace["evidence_verified"] = json!(verified);
         }
@@ -1850,6 +1875,8 @@ impl Agent {
     /// **The payload schema is LOCKED** — Wave 2's sleep-cycle harvest phase
     /// parses it verbatim (ADR 091 / the transcript-capture plan):
     /// `{v, ts, workspace, model, user_prompt, agent_answer, tools: [{tool, ok}]}`.
+    /// Additive since (readers ignore unknown keys): per-tool `wrote`, `args`,
+    /// `output`, `duration_ms`, and `dispatch: true` on autonomous turns (ADR 116 C2).
     pub(crate) fn emit_turn_wal(
         &self,
         engine: &Engine,
@@ -1859,7 +1886,7 @@ impl Agent {
         tools: &[Value],
     ) {
         let model = self.model_manager.as_deref().map(|m| m.model());
-        self.emit_turn_wal_with_model(engine, agent_id, user_prompt, answer, tools, model);
+        self.emit_turn_wal_with_model(engine, agent_id, user_prompt, answer, tools, model, false);
     }
 
     /// External session runtimes supply the model returned by their provider,
@@ -1872,11 +1899,12 @@ impl Agent {
         answer: &str,
         tools: &[Value],
         model: Option<&str>,
+        dispatch: bool,
     ) {
         if !self.transcript_capture_enabled() {
             return;
         }
-        let payload = json!({
+        let mut payload = json!({
             "v": 1,
             "ts": rfc3339_now(),
             "workspace": agent_id,
@@ -1885,6 +1913,12 @@ impl Agent {
             "agent_answer": answer,
             "tools": tools,
         });
+        // ADR 116 C2: an autonomous dispatch turn is not an operator turn; the
+        // session harvester keeps it out of operator sessions. Additive and
+        // present only when true, so the locked ADR 091 shape is otherwise unchanged.
+        if dispatch {
+            payload["dispatch"] = json!(true);
+        }
         engine.record_turn(payload);
     }
 }
@@ -2723,6 +2757,14 @@ mod tests {
         assert!(written.success, "{}", written.result);
         assert_eq!(store.frontmatter_only().len(), 1);
         assert_eq!(written.trace["evidence_verified"], true);
+        // ADR 116 C2: the trace doubles as the captured receipt, bounded.
+        assert!(
+            written.trace["args"]
+                .as_str()
+                .is_some_and(|a| !a.is_empty())
+        );
+        assert_eq!(written.trace["output"], written.result.as_str());
+        assert!(written.trace["duration_ms"].is_u64());
     }
 
     struct StaticArchivalEvidenceTool;
@@ -3819,6 +3861,18 @@ mod tests {
             );
         }
 
+        // --- 2b. ADR 116 C2: an autonomous dispatch turn is marked; nothing else changes. ---
+        agent.emit_turn_wal_with_model(&engine, "tecton", "auto", "done", &[], None, true);
+        {
+            let records = sink.records.lock().unwrap();
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[1].1["dispatch"], true);
+            assert!(
+                records[0].1.get("dispatch").is_none(),
+                "operator turns carry no dispatch key"
+            );
+        }
+
         // --- 3. Opt-out (env="0") writes nothing, even with the field on. ---
         unsafe {
             std::env::set_var("AKH_TRANSCRIPT_CAPTURE", "0");
@@ -3827,8 +3881,8 @@ mod tests {
         agent.emit_turn_wal(&engine, "tecton", "hi", "hello", &[]);
         assert_eq!(
             sink.records.lock().unwrap().len(),
-            1,
-            "opted-out capture writes nothing beyond step 2's single record"
+            2,
+            "opted-out capture writes nothing beyond steps 2 and 2b"
         );
 
         unsafe {

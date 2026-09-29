@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """How many CoS dojo episodes the snapshots recorded so far can support.
 
-    dojo_report.py [--root R] [--repo PATH] [--illumos-pack FILE] [--json]
+    dojo_report.py [--root R] [--repo PATH] [--illumos-pack FILE] [--corrections FILE] [--json]
 
 `--root` defaults to `LILITH_SNAPSHOT_ROOT`, then the recorder's default.
 `--repo` is a local akh-medu clone for the landed-claim ancestry checks; without
 it those episodes are excluded (undecidable), not guessed.
+`--corrections` is the C2 `corrections.jsonl` (`c2/harvest_sessions.py`); it feeds the correction family.
 
 The recorder only started on 2026-09-28. The report states the window it has
 and what that window can and cannot label; it never extrapolates volume.
@@ -25,7 +26,7 @@ if __package__ in (None, ""):
 from dojo import DOJO_VERSION
 from dojo.episode import Family
 from dojo.errors import DojoError
-from dojo.families import BuildContext, BuildResult, build_all, load_illumos_pack
+from dojo.families import BuildContext, BuildResult, build_all, load_corrections, load_illumos_pack
 from dojo.hindsight import hours_between, phase_changes_in_window
 from dojo.replay_server import GitAncestryOracle
 from dojo.snapshot import SnapshotStore
@@ -51,11 +52,13 @@ NEEDS = {
 }
 
 
-def build_report(root: Path, repo: Path | None, pack: Path | None) -> dict:
+def build_report(root: Path, repo: Path | None, pack: Path | None, corrections: Path | None = None) -> dict:
     store = SnapshotStore(root)
+    recorded = load_corrections(corrections) if corrections else ()
     ctx = BuildContext(
         oracle=GitAncestryOracle(repo) if repo else None,
         illumos_pack=load_illumos_pack(pack) if pack else (),
+        corrections=recorded,
     )
     snaps = store.snapshots()
     report: dict = {"dojo": DOJO_VERSION, "root": str(root), "snapshots": len(snaps)}
@@ -76,6 +79,9 @@ def build_report(root: Path, repo: Path | None, pack: Path | None) -> dict:
         note = NEEDS.get(family, "")
         if family is Family.LANDED_CLAIM and repo:
             note = ""
+        if family is Family.CORRECTION and corrections:
+            orphaned = sum(1 for c in recorded if c.snapshot_id not in store.ids)
+            note = f"{len(recorded)} recorded corrections" + (f", {orphaned} name a snapshot this root does not hold" if orphaned else "")
         families[family.value] = {
             "episodes": len(res.specs),
             "excluded": len(res.excluded),
@@ -122,11 +128,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=None)
     parser.add_argument("--repo", type=Path, default=None, help="local akh-medu clone for ancestry checks")
     parser.add_argument("--illumos-pack", type=Path, default=None)
+    parser.add_argument("--corrections", type=Path, default=None,
+                        help="C2 corrections.jsonl from c2/harvest_sessions.py")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     root = args.root or Path(os.environ.get("LILITH_SNAPSHOT_ROOT", RECORDER_DEFAULT_ROOT))
     try:
-        report = build_report(root, args.repo, args.illumos_pack)
+        report = build_report(root, args.repo, args.illumos_pack, args.corrections)
     except DojoError as error:
         print(error.render(), file=sys.stderr)
         return 2

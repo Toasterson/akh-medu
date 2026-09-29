@@ -44,7 +44,7 @@ from dojo import DOJO_VERSION, floors as floors_mod
 from dojo.contracts import REPO_ROOT
 from dojo.episode import EmitDocument, Family, SendMessage
 from dojo.errors import CompareError, DojoError, RunProvenanceError
-from dojo.families import BuildContext, HardConstraint, build_all, load_illumos_pack, verify, verify_context
+from dojo.families import BuildContext, HardConstraint, build_all, load_corrections, load_illumos_pack, verify, verify_context
 from dojo.model_adapters import (
     ANTHROPIC_BASE_URL,
     DEFAULT_ANTHROPIC_MODEL,
@@ -96,10 +96,11 @@ def parse_families(value: str) -> tuple[Family, ...]:
 
 
 def select_episodes(store: SnapshotStore, oracle, families: Sequence[Family], split: str, limit: int | None,
-                    seed: int, illumos_pack=()) -> tuple[list[Chosen], dict]:
+                    seed: int, illumos_pack=(), corrections=()) -> tuple[list[Chosen], dict]:
     """Deterministic for a given snapshot root, family, split, limit and seed: every model in an
     exam gets the same episodes."""
-    results = build_all(store, BuildContext(oracle=oracle, illumos_pack=tuple(illumos_pack)))
+    results = build_all(store, BuildContext(oracle=oracle, illumos_pack=tuple(illumos_pack),
+                                                  corrections=tuple(corrections)))
     all_specs = [s for res in results.values() for s in res.specs]
     manifest = assign_splits(all_specs, SplitConfig())
     wanted = {Split(split)} if split != "all" else set(Split)
@@ -530,6 +531,8 @@ def _add_run_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--root", type=Path, default=None, help="snapshot root (default: $LILITH_SNAPSHOT_ROOT)")
     p.add_argument("--repo", type=Path, default=REPO_ROOT, help="local akh-medu clone: ancestry oracle and provenance")
     p.add_argument("--illumos-pack", type=Path, default=None)
+    p.add_argument("--corrections", type=Path, default=None,
+                   help="C2 corrections.jsonl (c2/harvest_sessions.py); select them with --family correction")
     p.add_argument("--family", default="all", help="'all' or a comma list of family names")
     p.add_argument("--split", required=True, choices=["sealed", "dev", "train", "all"])
     p.add_argument("--limit", type=int, default=None, help="episodes per family")
@@ -560,8 +563,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     store = SnapshotStore(root)
     oracle = GitAncestryOracle(args.repo)
     pack = load_illumos_pack(args.illumos_pack) if args.illumos_pack else ()
+    corrections = load_corrections(args.corrections) if args.corrections else ()
     families = parse_families(args.family)
-    chosen, selection = select_episodes(store, oracle, families, args.split, args.limit, args.seed, pack)
+    chosen, selection = select_episodes(store, oracle, families, args.split, args.limit, args.seed, pack, corrections)
     system = compose_system_prompt(args.repo)
     floors_mod.load_floors()  # refuses floors that no longer hash to their pin
     if args.dry_run:
