@@ -687,8 +687,14 @@ keeps the stores above as an in-process cache. 38a–38c are implemented.
   file and converges schema packs from the host. A host file that still holds
   the akh is refused (`layout::unmigrated`). The offline `akhomed store
   split-per-akh` copies a shared file into this layout, verifying row counts
-  and a SHA-256 digest per table per akh, and writes evidence. It refuses while
-  the source's lock files are held and never writes the source. SQLite
+  against the planned `COUNT(*)` and a SHA-256 digest per table per akh, and
+  writes evidence plus a `<host>.per-akh-split.json` marker (a listed akh whose
+  file is missing is refused, not recreated empty). Both its dry run and real
+  run refuse a source that is open elsewhere (non-intrusive `F_GETLK` probe of
+  the `-shm`), has a non-empty WAL or fails `PRAGMA quick_check`; it never
+  writes the source. **No SQLite client may open a live store** (ADR 120
+  warning). Shared- and per-akh-layout lock files do not exclude each other:
+  one core per deployment. SQLite
   `BUSY`/`LOCKED` is typed as `StoreError::LockContention`
   (`akhomed_store::sqlite_busy`). On SQLite the snapshot ticker logs contention
   (including pool timeouts) instead of the ADR-049 split-brain text, which

@@ -11,6 +11,16 @@
   deployment boundary)
 - **Runbook:** `deploy/roman-mini/CUTOVER.md` §13 "Per-akh databases"
 
+> **WARNING — external SQLite clients only on a stopped core.** Never open a
+> live akhomed store (`state/core/*.sqlite3`) with `sqlite3`, Python `sqlite3`,
+> `akhomed store split-per-akh` (including `--dry-run`) or any other SQLite
+> client while the core runs. On 2026-09-29 a `sqlite3 <live> ".backup /tmp/…"`
+> taken for this ADR's measurements truncated the running core's WAL and
+> corrupted the Roman store; the operator recovered it (fresh store, adopted
+> local redb, schema rows restored). A `.backup` of a running database is not
+> safe. Stop the core and wait for its process to exit, or work on a copy made
+> while it was stopped. The split tool enforces this (decision 7).
+
 ## Context
 
 The Roman core is one `akhomed` hosting janus, minerva, vesta and lilith on a
@@ -76,7 +86,12 @@ configured file. PostgreSQL and the default `"shared"` layout are unchanged.**
    `SQLITE_BUSY`. Different akhs never share a lock.
 4. **Residency lock files stay beside the host file**
    (`<host>.akh-<uuid>.lock`), in the file the deployment configures. The split
-   tool holds them for the whole copy.
+   tool holds them for the whole copy. The shared layout's
+   `akh.sqlite3.akh-*.lock` and a per-akh host's `host.sqlite3.akh-*.lock` are
+   different files, so a shared-layout daemon and a per-akh daemon do **not**
+   exclude each other. One core per deployment is enforced by deployment (the
+   Roman core has the single launchd label `dev.roman-akhs.core`), not by these
+   locks.
 5. **Migrations per file.** Every file gets the full schema from the one
    `Migrator`, under its own `.migrate.lock` (`run_migrations_locked`). A table
    whose home is elsewhere just stays empty. A per-akh file is migrated when
@@ -91,16 +106,29 @@ configured file. PostgreSQL and the default `"shared"` layout are unchanged.**
    --host <new host> [--dry-run] [--json] [--allow-orphans] [--evidence P]`.
    It is an `akhomed` subcommand, so the deployed stable-path binary can run it
    with no second artifact. The tool:
-   - opens the source read-only (`immutable` when it has no pending WAL) and
-     refuses while any lock file beside the source is held;
+   - refuses, in the dry run as in the real run, a source that is not
+     quiescent: another process has it open (a non-intrusive `F_GETLK` probe
+     of the `-shm` byte every SQLite connection read-locks), its `-wal` is not
+     empty, or a hot `-journal` exists. The message says "stop the core or
+     dry-run a copy made while it was stopped". A copy made while the core was
+     stopped has none of these and is accepted. The dry run takes no lock;
+   - the real run also refuses while any lock file beside the source is held,
+     and holds them all until it finishes;
+   - opens the source read-only and `immutable`, and refuses unless
+     `PRAGMA quick_check` returns `ok`;
    - refuses existing targets, unknown tables, migrations this build does not
      know, and rows that belong to no akh (`--allow-orphans` leaves them in the
      source and lists them in the evidence);
    - copies value-for-value (SQLite storage classes preserved) in one
-     transaction per target file, then re-reads every table and compares the
-     row count and a SHA-256 content digest per table per akh;
+     transaction per target file, asserts that the rows read per table equal
+     the planned `COUNT(*)`, then re-reads every table and compares the row
+     count and a SHA-256 content digest per table per akh;
    - hashes the source (and its `-wal`) before and after, and writes a 0600
-     evidence JSON (`akhomed.store.split_per_akh.v1`);
+     evidence JSON (`akhomed.store.split_per_akh.v1`) and a split marker
+     `<host>.per-akh-split.json` listing the akhs it created. A per-akh daemon
+     refuses to recreate a listed akh whose file is missing
+     (`akhomed_store::layout::akh_file_missing`) instead of silently starting
+     it from an empty file; an akh born after the split still gets a new file;
    - removes the targets it created on any failure, and never modifies or
      deletes the source.
 8. **Diagnostics name the real cause.** `SQLITE_BUSY`/`SQLITE_LOCKED`
@@ -116,7 +144,11 @@ configured file. PostgreSQL and the default `"shared"` layout are unchanged.**
    renders the per-akh layout only when `config/per-akh-databases.json`
    (`{"evidence": "<split evidence>"}`) exists. The render also requires a
    verified split of `state/core/akh.sqlite3` into `state/core/host.sqlite3`
-   and an existing host file. The switch then moves both `[database] url` and
+   that is still current: the host file, its marker and every akh file exist,
+   and the shared file still hashes to the evidence's `sha256_after` with an
+   empty or absent `-wal` (a core that ran on the shared file after the split
+   makes the evidence stale). After the shared file is retired the switch
+   must say `"source_retired": true`. The switch then moves both `[database] url` and
    the plist's `DATABASE_URL`, which overrides the url, to `host.sqlite3`. A
    switch file follows the existing operator switch pattern
    (`janus-delegation.json`, `lilith.json`), and gating on the evidence means a
@@ -125,8 +157,10 @@ configured file. PostgreSQL and the default `"shared"` layout are unchanged.**
 ## Consequences
 
 - One akh's slow snapshot no longer delays or fails another akh's. On the
-  measured live copy, the split took 4.3 s (debug build) for 126 k rows and
-  was verified.
+  measured copy of the live store, the split took 4.3 s (debug build) for
+  126 k rows and was verified. That copy was taken with `sqlite3 .backup`
+  under the running core, which is what corrupted the live store (warning
+  above). The tool's tests use synthetic fixtures only.
 - Within one akh, writers wait on its connection instead of failing
   immediately. A persist longer than `connect_timeout_secs` still delays that
   akh's WAL flush (retried next tick; the buffer holds the rows).
