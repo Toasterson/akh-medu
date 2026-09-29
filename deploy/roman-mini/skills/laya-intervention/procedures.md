@@ -74,3 +74,7 @@ effects as fluents): `read_current_evidence` initiates `evidence_current`;
 `check_prior_outcome` initiates `prior_outcome_known`; `apply_scoped_fix`
 initiates `fix_attempted`; each `record_*` action initiates
 `outcome_recorded` and terminates `intervention_admitted`.
+
+## Fleet machine credentials (OpenBao)
+
+OpenBao is the authority for migrated fleet machine credentials. Use the credentials already supplied to your own Board/service tools or your specifically enrolled cache. A guide does not grant another agent's identity, new tools or administrator access. Missing scope requires operator enrollment; expired cache requires the enrolled certificate refresh. Migrated consumers have no runtime 1Password fallback. Historical op:// recipes are mapping clues, not instructions to fetch credentials. Keep secret values out of messages, logs and command arguments. Cloud services still require networking even when a credential cache is available offline. When file tools are granted, read /Users/toasty/.agents/skills/fleet-secrets/SKILL.md and references/machine.md for current host delivery paths.
