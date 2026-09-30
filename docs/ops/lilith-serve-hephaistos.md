@@ -8,29 +8,33 @@
 
 Since 2026-09-29 Lilith (the frozen pinned parent `google/gemma-4-12B-it@5926caa4…`, no adapter) is
 served on **hephaistos**, the operator's Linux box (RX 7900 XTX, 24 GB, ROCm, gfx1100), until new
-hardware arrives. The server is llama.cpp `llama-server` `v0.5.0` (HIP build), serving a Q8_0 GGUF of
+hardware arrives. The server is llama.cpp `llama-server` `v0.5.0`
+(commit `7fe450e19305`), **the Vulkan build (RADV), not HIP**, serving a Q8_0 GGUF of
 the parent with the parent's own chat template, on the LAN address `192.168.1.114:8080` over plain
 HTTP with a bearer key. She is a workspace of the Roman core on the Mac; T3 talks to her through the
 provider "Lilith · Chief of Staff".
 
-**Status: prepared, not yet executed** (hephaistos was off when this was written; the numbers below
-marked *bound* are analytic, and `verify.py` produces the measured ones). Everything that does not
-need the GPU was exercised on the Mac on 2026-09-29: the pinned llama.cpp built, `run_server.sh` and
-`verify.py` passed against it on a public Gemma 4 12B GGUF with the parent's pinned template, and the
-pinned converter produced a 12.67 GB Q8_0 file from a header-exact stand-in for the parent (ADR 121).
-Not exercised: the HIP build, the real weights, ROCm, systemd, the NFS mount from hephaistos.
+**Live server: the Vulkan build of llama.cpp `7fe450e19305` (v0.5.0), until ROCm is upgraded.** The
+first real build on hephaistos (2026-09-30; Zorin OS 17.3 = Ubuntu 22.04 "jammy", ROCm 6.3.4, gfx1100)
+showed that the HIP build of this commit does not compile with ROCm 6.3.4 (see "Why Vulkan, not HIP"
+below), so `build_server.sh` refuses HIP on ROCm 6.3.4 and older and the install path is
+`/opt/lilith-serve/llama.cpp/7fe450e19305-vulkan/`. Expect the Vulkan build's tokens/s, not the HIP
+bounds, in the verify output; `verify.py` records them. On 2026-09-29 the pinned llama.cpp was also
+built on the Mac, `run_server.sh` and `verify.py` passed against it on a public Gemma 4 12B GGUF with
+the parent's pinned template, and the pinned converter produced a 12.67 GB Q8_0 file from a
+header-exact stand-in for the parent (ADR 121).
 
 ## What runs where
 
 | Piece | Where |
 |---|---|
-| `llama-server` (pinned build) | `/opt/lilith-serve/llama.cpp/<commit12>-hip/`, `/opt/lilith-serve/current` |
+| `llama-server` (pinned build) | `/opt/lilith-serve/llama.cpp/<commit12>-vulkan/` (live) or `-hip/`, `/opt/lilith-serve/current`; `BUILD.json` in it records the backend, the Vulkan SDK version + sha256 or the ROCm version |
 | Model | `/var/lib/lilith-serve/models/<name>/{lilith-parent-q8_0.gguf,chat_template.jinja,PROVENANCE.json}`, `models/current` |
 | Converted copy for reuse | the runs share: `hephaistos-20260927/models/lilith-parent-5926caa4-q8_0-llamacpp-<commit12>/` |
 | Settings | `/etc/lilith-serve/server.env` (created once from `server.env.example`, never overwritten) |
 | API key | `/etc/lilith-serve/api-key` (0600, owned by `lilith-serve`); copy on the Mac: `$ROOT/secrets/lilith-openai-key` |
 | Unit | `lilith-serve.service` (user `lilith-serve`, groups `render`, `video`) |
-| Work directory (operator) | `~/lilith-serve-work/`: llama.cpp source, build, conversion venv, staged parent |
+| Work directory (operator) | `~/lilith-serve-work/`: llama.cpp source, build, conversion venv, staged parent, `vulkan-sdk/<version>/` (the pinned LunarG SDK) |
 
 Memory (a *bound*, from plan §2/§2a): Q8_0 weights about 12.7 GB, KV about 1.6 GB per 65536-token
 slot (two slots: about 3.2 GB), compute buffers 1-2 GB: about 18 GB of 24 GB.
@@ -66,23 +70,52 @@ run report. Then on hephaistos: `cd ~/lilith-serve-scripts/scripts/lilith/hephai
 uname -sr; rocminfo | grep -m1 gfx; free -g | head -2; df -h ~ /var/lib /opt | cat
 ip -4 -o addr show | grep 192.168.1.114; ss -ltn 'sport = :8080'
 rocm-smi --showmeminfo vram   # the GPU must be idle: no training run, no ollama holding VRAM
-systemctl is-active ollama 2>/dev/null; command -v cmake git hipconfig python3
+systemctl is-active ollama 2>/dev/null; command -v cmake git python3; cat /opt/rocm/.info/version
 ```
 
 Need: `gfx1100` listed, 192.168.1.114 on this host, port 8080 free, at least 60 GB free under `~` and
 `/var/lib` together (24 GB staged parent + 13 GB GGUF + venv/build), the GPU idle. If Ollama or a
 training venv holds VRAM, stop it first.
 
-### 2. Build the server (10-25 minutes)
+### 2. Build the server (Vulkan, 10-25 minutes)
 
 ```sh
-bash build_server.sh --install-deps      # apt tools, then HIP build for gfx1100
-bash build_server.sh --check             # exits 0 when the build is complete and has every flag the unit uses
+bash build_server.sh --backend vulkan --install-deps   # apt tools + libvulkan-dev mesa-vulkan-drivers, then the Vulkan build
+bash build_server.sh --backend vulkan --check          # exits 0 when the build is complete and has every flag the unit uses
 ```
 
-Idempotent: a complete build of the same commit is reused. If ROCm's headers are missing it says
-which package to install (`hipblas-dev rocblas-dev`). If HIP misbehaves, `--backend vulkan` builds
-the same source with RADV as the fallback (then note it in the run report).
+Idempotent: a complete build of the same commit and backend is reused. `--toolchain-only` resolves
+and verifies the toolchain without building.
+
+**Vulkan on Ubuntu 22.04 (jammy).** jammy has no `glslc` package, and its `libvulkan-dev` ships the
+Vulkan 1.3.204 headers, which are too old for the pinned llama.cpp (`PFN_vkGetDeviceFaultInfoEXT does
+not name a type`; VK_EXT_device_fault needs headers 1.3.246 or newer). So `--install-deps` apt-installs
+only `libvulkan-dev mesa-vulkan-drivers`; if `glslc` is missing or the system headers are older than
+the minimum in `pins.json`, it downloads the **pinned** LunarG Vulkan SDK (`pins.json` `vulkan_sdk`:
+a versioned URL, never "latest", and its sha256, verified before unpacking) into
+`~/lilith-serve-work/vulkan-sdk/<version>/`, sources its `setup-env.sh` for the build only, and starts
+from a clean build directory whenever the toolchain changed. Nothing is installed system-wide. The SDK
+version and sha256 are recorded in the build's `BUILD.json`. Without `--install-deps` the script never
+downloads: it uses an already unpacked SDK or tells you to rerun with the flag. The SDK tarball is
+about 350 MB and x86_64 only.
+
+#### Why Vulkan, not HIP (2026-09-30)
+
+- The HIP build of the pinned commit (`7fe450e19305`, v0.5.0) **fails to compile with ROCm 6.3.4 on
+  gfx1100**: the `mmf` template instances stop with `error: Illegal instruction detected: Invalid
+  dpp_ctrl value: wavefront shifts are not supported on GFX10+`. llama.cpp's docs name no minimum ROCm
+  version, so the rule is: **ROCm 6.3.4 and older are known bad** (`pins.json`
+  `llama_cpp.hip_rocm_known_bad_through`). `build_server.sh` reads `/opt/rocm/.info/version` and
+  refuses HIP at or below that with `lilith::heph::rocm_version`, naming `--backend vulkan` and a ROCm
+  upgrade as the ways out. Whether a newer ROCm (6.4 or 7.x) fixes it is not measured: upgrade, then
+  prove it with a build (`LILITH_ALLOW_OLD_ROCM=1` bypasses the refusal to test a version you believe
+  fixed; it is not for the live build). Until then the live server is the Vulkan build.
+- HIP on jammy also needs two setup facts, handled by the script: `/opt/rocm/bin` is not on `PATH` (it
+  is added when it exists, so `hipconfig` is found), and ROCm's clang uses the highest installed GCC's
+  libstdc++, so the HIP configure fails with `cuda_wrappers/cmath: 'cmath' file not found` unless
+  `libstdc++-<N>-dev` for that GCC is installed. `--install-deps` installs it for the highest GCC
+  under `/usr/lib/gcc/<arch>-linux-gnu` (detected, never a fixed 12), and the preflight names the
+  package when it is missing (`lilith::heph::libstdcxx`).
 
 ### 3. Convert and publish the model (about 30-90 minutes, mostly network)
 
@@ -216,6 +249,9 @@ followed by `build_server.sh`, `convert_parent.sh --force`, `install_service.sh`
 
 | Symptom | Meaning | Action |
 |---|---|---|
+| `build_server.sh`: `lilith::heph::rocm_version` | HIP requested on ROCm 6.3.4 or older (known bad for this llama.cpp) | `--backend vulkan --install-deps` (the live build), or upgrade ROCm |
+| `build_server.sh`: `lilith::heph::libstdcxx` | HIP: the highest GCC's `libstdc++-<N>-dev` is missing | `--install-deps`, or the `apt-get` line in the message |
+| `build_server.sh`: `lilith::heph::vulkan_sdk` | Vulkan: no glslc / headers too old and the pinned SDK is not unpacked, or its download failed the sha256 | `--backend vulkan --install-deps`; a repeated sha256 mismatch means stop and report |
 | `build_server.sh`: `lilith::heph::gpu` | `rocminfo` lists no gfx1100 | driver: `dmesg | grep amdgpu`; or `--backend vulkan` |
 | `build_server.sh`: `lilith::heph::flags` | the built server lacks a flag the unit passes | rebuild the pinned commit; do not edit the unit |
 | `convert_parent.sh`: `lilith::heph::stage_mismatch` / `parent_hash` | a parent file differs from its pin, or the NFS read was cut short | rerun once (copies are idempotent); a repeat means the share's copy is not the pinned parent: stop and report |
@@ -223,7 +259,7 @@ followed by `build_server.sh`, `convert_parent.sh --force`, `install_service.sh`
 | `convert_parent.sh`: `lilith::heph::convert` | converter failed | `~/lilith-serve-work/convert-<name>.log`; the pinned converter registers `Gemma4UnifiedForConditionalGeneration` |
 | `install_service.sh`: `lilith::heph::bind` | the bind address is 0.0.0.0 or not on this host | set `LILITH_LLAMA_HOST` in `server.env` to the LAN address |
 | unit fails at start, journal `lilith::heph::key` | the key file is missing or readable by others | rerun `install_service.sh` |
-| unit fails, HIP out-of-memory | another process holds VRAM | `rocm-smi`; stop Ollama or the training job |
+| unit fails, out-of-memory | another process holds VRAM | `rocm-smi`; stop Ollama or the training job |
 | `verify.py` `tool_call` FAIL "unparsed" | template and parser do not match | ADR 121, "Tool calling": test a later commit, else the Runpod pod |
 | `verify.py` `context` FAIL | started with a smaller `--kv-unified-per-slot` | fix `server.env`, restart |
 | turns fail, `curl` from a login shell works | Local Network TCC for the LaunchDaemon | CUTOVER TCC section |
@@ -239,11 +275,13 @@ lilith-serve`. Nothing on hephaistos needs removal; the share keeps the converte
 ## Tests
 
 ```sh
-python3 -m unittest scripts/lilith/hephaistos/test_hephaistos_scripts.py     # 41+ tests, no GPU, no network
+uv run --with pytest python -m pytest -q scripts/lilith/hephaistos     # 58 tests, no GPU, no network, no root
 cd deploy/roman-mini && python3 -m unittest discover -p 'test_*.py'
 ```
 
 They cover the pin/provenance chain (tampering, wrong parent, wrong converter, wrong template), each
 script's refusals against fakes (`LILITH_NO_SUDO=1`, a fake NFS, a fake `llama-server`), `run_server.sh`'s
-exact command line and that the key is on no argv or environment, the unit file, and `verify.py`
+exact command line and that the key is on no argv or environment, the unit file, the build toolchain
+handling (ROCm PATH and version floor, libstdc++-dev, the pinned Vulkan SDK download, hash refusal and
+`BUILD.json` provenance), and `verify.py`
 against a mock server with every failure shape.

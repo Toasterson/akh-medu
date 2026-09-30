@@ -41,8 +41,18 @@
     "tag": "v0.5.0",
     "commit": "7fe450e19305b828c199d602c23a8337aaa1f03b",
     "gpu_target": "gfx1100",
+    "hip_rocm_known_bad_through": "6.3.4",
+    "hip_rocm_known_bad_reason": "Verified 2026-09-30 on hephaistos (Zorin 17.3 = Ubuntu 22.04 jammy, ROCm 6.3.4, gfx1100): compiling the pinned commit's mmf template instances fails with 'Illegal instruction detected: Invalid dpp_ctrl value: wavefront shifts are not supported on GFX10+'. llama.cpp's docs state no minimum ROCm version, so the rule is: 6.3.4 and older are known bad, and a newer ROCm has to be proven by a build.",
     "converter_transformers": "5.17.0",
     "converter_transformers_reason": "llama.cpp's own requirements pin transformers 4.57.6, whose AutoTokenizer raises AttributeError on the parent's tokenizer_config.json (extra_special_tokens is a list, a transformers 5 format; the parent was written by transformers 5.10.0.dev0). Verified 2026-09-29 on the pinned converter: 4.57.6 fails, 5.17.0 exports the vocabulary and chat template."
+  },
+  "vulkan_sdk": {
+    "version": "1.4.363.0",
+    "url": "https://sdk.lunarg.com/sdk/download/1.4.363.0/linux/vulkan_sdk.tar.xz",
+    "sha256": "197962f5cbf80baf2775a03336a01cee7c8745686c65aaa70d3f751ade4d7e43",
+    "size": 366564872,
+    "system_headers_min_patch": 246,
+    "reason": "Ubuntu 22.04 (jammy) has no glslc package and ships Vulkan 1.3.204 headers; the pinned llama.cpp then fails with 'PFN_vkGetDeviceFaultInfoEXT does not name a type' (VK_EXT_device_fault arrived in header 1.3.246). The LunarG SDK supplies glslc and current headers; the build uses it from the work directory, nothing is installed system-wide. Verified 2026-09-30 on hephaistos."
   },
   "gguf": {
     "quant": "q8_0",

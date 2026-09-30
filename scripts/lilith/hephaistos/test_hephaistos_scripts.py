@@ -87,6 +87,17 @@ class PinsTests(unittest.TestCase):
         revision = re.search(r'^PARENT_REVISION="([0-9a-f]{40})"', bootstrap, re.M).group(1)
         self.assertEqual(pins["parent"]["revision"], revision)
 
+    def test_the_build_pins_name_the_rocm_floor_and_a_hashed_versioned_vulkan_sdk(self):
+        pins = tools.load_pins()
+        self.assertEqual(pins["llama_cpp"]["hip_rocm_known_bad_through"], "6.3.4")
+        self.assertIn("dpp_ctrl", pins["llama_cpp"]["hip_rocm_known_bad_reason"])
+        sdk = pins["vulkan_sdk"]
+        self.assertRegex(sdk["version"], r"^1\.\d+\.\d+\.\d+$")
+        self.assertRegex(sdk["sha256"], r"^[0-9a-f]{64}$")
+        self.assertIn(sdk["version"], sdk["url"], "the URL is versioned, never 'latest'")
+        self.assertNotIn("latest", sdk["url"])
+        self.assertGreater(sdk["system_headers_min_patch"], 204, "jammy's 1.3.204 headers are known too old")
+
     def test_the_serving_defaults_meet_the_context_requirement(self):
         env = (HERE / "server.env.example").read_text()
         per_slot = int(re.search(r"^LILITH_LLAMA_CTX_PER_SLOT=(\d+)$", env, re.M).group(1))
@@ -98,6 +109,27 @@ class PinsTests(unittest.TestCase):
         model = re.search(r'^LILITH_MODEL = "([^"]+)"', akh, re.M).group(1)
         self.assertEqual(re.search(r"^LILITH_MODEL_NAME=(\S+)$", env, re.M).group(1), model)
         self.assertEqual(verify.DEFAULT_MODEL, model)
+
+
+class VersionTests(unittest.TestCase):
+    def test_version_ordering_ignores_the_package_suffix_and_pads_zeros(self):
+        self.assertTrue(tools.version_le("6.3.4-76", "6.3.4"))
+        self.assertTrue(tools.version_le("6.2.0", "6.3.4"))
+        self.assertTrue(tools.version_le("6.3", "6.3.0"))
+        self.assertFalse(tools.version_le("6.4.0", "6.3.4"))
+        self.assertFalse(tools.version_le("6.10.0", "6.3.4"), "numeric, not lexicographic")
+        self.assertTrue(tools.version_le("7.0.0", "7.0"))
+
+    def test_a_non_numeric_version_is_a_refusal(self):
+        with self.assertRaises(tools.HephError):
+            tools.version_le("none", "6.3.4")
+
+    def test_the_cli_exit_codes(self):
+        run = lambda *a: subprocess.run([sys.executable, str(HERE / "heph_tools.py"), "version-le", *a],
+                                        capture_output=True, text=True).returncode
+        self.assertEqual(run("6.3.4", "6.3.4"), 0)
+        self.assertEqual(run("6.4.0", "6.3.4"), 2)
+        self.assertEqual(run("banana", "6.3.4"), 1)
 
 
 class HephToolsTests(unittest.TestCase):
@@ -418,6 +450,238 @@ class BuildServerTests(FakeServerCase):
             result = self.run_script("build_server.sh", *args)
             self.assertEqual(result.returncode, 1)
             self.assertIn(f"error[lilith::heph::{code}]", result.stderr)
+
+
+class BuildToolchainTests(FakeServerCase):
+    """build_server.sh toolchain handling on Ubuntu 22.04: ROCm PATH and version floor, libstdc++-dev,
+    and the pinned Vulkan SDK. Fakes only: PATH is a fake bin dir plus /usr/bin:/bin."""
+
+    SDK_VERSION = "9.9.9.0"
+
+    def setUp(self):
+        super().setUp()
+        self.bin = self.dir / "fakebin"
+        self.bin.mkdir()
+        self.apt_log = self.dir / "apt.log"
+        self.fake("apt-get", f'echo "$@" >> {self.apt_log}')
+        self.fake("cmake", "exit 0")
+        self.fake("c++", "exit 0")
+        # ROCm: bin/ is NOT on PATH, like hephaistos
+        self.rocm = self.dir / "rocm"
+        (self.rocm / "bin").mkdir(parents=True)
+        (self.rocm / ".info").mkdir()
+        (self.rocm / "include/hipblas").mkdir(parents=True)
+        (self.rocm / "include/hipblas/hipblas.h").write_text("")
+        (self.rocm / "bin/hipconfig").write_text(f'#!/bin/sh\ncase "$1" in -R) echo {self.rocm};; -l) echo {self.rocm}/llvm/bin;; esac\n')
+        (self.rocm / "bin/rocminfo").write_text("#!/bin/sh\necho 'Name: gfx1100'\n")
+        for name in ("hipconfig", "rocminfo"):
+            (self.rocm / "bin" / name).chmod(0o755)
+        self.set_rocm_version("6.4.1-1")
+        # GCC 11 and 12 installed; only 11's libstdc++ headers
+        self.gcc = self.dir / "gcc"
+        self.cxx = self.dir / "cxx"
+        for major in ("9", "10", "12"):
+            (self.gcc / major).mkdir(parents=True)
+        (self.gcc / "plugin").mkdir()
+        (self.cxx / "10").mkdir(parents=True)
+        (self.cxx / "10/cmath").write_text("")
+        self.vk_include = self.dir / "vkinc"
+        self.vk_include.mkdir()
+        self.env.update({"PATH": f"{self.bin}:/usr/bin:/bin", "LILITH_ROCM_DIR": str(self.rocm),
+                         "LILITH_GCC_LIB_DIR": str(self.gcc), "LILITH_CXX_INCLUDE_DIR": str(self.cxx),
+                         "LILITH_VULKAN_INCLUDE_DIR": str(self.vk_include), "LILITH_HOST_ARCH": "x86_64"})
+
+    def fake(self, name, body):
+        path = self.bin / name
+        path.write_text(f"#!/bin/sh\n{body}\n")
+        path.chmod(0o755)
+
+    def set_rocm_version(self, version):
+        (self.rocm / ".info/version").write_text(version + "\n")
+
+    def set_vulkan_headers(self, patch):
+        (self.vk_include / "vulkan_core.h").write_text(f"#define VK_HEADER_VERSION {patch}\n")
+
+    def apt_args(self):
+        return self.apt_log.read_text().splitlines() if self.apt_log.exists() else []
+
+    # ---- HIP -------------------------------------------------------------------------------------
+
+    def test_hip_adds_rocm_bin_to_path_itself_and_refuses_the_known_bad_rocm(self):
+        self.set_rocm_version("6.3.4-76")
+        result = self.run_script("build_server.sh", "--toolchain-only")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("error[lilith::heph::rocm_version]", result.stderr, "hipconfig was found via /opt/rocm/bin")
+        self.assertNotIn("error[lilith::heph::tool]", result.stderr)
+        self.assertIn("6.3.4", result.stderr)
+        self.assertIn("--backend vulkan", result.stderr)
+        self.assertIn("upgrade ROCm", result.stderr)
+
+    def test_an_older_rocm_is_refused_too_and_the_override_builds_anyway(self):
+        self.set_rocm_version("6.2.4")
+        (self.cxx / "12").mkdir()
+        (self.cxx / "12/cmath").write_text("")
+        self.assertIn("rocm_version", self.run_script("build_server.sh", "--toolchain-only").stderr)
+        forced = self.run_script("build_server.sh", "--toolchain-only", LILITH_ALLOW_OLD_ROCM="1")
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertIn("WARNING: ROCm 6.2.4 is known bad", forced.stderr)
+
+    def test_a_newer_rocm_passes_the_floor_then_needs_the_libstdcxx_of_the_highest_gcc(self):
+        result = self.run_script("build_server.sh", "--toolchain-only")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("error[lilith::heph::libstdcxx]", result.stderr)
+        self.assertIn("libstdc++-12-dev", result.stderr, "structurally the highest GCC (12), not 10 or 9")
+        (self.cxx / "12").mkdir()
+        (self.cxx / "12/cmath").write_text("")
+        ok = self.run_script("build_server.sh", "--toolchain-only")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn("toolchain ok (hip)", ok.stderr)
+        self.assertIn("rocm=6.4.1-1", ok.stderr)
+
+    def test_hip_install_deps_installs_libstdcxx_dev_for_the_highest_gcc_numerically(self):
+        self.run_script("build_server.sh", "--install-deps", "--toolchain-only")
+        self.assertIn("install -y libstdc++-12-dev", self.apt_args(), "12 beats 9 and 10 (numeric sort)")
+        self.assertFalse([line for line in self.apt_args() if "glslc" in line or "vulkan" in line])
+
+    def test_hip_install_deps_follows_a_newer_gcc_without_a_hardcoded_version(self):
+        (self.gcc / "13").mkdir()
+        self.run_script("build_server.sh", "--install-deps", "--toolchain-only")
+        self.assertIn("install -y libstdc++-13-dev", self.apt_args())
+
+    def test_the_rocm_version_is_unreadable_then_it_warns_but_does_not_block(self):
+        (self.rocm / ".info/version").unlink()
+        (self.cxx / "12").mkdir()
+        (self.cxx / "12/cmath").write_text("")
+        result = self.run_script("build_server.sh", "--toolchain-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("could not read the ROCm version", result.stderr)
+
+    # ---- Vulkan ----------------------------------------------------------------------------------
+
+    def make_sdk_pins(self, *, sha=None):
+        """Point the pins' vulkan_sdk at a local fake tarball (file:// URL) holding <ver>/setup-env.sh."""
+        stage = self.dir / "sdkstage"
+        sdk = stage / self.SDK_VERSION
+        (sdk / "x86_64/bin").mkdir(parents=True)
+        glslc = sdk / "x86_64/bin/glslc"
+        glslc.write_text("#!/bin/sh\necho glslc fake\n")
+        glslc.chmod(0o755)
+        (sdk / "setup-env.sh").write_text(
+            f'export VULKAN_SDK="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)/x86_64"\n'
+            'export PATH="$VULKAN_SDK/bin:$PATH"\necho "$UNSET_IN_INTERACTIVE_SHELLS" >/dev/null\n')
+        tarball = self.dir / "vulkan_sdk.tar.xz"
+        subprocess.run(["tar", "-cJf", str(tarball), "-C", str(stage), self.SDK_VERSION], check=True)
+        pins = tools.load_pins()
+        pins["vulkan_sdk"].update({"version": self.SDK_VERSION, "url": tarball.as_uri(),
+                                   "sha256": sha or hashlib.sha256(tarball.read_bytes()).hexdigest(),
+                                   "size": tarball.stat().st_size})
+        pins_file = self.dir / "pins-sdk.json"
+        pins_file.write_text(json.dumps(pins))
+        self.env["LILITH_PINS_FILE"] = str(pins_file)
+        return pins
+
+    def test_vulkan_install_deps_apt_installs_only_the_headers_and_drivers_not_glslc(self):
+        self.make_sdk_pins()
+        self.set_vulkan_headers(204)
+        result = self.run_script("build_server.sh", "--backend", "vulkan", "--install-deps", "--toolchain-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        vulkan_lines = [line for line in self.apt_args() if "vulkan" in line]
+        self.assertEqual(vulkan_lines, ["install -y libvulkan-dev mesa-vulkan-drivers"])
+        self.assertFalse([line for line in self.apt_args() if "glslc" in line or "libstdc++" in line])
+
+    def test_old_system_headers_and_no_glslc_download_the_pinned_sdk_verify_and_use_it(self):
+        self.make_sdk_pins()
+        self.set_vulkan_headers(204)   # jammy
+        result = self.run_script("build_server.sh", "--backend", "vulkan", "--install-deps", "--toolchain-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"pinned Vulkan SDK {self.SDK_VERSION}", result.stderr)
+        self.assertIn(f"vulkan_sdk={self.SDK_VERSION}", result.stderr)
+        root = self.dir / "work/vulkan-sdk"
+        self.assertTrue((root / self.SDK_VERSION / "setup-env.sh").is_file())
+        self.assertTrue((root / f"{self.SDK_VERSION}.sha256").is_file())
+        self.assertFalse(list(root.glob("*.tar.xz*")), "the tarball is not kept")
+        # rerun: reused, no second download
+        again = self.run_script("build_server.sh", "--backend", "vulkan", "--toolchain-only")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertNotIn("downloading", again.stderr)
+        self.assertIn(f"vulkan_sdk={self.SDK_VERSION}", again.stderr)
+
+    def test_a_download_that_does_not_match_its_pinned_sha256_is_refused_and_not_unpacked(self):
+        self.make_sdk_pins(sha="0" * 64)
+        self.set_vulkan_headers(204)
+        result = self.run_script("build_server.sh", "--backend", "vulkan", "--install-deps", "--toolchain-only")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("error[lilith::heph::vulkan_sdk]", result.stderr)
+        self.assertIn("pinned sha256", result.stderr)
+        self.assertFalse((self.dir / f"work/vulkan-sdk/{self.SDK_VERSION}").exists())
+
+    def test_without_install_deps_nothing_is_downloaded_and_the_help_names_the_flag(self):
+        self.make_sdk_pins()
+        self.set_vulkan_headers(204)
+        result = self.run_script("build_server.sh", "--backend", "vulkan", "--toolchain-only")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("error[lilith::heph::vulkan_sdk]", result.stderr)
+        self.assertIn("--backend vulkan --install-deps", result.stderr)
+        self.assertFalse((self.dir / "work/vulkan-sdk").exists())
+
+    def test_a_sufficient_system_toolchain_is_used_without_the_sdk(self):
+        self.make_sdk_pins()
+        self.fake("glslc", "echo glslc")
+        self.set_vulkan_headers(275)
+        result = self.run_script("build_server.sh", "--backend", "vulkan", "--install-deps", "--toolchain-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("using the system Vulkan toolchain", result.stderr)
+        self.assertIn("vulkan_sdk=system", result.stderr)
+        self.assertFalse((self.dir / "work/vulkan-sdk").exists())
+
+    def test_glslc_with_too_old_headers_still_needs_the_sdk(self):
+        self.make_sdk_pins()
+        self.fake("glslc", "echo glslc")
+        self.set_vulkan_headers(204)
+        result = self.run_script("build_server.sh", "--backend", "vulkan", "--install-deps", "--toolchain-only")
+        self.assertIn(f"vulkan_sdk={self.SDK_VERSION}", result.stderr)
+
+    def test_a_full_vulkan_build_records_the_sdk_in_build_json_and_a_toolchain_change_cleans_the_build_dir(self):
+        self.make_sdk_pins()
+        self.set_vulkan_headers(204)
+        # a local llama.cpp "repo" at a known commit, so ensure_llama_source can fetch it by SHA
+        repo = self.dir / "llama-repo"
+        repo.mkdir()
+        git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True,
+                                        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                                             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+        git("init", "-q")
+        (repo / "CMakeLists.txt").write_text("\n")
+        git("add", ".")
+        git("commit", "-q", "-m", "x")
+        commit = git("rev-parse", "HEAD").stdout.strip()
+        pins = json.loads(Path(self.env["LILITH_PINS_FILE"]).read_text())
+        pins["llama_cpp"].update({"repo": str(repo), "commit": commit})
+        Path(self.env["LILITH_PINS_FILE"]).write_text(json.dumps(pins))
+        fake_server = self.dir / "fake-llama-server"
+        fake_server.write_text("#!/bin/sh\necho options:\n" + "".join(f"echo '  {flag} X'\n" for flag in BuildServerTests.REQUIRED))
+        fake_server.chmod(0o755)
+        self.fake("cmake", f"""if [ "$1" = --build ]; then
+  mkdir -p "$2/bin"
+  cp "{fake_server}" "$2/bin/llama-server"
+  cp "{fake_server}" "$2/bin/llama-bench"
+else
+  printf '%s\\n' "$@" > "{self.dir}/cmake-args"
+fi""")
+        (self.dir / "work/build-vulkan").mkdir(parents=True)
+        (self.dir / "work/build-vulkan/stale-cache").write_text("old toolchain")
+        result = self.run_script("build_server.sh", "--backend", "vulkan", "--install-deps")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("toolchain changed", result.stderr)
+        self.assertFalse((self.dir / "work/build-vulkan/stale-cache").exists(), "clean build dir")
+        self.assertIn("-DGGML_VULKAN=ON", (self.dir / "cmake-args").read_text())
+        build = json.loads((self.dir / f"opt/llama.cpp/{commit[:12]}-vulkan/BUILD.json").read_text())
+        self.assertEqual(build["backend"], "vulkan")
+        self.assertEqual(build["commit"], commit)
+        self.assertEqual(build["vulkan_sdk"], self.SDK_VERSION)
+        self.assertEqual(build["vulkan_sdk_sha256"], pins["vulkan_sdk"]["sha256"])
+        self.assertIsNone(build["rocm"])
+        self.assertIsNone(build["system_vulkan_header_patch"])
 
 
 class ConvertParentTests(FakeServerCase):

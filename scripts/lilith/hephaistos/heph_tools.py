@@ -7,6 +7,7 @@ in this directory call these subcommands; they are kept here so that they can be
   pins get KEY                      print one value from pins.json (dotted key)
   pins file NAME                    print "<sha256> <size>" of one pinned parent file
   sha256 FILE|-                     print the sha256 of a file (or of stdin)
+  version-le A B                    exit 0 when dotted version A <= B, 2 when not (a "-76" suffix is ignored)
   verify-dir DIR [--files a,b]      check size + sha256 of the pinned parent files in DIR
   stage --dst PATH --sha256 H --size N
                                     copy stdin to PATH, verified, atomic (partial + rename)
@@ -52,6 +53,23 @@ def load_pins(path: Path = DEFAULT_PINS) -> dict[str, Any]:
         raise HephError("lilith::heph::pins", f"{path} has an unknown schema {pins.get('schema')!r}",
                         "use the pins.json shipped with this checkout")
     return pins
+
+
+def version_tuple(text: str) -> tuple[int, ...]:
+    """'6.3.4-76' -> (6, 3, 4). Only the leading dotted-numeric part counts."""
+    head = text.strip().split("-", 1)[0]
+    parts = head.split(".")
+    if not head or not all(part.isdigit() for part in parts):
+        raise HephError("lilith::heph::version", f"'{text.strip()}' is not a dotted numeric version",
+                        "expected something like 6.3.4 or 6.3.4-76")
+    return tuple(int(part) for part in parts)
+
+
+def version_le(left: str, right: str) -> bool:
+    """left <= right, padding the shorter version with zeros (6.3 == 6.3.0)."""
+    a, b = version_tuple(left), version_tuple(right)
+    width = max(len(a), len(b))
+    return a + (0,) * (width - len(a)) <= b + (0,) * (width - len(b))
 
 
 def sha256_stream(handle) -> str:
@@ -220,6 +238,9 @@ def main(argv: list[str]) -> int:
     get.add_argument("key", help="dotted key for `get`; a parent file name for `file` (prints 'sha256 size')")
     sha = sub.add_parser("sha256")
     sha.add_argument("file", type=Path)
+    le = sub.add_parser("version-le")
+    le.add_argument("left")
+    le.add_argument("right")
     verify = sub.add_parser("verify-dir")
     verify.add_argument("directory", type=Path)
     verify.add_argument("--files", default=None, help="comma-separated subset")
@@ -258,6 +279,8 @@ def main(argv: list[str]) -> int:
                 print(sha256_stream(sys.stdin.buffer))
             else:
                 print(sha256_file(args.file))
+        elif args.command == "version-le":
+            return 0 if version_le(args.left, args.right) else 2
         elif args.command == "verify-dir":
             only = args.files.split(",") if args.files else None
             print(json.dumps(verify_dir(args.directory, pins, only), indent=2, sort_keys=True))

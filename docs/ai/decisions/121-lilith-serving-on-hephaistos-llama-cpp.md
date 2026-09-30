@@ -1,7 +1,8 @@
 # ADR 121 — Lilith is served on hephaistos with llama.cpp (Q8_0), Runpod is for training
 
 - **Status:** Accepted (operator decision 2026-09-29; scripts and runbook on branch
-  `feat/lilith-serve-hephaistos`; executed by the supervisor when hephaistos is powered on)
+  `feat/lilith-serve-hephaistos`). **Amended 2026-09-30:** the first real build showed the HIP build
+  fails on ROCm 6.3.4, so the live server is the Vulkan build (see "Amendment 2026-09-30")
 - **Date:** 2026-09-29
 - **Relates:** [ADR 116](116-lilith-chief-of-staff-guided-rl.md) (Lilith; this refines Decision 7's
   serving placement), [ADR 113](113-full-akh-always.md) (Lilith is a workspace of the Roman core),
@@ -164,6 +165,34 @@ ROCm training run (a mixed-backend episode reset this card in September).
   `reasoning_content`), so a small `max_tokens` can end a turn before the answer or tool call.
 - Not covered: the frozen parent only. Serving a certified adapter needs a LoRA-to-GGUF export
   (plan §4a) and a parity check against the served arithmetic; that is a later slice.
+
+## Amendment 2026-09-30 — first real build on hephaistos: Vulkan is the live backend
+
+Host facts: Zorin OS 17.3 (Ubuntu 22.04 jammy base), ROCm 6.3.4 at `/opt/rocm` (bin not on `PATH`),
+gfx1100. Anima WI C2 `01a0e270-314e`.
+
+- **HIP does not build the pinned commit with ROCm 6.3.4.** After fixing the `hipconfig` PATH and the
+  missing `libstdc++-12-dev` (ROCm's clang picks the highest installed GCC), compiling the `mmf`
+  template instances for gfx1100 fails: `error: Illegal instruction detected: Invalid dpp_ctrl value:
+  wavefront shifts are not supported on GFX10+`. llama.cpp's docs name no minimum ROCm, so the rule in
+  `pins.json` is `hip_rocm_known_bad_through = 6.3.4`; `build_server.sh` refuses HIP at or below it
+  (`lilith::heph::rocm_version`, naming `--backend vulkan` and a ROCm upgrade). Whether ROCm 6.4 or 7
+  fixes it is unmeasured.
+- **The live server is the Vulkan (RADV) build of the same commit `7fe450e19305`**, the fallback this
+  ADR already named, until ROCm is upgraded and a HIP build is proven. Decision 1's HIP row is the
+  intended default, not what runs today; the throughput bounds above were written for HIP, and
+  `verify.py` produces the measured Vulkan numbers.
+- **Vulkan on jammy needs the LunarG SDK.** jammy has no `glslc` package, and `libvulkan-dev` ships
+  1.3.204 headers, which fail the pinned llama.cpp (`PFN_vkGetDeviceFaultInfoEXT does not name a
+  type`). `build_server.sh --backend vulkan --install-deps` apt-installs `libvulkan-dev
+  mesa-vulkan-drivers` only, then, when glslc is missing or the headers are older than
+  `vulkan_sdk.system_headers_min_patch` (246), downloads the **pinned** SDK (`pins.json` `vulkan_sdk`:
+  version 1.4.363.0, versioned URL, sha256 `197962f5…d7e43`, verified before use) into the work
+  directory, sources its `setup-env.sh` for the build only, and cleans the build directory when the
+  toolchain changed. The SDK version and sha256 are in the build's `BUILD.json`. Pinning is
+  deliberate: `.../latest/...` changes under us and breaks provenance.
+- Consequence for ADR 116: nothing changes for the akh (same endpoint, same model name); only the
+  backend behind `192.168.1.114:8080` differs.
 
 ## Alternatives considered
 
