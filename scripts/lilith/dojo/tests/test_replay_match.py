@@ -26,6 +26,7 @@ TOOLS = [
     {"name": "get_work_item_detail", "inputSchema": {"type": "object", "properties": {
         "id": {"type": "string"}, "message_page_size": {"type": "integer"}, "change_page_size": {"type": "integer"},
         "archived": {"type": "boolean"}}}},
+    {"name": "get_work_item_forensics", "inputSchema": FORENSICS},
     {"name": "get_plan", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}}},
 ]
 PAGE_1 = {"work_items": [{"id": f"w{i}"} for i in range(3)], "next_page_token": "tok", "total": 5}
@@ -91,8 +92,13 @@ def test_page_size_equal_to_the_recorded_full_page_is_the_same_call(snap):
 
 
 @pytest.mark.parametrize("size", [1, 2, 4, 100])
-def test_page_size_that_would_truncate_or_extend_a_partial_page_stays_an_error(snap, size):
-    assert resolve(snap, "list_work_items", {"project_id": PROJECT, "page_size": size}) is None
+def test_page_size_that_the_recorded_page_does_not_match_is_derived_from_the_recorded_items(snap, size):
+    """Not the recorded page, so never passed off as it: re-paged over the recorded walk, rule named."""
+    found = resolve(snap, "list_work_items", {"project_id": PROJECT, "page_size": size})
+    expected = [{"id": f"w{i}"} for i in range(5)][:size]
+    assert found.payload["work_items"] == expected and found.payload["total"] == 5
+    assert ("derive:list_work_items" in found.match.rules) and not found.match.exact
+    assert (found.payload["next_page_token"] is None) == (size >= 5)
 
 
 @pytest.mark.parametrize("size", [2, 3, 50])
@@ -119,12 +125,12 @@ def test_empty_page_token_is_the_first_page(snap):
     assert found.payload == PAGE_1 and found.match.rules == ("empty-token:page_token",)
 
 
-def test_filters_and_unrecorded_scopes_are_never_normalised_away(snap):
-    assert resolve(snap, "list_work_items", {"project_id": PROJECT, "current_phase": "working"}) is None
-    assert resolve(snap, "list_work_items", {"current_phase": "working", "page_size": 3}) is None
-    assert resolve(snap, "list_work_items", {"page_size": 3}) is None
+def test_unrecorded_scopes_and_identifiers_are_never_invented(snap):
+    assert resolve(snap, "list_work_items", {"project_id": "elsewhere"}) is None
+    assert resolve(snap, "list_work_items", {"project_id": PROJECT, "bogus": 1}) is None
     assert resolve(snap, "get_work_item_detail", {"id": "unrecorded"}) is None
-    assert resolve(snap, "get_plan", {"id": "p1"}) is None  # tool never recorded
+    assert resolve(snap, "get_plan", {"id": "unrecorded"}) is None
+    assert resolve(snap, "get_work_item_forensics", {"work_item_id": "w0"}) is None  # tool never recorded
 
 
 def test_unlistable_or_multi_list_responses_have_no_completeness_proof(snap):
@@ -182,13 +188,13 @@ def test_receipt_records_requested_and_matched_arguments(snap, tmp_path):
 
 def test_error_receipts_carry_a_machine_readable_reason(snap, tmp_path):
     server = ReplayServer(snap, DojoLedger(tmp_path / "l.jsonl"))
-    for name, args, reason in (("get_work_item_detail", {"id": "nope"}, "arguments-not-recorded"),
-                               ("get_plan", {"id": "p1"}, "tool-not-recorded")):
+    for name, args, reason in (("get_work_item_detail", {"id": "nope"}, "work-item-not-recorded"),
+                               ("get_work_item_forensics", {"work_item_id": "w0"}, "tool-not-recorded")):
         result = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                                 "params": {"name": name, "arguments": args}})["result"]
         assert result["isError"] is True
         assert json.loads(result["content"][0]["text"])["reason"] == reason
-    assert [r.error_reason for r in server.receipts.receipts] == ["arguments-not-recorded", "tool-not-recorded"]
+    assert [r.error_reason for r in server.receipts.receipts] == ["work-item-not-recorded", "tool-not-recorded"]
 
 
 def test_resolve_ref_follows_git_spellings_against_recorded_refs():
@@ -234,8 +240,10 @@ def test_audit_classifies_misses(snap):
         return classify(snap, server, tool, args).klass
 
     assert klass("anima", "list_work_items", {"project_id": PROJECT, "page_size": 3}) == CLASS_EQUIVALENT
-    assert klass("anima", "get_plan", {"id": "p1"}) == CLASS_UNRECORDED
+    assert klass("anima", "get_plan", {"id": "p1"}) == CLASS_EQUIVALENT  # derived from the recorded list_plans
+    assert klass("anima", "get_work_item_forensics", {"work_item_id": "w0"}) == CLASS_UNRECORDED
     assert klass("anima", "get_work_item_detail", {"id": "nope"}) == CLASS_UNRECORDED
-    assert klass("anima", "list_work_items", {"current_phase": "working"}) == CLASS_OTHER
+    assert klass("anima", "list_work_items", {"current_phase": "working"}) == CLASS_EQUIVALENT
+    assert klass("anima", "list_work_items", {"bogus": 1}) == CLASS_OTHER
     assert klass("git", "git_is_ancestor", {"commit": "c" * 40, "ref": "origin/main"}) == CLASS_EQUIVALENT
     assert klass("git", "git_is_ancestor", {"commit": "c" * 40, "ref": "elsewhere/main"}) == CLASS_UNRECORDED

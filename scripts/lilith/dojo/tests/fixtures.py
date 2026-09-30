@@ -38,6 +38,8 @@ TOOLS = [
     {"name": "get_wi_loop_state", "inputSchema": {"type": "object", "properties": {
         "work_item_id": {"type": "string"}}, "required": ["work_item_id"]}},
     {"name": "get_thread", "inputSchema": {"type": "object", "properties": {"work_item_id": {"type": "string"}}}},
+    {"name": "get_work_item_forensics", "inputSchema": {"type": "object", "properties": {
+        "work_item_id": {"type": "string"}}, "required": ["work_item_id"]}},
     {"name": "get_plan", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
     {"name": "list_plans", "inputSchema": {"type": "object", "properties": {"project_id": {"type": "string"}}}},
     {"name": "approve_and_merge", "inputSchema": {"type": "object", "properties": {
@@ -77,7 +79,7 @@ class World:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def snapshot(self, when: datetime, items: list[WI], main_sha: str = MAIN_1, tools: list[dict] | None = None,
-                 extra: tuple[tuple[str, dict, Any, dict], ...] = ()) -> str:
+                 extra: tuple[tuple[str, dict, Any, dict], ...] = (), branches: tuple[str, ...] = ()) -> str:
         """`extra`: more recorded reads, `(call, args, payload, manifest fields)`."""
         sid = when.strftime("%Y%m%dT%H%M%SZ")
         responses: list[dict] = []
@@ -122,7 +124,8 @@ class World:
             responses[-1].update(fields)
         contract_sha, _ = rec.store_object(self.root, {"tools": tools if tools is not None else TOOLS})
         refs_payload = {"remote": rec.GIT_REMOTE, "refs": [{"ref": "HEAD", "sha": main_sha},
-                                                           {"ref": "refs/heads/main", "sha": main_sha}]}
+                                                           {"ref": "refs/heads/main", "sha": main_sha},
+                                                           *({"ref": f"refs/heads/{b}", "sha": "3" * 40} for b in branches)]}
         refs_sha, _ = rec.store_object(self.root, refs_payload)
         manifest = {
             "schema": rec.SCHEMA,

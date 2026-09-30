@@ -38,8 +38,12 @@ an `integer` property named `page_size` / `per_page` / `limit` / `top_k` / `max_
 (optionally prefixed, e.g. `change_page_size`); a page-token parameter is a `string` property
 named `page_token` / `cursor` (optionally prefixed). The response's own next-page key is
 matched on the normalised identifier (`next_page_token`, `nextPageToken`, `next_cursor`).
-Filters (`current_phase`, `plan_id`, ...), unrecorded tools and unrecorded ids are never
-normalised away.
+Unrecorded tools and unrecorded ids are never normalised away.
+
+Beyond argument spelling, `replay_anima` answers reads the recorder captured as *data* rather
+than as a call: `list_work_items` with any `current_phase` / `plan_id` / `project_id` / `page_size`
+/ `page_token` (filter + paginate over the recorded pages), `list_projects`,
+`get_work_item_by_id` and `get_plan`. Those receipts carry `derive:...` rules.
 """
 from __future__ import annotations
 
@@ -47,7 +51,9 @@ import dataclasses
 import re
 from typing import Any, Mapping
 
-from dojo.snapshot import MAIN_REF, ObjectRef, Snapshot
+from dojo import replay_anima
+from dojo.replay_anima import Derived, DeriveMiss, MissReason
+from dojo.snapshot import MAIN_REF, ObjectRef, Snapshot, canonical_args, canonical_json, sha256_hex
 
 PAGE_SIZE_PARAM = re.compile(r"^(?:[a-z][a-z0-9]*_)*(?:page_size|per_page|limit|top_k|max_results|k)$")
 PAGE_TOKEN_PARAM = re.compile(r"^(?:[a-z][a-z0-9]*_)*(?:page_token|cursor)$")
@@ -188,6 +194,10 @@ def resolve_recorded_read(snapshot: Snapshot, name: str, input_schema: Mapping[s
                                                         bool(response.complete)):
             return _read(snapshot, response, ArgumentMatch(
                 requested, dict(response.args), (*rules, f"page-size-satisfied:{key}={int(normalised[key])}")))
+    derived = replay_anima.derive(snapshot, name, normalised)
+    if isinstance(derived, Derived):
+        ref = ObjectRef(snapshot.id, name, canonical_args(requested), sha256_hex(canonical_json(derived.payload)))
+        return RecordedRead(derived.payload, ref, ArgumentMatch(requested, dict(derived.matched), (*rules, *derived.rules)))
     return None
 
 
@@ -198,6 +208,32 @@ def _read(snapshot: Snapshot, response, match: ArgumentMatch) -> RecordedRead:
 def recorded_shape(snapshot: Snapshot, name: str) -> str:
     """Why a read missed: was the tool ever recorded in this snapshot?"""
     return "arguments-not-recorded" if any(True for _ in snapshot.by_call(name)) else "tool-not-recorded"
+
+
+@dataclasses.dataclass(frozen=True)
+class MissExplanation:
+    """Why a read could not be answered: a stable `reason`, what the replay knows about it."""
+
+    reason: str
+    detail: str = ""
+    context: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+
+
+def explain_miss(snapshot: Snapshot, name: str, input_schema: Mapping[str, Any] | None,
+                 arguments: Mapping[str, Any]) -> MissExplanation:
+    """The most specific reason `resolve_recorded_read` returned `None` for this call."""
+    normalised, _ = normalize_arguments(input_schema, arguments)
+    derived = replay_anima.derive(snapshot, name, normalised)
+    if isinstance(derived, DeriveMiss):
+        return MissExplanation(derived.reason.value, derived.detail, derived.context)
+    shape = recorded_shape(snapshot, name)
+    project = arguments.get("project_id")
+    if (shape == MissReason.ARGUMENTS_NOT_RECORDED.value and isinstance(project, str)
+            and project not in replay_anima.project_ids(snapshot)):
+        return MissExplanation(MissReason.PROJECT_NOT_RECORDED.value,
+                               f"snapshot {snapshot.id} recorded no collector for project {project!r}",
+                               {"recorded_projects": sorted(replay_anima.project_ids(snapshot))})
+    return MissExplanation(shape)
 
 
 def resolve_ref(refs: Mapping[str, str], requested: str | None) -> tuple[str | None, tuple[str, ...]]:
@@ -223,7 +259,9 @@ def resolve_ref(refs: Mapping[str, str], requested: str | None) -> tuple[str | N
 
 __all__ = [
     "ArgumentMatch",
+    "MissExplanation",
     "RecordedRead",
+    "explain_miss",
     "normalize_arguments",
     "page_size_satisfied",
     "recorded_shape",

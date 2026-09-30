@@ -70,13 +70,64 @@ def test_briefing_fabrication_wrong_phase_unread_id_and_fake_receipt(briefing_wo
     assert v.metrics["fabrications"] == 1.0
 
 
+def test_briefing_id_evidenced_only_by_a_git_branch_is_unbacked_not_fabricated(world, tmp_path):
+    """A work-item id seen verbatim in a git_ls_remote branch (`anima/<id>`) exists; no tracker receipt backs
+    its claimed phase, so the claim is soft. An id in no receipt at all stays a hard fabrication."""
+    wid = "0000aaaa-0000-7000-8000-00000000beef"
+    world.snapshot(T0, [WI("a", "working")])
+    sid = world.snapshot(T0 + hours(2), [WI("a", "done"), WI("w", "working")], branches=(f"anima/{wid}",))
+    spec = only(F.build_briefing(world.store(), sid, BuildContext()), "briefing")
+    d = Driver(spec, world.store(), tmp_path / "l.jsonl")
+    _, r1 = d.call("list_work_items", {"project_id": PROJECT})
+    _, r2 = d.call("git_ls_remote", {}, server="git")
+    d.emit(briefing_doc(d, rc(d, r1, r2), {"in_flight": [wid]}))
+    v = run_verify(world, spec, d)
+    assert not v.hard_constraints and v.metrics["fabrications"] == 0.0
+    assert any(n.startswith("unbacked:") and f"in_flight:{wid}" in n for n in v.steps[-1].notes)
+    assert v.steps[-1].vector.provenance < 1.0
+
+    d2 = Driver(spec, world.store(), tmp_path / "l2.jsonl")
+    _, s1 = d2.call("list_work_items", {"project_id": PROJECT})
+    _, s2 = d2.call("git_ls_remote", {}, server="git")
+    ghost = "0000aaaa-0000-7000-8000-0000000fab1e"
+    d2.emit(briefing_doc(d2, rc(d2, s1, s2), {"in_flight": [ghost]}))
+    v2 = run_verify(world, spec, d2)
+    assert HardConstraint.FABRICATION in v2.steps[-1].hard
+    assert any(f"fabricated: in_flight:{ghost}" in n for n in v2.steps[-1].notes)
+
+
+def test_a_tracker_receipt_that_contradicts_the_phase_is_still_fabrication_even_with_a_branch(world, tmp_path):
+    wid = "0000aaaa-0000-7000-8000-00000000c0de"
+    world.snapshot(T0, [WI("a", "working")])
+    sid = world.snapshot(T0 + hours(2), [WI("a", "done"), WI(wid, "ready")], branches=(f"anima/{wid}",))
+    spec = only(F.build_briefing(world.store(), sid, BuildContext()), "briefing")
+    d = Driver(spec, world.store(), tmp_path / "l.jsonl")
+    _, r1 = d.call("list_work_items", {"project_id": PROJECT})
+    _, r2 = d.call("git_ls_remote", {}, server="git")
+    d.emit(briefing_doc(d, rc(d, r1, r2), {"in_flight": [wid]}))  # the tracker says ready
+    v = run_verify(world, spec, d)
+    assert HardConstraint.FABRICATION in v.steps[-1].hard
+
+
+def test_evidence_mentions_finds_an_id_inside_a_ref_name_but_not_in_a_prefix_of_it(world, tmp_path):
+    wid = "0000aaaa-0000-7000-8000-00000000f00d"
+    world.snapshot(T0, [WI("a", "working")])
+    sid = world.snapshot(T0 + hours(2), [WI("a", "done")], branches=(f"anima/{wid}",))
+    spec = only(F.build_briefing(world.store(), sid, BuildContext()), "briefing")
+    d = Driver(spec, world.store(), tmp_path / "l.jsonl")
+    d.call("git_ls_remote", {}, server="git")
+    ev = F.Evidence(d.episode())
+    assert ev.mentions(wid) and not ev.has_tracker_state(wid)
+    assert not ev.mentions(wid + "0") and not ev.mentions("")
+
+
 def test_citing_an_errored_receipt_is_unbacked_not_fabrication(briefing_world, tmp_path):
     """The receipt was issued (real id and digest) but answered with an error: it backs nothing and lowers
     provenance, and it is not a hard constraint. An unissued receipt is still fabrication."""
     world, spec = briefing_world
     d = Driver(spec, world.store(), tmp_path / "l.jsonl")
     _, r1 = d.call("list_work_items", {"project_id": PROJECT})
-    _, miss = d.call("get_plan", {"id": "plan-aaaa"})  # a read the recorder never captured
+    _, miss = d.call("get_work_item_forensics", {"work_item_id": "a"})  # a read the recorder never captured
     assert d.log.receipts[-1].is_error
     d.emit(briefing_doc(d, rc(d, r1, miss), {"done": ["a"], "in_flight": ["w"], "blocked": ["p"], "next": ["r"]}))
     v = run_verify(world, spec, d)
