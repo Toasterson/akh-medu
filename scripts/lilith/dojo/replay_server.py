@@ -46,7 +46,7 @@ if __package__ in (None, ""):
 from dojo.contracts import PermissionProfile, Tier
 from dojo.episode import ReceiptSource, ToolReceipt
 from dojo.errors import DojoError, LedgerError
-from dojo.replay_match import ArgumentMatch, recorded_shape, resolve_recorded_read, resolve_ref
+from dojo.replay_match import ArgumentMatch, explain_miss, resolve_recorded_read, resolve_ref
 from dojo.snapshot import MAIN_REF, Snapshot, SnapshotStore, canonical_json, sha256_hex
 
 PROTOCOL_VERSION = "2025-03-26"
@@ -335,12 +335,18 @@ class ReplayServer(_McpServer):
             return receipt, payload, True
         if self.is_read(name):
             found = None
+            schema = (self.tool(name) or {}).get("inputSchema")
             if name in ANIMA_READ_TOOLS:
-                found = resolve_recorded_read(self.snapshot, name, (self.tool(name) or {}).get("inputSchema"), arguments)
+                found = resolve_recorded_read(self.snapshot, name, schema, arguments)
             if found is None:
-                reason = recorded_shape(self.snapshot, name) if name in ANIMA_READ_TOOLS else "tool-not-recorded"
+                why = explain_miss(self.snapshot, name, schema, arguments) if name in ANIMA_READ_TOOLS else None
+                reason = why.reason if why is not None else "tool-not-recorded"
                 payload = {"error": "not recorded", "reason": reason, "tool": name, "arguments": dict(arguments),
                            "snapshot": self.snapshot.id}
+                if why is not None and why.detail:
+                    payload["detail"] = why.detail
+                if why is not None and why.context:
+                    payload.update({k: v for k, v in why.context.items() if k not in payload})
                 receipt = self._issue(name, arguments, payload, sha256_hex(canonical_json(payload)), ReceiptSource.ERROR,
                                       error_reason=reason)
                 return receipt, payload, True

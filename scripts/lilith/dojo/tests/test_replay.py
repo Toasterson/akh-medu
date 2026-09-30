@@ -58,7 +58,7 @@ def test_recorded_read_answers_with_recorded_bytes_and_issues_receipt(world, tmp
 def test_unrecorded_read_is_an_error_and_never_reaches_the_ledger(world, tmp_path):
     snap = one_snapshot(world)
     server = ReplayServer(snap, DojoLedger(tmp_path / "ledger.jsonl"))
-    for name, args in (("get_work_item_detail", {"id": "nope"}), ("get_plan", {"id": "plan-aaaa"})):
+    for name, args in (("get_work_item_detail", {"id": "nope"}), ("get_work_item_forensics", {"work_item_id": "wi-1"})):
         result = rpc(server, "tools/call", {"name": name, "arguments": args})["result"]
         assert result["isError"] is True
         assert result["_meta"]["lilith/source"] == "error"

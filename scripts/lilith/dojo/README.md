@@ -245,12 +245,27 @@ receipt keeps both what the caller asked (`arguments`) and the recorded call tha
   refs the recorder saw on the remote, in `git rev-parse` order. The answer's `ref` is the recorded ref and
   `requested_ref` keeps the spelling.
 
+- `derive:<...>` (`replay_anima.py`): reads the recorder holds as *data* rather than as a call, answered from
+  the recorded objects and named in the receipt. `list_work_items` with any `current_phase` / `plan_id` /
+  `project_id` / `page_size` / `page_token` is filtered and re-paged over the project's recorded, cursor-linked
+  walk (all recorded projects when `project_id` is omitted; a cursor the recorder saw is honoured); `list_projects`
+  from the recorded project set (only when the recorder captured no `list_projects` itself); `get_work_item_by_id`
+  from the recorded detail or listing; `get_plan` from the recorded `list_plans`; `get_work_item_detail` with
+  history page sizes a default-sized, untruncated recording covers.
+
 Role detection uses API identifiers only: a page-size parameter is an integer property named `page_size`,
 `per_page`, `limit`, `top_k`, `max_results` or `k` (optionally prefixed); a page-token parameter is a string
 named `page_token` or `cursor`; the response's next-page key is matched on the normalised name. Filters, other
-scopes (a missing `project_id`), unrecorded tools and unrecorded ids are never normalised away: they stay
-errors, and an error receipt carries a machine-readable `error_reason` (`tool-not-recorded`,
-`arguments-not-recorded`, `ref-not-recorded`, `commit-unknown-to-oracle`, `commit-missing`).
+scopes, unrecorded tools and unrecorded ids are never normalised away: they stay errors, and an error receipt
+carries a machine-readable `error_reason`: `tool-not-recorded` (the snapshot holds nothing for the tool),
+`arguments-not-recorded`, `project-not-recorded` (a `project_id` with no recorded collector),
+`listing-incomplete` (the recorded walk does not end in an empty cursor), `page-token-unknown`,
+`work-item-not-recorded`, `detail-not-recorded` (listed, but the recorder fetches detail for live items only),
+`plan-not-recorded`, `ref-not-recorded`, `commit-unknown-to-oracle`, `commit-missing`.
+
+`python3 -m dojo.replay_coverage --root R [--snapshot ID] [--json]` (run from `scripts/lilith`) probes every Anima
+read tool per snapshot with the real resolver and prints which are recorded, derived, not replayable or absent,
+and which argument shapes the recorder captured.
 
 `replay_audit.py --root R [--repo .] RESULT_DIR...` re-asks every errored receipt of finished runs and
 classifies it: (a) equivalent, answered now; (b) genuinely unrecorded; (c) other (a filter the recorder did not
