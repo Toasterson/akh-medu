@@ -113,16 +113,58 @@ class PromotionTests(unittest.TestCase):
             run.assert_not_called()
 
     def test_outdated_pipeline_cannot_roll_channel_back(self):
-        with patch.object(images, 'run', return_value='b' * 40 + '\trefs/heads/main') as run:
+        with patch.object(images, 'released_set', return_value={'source_commit': 'b' * 40}), \
+             patch.object(images, 'is_ancestor', return_value=False), \
+             patch.object(images, 'run') as run:
             self.assertFalse(images.promote_verified_set(self.evidence(), 'a' * 40))
+            run.assert_not_called()
+
+    def test_verified_successor_can_promote_even_if_source_main_has_advanced(self):
+        evidence = self.evidence()
+        with patch.object(images, 'released_set', side_effect=[{'source_commit': 'b' * 40}, evidence]), \
+             patch.object(images, 'is_ancestor', return_value=True) as ancestry, \
+             patch.object(images, 'run') as run, \
+             patch.object(images, 'image_manifest', return_value={'platform_digests': {'arm64': 'sha256:arm'}}):
+            self.assertTrue(images.promote_verified_set(evidence, 'a' * 40))
+            ancestry.assert_called_once_with('b' * 40, 'a' * 40)
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args.args[-2:], (images.REGISTRY + '/akh-image-set:main-ready',
+                images.REGISTRY + '/akh-image-set:main-' + 'a' * 40))
+
+    def test_first_release_promotes_verified_digest_before_release_marker(self):
+        evidence = self.evidence()
+        with patch.object(images, 'released_set', side_effect=[None, evidence]), \
+             patch.object(images, 'run') as run, \
+             patch.object(images, 'image_manifest', return_value={'platform_digests': {'arm64': 'sha256:arm'}}):
+            self.assertTrue(images.promote_verified_set(evidence, 'a' * 40))
+            self.assertEqual(run.call_args_list[0].args, ('docker', 'buildx', 'imagetools', 'create',
+                '--tag', 'registry/runtime:main-ready', 'registry/runtime@sha256:verified'))
+
+    def test_digest_mismatch_does_not_publish_release_marker(self):
+        with patch.object(images, 'released_set', return_value=None), \
+             patch.object(images, 'run') as run, \
+             patch.object(images, 'image_manifest', return_value={'platform_digests': {}}):
+            with self.assertRaisesRegex(RuntimeError, 'channel differs'):
+                images.promote_verified_set(self.evidence(), 'a' * 40)
             self.assertEqual(run.call_count, 1)
 
-    def test_current_verified_digest_is_promoted_and_checked(self):
-        with patch.object(images, 'run', side_effect=['a' * 40 + '\trefs/heads/main', None]) as run, \
-             patch.object(images, 'image_manifest', return_value={'platform_digests': {'arm64': 'sha256:arm'}}):
-            self.assertTrue(images.promote_verified_set(self.evidence(), 'a' * 40))
-            self.assertEqual(run.call_args.args, ('docker', 'buildx', 'imagetools', 'create',
-                '--tag', 'registry/runtime:main-ready', 'registry/runtime@sha256:verified'))
+    def test_registry_error_is_not_treated_as_first_release(self):
+        result = images.subprocess.CompletedProcess([], 1, '', 'unauthorized: authentication required')
+        with patch.object(images.subprocess, 'run', return_value=result):
+            with self.assertRaisesRegex(RuntimeError, 'cannot inspect'):
+                images.released_set()
+
+    def test_missing_marker_allows_first_release(self):
+        result = images.subprocess.CompletedProcess([], 1, '', 'manifest unknown')
+        with patch.object(images.subprocess, 'run', return_value=result):
+            self.assertIsNone(images.released_set())
+
+    def test_malformed_marker_cannot_be_promoted_over(self):
+        result = images.subprocess.CompletedProcess([], 0, '{}', '')
+        with patch.object(images.subprocess, 'run', return_value=result), \
+             patch.object(images, 'read_manifest', return_value={'complete': False}):
+            with self.assertRaisesRegex(RuntimeError, 'invalid verified release marker'):
+                images.released_set()
 
 
 if __name__ == '__main__':

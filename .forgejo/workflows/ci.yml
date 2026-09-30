@@ -22,9 +22,13 @@ name: CI
 # develop are covered by the push lane, which is the one that publishes the
 # seshd image and the Helm chart.
 #
-# Deliberately no `concurrency:` block — it requires ${{ github.* }} expression
-# support, which Solstice evaluates inconsistently (see the resolve-branch.sh
-# note on docker-seshd below). This change needs no expression support at all.
+# Forgejo evaluates workflow concurrency before dispatch to Solstice. Let a
+# main release finish even when another merge arrives; otherwise long image
+# builds never publish. PR updates still cancel superseded checks. The shared
+# main group also serializes channel promotion, including manually rerun jobs.
+concurrency:
+  group: akh-ci-${{ forgejo.ref }}
+  cancel-in-progress: ${{ forgejo.ref != 'refs/heads/main' }}
 env:
   CARGO_INCREMENTAL: "0"
   SCCACHE_IDLE_TIMEOUT: "0"

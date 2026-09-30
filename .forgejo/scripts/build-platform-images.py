@@ -55,8 +55,7 @@ def publish_manifest(evidence, name, sha):
             '--label', 'org.opencontainers.image.revision=' + sha, '--push', directory)
 
 
-def read_partial(group, sha):
-    image = REGISTRY + '/akh-image-set-' + group + ':main-' + sha
+def read_manifest(image):
     run('docker', 'pull', '--platform', 'linux/amd64', image)
     container = run('docker', 'create', '--platform', 'linux/amd64', image, '/never-run', capture=True)
     try:
@@ -66,6 +65,35 @@ def read_partial(group, sha):
             return json.loads(path.read_text())
     finally:
         run('docker', 'rm', container)
+
+
+def read_partial(group, sha):
+    return read_manifest(REGISTRY + '/akh-image-set-' + group + ':main-' + sha)
+
+
+def released_set():
+    """Only a missing marker means first release; registry errors fail closed."""
+    marker = REGISTRY + '/akh-image-set:main-ready'
+    result = subprocess.run(['docker', 'buildx', 'imagetools', 'inspect', '--raw', marker],
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        error = result.stderr.lower()
+        if 'manifest unknown' in error or 'not found' in error:
+            return None
+        raise RuntimeError('cannot inspect verified release marker: ' + result.stderr.strip())
+    evidence = read_manifest(marker)
+    if (evidence.get('complete') is not True
+            or evidence.get('main_ancestry_verified') is not True
+            or len(evidence.get('source_commit', '')) != 40):
+        raise RuntimeError('invalid verified release marker')
+    return evidence
+
+
+def is_ancestor(older, newer):
+    result = subprocess.run(['git', 'merge-base', '--is-ancestor', older, newer])
+    if result.returncode not in (0, 1):
+        raise RuntimeError('cannot establish release commit ancestry')
+    return result.returncode == 0
 
 
 def assemble_partials(partials, sha):
@@ -164,18 +192,27 @@ def promote_verified_set(evidence, sha):
         raise RuntimeError('only a complete commit-matched image set can be promoted')
     if not evidence['images']['home-runtime'].get('native_receipts_embedded'):
         raise RuntimeError('automatic native updates require embedded CI receipts')
+    # The Forgejo main concurrency group serializes release workflows. Compare
+    # against the last COMPLETE release, not the moving source branch: frequent
+    # merges must not starve delivery, and an old manual rerun must not roll back.
+    previous = released_set()
+    if previous is not None and not is_ancestor(previous['source_commit'], sha):
+        print('A newer or divergent release exists; retaining immutable artifacts only.', flush=True)
+        return False
     for name, record in sorted(evidence['images'].items()):
-        # An older, slower pipeline may finish after a newer main build. It may
-        # retain its immutable artifacts, but must not move the live channel.
-        current = run('git', 'ls-remote', 'origin', 'refs/heads/main', capture=True).split()[0]
-        if current != sha:
-            print('Main advanced; immutable image set retained without further promotion.', flush=True)
-            return False
         alias = record['image'].split('@')[0] + ':main-ready'
         run('docker', 'buildx', 'imagetools', 'create', '--tag', alias, record['image'])
         live = image_manifest(alias, list(record['platform_digests']))
         if live['platform_digests'] != record['platform_digests']:
             raise RuntimeError('promoted channel differs from verified image set: ' + name)
+    # Publish the release pointer last. A failed partial promotion can be retried;
+    # a later successful release then prevents older reruns from moving it back.
+    marker = REGISTRY + '/akh-image-set:main-ready'
+    run('docker', 'buildx', 'imagetools', 'create', '--tag', marker,
+        REGISTRY + '/akh-image-set:main-' + sha)
+    published = released_set()
+    if published is None or published['source_commit'] != sha or published['images'] != evidence['images']:
+        raise RuntimeError('published release marker differs from verified image set')
     return True
 
 
@@ -366,7 +403,9 @@ def build_set(group):
         raise RuntimeError('CI request SHA differs from checkout')
     if run('git', 'status', '--porcelain', '--untracked-files=no', capture=True):
         raise RuntimeError('deploy image checkout is dirty')
-    run('git', 'fetch', 'origin', 'main:refs/remotes/origin/main')
+    shallow = run('git', 'rev-parse', '--is-shallow-repository', capture=True) == 'true'
+    run('git', 'fetch', *(['--unshallow'] if shallow else []), 'origin',
+        'main:refs/remotes/origin/main')
     run('git', 'merge-base', '--is-ancestor', sha, 'origin/main')
     tag = 'main-' + sha
     evidence = {'schema_version': 1, 'source_commit': sha, 'main_ancestry_verified': True,
