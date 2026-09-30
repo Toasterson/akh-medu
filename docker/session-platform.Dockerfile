@@ -8,13 +8,13 @@ ARG PROFILE=session
 ARG TARGETPLATFORM
 WORKDIR /src
 COPY . .
-ENV CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_INCREMENTAL=0
+ENV CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_DEBUG=line-tables-only CARGO_INCREMENTAL=0
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target,id=akh-session-platform-${TARGETPLATFORM} \
     case "$SERVICE:$PROFILE" in \
       akhsessd:session|akhrtd:runtime|akhexecd:executor|akhsbxd:sandbox|akheventd:events|akh-trigger:trigger|akh-connect:client|akh-acp:client|akh-kagent:kagent) ;; \
       *) exit 2 ;; esac && \
-    cargo build --locked --release -p akh-session-services --no-default-features --features "$PROFILE" --bin "$SERVICE" && \
+    cargo build --locked --release -p akh-session-services --no-default-features --features "$PROFILE,profiling" --bin "$SERVICE" && \
     mkdir /out && cp "target/release/$SERVICE" /out/ && \
     case "$SERVICE" in \
       akhrtd|akhexecd) cargo build --locked --release -p akh-session-services --no-default-features --features helpers --bin akh-service && cp target/release/akh-service /out/ ;; \
