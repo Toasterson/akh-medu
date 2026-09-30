@@ -131,6 +131,46 @@ class AcpTransportError(ModelError):
     )
 
 
+class AcpOutage(AcpTransportError):
+    """The ACP endpoint is unreachable, or the peer went away, before the episode's prompt was sent.
+
+    That is an outage of the deployment (the core restarting for a deploy), not a result of the
+    episode: `AcpEpisodeRunner` waits and retries the SAME episode (after the isolation preflight
+    passes again) and only gives up with `AcpOutageExhausted`."""
+
+    code = "lilith::dojo::acp_outage"
+
+
+class AcpPeerClosed(AcpTransportError):
+    """The ACP peer closed or reset the connection during a request. `AcpEpisodeRunner` turns it into
+    an `AcpOutage` (prompt not sent yet) or an `AcpConnectionLost` (prompt sent)."""
+
+
+class AcpConnectionLost(AcpTransportError):
+    """The connection closed after the episode's prompt was sent: the episode ran, the result is gone.
+
+    The episode is recorded as an error (not scored) and runs again on resume; it does not stop the
+    batch."""
+
+    code = "lilith::dojo::acp_connection_lost"
+    help = (
+        "the ACP peer went away during the turn (a core restart?); this episode is recorded as an error "
+        "and runs again when you re-run the same command (resume skips finished episodes)"
+    )
+
+
+class AcpOutageExhausted(DojoError):
+    """The endpoint stayed unreachable for the whole outage budget. The batch stops: the remaining
+    episodes are NOT attempted and NOT recorded as errors, so a resume runs them all."""
+
+    code = "lilith::dojo::acp_outage_exhausted"
+    help = (
+        "start the Mac core's akhomed (check `akh -w <akh> acp health`), then re-run the same command to "
+        "resume: nothing was recorded for the episodes that were not reached. Raise the wait with "
+        "--outage-budget SECONDS for a longer deploy window"
+    )
+
+
 # --- line transport ----------------------------------------------------------------------------------
 
 
@@ -207,7 +247,7 @@ def tcp_connector(endpoint: str, connect_timeout: float = 10.0) -> Callable[[], 
         try:
             sock = socket.create_connection((host, port), timeout=connect_timeout)
         except OSError as error:
-            raise AcpTransportError(f"cannot connect to the ACP endpoint {host}:{port}: {error.strerror or error}") from None
+            raise AcpOutage(f"cannot connect to the ACP endpoint {host}:{port}: {error.strerror or error}") from None
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return SocketLineChannel(sock)
@@ -240,10 +280,16 @@ class AcpClient:
         self._next = 0
 
     def request(self, method: str, params: Mapping[str, Any], *, on_notification: Handler | None = None,
-                on_request: Handler | None = None, timeout_s: float | None = None) -> Any:
+                on_request: Handler | None = None, timeout_s: float | None = None,
+                on_sent: Callable[[], None] | None = None) -> Any:
         self._next += 1
         request_id = self._next
-        self.channel.send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": dict(params)})
+        try:
+            self.channel.send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": dict(params)})
+        except OSError as error:  # broken pipe / reset: the request did not reach the peer
+            raise AcpPeerClosed(f"{method}: the ACP peer closed the connection ({error.strerror or error})") from None
+        if on_sent is not None:
+            on_sent()
         deadline = time.monotonic() + (timeout_s or self.timeout_s)
         while True:
             remaining = deadline - time.monotonic()
@@ -254,7 +300,7 @@ class AcpClient:
             except queue.Empty:
                 continue
             if message is None:
-                raise AcpTransportError(f"{method}: the ACP peer closed the connection")
+                raise AcpPeerClosed(f"{method}: the ACP peer closed the connection")
             if "method" in message:
                 self._incoming(message, on_notification, on_request)
                 continue
@@ -288,7 +334,10 @@ class AcpClient:
             reply["error"] = error
         else:
             reply["result"] = result
-        self.channel.send(reply)
+        try:
+            self.channel.send(reply)
+        except OSError as failure:
+            raise AcpPeerClosed(f"{method}: the ACP peer closed the connection ({failure.strerror or failure})") from None
 
     def scrub(self, text: str) -> str:
         return self.secret.scrub(text)
@@ -304,6 +353,28 @@ class _Refuse(Exception):
 
 
 @dataclasses.dataclass(frozen=True)
+class OutagePolicy:
+    """How long one episode waits for an unreachable ACP endpoint before the batch stops.
+
+    Waits grow `initial_s` -> `initial_s * factor` ... capped at `max_backoff_s`, each clipped to what
+    is left of `budget_s` (the total time since the outage began). `budget_s = 0` waits for nothing:
+    the first outage stops the batch."""
+
+    initial_s: float = 5.0
+    max_backoff_s: float = 60.0
+    factor: float = 2.0
+    budget_s: float = 900.0
+
+    def wait_after(self, attempt: int, elapsed_s: float) -> float | None:
+        """Seconds to sleep before outage retry number `attempt` (0-based), or None when the budget
+        is spent."""
+        left = self.budget_s - elapsed_s
+        if left <= 0:
+            return None
+        return min(self.initial_s * self.factor ** attempt, self.max_backoff_s, left)
+
+
+@dataclasses.dataclass(frozen=True)
 class AcpTeacherConfig:
     akh: str  # the dojo teacher akh (akhomed workspace name)
     endpoint_host: str = "127.0.0.1"
@@ -316,6 +387,7 @@ class AcpTeacherConfig:
     # Two throwaway tool-less prompts before the memory baseline (`AcpEpisodeRunner.warm_up`). The
     # CLI turns it on (`--no-warm-up` off); the library default leaves the akh untouched.
     warm_up: bool = False
+    outage: OutagePolicy = OutagePolicy()
 
 
 # The echo akhomed sends after every tool call: `AkhMessage::ToolResult` becomes an agent thought
@@ -404,13 +476,20 @@ class AcpEpisodeRunner:
     kind = KIND
 
     def __init__(self, connect: Callable[[], LineChannel], secret: Secret, system: SystemPrompt,
-                 gateway: ReplayMcpGateway, config: AcpTeacherConfig, clock=time.monotonic):
+                 gateway: ReplayMcpGateway, config: AcpTeacherConfig, clock=time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep,
+                 notify: Callable[[str], None] | None = None):
         self.connect = connect
         self.secret = secret
         self.system = system
         self.gateway = gateway
         self.config = config
         self._clock = clock
+        self._sleep = sleep
+        self._notify = notify or (lambda line: print(line, file=sys.stderr, flush=True))
+        self._prompt_sent = False  # the current episode's `session/prompt` reached the peer
+        self._rewarm = False       # the connection was lost: prove the akh's memory baseline again before the next episode
+        self.outages: list[dict] = []  # every wait, for the run's provenance (non-identity)
         self.model_id = f"akh:{config.akh}"
         self.endpoint_host = config.endpoint_host
         self._memory_baseline: tuple[int, int] | None = None
@@ -422,26 +501,54 @@ class AcpEpisodeRunner:
         return self.run_traced(spec, tools).episode
 
     def run_traced(self, spec: EpisodeSpec, tools: Mapping[str, ReplayTools]) -> RunResult:
-        log = receipt_log(tools)
-        trace = RunTrace()
-        steps: list[StepRecord] = []
-        try:
-            self._episode(spec, tools, trace, steps)
-        except IsolationRefusal:
-            raise
-        except ModelError as error:
-            trace.status = EpisodeStatus.ERROR
-            trace.error = self.secret.scrub(str(error))
-            trace.error_code = error.code
-            trace.answer_status = "error"
-        except DojoError:
-            raise
-        except Exception as error:  # one broken episode must not end the batch
-            trace.status = EpisodeStatus.ERROR
-            trace.error = self.secret.scrub(f"{type(error).__name__}: {error}")
-            trace.error_code = "lilith::dojo::runner_internal"
-            trace.answer_status = "error"
-        return RunResult(Episode(spec, tuple(log.receipts), tuple(steps)), trace)
+        outage_began: float | None = None
+        attempt = 0
+        while True:
+            log = receipt_log(tools)
+            trace = RunTrace()
+            steps: list[StepRecord] = []
+            try:
+                self._episode(spec, tools, trace, steps)
+            except IsolationRefusal:
+                raise
+            except AcpOutage as error:
+                # Before the prompt was sent: the deployment is down, the episode has no result. Wait
+                # and run the SAME episode again; the isolation preflight runs again on reconnect.
+                self._rewarm = True
+                now = self._clock()
+                outage_began = now if outage_began is None else outage_began
+                wait = self.config.outage.wait_after(attempt, now - outage_began)
+                reason = self.secret.scrub(str(error))
+                if wait is None:
+                    raise AcpOutageExhausted(
+                        f"the ACP endpoint stayed unreachable for {now - outage_began:.0f}s over {attempt + 1} attempt(s) "
+                        f"at episode {spec.episode_id} (last error: {reason}); the batch stops here and the episodes "
+                        "that were not reached are not recorded") from None
+                self.outages.append({"episode": spec.episode_id, "attempt": attempt + 1, "wait_s": round(wait, 3),
+                                     "error": reason})
+                del self.outages[:-200]
+                self._notify(f"[outage] {spec.episode_id}: {reason}; waiting {wait:.0f}s before attempt {attempt + 2} "
+                             f"({now - outage_began:.0f}s of {self.config.outage.budget_s:.0f}s budget used)")
+                self._sleep(wait)
+                attempt += 1
+                continue
+            except ModelError as error:
+                if isinstance(error, AcpConnectionLost):
+                    self._rewarm = True
+                trace.status = EpisodeStatus.ERROR
+                trace.error = self.secret.scrub(str(error))
+                trace.error_code = error.code
+                trace.answer_status = "error"
+            except DojoError:
+                raise
+            except Exception as error:  # one broken episode must not end the batch
+                trace.status = EpisodeStatus.ERROR
+                trace.error = self.secret.scrub(f"{type(error).__name__}: {error}")
+                trace.error_code = "lilith::dojo::runner_internal"
+                trace.answer_status = "error"
+            if attempt:
+                self._notify(f"[outage] {spec.episode_id}: the ACP endpoint is back after {attempt} wait(s); episode ran")
+            return RunResult(Episode(spec, tuple(log.receipts), tuple(steps)), trace)
 
     # -- one episode --------------------------------------------------------------------------------
 
@@ -458,23 +565,40 @@ class AcpEpisodeRunner:
         trace.tools_sha256 = broker.tools_sha256
         trace.transcript.append({"role": "user", "content_sha256": trace.user_prompt_sha256,
                                  "delivery": "acp-session-prompt"})
-        channel = self.connect()
+        self._prompt_sent = False
+        channel = self.connect()  # AcpOutage when the endpoint is unreachable
         try:
             client = AcpClient(channel, self.secret, self.config.rpc_timeout_s)
-            self._initialize(client)
-            before = self._preflight(client)
-            usage_before, turns_before = self._usage(client)
-            with self.gateway.open(broker) as episode_tools:
-                turn, started, turn_ms, stop = self._turn(client, episode_tools.acp_mcp_servers(),
-                                                          self._prompt_blocks(prompt), allowed)
-                usage_after, turns_after = self._usage(client)
-                self._postflight(client, before)
-                reported = (turns_after - turns_before) if turns_before is not None and turns_after is not None else None
-                used = Usage(max(0, usage_after.prompt_tokens - usage_before.prompt_tokens),
-                             max(0, usage_after.completion_tokens - usage_before.completion_tokens), 0)
-                self._assemble(spec, episode_tools, turn, started, turn_ms, stop, used, reported, now, trace, steps)
+            try:
+                self._initialize(client)
+                if self._rewarm:
+                    self._rewarm_after_loss(client)
+                before = self._preflight(client)
+                usage_before, turns_before = self._usage(client)
+                with self.gateway.open(broker) as episode_tools:
+                    turn, started, turn_ms, stop = self._turn(client, episode_tools.acp_mcp_servers(),
+                                                              self._prompt_blocks(prompt), allowed)
+                    usage_after, turns_after = self._usage(client)
+                    self._postflight(client, before)
+                    reported = (turns_after - turns_before) if turns_before is not None and turns_after is not None else None
+                    used = Usage(max(0, usage_after.prompt_tokens - usage_before.prompt_tokens),
+                                 max(0, usage_after.completion_tokens - usage_before.completion_tokens), 0)
+                    self._assemble(spec, episode_tools, turn, started, turn_ms, stop, used, reported, now, trace, steps)
+            except AcpPeerClosed as closed:
+                if self._prompt_sent:  # the turn ran (or was running): an error episode, retried on resume
+                    raise AcpConnectionLost(f"{closed}; the episode's prompt had been sent, so its result is lost") from None
+                raise AcpOutage(str(closed)) from None
         finally:
             channel.close()
+
+    def _rewarm_after_loss(self, client: AcpClient) -> None:
+        """After a lost connection the akh may have restarted, and the first prompt of a fresh akhomed
+        process can intern a one-time init (`_warm_up`). Wait for the akh to go idle, then run the same
+        two-prompt proof before the exact memory baseline is compared again: a triple write or a
+        per-turn symbol write still refuses the run (fail closed)."""
+        if self.config.warm_up and self._list_own_tools(client).get("stale") is False:
+            self._warm_up(client)
+        self._rewarm = False
 
     def probe(self) -> dict:
         """Check the teacher before a batch writes anything: ACP reachable, client-pushed HTTP MCP
@@ -563,7 +687,8 @@ class AcpEpisodeRunner:
         known = self._symbol_labels(client)
         counts = [before]
         for n in (1, 2):
-            turn, _, _, stop = self._turn(client, [], [{"type": "text", "text": WARM_UP_PROMPT}], frozenset())
+            turn, _, _, stop = self._turn(client, [], [{"type": "text", "text": WARM_UP_PROMPT}], frozenset(),
+                                         episode_prompt=False)
             if stop.get("stopReason") != "end_turn" or _AKH_ERROR.match(turn.answer):
                 raise AcpTransportError(
                     f"the warm-up prompt {n} did not end normally (stopReason {stop.get('stopReason')!r}"
@@ -630,7 +755,7 @@ class AcpEpisodeRunner:
                 {"type": "text", "text": "# Task\n\n" + prompt}]
 
     def _turn(self, client: AcpClient, mcp_servers: list, blocks: list[dict],
-              allowed: frozenset[str]) -> tuple[_TurnState, float, int, Mapping[str, Any]]:
+              allowed: frozenset[str], *, episode_prompt: bool = True) -> tuple[_TurnState, float, int, Mapping[str, Any]]:
         created = client.request("session/new", {
             "cwd": f"akh-ws:{self.config.akh}",
             "mcpServers": mcp_servers,
@@ -702,7 +827,8 @@ class AcpEpisodeRunner:
         try:
             response = client.request("session/prompt", {"sessionId": session_id, "prompt": blocks},
                                       on_notification=on_notification, on_request=on_request,
-                                      timeout_s=self.config.turn_timeout_s) or {}
+                                      timeout_s=self.config.turn_timeout_s,
+                                      on_sent=self._mark_prompt_sent if episode_prompt else None) or {}
         except AcpTransportError:
             try:  # stop the akh's turn; its tool calls already fail (the gateway closes with the episode)
                 client.notify("session/cancel", {"sessionId": session_id})
@@ -713,6 +839,9 @@ class AcpEpisodeRunner:
         if state.violations:
             raise IsolationRefusal("; ".join(state.violations))
         return state, started, turn_ms, response
+
+    def _mark_prompt_sent(self) -> None:
+        self._prompt_sent = True
 
     def _assemble(self, spec: EpisodeSpec, episode_tools: EpisodeTools, turn: _TurnState, started: float,
                   turn_ms: int, stop: Mapping[str, Any], used: Usage, reported_turns: int | None, now: int,
@@ -808,7 +937,8 @@ def endpoint_host(endpoint: str) -> str:
 
 def read_teacher_config(path: Path, akh: str) -> dict:
     """The teacher's rendered workspace TOML (read-only): it must be the sealed teacher. Returns what
-    the provenance records: the file hash and the backing model the akh pins."""
+    the provenance records: the file hash and the backing model the akh pins. The file hash covers the
+    whole file (comments, rendered budgets), so it is deployment provenance and not resume identity."""
     import tomllib
 
     try:
@@ -828,8 +958,14 @@ def read_teacher_config(path: Path, akh: str) -> dict:
     if problems:
         raise IsolationRefusal(f"{path} is not a sealed dojo teacher: " + "; ".join(problems))
     prompt = doc.get("system_prompt")
+    profile = doc.get("model_profile")
     return {"path": str(path), "sha256": sha256_hex(raw), "backend": doc.get("backend"), "model": doc.get("model"),
+            "reasoning_effort": doc.get("reasoning_effort"),
+            # The akh's own per-model overrides (ADR 123). Read by `model_profile.resolve_turn_timeout`;
+            # deployment settings, never part of the resume identity.
+            "model_profile": dict(profile) if isinstance(profile, dict) else {},
             "tool_surface": doc.get("tool_surface"),
+            "capture_transcripts": doc.get("capture_transcripts"),
             "system_prompt_sha256": sha256_hex(prompt.encode("utf-8")) if isinstance(prompt, str) else None}
 
 
