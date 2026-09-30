@@ -47,12 +47,52 @@ HEAP_BINARIES = {name: binary for name, (binary, _) in DAEMONS.items()} | {
 WORKSPACE_MALLOC_CONF = 'prof:true,prof_active:true,lg_prof_sample:19'
 
 
+GITOPS_IMAGES = {
+    'AKH_SESSIONS_IMAGE': 'sessions', 'AKH_SANDBOX_IMAGE': 'sandbox',
+    'AKH_RUNTIME_IMAGE': 'runtime', 'AKH_EVENTS_IMAGE': 'events',
+    'AKH_EXECUTOR_IMAGE': 'executor', 'AKH_WORKSPACE_IMAGE': 'workspace',
+    'AKH_VESTA_IMAGE': 'vesta-sandbox',
+}
+
+
+def gitops_release_config(evidence):
+    # Flux consumes only the final complete release marker. Values stay pinned
+    # to immutable images; CI needs no Kubernetes or Git write credentials.
+    if (evidence.get('complete') is not True
+            or evidence.get('main_ancestry_verified') is not True
+            or set(evidence.get('images', {})) != EXPECTED):
+        raise RuntimeError('GitOps bundle requires a complete verified image set')
+    sha = evidence['source_commit']
+    if len(sha) != 40 or any(c not in '0123456789abcdef' for c in sha):
+        raise RuntimeError('GitOps bundle requires a full source commit')
+    data = {'AKH_SOURCE_COMMIT': sha}
+    for key, name in GITOPS_IMAGES.items():
+        record = evidence['images'][name]
+        image = record['image']
+        digest = image.rsplit('@sha256:', 1)[-1]
+        if (record.get('source_commit') != sha or '@sha256:' not in image
+                or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest)):
+            raise RuntimeError('GitOps image is not a commit-matched immutable digest: ' + name)
+        data[key] = image
+    return {'apiVersion': 'v1', 'kind': 'ConfigMap',
+            'metadata': {'name': 'akh-verified-release', 'namespace': 'flux-system',
+                         'labels': {'reconcile.fluxcd.io/watch': 'Enabled'}}, 'data': data}
+
+
 def publish_manifest(evidence, name, sha):
     with tempfile.TemporaryDirectory(prefix='akh-image-set-') as directory:
         output = Path(directory)
         (output / 'image-set.json').write_text(json.dumps(evidence, indent=2) + '\n')
-        (output / 'Dockerfile').write_text('FROM scratch\nCOPY image-set.json /image-set.json\n')
-        run('docker', 'buildx', 'build', '--platform', 'linux/amd64', '-t',
+        files = ['image-set.json']
+        if name == 'akh-image-set':
+            (output / 'release-configmap.yaml').write_text(json.dumps(gitops_release_config(evidence), indent=2) + '\n')
+            (output / 'kustomization.yaml').write_text(
+                'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n- release-configmap.yaml\n')
+            files += ['release-configmap.yaml', 'kustomization.yaml']
+        # One gzip layer is directly consumable by Flux OCIRepository. Disable
+        # attestations only for this metadata artifact, not executable images.
+        (output / 'Dockerfile').write_text('FROM scratch\nCOPY ' + ' '.join(files) + ' /\n')
+        run('docker', 'buildx', 'build', '--platform', 'linux/amd64', '--provenance=false', '-t',
             REGISTRY + '/' + name + ':main-' + sha,
             '--label', 'org.opencontainers.image.revision=' + sha, '--push', directory)
 
