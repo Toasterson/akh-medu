@@ -15,6 +15,8 @@ over the C3 recorder's `lilith/cos-snapshot@1` roots.
 | `snapshot.py` | Read-only loader. It re-hashes every object it reads and exposes typed views (`WorkItemState`, `LoopState`, `ChangeHead`) and `ObjectRef` / `Provenance`. |
 | `episode.py` | The runner interface: `EpisodeSpec`, `ToolReceipt`, `StepRecord` (actions `ToolCall` / `EmitDocument` / `SendMessage`), `Episode`, and the `EpisodeRunner` protocol. |
 | `replay_server.py` | The MCP JSON-RPC replay of snapshot t_k (`ReplayServer`) and `DojoGitServer` (`git_ls_remote`, `git_is_ancestor`). Writes go to `DojoLedger`, a hash-chained JSONL file. Run it with `replay_server.py serve` (stdio). |
+| `replay_match.py` + `replay_audit.py` | Schema-driven argument equivalence for replay reads (paging sizes, schema defaults, type coercion, git ref spellings) and the audit that classifies a finished run's replay misses. See "Replay fidelity" below. |
+| `context_budget.py` | Cumulative context budgeting for the in-process runner (production #458 constants); `--context-window`. |
 | `hindsight.py` | Ground truth from t_{k-1}, t_k and t_{k+n}: briefing buckets, stale items, park causes, landed verdicts, commitments and later outcomes. Each label carries its provenance. Cases the evidence does not settle are excluded and listed. |
 | `families.py` | Spec builders and verifiers for the 11 families. Each verifier produces the 5-component step vector and flags hard constraints. |
 | `reward.py` | `cos-v1`: reduces a step to a weight in [0, 1], forces weight 0 and asks for a corrected sibling after a hard constraint, and builds sibling-contrast pairs. |
@@ -132,8 +134,18 @@ the in-process model loop; the akh runs its own loop and calls the tools itself:
   the same names (`mcp__anima__...`, `mcp__git__...`) and recorded schemas, and the receipts land in the
   episode's one `ReceiptLog`.
 - The runner speaks ACP to akhomed's loopback listener: `initialize`, the isolation preflight,
-  `session/new` with the gateway's `mcpServers`, one `session/prompt` carrying the dojo system prompt and
-  the task. The final message (text after the last tool call) goes through the same `finish_answer`.
+  `session/new` with the gateway's `mcpServers`, one `session/prompt`. The final message (text after
+  the last tool call) goes through the same `finish_answer`.
+- **Prompt placement** (`--teacher-prompt`). `akh` (default): the dojo system prompt is the akh's own
+  `system_prompt` (rendered by `configure_core.py` from the same role file, procedures and
+  `roles/addenda/dojo-teacher.md`), and the prompt turn is exactly the parent's user message. The run is
+  refused (`lilith::dojo::teacher_prompt_parity`) unless the `--akh-config` TOML's `system_prompt` hashes to
+  the run's `system_prompt_sha256`. What the check cannot see: whether akhomed has reloaded that file (no
+  `_akh/*` read exposes the active prompt; restart the core after a render), and the text akhomed composes
+  around it: its psyche identity paragraph before, the text under a `# Operator Instructions` heading, and
+  its machine-owned tool-operation and convention sections after (not suppressible per akh; a
+  `prompt_mode` for session-only akhs would be a Rust change). `session`: the legacy layout, the prompt in
+  the first user turn (`provenance.teacher.prompt_delivery` records which).
 - Isolation is checked, and a failed check stops the whole batch (`lilith::dojo::teacher_isolation`): the
   akh must list no tool of its own (`_akh/tools`), may start or request no tool outside the replay set
   during a turn, and its memory size (`_akh/health`) must not change across an episode or between
@@ -144,15 +156,53 @@ the in-process model loop; the akh runs its own loop and calls the tools itself:
   `_akh/usage` counters over the turn. A provider error (`error[...]` chunk, refusal, timeout) is an
   unscored episode, retried on resume, like a model endpoint failure.
 - `--key-file` is the ACP principal's token (`secrets/dojo-teacher.key`, scoped to the teacher akh).
-  `--akh-config` (optional, read-only) checks the rendered workspace is sealed and records its model and
-  sha256 in `provenance.json` next to the probe (daemon version, memory size).
+  `--akh-config` (read-only) checks the rendered workspace is sealed and records its model, its sha256 and
+  its `system_prompt` sha256 in `provenance.json` next to the probe (daemon version, memory size); it is
+  required for `--teacher-prompt akh`.
 - The Mac core renders the teacher only behind `config/dojo-teacher.json` (`{"model": "<Ollama Cloud
-  model>"}`, default `glm-5.3`): see `deploy/roman-mini/full_akh.py` `render_dojo_teacher_workspace`.
+  model>", "prompt": "dojo"|"neutral"}`, defaults `glm-5.3` and `dojo`): see
+  `deploy/roman-mini/full_akh.py` `render_dojo_teacher_workspace`. `neutral` keeps the short generic
+  prompt and needs `--teacher-prompt session`.
+- The in-process arm bounds the running request to `--context-window` (default 49152 tokens) minus
+  `--max-tokens`; the teacher's akh bounds tool results itself (#458) against its own `context_window`.
+
+## Replay fidelity
+
+A recorded read is served for the recorded arguments, or for arguments provably equivalent to them under
+the tool's own input schema (`replay_match.py`). Each rule is named in the receipt (`match_rules`), and the
+receipt keeps both what the caller asked (`arguments`) and the recorded call that answered
+(`matched_arguments`), so a normalised match is auditable. Rules:
+
+- `coerce:<param>:<type>`: the schema types the parameter and the value is the same value in another JSON
+  type (`"50"` for `50`).
+- `default:<param>`: the value equals the schema's `default` keyword, so it is the omitted argument.
+- `empty-token:<param>`: a page-token parameter set to the empty string is the first page.
+- `page-size-satisfied:<param>=<n>`: a page-size parameter that the recorded page-size-less response already
+  satisfies: the recorded listing is complete (empty next-page token) and holds at most `n` items, or it has
+  a next page and exactly `n` items (a page is full iff another page exists, so `n` is the server's page
+  size). A smaller `n`, or a larger `n` on a partial listing, is a different query and stays an error.
+- `ref-alias:<requested>-><recorded>` (git): `origin/main`, `main`, `heads/main` resolved against the
+  refs the recorder saw on the remote, in `git rev-parse` order. The answer's `ref` is the recorded ref and
+  `requested_ref` keeps the spelling.
+
+Role detection uses API identifiers only: a page-size parameter is an integer property named `page_size`,
+`per_page`, `limit`, `top_k`, `max_results` or `k` (optionally prefixed); a page-token parameter is a string
+named `page_token` or `cursor`; the response's next-page key is matched on the normalised name. Filters, other
+scopes (a missing `project_id`), unrecorded tools and unrecorded ids are never normalised away: they stay
+errors, and an error receipt carries a machine-readable `error_reason` (`tool-not-recorded`,
+`arguments-not-recorded`, `ref-not-recorded`, `commit-unknown-to-oracle`, `commit-missing`).
+
+`replay_audit.py --root R [--repo .] RESULT_DIR...` re-asks every errored receipt of finished runs and
+classifies it: (a) equivalent, answered now; (b) genuinely unrecorded; (c) other (a filter the recorder did not
+apply, a scope argument, an object the clone lacks). Runs made before a change of these rules are not
+comparable to runs after it: rerun the baselines.
 
 ## Design choices worth knowing
 
 - **Fabrication** is a hard constraint. It covers a WI id that no read receipt in the episode shows, a
-  bucket or phase that the receipts contradict, a cited receipt that the servers never issued, an
+  bucket or phase that the receipts contradict, a cited receipt that the servers never issued (a cited receipt
+  that was issued but answered with an error is only *unbacked*: it lowers the provenance score, is noted
+  as `unbacked:`, and is not a hard constraint), an
   "on main" verdict without a matching `git_is_ancestor` receipt, and a commitment closed without a
   `done` receipt.
 - **Rule-breaking or unannounced operator-class actions** are hard constraints. The standing rules cover

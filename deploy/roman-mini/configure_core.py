@@ -342,7 +342,16 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
     if teacher is not None:
         path = root / f"core-config/akh-medu/workspaces/{fa.DOJO_TEACHER}.toml"
         existing = tomllib.loads(path.read_text()) if path.exists() else None
-        toml[path] = fa.dump_toml(fa.render_dojo_teacher_workspace(existing, teacher), fa.DOJO_TEACHER_COMMENTS,
+        teacher_prompt = None
+        if teacher.prompt == "dojo":
+            skill_source = cos_skill_source(source)
+            if not (skill_source / "skill.json").is_file():
+                raise fa.RenderError(f"the chief-of-staff skillpack is missing at {skill_source}; the dojo teacher "
+                                     "renders the dojo system prompt from it: render from a full akh-medu checkout "
+                                     "of origin/main (or set \"prompt\": \"neutral\" in config/dojo-teacher.json)")
+            teacher_prompt = fa.dojo_teacher_system_prompt(source / "roles", skill_source)
+        toml[path] = fa.dump_toml(fa.render_dojo_teacher_workspace(existing, teacher, teacher_prompt),
+                                  fa.DOJO_TEACHER_COMMENTS,
                                   header=f"{fa.DOJO_TEACHER}: sealed Lilith C4 dojo teacher (ADR 116; "
                                          "tool_surface = session-only, an exam instrument, not a working akh). "
                                          "Rendered by configure_core.py.")

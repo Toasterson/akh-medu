@@ -76,6 +76,14 @@ class ToolReceipt:
     source: ReceiptSource
     snapshot_id: str
     observed_at: int
+    # Replay-fidelity audit trail. `arguments` is always what the caller asked; when the
+    # server answered from a recorded call whose arguments differ but are provably
+    # equivalent (schema-driven, see `replay_match`), `matched_arguments` is the recorded
+    # call and `match_rules` names each normalisation applied. `error_reason` is the
+    # machine-readable cause of an `ERROR` receipt.
+    matched_arguments: Mapping[str, Any] | None = None
+    match_rules: tuple[str, ...] = ()
+    error_reason: str | None = None
 
     @property
     def is_error(self) -> bool:
@@ -95,6 +103,9 @@ class ToolReceipt:
             "source": self.source.value,
             "snapshot_id": self.snapshot_id,
             "observed_at": self.observed_at,
+            **({"matched_arguments": dict(self.matched_arguments), "match_rules": list(self.match_rules)}
+               if self.match_rules else {}),
+            **({"error_reason": self.error_reason} if self.error_reason else {}),
         }
 
 

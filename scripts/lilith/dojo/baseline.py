@@ -56,6 +56,7 @@ from dojo.model_adapters import (
 )
 from dojo.replay_server import DojoLedger, GitAncestryOracle, episode_servers
 from dojo.reward import COS_V1, reduce_episode
+from dojo.context_budget import DEFAULT_CONTEXT_WINDOW
 from dojo.runner import (
     RUNNER_VERSION,
     ModelEpisodeRunner,
@@ -153,7 +154,7 @@ def snapshot_root_sha256(store: SnapshotStore) -> str:
 
 IDENTITY_KEYS = ("runner", "dojo", "git_sha", "snapshot_root_sha256", "floors_sha256", "prompt_sha256",
                  "system_prompt_sha256", "model_kind", "model_id", "endpoint_host", "temperature", "max_tokens",
-                 "max_rounds", "episode_token_cap", "seed", "split", "families", "limit", "teacher")
+                 "max_rounds", "episode_token_cap", "context_window", "seed", "split", "families", "limit", "teacher")
 
 
 def check_resume(out: Path, provenance: Mapping[str, Any]) -> None:
@@ -550,7 +551,12 @@ def _add_run_arguments(p: argparse.ArgumentParser) -> None:
                    help=f"acp: akhomed's loopback ACP listener (default {DEFAULT_ACP_ENDPOINT})")
     p.add_argument("--akh", default=None, help=f"acp: the sealed teacher akh (default {DEFAULT_TEACHER_AKH})")
     p.add_argument("--akh-config", type=Path, default=None,
-                   help="acp: the teacher's rendered workspace TOML, read to verify tool_surface and record its model")
+                   help="acp: the teacher's rendered workspace TOML, read to verify tool_surface and record its model "
+                        "(required for --teacher-prompt akh)")
+    p.add_argument("--teacher-prompt", choices=["akh", "session"], default="akh",
+                   help="acp: where the teacher gets the dojo system prompt. akh (default): the akh's own system_prompt, "
+                        "like the parent's system message; the run is refused unless --akh-config's system_prompt is the "
+                        "run's prompt. session: inside the first user turn (a recorded placement difference)")
     p.add_argument("--base-url", default=None)
     p.add_argument("--base-url-file", type=Path, default=None)
     p.add_argument("--model", default=None)
@@ -562,6 +568,10 @@ def _add_run_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-tokens", type=int, default=4096, help="completion tokens per model call")
     p.add_argument("--max-rounds", type=int, default=20, help="model turns per episode")
     p.add_argument("--episode-token-cap", type=int, default=64_000, help="completion tokens per episode")
+    p.add_argument("--context-window", type=int, default=DEFAULT_CONTEXT_WINDOW,
+                   help="tokens the in-process loop keeps the running request inside: each tool result is cut to fit "
+                        "what is left after the system prompt, tool schemas and conversation, minus --max-tokens "
+                        "(production #458; keep it below the serving window)")
     p.add_argument("--timeout", type=float, default=300.0)
     p.add_argument("--attempts", type=int, default=4, help="HTTP attempts per model call (429/5xx/transport)")
     p.add_argument("--backoff", type=float, default=2.0)
@@ -584,15 +594,20 @@ def _acp_run(args: argparse.Namespace, store: SnapshotStore, chosen, system: Sys
     endpoint = args.acp_endpoint or DEFAULT_ACP_ENDPOINT
     akh = args.akh or DEFAULT_TEACHER_AKH
     declared = T.read_teacher_config(args.akh_config, akh) if args.akh_config else None
+    placement = T.PromptPlacement.AKH_SYSTEM if args.teacher_prompt == "akh" else T.PromptPlacement.SESSION_TURN
+    if placement is T.PromptPlacement.AKH_SYSTEM:
+        T.verify_prompt_parity(declared, system)
     secret = load_secret(env=args.key_env, file=args.key_file)
     runner_config = RunnerConfig(max_rounds=args.max_rounds, episode_token_cap=args.episode_token_cap)
     with ReplayMcpGateway() as gateway:
         runner = T.AcpEpisodeRunner(T.tcp_connector(endpoint), secret, system, gateway,
                                     T.AcpTeacherConfig(akh=akh, endpoint_host=T.endpoint_host(endpoint),
-                                                       turn_timeout_s=args.timeout, runner=runner_config))
+                                                       turn_timeout_s=args.timeout, runner=runner_config,
+                                                       placement=placement))
         probe = runner.probe()  # refuses a teacher with tools of its own before anything is written
         provenance = {
             **_base_provenance(args, store, system, families, selection),
+            "context_window": None,  # the akh bounds tool results itself (#458), against its own context_window
             "model_kind": T.KIND,
             "model_id": runner.model_id,
             "endpoint_host": runner.endpoint_host,
@@ -625,6 +640,7 @@ def _base_provenance(args: argparse.Namespace, store: SnapshotStore, system: Sys
         "prompt_sources": dict(system.sources),
         "max_rounds": args.max_rounds,
         "episode_token_cap": args.episode_token_cap,
+        "context_window": args.context_window,
         "seed": args.seed,
         "split": args.split,
         "families": [f.value for f in families],
@@ -664,7 +680,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         "max_tokens": args.max_tokens,
     }
     config = BatchConfig(args.out, args.concurrency,
-                         RunnerConfig(max_rounds=args.max_rounds, episode_token_cap=args.episode_token_cap))
+                         RunnerConfig(max_rounds=args.max_rounds, episode_token_cap=args.episode_token_cap,
+                                      context_window=args.context_window, reserved_output_tokens=args.max_tokens))
     summary = run_batch(store, chosen, adapter, system, oracle, config, provenance,
                         args.label or adapter.model_id, progress=lambda line: print(line, file=sys.stderr, flush=True))
     interrupted = summary.pop("_interrupted", False)

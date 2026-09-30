@@ -1242,7 +1242,14 @@ def lilith_settings(root: Path) -> LilithSettings | None:
 
 DOJO_TEACHER = "dojo-teacher"
 DOJO_TEACHER_CONFIG_FILE = "config/dojo-teacher.json"
-DOJO_TEACHER_CONFIG_KEYS = {"model", "reasoning_effort"}
+DOJO_TEACHER_CONFIG_KEYS = {"model", "reasoning_effort", "prompt"}
+# `prompt` (config/dojo-teacher.json): "dojo" (default) renders the run's own dojo system prompt as the
+# akh's `system_prompt`, so the teacher receives it in the same role as the in-process parent;
+# "neutral" keeps DOJO_TEACHER_PROMPT and lets the runner deliver the dojo prompt in the first user turn
+# (`--teacher-prompt session`).
+DOJO_TEACHER_PROMPTS = ("dojo", "neutral")
+DOJO_TEACHER_SERVERS = ("anima", "git")  # the replay servers the dojo runner pushes
+DOJO_TEACHER_ADDENDUM = "addenda/dojo-teacher.md"
 DOJO_TEACHER_PRINCIPAL = "dojo-teacher"
 DOJO_TEACHER_KEY_FILE = "secrets/dojo-teacher.key"
 REASONING_EFFORTS = ("low", "medium", "high", "max")
@@ -1265,6 +1272,7 @@ class DojoTeacherSettings:
     """The operator's render inputs for the dojo teacher (`config/dojo-teacher.json`)."""
     model: str = MODEL
     reasoning_effort: str | None = None
+    prompt: str = "dojo"
 
     def inference(self) -> Inference:
         # The Romans' Ollama Cloud subscription (ROMAN_OLLAMA_KEY): no direct
@@ -1278,7 +1286,10 @@ def dojo_teacher_settings(root: Path) -> DojoTeacherSettings | None:
     `config/dojo-teacher.json` (written by the operator; non-secret) holds:
     - `model` (optional, default the Romans' `glm-5.3`): the Ollama Cloud model
       that backs the teacher, reached with the Romans' ROMAN_OLLAMA_KEY;
-    - `reasoning_effort` (optional): one of low, medium, high, max.
+    - `reasoning_effort` (optional): one of low, medium, high, max;
+    - `prompt` (optional, default `dojo`): `dojo` renders the run's dojo system prompt
+      (`dojo_teacher_system_prompt`) as the akh's `system_prompt`; `neutral` keeps
+      the short generic prompt.
 
     Absent file: None, nothing about the teacher is rendered. A malformed file
     fails the whole render closed before any file is written.
@@ -1301,19 +1312,45 @@ def dojo_teacher_settings(root: Path) -> DojoTeacherSettings | None:
     effort = settings.get("reasoning_effort")
     if effort is not None and effort not in REASONING_EFFORTS:
         raise RenderError(f"{path}: `reasoning_effort` must be one of {list(REASONING_EFFORTS)}")
-    return DojoTeacherSettings(model=model, reasoning_effort=effort)
+    prompt = settings.get("prompt", "dojo")
+    if prompt not in DOJO_TEACHER_PROMPTS:
+        raise RenderError(f"{path}: `prompt` must be one of {list(DOJO_TEACHER_PROMPTS)}")
+    return DojoTeacherSettings(model=model, reasoning_effort=effort, prompt=prompt)
 
 
-def render_dojo_teacher_workspace(existing: dict | None, settings: DojoTeacherSettings) -> dict:
+def dojo_teacher_system_prompt(roles_dir: Path, skill_dir: Path) -> str:
+    """The dojo system prompt, byte for byte what the in-process arm sends as its system
+    message (`scripts/lilith/dojo/runner.py compose_system_prompt`; a test pins the two together):
+    Lilith's role file, the chief-of-staff procedures, then the dojo addendum, with
+    `{mcp_servers}` filled with the replay servers."""
+    names = ", ".join(DOJO_TEACHER_SERVERS)
+    body = "\n".join([(roles_dir / "lilith.md").read_text(), skill_procedures(skill_dir)])
+    body = body.replace(MCP_SERVERS_PLACEHOLDER, names)
+    addendum = (roles_dir / DOJO_TEACHER_ADDENDUM).read_text().replace(MCP_SERVERS_PLACEHOLDER, names)
+    return body.rstrip("\n") + "\n\n" + addendum
+
+
+def render_dojo_teacher_workspace(existing: dict | None, settings: DojoTeacherSettings,
+                                  prompt: str | None = None) -> dict:
     """The sealed teacher workspace. Rendered from scratch except for engine
     sizing keys; akhomed refuses the load if any channel beyond the session
-    is configured (`AkhConfig::validate_tool_surface`)."""
+    is configured (`AkhConfig::validate_tool_surface`).
+
+    `prompt` is the composed dojo system prompt (`dojo_teacher_system_prompt`);
+    required unless `settings.prompt` is `neutral`. akhomed composes it as the
+    "Operator Instructions" section of the akh's system message, between its own
+    psyche identity and its machine-owned tool/convention sections (not
+    suppressible per akh); the text itself is verbatim."""
+    if settings.prompt == "dojo" and prompt is None:
+        raise RenderError("the dojo teacher renders the dojo system prompt: pass the composed prompt "
+                          "(configure_core.py does; a checkout with roles/ and skills/chief-of-staff is required)")
     doc = {key: existing[key] for key in DOJO_TEACHER_ENGINE_KEYS if existing and key in existing}
     inference = settings.inference()
     doc.update(name=DOJO_TEACHER, model=inference.model)
     if settings.reasoning_effort is not None:
         doc["reasoning_effort"] = settings.reasoning_effort
-    doc.update(system_prompt=DOJO_TEACHER_PROMPT, backend=inference.backend,
+    doc.update(system_prompt=prompt if settings.prompt == "dojo" else DOJO_TEACHER_PROMPT,
+               backend=inference.backend,
                # Keep nothing between episodes, and pre-load nothing: the dojo
                # prompt is the whole context (the passthrough A/B control).
                capture_transcripts=False, context_strategy="passthrough",

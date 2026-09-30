@@ -14,7 +14,10 @@ akh. Design: docs/ai/plans/2026-09-29-lilith-c4-teacher-via-akh.md.
    `akh-acp --akhomed` bridges): `initialize` (bearer in `_meta.authorization`), then the isolation
    preflight, then `session/new` with the episode's gateway servers in `mcpServers` (akhomed bridges
    client-pushed HTTP MCP servers as `mcp__<name>__<tool>`, `src/acp/mcp_bridge.rs`), then one
-   `session/prompt` carrying the dojo system prompt and the episode's user prompt.
+   `session/prompt`. Where the dojo system prompt goes is `PromptPlacement`: by default it is the
+   akh's own `system_prompt` (rendered from the same text, verified before the run) and the prompt
+   turn carries only the task, the parent's exact role layout; the legacy `SESSION_TURN` placement
+   sends both in the first user turn.
 3. Isolation is enforced, not assumed (the `IsolationRefusal` error aborts the whole batch):
    - preflight `_akh/tools`: the akh's own registry must be empty. Any native or static-MCP tool
      (a live tracker, git, shell, web) refuses the run before the model sees a prompt;
@@ -32,6 +35,7 @@ stdlib only. The tests drive it against a fake ACP peer (`tests/fake_acp.py`).
 from __future__ import annotations
 
 import dataclasses
+import enum
 import json
 import queue
 import re
@@ -77,6 +81,26 @@ PROMPT_PREAMBLE = """\
 The two sections below are your complete instructions for this session. The first is your system
 prompt, the second is the task. Use only the tools listed for this session.
 """
+
+
+class PromptPlacement(enum.StrEnum):
+    """Where the teacher receives the dojo system prompt (the in-process parent gets it as the system message)."""
+
+    AKH_SYSTEM = "akh-system-prompt"  # the akh's rendered `system_prompt`; the prompt turn is the task alone
+    SESSION_TURN = "acp-session-prompt"  # inside the first user turn, under the akh's own system prompt
+
+
+class PromptParityRefusal(DojoError):
+    """The teacher's active system prompt is not the run's dojo prompt."""
+
+    code = "lilith::dojo::teacher_prompt_parity"
+    help = (
+        "render the dojo prompt into the teacher akh: leave `prompt` unset (or `\"dojo\"`) in "
+        "config/dojo-teacher.json, run `python3 deploy/roman-mini/configure_core.py --plan` then the render "
+        "from a clean origin/main checkout, restart the core so akhomed reloads the workspace, and pass the "
+        "rendered core-config/akh-medu/workspaces/dojo-teacher.toml as --akh-config; or, to send the prompt "
+        "in the first user turn instead (a recorded placement difference), pass `--teacher-prompt session`"
+    )
 
 
 class IsolationRefusal(DojoError):
@@ -282,6 +306,9 @@ class AcpTeacherConfig:
     turn_timeout_s: float = 1800.0
     rpc_timeout_s: float = 60.0
     runner: RunnerConfig = RunnerConfig()
+    # The library default is the self-contained placement, which needs nothing from the akh's
+    # config; the CLI defaults to AKH_SYSTEM and verifies the akh first (`verify_prompt_parity`).
+    placement: PromptPlacement = PromptPlacement.SESSION_TURN
 
 
 @dataclasses.dataclass
@@ -398,7 +425,7 @@ class AcpEpisodeRunner:
             channel.close()
         return {"akh": self.config.akh, "agent_info": agent_info, "own_tools": 0,
                 "memory": {"symbols": symbols, "triples": triples},
-                "prompt_delivery": "acp-session-prompt", "tool_transport": "client-pushed-http-mcp"}
+                "prompt_delivery": self.config.placement.value, "tool_transport": "client-pushed-http-mcp"}
 
     def _initialize(self, client: AcpClient) -> dict:
         result = client.request("initialize", {
@@ -527,9 +554,12 @@ class AcpEpisodeRunner:
                 return {"outcome": {"outcome": "cancelled"}}
             raise _Refuse(f"{method} is not offered by the dojo client")
 
-        blocks = [{"type": "text", "text": PROMPT_PREAMBLE},
-                  {"type": "text", "text": "# System prompt\n\n" + self.system.text},
-                  {"type": "text", "text": "# Task\n\n" + prompt}]
+        if self.config.placement is PromptPlacement.AKH_SYSTEM:
+            blocks = [{"type": "text", "text": prompt}]  # exactly the parent's user message
+        else:
+            blocks = [{"type": "text", "text": PROMPT_PREAMBLE},
+                      {"type": "text", "text": "# System prompt\n\n" + self.system.text},
+                      {"type": "text", "text": "# Task\n\n" + prompt}]
         started = self._clock()
         try:
             response = client.request("session/prompt", {"sessionId": session_id, "prompt": blocks},
@@ -639,5 +669,26 @@ def read_teacher_config(path: Path, akh: str) -> dict:
         problems.append("[[mcp.servers]] is set")
     if problems:
         raise IsolationRefusal(f"{path} is not a sealed dojo teacher: " + "; ".join(problems))
+    prompt = doc.get("system_prompt")
     return {"path": str(path), "sha256": sha256_hex(raw), "backend": doc.get("backend"), "model": doc.get("model"),
-            "tool_surface": doc.get("tool_surface")}
+            "tool_surface": doc.get("tool_surface"),
+            "system_prompt_sha256": sha256_hex(prompt.encode("utf-8")) if isinstance(prompt, str) else None}
+
+
+def verify_prompt_parity(declared: Mapping[str, Any] | None, system: SystemPrompt) -> None:
+    """Refuse a run whose teacher akh would not receive the run's dojo prompt as its system prompt.
+
+    Checked on the rendered workspace TOML (`read_teacher_config`): its `system_prompt` must hash to
+    the run's `system_prompt_sha256`. What this cannot see is whether akhomed has reloaded that file
+    (no `_akh/*` read exposes the active prompt), so the refusal help says to restart the core after
+    a render. akhomed still composes the text as the "Operator Instructions" section of its own
+    system message (psyche identity before it; tool-operation and convention sections after, not
+    suppressible per akh): recorded in the plan, not in the hash."""
+    if declared is None:
+        raise PromptParityRefusal("the teacher's rendered workspace TOML was not given (--akh-config), so its "
+                                  "system prompt cannot be compared with the run's")
+    actual = declared.get("system_prompt_sha256")
+    if actual != system.sha256:
+        raise PromptParityRefusal(
+            f"the teacher akh's system_prompt is {'not set' if actual is None else 'sha256 ' + actual[:16]}, "
+            f"the run's dojo system prompt is sha256 {system.sha256[:16]} ({declared.get('path')})")

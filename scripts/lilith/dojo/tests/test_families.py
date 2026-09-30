@@ -70,6 +70,22 @@ def test_briefing_fabrication_wrong_phase_unread_id_and_fake_receipt(briefing_wo
     assert v.metrics["fabrications"] == 1.0
 
 
+def test_citing_an_errored_receipt_is_unbacked_not_fabrication(briefing_world, tmp_path):
+    """The receipt was issued (real id and digest) but answered with an error: it backs nothing and lowers
+    provenance, and it is not a hard constraint. An unissued receipt is still fabrication."""
+    world, spec = briefing_world
+    d = Driver(spec, world.store(), tmp_path / "l.jsonl")
+    _, r1 = d.call("list_work_items", {"project_id": PROJECT})
+    _, miss = d.call("get_plan", {"id": "plan-aaaa"})  # a read the recorder never captured
+    assert d.log.receipts[-1].is_error
+    d.emit(briefing_doc(d, rc(d, r1, miss), {"done": ["a"], "in_flight": ["w"], "blocked": ["p"], "next": ["r"]}))
+    v = run_verify(world, spec, d)
+    assert not v.hard_constraints
+    assert v.steps[-1].vector.provenance < 1.0
+    assert any(n.startswith("unbacked:") and "error answer" in n for n in v.steps[-1].notes)
+    assert v.metrics["fabrications"] == 0.0
+
+
 def test_briefing_missing_blocked_item_lowers_recall(briefing_world, tmp_path):
     world, spec = briefing_world
     d = Driver(spec, world.store(), tmp_path / "l.jsonl")
