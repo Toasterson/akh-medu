@@ -1655,6 +1655,20 @@ class DojoTeacherRenderTests(RenderFixture):
         ws = self.toml(self.WS)
         self.assertEqual((ws["model"], ws["reasoning_effort"]), ("deepseek-v4.1", "high"))
 
+    def test_prompt_guidance_is_off_by_default_and_rendered_when_set(self):
+        self.configure()
+        self.render()
+        self.assertNotIn("prompt_guidance", self.toml(self.WS))
+        self.configure(model="kimi-k3", prompt_guidance="auto")
+        self.render()
+        ws = self.toml(self.WS)
+        self.assertEqual((ws["model"], ws["prompt_guidance"]), ("kimi-k3", "auto"))
+        # a top-level scalar: above the first table, or serde would nest it
+        text = self.text(self.WS)
+        self.assertLess(text.index("prompt_guidance ="), text.index("[ollama_endpoint]"))
+        # the dojo prompt itself is untouched, so --teacher-prompt akh parity holds
+        self.assertEqual(ws["system_prompt"], self.dojo_prompt())
+
     def test_rerender_drops_stale_channels_and_keeps_engine_sizing(self):
         self.configure()
         path = self.root / self.WS
@@ -1672,7 +1686,7 @@ class DojoTeacherRenderTests(RenderFixture):
 
     def test_malformed_switch_fails_before_writing(self):
         for body, needle in (("{", "not valid JSON"), ('{"modle": "x"}', "unknown keys"),
-                             ('{"model": "a b"}', "model"), ('{"prompt": 1}', "prompt"), ('{"reasoning_effort": "extreme"}', "reasoning_effort"),
+                             ('{"model": "a b"}', "model"), ('{"prompt": 1}', "prompt"), ('{"reasoning_effort": "extreme"}', "reasoning_effort"), ('{"prompt_guidance": "strict"}', "prompt_guidance"),
                              ("[]", "JSON object")):
             with self.subTest(body=body):
                 (self.root / fa.DOJO_TEACHER_CONFIG_FILE).write_text(body)

@@ -1200,6 +1200,18 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
 
+    /// Model-family guidance layer for the generated system prompt (ADR 122):
+    /// `"off"` (default), `"auto"` (family from [`Self::model`]), `"generic"`,
+    /// `"glm"` or `"kimi"`. Adds a machine-owned *Execution Discipline*
+    /// section (tool arguments, failed calls, evidence, announce-before-act,
+    /// finishing). Off ⇒ the prompt is byte-identical to before. Serialized
+    /// as a top-level scalar (above the first table); omitted when off.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::prompt_guidance::PromptGuidance::is_off"
+    )]
+    pub prompt_guidance: crate::agent::prompt_guidance::PromptGuidance,
+
     /// Whether this is the akh's MAIN memory workspace (writes target MAIN).
     #[serde(default = "default_true")]
     pub is_main: bool,
@@ -1394,6 +1406,7 @@ impl Default for AkhConfig {
             model: None,
             reasoning_effort: None,
             system_prompt: None,
+            prompt_guidance: crate::agent::prompt_guidance::PromptGuidance::Off,
             is_main: true,
             backend: ChatBacking::default(),
             spec_decode: false,
@@ -1608,6 +1621,7 @@ impl AkhConfig {
             "model",
             "reasoning_effort",
             "system_prompt",
+            "prompt_guidance",
             "is_main",
             "backend",
             "spec_decode",
@@ -1874,6 +1888,7 @@ impl AkhConfig {
         ModelManagerConfig {
             ollama,
             system_prompt: self.system_prompt.clone(),
+            prompt_guidance: self.prompt_guidance,
             ..Default::default()
         }
     }
@@ -3356,6 +3371,62 @@ auth = { token_file = "/tmp/observer.key" }
         // The default stays off the wire, so every other akh.toml is unchanged.
         let full = toml::to_string(&AkhConfig::with_name("janus")).expect("serialize");
         assert!(!full.contains("tool_surface"), "{full}");
+    }
+
+    #[test]
+    fn prompt_guidance_is_opt_in_and_reaches_the_model_manager() {
+        use crate::agent::prompt_guidance::{ModelFamily, PromptGuidance};
+        // Default: off, absent from the wire, and the manager resolves nothing.
+        let base: AkhConfig = toml::from_str(SESSION_ONLY_TEACHER).expect("parse");
+        assert_eq!(base.prompt_guidance, PromptGuidance::Off);
+        assert!(
+            !toml::to_string(&base)
+                .expect("serialize")
+                .contains("prompt_guidance")
+        );
+        assert_eq!(
+            base.to_model_manager_config().prompt_guidance,
+            PromptGuidance::Off
+        );
+
+        // Opt-in: a top-level scalar above the first table (ADR 122).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        std::fs::write(
+            &path,
+            SESSION_ONLY_TEACHER.replace(
+                "tool_surface = \"session-only\"\n",
+                "tool_surface = \"session-only\"\nprompt_guidance = \"auto\"\n",
+            ),
+        )
+        .expect("write");
+        let (cfg, unknown) = AkhConfig::load_checked(&path).expect("guided teacher loads");
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(cfg.prompt_guidance, PromptGuidance::Auto);
+        let rendered = toml::to_string(&cfg).expect("serialize");
+        assert!(
+            rendered.contains("prompt_guidance = \"auto\""),
+            "{rendered}"
+        );
+        let reparsed: AkhConfig = toml::from_str(&rendered).expect("reparse");
+        assert_eq!(reparsed.prompt_guidance, PromptGuidance::Auto);
+        let mm = cfg.to_model_manager_config();
+        assert_eq!(mm.prompt_guidance, PromptGuidance::Auto);
+        assert_eq!(
+            mm.prompt_guidance.resolve(&mm.ollama.model),
+            Some(ModelFamily::Glm)
+        );
+
+        // A misspelt value is a load error, not a silent fallback to off.
+        std::fs::write(
+            &path,
+            SESSION_ONLY_TEACHER.replace(
+                "tool_surface = \"session-only\"\n",
+                "tool_surface = \"session-only\"\nprompt_guidance = \"strict\"\n",
+            ),
+        )
+        .expect("write");
+        assert!(AkhConfig::load_checked(&path).is_err());
     }
 
     #[test]

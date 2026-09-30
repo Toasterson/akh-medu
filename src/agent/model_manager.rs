@@ -105,6 +105,11 @@ pub struct ModelManagerConfig {
     /// `AkhConfig.system_prompt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// Model-family guidance layer (ADR 122), sourced from
+    /// `AkhConfig.prompt_guidance`. Resolved against `ollama.model` once at
+    /// [`AgentModelManager::new`]. Default [`PromptGuidance::Off`].
+    #[serde(default)]
+    pub prompt_guidance: super::prompt_guidance::PromptGuidance,
 }
 
 impl Default for ModelManagerConfig {
@@ -115,6 +120,7 @@ impl Default for ModelManagerConfig {
             idle_ttl_secs: default_ttl(),
             prompt_mode: None,
             system_prompt: None,
+            prompt_guidance: super::prompt_guidance::PromptGuidance::Off,
         }
     }
 }
@@ -300,6 +306,8 @@ pub struct AgentModelManager {
     agents: Mutex<HashMap<String, AgentEntry>>,
     /// Resolved prompt mode for this manager (auto-detected or config-overridden).
     prompt_mode: PromptMode,
+    /// Resolved model-family guidance (ADR 122); `None` = layer off.
+    guidance: Option<super::prompt_guidance::ModelFamily>,
     /// Cumulative token usage across this manager's agentic turns.
     usage: UsageLedger,
     /// Lazily-fetched model context-window size (0 = unknown). Populated once via
@@ -315,10 +323,22 @@ impl AgentModelManager {
         let prompt_mode = config
             .prompt_mode
             .unwrap_or_else(|| detect_prompt_mode(&config.ollama.model));
+        let guidance = config.prompt_guidance.resolve(&config.ollama.model);
+        if let Some(family) = guidance {
+            // Info, not debug: the dojo A/B verifies the guided arm from this
+            // line (the assembled prompt is not exposed over ACP).
+            tracing::info!(
+                model = %config.ollama.model,
+                setting = ?config.prompt_guidance,
+                family = family.label(),
+                "model-family prompt guidance enabled (ADR 122)"
+            );
+        }
         let ollama = OllamaClient::new(config.ollama.clone());
         tracing::debug!(
             model = %config.ollama.model,
             ?prompt_mode,
+            guidance = guidance.map(super::prompt_guidance::ModelFamily::label),
             "model manager initialised",
         );
         Self {
@@ -326,6 +346,7 @@ impl AgentModelManager {
             ollama,
             agents: Mutex::new(HashMap::new()),
             prompt_mode,
+            guidance,
             usage: UsageLedger::default(),
             context_window: AtomicU64::new(0),
             context_window_tried: AtomicBool::new(false),
@@ -335,6 +356,11 @@ impl AgentModelManager {
     /// Return the prompt mode in effect for this manager.
     pub fn prompt_mode(&self) -> PromptMode {
         self.prompt_mode
+    }
+
+    /// Return the resolved model-family guidance (ADR 122); `None` = off.
+    pub fn guidance(&self) -> Option<super::prompt_guidance::ModelFamily> {
+        self.guidance
     }
 
     /// A point-in-time copy of this manager's cumulative token usage, including
@@ -429,6 +455,7 @@ impl AgentModelManager {
             self.config.system_prompt.as_deref(),
             self.prompt_mode,
             manifests,
+            self.guidance,
         );
         agents.insert(
             agent_id.to_string(),
@@ -802,7 +829,12 @@ impl AgentModelManager {
 /// 3. **Machine-owned sections** (always appended):
 ///    - Tool-operations section (generated from `manifests` registry)
 ///    - Operating conventions block
-/// 4. **Mode constraints**: [`PromptMode::Terse`] brevity constraints compose
+/// 4. **Model-family guidance** (optional, ADR 122): when `guidance` is
+///    `Some`, the Execution Discipline section from
+///    [`prompt_guidance::guidance_section`](super::prompt_guidance::guidance_section)
+///    follows the conventions. `None` (every akh without `prompt_guidance`)
+///    leaves the output byte-identical to the pre-ADR-122 assembly.
+/// 5. **Mode constraints**: [`PromptMode::Terse`] brevity constraints compose
 ///    after all of the above.
 ///
 /// Ordering rationale: psyche establishes *who the akh is* (derived, not
@@ -824,6 +856,7 @@ pub fn assemble_system_prompt(
     explicit: Option<&str>,
     mode: PromptMode,
     manifests: &[&crate::agent::tool_manifest::ToolManifest],
+    guidance: Option<super::prompt_guidance::ModelFamily>,
 ) -> String {
     // 1. Psyche-derived identity — always present, never replaced.
     let psyche_body = build_system_prompt_body(agent_id, agent_name, psyche);
@@ -839,14 +872,30 @@ pub fn assemble_system_prompt(
         _ => String::new(),
     };
 
-    // 3. Machine-owned sections (always appended)
+    // 3. Machine-owned sections (always appended). With the guidance layer
+    //    on (ADR 122), the conventions keep only the lines whose tools are
+    //    live in this turn: a session-only dojo teacher or an Anima runtime
+    //    context must not be told to use `kg_query` it does not have.
     let tool_section = generate_tool_operations_section(manifests);
-    let conventions = OPERATING_CONVENTIONS;
+    let conventions: std::borrow::Cow<'static, str> = match guidance {
+        None => OPERATING_CONVENTIONS.into(),
+        Some(_) => {
+            let live: std::collections::HashSet<&str> =
+                manifests.iter().map(|m| m.name.as_str()).collect();
+            render_live_conventions(&live).into()
+        }
+    };
 
     // 4. Assemble with mode-specific constraints. When `operator_section` is
     //    empty (no `explicit` prompt configured) this is byte-identical to
     //    the pre-fix output: `psyche_body\n\n{tool_section}\n\n{conventions}`.
-    let base = format!("{psyche_body}{operator_section}\n\n{tool_section}\n\n{conventions}");
+    let mut base = format!("{psyche_body}{operator_section}\n\n{tool_section}\n\n{conventions}");
+    // 5. Model-family guidance (ADR 122) — opt-in, after the conventions so
+    //    it sits late in the prompt, before any Terse block.
+    if let Some(family) = guidance {
+        base.push_str("\n\n");
+        base.push_str(&super::prompt_guidance::guidance_section(family));
+    }
     match mode {
         PromptMode::Standard => base,
         PromptMode::Terse => format!("{base}\n\n{TERSE_CONSTRAINTS}"),
@@ -922,6 +971,139 @@ const OPERATING_CONVENTIONS: &str = "\
   - `mcp__anima__update_work_item` — update phase/status/priority\n\
   - Use these to coordinate with the tracker and other agents.";
 
+/// What a line of the operating conventions needs from the live tool set to
+/// be true for this turn (ADR 122 live-conventions filter).
+#[derive(Debug, Clone, Copy)]
+enum ConventionNeed {
+    /// Generic advice; always rendered.
+    Always,
+    /// Every named tool must be live.
+    Tools(&'static [&'static str]),
+    /// At least one live tool carries this name prefix (an MCP server).
+    Prefix(&'static str),
+    /// A tool carrying the prefix is live *and* at least one of the named
+    /// local tools is (the Anima worktree contract only holds for an akh
+    /// that can edit the worktree).
+    PrefixAndAnyOf(&'static str, &'static [&'static str]),
+}
+
+impl ConventionNeed {
+    fn met(self, live: &std::collections::HashSet<&str>) -> bool {
+        let has_prefix = |p: &str| live.iter().any(|name| name.starts_with(p));
+        match self {
+            Self::Always => true,
+            Self::Tools(names) => names.iter().all(|n| live.contains(n)),
+            Self::Prefix(p) => has_prefix(p),
+            Self::PrefixAndAnyOf(p, names) => {
+                has_prefix(p) && names.iter().any(|n| live.contains(n))
+            }
+        }
+    }
+}
+
+/// [`OPERATING_CONVENTIONS`], line by line, with what each line needs.
+/// Joined unfiltered, the lines reproduce the constant byte for byte
+/// (`convention_lines_reproduce_the_constant`).
+const CONVENTION_LINES: &[(&str, ConventionNeed)] = {
+    use ConventionNeed::{Always, Prefix, PrefixAndAnyOf, Tools};
+    const EDITORS: &[&str] = &["edit", "file_io", "shell_exec"];
+    &[
+        ("### Knowledge Graph", Always),
+        (
+            "- Use `kg_query` to read facts; `kg_mutate` to write new beliefs.",
+            Tools(&["kg_query", "kg_mutate"]),
+        ),
+        (
+            "- Provenance is tracked automatically — cite sources when adding facts.",
+            Tools(&["kg_mutate"]),
+        ),
+        (
+            "- The KG is your long-term memory; use it to ground decisions.",
+            Tools(&["kg_query"]),
+        ),
+        ("", Always),
+        ("### Skills & Tools", Always),
+        (
+            "- Skills auto-activate when a task needs them; `skill_author` writes new ones.",
+            Tools(&["skill_author"]),
+        ),
+        (
+            "- Dangerous tools (Critical level) may require user approval.",
+            Always,
+        ),
+        (
+            "- Always check tool descriptions and danger levels before invoking.",
+            Always,
+        ),
+        ("", Always),
+        ("### Workspace & Session Contract (Anima)", Always),
+        (
+            "- When running in an Anima session, you operate in a git worktree.",
+            PrefixAndAnyOf("mcp__anima__", EDITORS),
+        ),
+        (
+            "- `.anima/wip/` contains session documentation and artifacts.",
+            PrefixAndAnyOf("mcp__anima__", EDITORS),
+        ),
+        (
+            "- After each turn, the runner captures your diff for the work item.",
+            PrefixAndAnyOf("mcp__anima__", EDITORS),
+        ),
+        (
+            "- `mcp__anima__*` tools interact with the Anima project tracker:",
+            Prefix("mcp__anima__"),
+        ),
+        (
+            "- `mcp__anima__get_work_item` — fetch your current work item",
+            Tools(&["mcp__anima__get_work_item"]),
+        ),
+        (
+            "- `mcp__anima__post_message` — communicate on the work item thread",
+            Tools(&["mcp__anima__post_message"]),
+        ),
+        (
+            "- `mcp__anima__update_work_item` — update phase/status/priority",
+            Tools(&["mcp__anima__update_work_item"]),
+        ),
+        (
+            "- Use these to coordinate with the tracker and other agents.",
+            Prefix("mcp__anima__"),
+        ),
+    ]
+};
+
+/// The operating conventions reduced to the lines that hold for `live`
+/// (ADR 122). A `###` heading whose lines all drop is dropped with them.
+fn render_live_conventions(live: &std::collections::HashSet<&str>) -> String {
+    let mut out = String::from("## Operating Conventions\n");
+    // Split the line table into heading-led groups at the blank separators.
+    for group in CONVENTION_LINES.split(|(line, _)| line.is_empty()) {
+        let Some(((heading, _), body)) = group.split_first() else {
+            continue;
+        };
+        let kept: Vec<&str> = body
+            .iter()
+            .filter(|(_, need)| need.met(live))
+            .map(|(line, _)| *line)
+            .collect();
+        if kept.is_empty() {
+            continue;
+        }
+        out.push('\n');
+        out.push_str(heading);
+        for line in kept {
+            out.push('\n');
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    // Match the constant's shape: no trailing newline.
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 /// Generate the tool-operations section from the manifest registry.
 ///
 /// Returns a formatted markdown section listing each advertised tool with:
@@ -938,7 +1120,15 @@ fn generate_tool_operations_section(
     use crate::agent::tool_manifest::DangerLevel;
 
     if manifests.is_empty() {
-        return "## Available Tools\n\nNo tools currently available.".to_string();
+        // No akh-registered tools does not mean no tools: a session (the
+        // `/v1` context of an Anima runtime, a session-only dojo teacher) can
+        // supply its own. "No tools currently available" contradicted the
+        // session tool schemas appended right after it (2026-09-30 evaluation,
+        // mode A-F7).
+        return "## Available Tools\n\nThis akh registers no tools of its own. \
+                Use only the tools whose schemas this session provides; if it provides \
+                none, answer without tools."
+            .to_string();
     }
 
     // WI-357 (KV-cache prefix stability): iterate manifests in canonical
@@ -1281,6 +1471,7 @@ mod tests {
             Some(explicit),
             PromptMode::Standard,
             &[], // No tools for this test
+            None,
         );
         assert!(
             prompt.starts_with("You are Thoth (id: t1)"),
@@ -1331,6 +1522,7 @@ mod tests {
             None,
             PromptMode::Standard,
             &[],
+            None,
         );
         let expected = format!(
             "{}\n\n{}\n\n{}",
@@ -1351,6 +1543,7 @@ mod tests {
             None,
             PromptMode::Standard,
             &[],
+            None,
         );
         // Now composed, not equal to psyche_prompt alone
         assert!(assembled.contains("Thoth"), "contains agent name");
@@ -1374,6 +1567,7 @@ mod tests {
             Some("   \n  "),
             PromptMode::Standard,
             &[],
+            None,
         );
         assert!(
             assembled.contains("archetype"),
@@ -1410,6 +1604,163 @@ mod tests {
             prompt.contains("Available Tools"),
             "tool section is composed"
         );
+    }
+
+    // ── ADR 122: model-family guidance layer ─────────────────────────────
+
+    #[test]
+    fn guidance_off_keeps_assembly_byte_identical() {
+        let without = assemble_system_prompt(
+            "t1",
+            "Thoth",
+            Some(&thoth_psyche()),
+            Some("Operator voice."),
+            PromptMode::Standard,
+            &[],
+            None,
+        );
+        let cfg = ModelManagerConfig {
+            ollama: OllamaConfig {
+                model: "glm-5.3:cloud".into(),
+                ..OllamaConfig::default()
+            },
+            system_prompt: Some("Operator voice.".into()),
+            ..ModelManagerConfig::default()
+        };
+        let mgr = AgentModelManager::new(cfg);
+        assert_eq!(mgr.guidance(), None, "default config leaves guidance off");
+        mgr.load_agent("t1", "Thoth", Some(&thoth_psyche()), &[]);
+        assert_eq!(mgr.system_prompt_for("t1").unwrap(), without);
+        assert!(!without.contains(crate::agent::prompt_guidance::GUIDANCE_HEADING));
+    }
+
+    #[test]
+    fn guidance_follows_conventions_and_precedes_terse_block() {
+        use crate::agent::prompt_guidance::{GUIDANCE_HEADING, ModelFamily};
+        let prompt = assemble_system_prompt(
+            "g1",
+            "Gemma",
+            None,
+            Some("Operator voice."),
+            PromptMode::Terse,
+            &[],
+            Some(ModelFamily::Other),
+        );
+        let conventions = prompt.find("## Operating Conventions").unwrap();
+        let guidance = prompt.find(GUIDANCE_HEADING).unwrap();
+        let terse = prompt.find("Terse Mode").unwrap();
+        let operator = prompt.find("# Operator Instructions").unwrap();
+        assert!(operator < conventions && conventions < guidance && guidance < terse);
+        assert_eq!(prompt.matches(GUIDANCE_HEADING).count(), 1);
+    }
+
+    #[test]
+    fn manager_auto_guidance_resolves_family_from_pinned_model() {
+        use crate::agent::prompt_guidance::{GUIDANCE_HEADING, ModelFamily, PromptGuidance};
+        for (model, family) in [
+            ("glm-5.3:cloud", ModelFamily::Glm),
+            ("kimi-k3:cloud", ModelFamily::Kimi),
+            ("qwen3.8:32b", ModelFamily::Other),
+        ] {
+            let cfg = ModelManagerConfig {
+                ollama: OllamaConfig {
+                    model: model.into(),
+                    ..OllamaConfig::default()
+                },
+                prompt_guidance: PromptGuidance::Auto,
+                ..ModelManagerConfig::default()
+            };
+            let mgr = AgentModelManager::new(cfg);
+            assert_eq!(mgr.guidance(), Some(family), "{model}");
+            mgr.load_agent("a1", "Alice", None, &[]);
+            let prompt = mgr.system_prompt_for("a1").unwrap();
+            assert!(prompt.contains(GUIDANCE_HEADING), "{model}");
+            assert!(
+                prompt.ends_with(&crate::agent::prompt_guidance::guidance_section(family)),
+                "{model}: guidance is the final section in Standard mode"
+            );
+        }
+    }
+
+    fn names<'a>(list: &[&'a str]) -> std::collections::HashSet<&'a str> {
+        list.iter().copied().collect()
+    }
+
+    #[test]
+    fn convention_lines_reproduce_the_constant() {
+        let everything = names(&[
+            "kg_query",
+            "kg_mutate",
+            "skill_author",
+            "edit",
+            "mcp__anima__get_work_item",
+            "mcp__anima__post_message",
+            "mcp__anima__update_work_item",
+        ]);
+        assert_eq!(render_live_conventions(&everything), OPERATING_CONVENTIONS);
+    }
+
+    #[test]
+    fn live_conventions_drop_lines_for_absent_tools() {
+        // The dojo teacher: session-only, replayed anima + git servers.
+        let teacher = render_live_conventions(&names(&[
+            "mcp__anima__get_work_item_detail",
+            "mcp__anima__list_work_items",
+            "mcp__git__git_is_ancestor",
+        ]));
+        assert!(!teacher.contains("kg_query"), "{teacher}");
+        assert!(!teacher.contains("### Knowledge Graph"), "{teacher}");
+        assert!(!teacher.contains("skill_author"), "{teacher}");
+        assert!(
+            !teacher.contains("git worktree"),
+            "no editor ⇒ no worktree contract"
+        );
+        assert!(
+            !teacher.contains("mcp__anima__update_work_item"),
+            "{teacher}"
+        );
+        assert!(
+            teacher.contains("`mcp__anima__*` tools interact"),
+            "{teacher}"
+        );
+        assert!(teacher.contains("danger levels"), "generic advice stays");
+
+        // An Anima runtime's `/v1` context: no akh tools at all.
+        let bare = render_live_conventions(&names(&[]));
+        assert_eq!(
+            bare,
+            "## Operating Conventions\n\n### Skills & Tools\n\
+             - Dangerous tools (Critical level) may require user approval.\n\
+             - Always check tool descriptions and danger levels before invoking."
+        );
+    }
+
+    #[test]
+    fn guidance_applies_live_conventions_only_when_enabled() {
+        use crate::agent::prompt_guidance::ModelFamily;
+        let off = assemble_system_prompt("a", "A", None, None, PromptMode::Standard, &[], None);
+        assert!(
+            off.contains("kg_query"),
+            "guidance off keeps the full conventions"
+        );
+        let on = assemble_system_prompt(
+            "a",
+            "A",
+            None,
+            None,
+            PromptMode::Standard,
+            &[],
+            Some(ModelFamily::Glm),
+        );
+        assert!(!on.contains("kg_query"), "{on}");
+        assert!(on.contains("registers no tools of its own"), "{on}");
+    }
+
+    #[test]
+    fn empty_tool_section_does_not_deny_session_tools() {
+        let section = generate_tool_operations_section(&[]);
+        assert!(!section.contains("No tools currently available"));
+        assert!(section.contains("tools whose schemas this session provides"));
     }
 
     #[test]

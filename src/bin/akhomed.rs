@@ -3923,11 +3923,13 @@ impl ServerState {
         // answerable, which is a precondition for benchmarking the akh.
         match akh_config.to_openai_config() {
             Ok(Some(openai_cfg)) => {
-                let backend =
-                    std::sync::Arc::new(akh_medu::agent::openai_backend::OpenAiChatBackend::new(
+                let backend = std::sync::Arc::new(
+                    akh_medu::agent::openai_backend::OpenAiChatBackend::new(
                         openai_cfg.clone(),
                         akh_config.system_prompt.clone(),
-                    ));
+                    )
+                    .with_prompt_guidance(akh_config.prompt_guidance),
+                );
                 agent.set_chat_backend(backend);
                 tracing::info!(
                     workspace = %name, backend = "openai",
@@ -5242,7 +5244,8 @@ impl akh_medu::acp::ServerControl for ServerState {
                                 akh_medu::agent::openai_backend::OpenAiChatBackend::new(
                                     openai,
                                     cfg.system_prompt.clone(),
-                                ),
+                                )
+                                .with_prompt_guidance(cfg.prompt_guidance),
                             ));
                         }
                     }

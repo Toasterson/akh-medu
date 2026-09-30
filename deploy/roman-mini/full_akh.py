@@ -1242,7 +1242,12 @@ def lilith_settings(root: Path) -> LilithSettings | None:
 
 DOJO_TEACHER = "dojo-teacher"
 DOJO_TEACHER_CONFIG_FILE = "config/dojo-teacher.json"
-DOJO_TEACHER_CONFIG_KEYS = {"model", "reasoning_effort", "prompt"}
+DOJO_TEACHER_CONFIG_KEYS = {"model", "reasoning_effort", "prompt", "prompt_guidance"}
+# `prompt_guidance` (config/dojo-teacher.json): the akh.toml model-family guidance layer (ADR 122,
+# `AkhConfig::prompt_guidance`). "off" (default) renders nothing, so the teacher's akhomed system
+# message stays byte-identical; any other value is rendered as the top-level `prompt_guidance` scalar
+# for the dojo A/B (docs/ai/research/2026-09-30-glm-kimi-run-evaluation.md).
+PROMPT_GUIDANCE = ("off", "auto", "generic", "glm", "kimi")
 # `prompt` (config/dojo-teacher.json): "dojo" (default) renders the run's own dojo system prompt as the
 # akh's `system_prompt`, so the teacher receives it in the same role as the in-process parent;
 # "neutral" keeps DOJO_TEACHER_PROMPT and lets the runner deliver the dojo prompt in the first user turn
@@ -1273,6 +1278,7 @@ class DojoTeacherSettings:
     model: str = MODEL
     reasoning_effort: str | None = None
     prompt: str = "dojo"
+    prompt_guidance: str = "off"
 
     def inference(self) -> Inference:
         # The Romans' Ollama Cloud subscription (ROMAN_OLLAMA_KEY): no direct
@@ -1290,6 +1296,8 @@ def dojo_teacher_settings(root: Path) -> DojoTeacherSettings | None:
     - `prompt` (optional, default `dojo`): `dojo` renders the run's dojo system prompt
       (`dojo_teacher_system_prompt`) as the akh's `system_prompt`; `neutral` keeps
       the short generic prompt.
+    - `prompt_guidance` (optional, default `off`): one of off, auto, generic, glm, kimi;
+      the ADR 122 Execution Discipline layer akhomed adds to the teacher's system message.
 
     Absent file: None, nothing about the teacher is rendered. A malformed file
     fails the whole render closed before any file is written.
@@ -1315,7 +1323,11 @@ def dojo_teacher_settings(root: Path) -> DojoTeacherSettings | None:
     prompt = settings.get("prompt", "dojo")
     if prompt not in DOJO_TEACHER_PROMPTS:
         raise RenderError(f"{path}: `prompt` must be one of {list(DOJO_TEACHER_PROMPTS)}")
-    return DojoTeacherSettings(model=model, reasoning_effort=effort, prompt=prompt)
+    guidance = settings.get("prompt_guidance", "off")
+    if guidance not in PROMPT_GUIDANCE:
+        raise RenderError(f"{path}: `prompt_guidance` must be one of {list(PROMPT_GUIDANCE)}")
+    return DojoTeacherSettings(model=model, reasoning_effort=effort, prompt=prompt,
+                               prompt_guidance=guidance)
 
 
 def dojo_teacher_system_prompt(roles_dir: Path, skill_dir: Path) -> str:
@@ -1349,6 +1361,8 @@ def render_dojo_teacher_workspace(existing: dict | None, settings: DojoTeacherSe
     doc.update(name=DOJO_TEACHER, model=inference.model)
     if settings.reasoning_effort is not None:
         doc["reasoning_effort"] = settings.reasoning_effort
+    if settings.prompt_guidance != "off":
+        doc["prompt_guidance"] = settings.prompt_guidance
     doc.update(system_prompt=prompt if settings.prompt == "dojo" else DOJO_TEACHER_PROMPT,
                backend=inference.backend,
                # Keep nothing between episodes, and pre-load nothing: the dojo
