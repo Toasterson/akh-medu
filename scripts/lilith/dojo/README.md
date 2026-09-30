@@ -95,7 +95,10 @@ python3 scripts/lilith/dojo/runner.py compare runs/c4/parent-sealed runs/c4/teac
   uncommitted tracked changes, and the summary records `git_sha`, `on_origin_main`, the snapshot root hash,
   the floors sha and the prompt sha. The endpoint is recorded as host only.
 - Re-running the same command resumes: completed episodes are skipped and errored ones are retried. A
-  resume with a different model, prompt, snapshots, seed or commit is refused. Use a fresh `--out`.
+  resume with a different model, effort, prompt, tools, snapshots, floors, seed, context window, isolation
+  invariants or commit is refused (the error names each field and its old and new value). Deployment-only
+  changes (the rendered TOML's file hash, budgets, comments, timeouts, daemon version, memory counts) never
+  block a resume; they are listed in `provenance.json` under `deployment_history`. Use a fresh `--out` otherwise.
 - The teacher makes no batch or direct model-API calls (operator decision 2026-09-29): it runs as the
   sealed `dojo-teacher` akh (`--model-kind acp`). `--model-kind anthropic` stays for other arms; some
   newer Anthropic models reject `temperature`: add `--omit-temperature`.
@@ -174,6 +177,17 @@ the in-process model loop; the akh runs its own loop and calls the tools itself:
 - Episodes run one at a time (`--concurrency` > 1 is refused). Usage is the difference of the akh's
   `_akh/usage` counters over the turn. A provider error (`error[...]` chunk, refusal, timeout) is an
   unscored episode, retried on resume, like a model endpoint failure.
+- The teacher's prompt timeout follows the akh's resolved turn deadline (ADR 123: `[model_profile]` in the
+  `--akh-config`, else the catalog row for its model and effort) plus a 300 s margin; 1800 s when neither is
+  readable; `--turn-timeout` overrides it exactly. It is recorded under `timeouts` (non-identity). `--timeout`
+  is the in-process arms' HTTP timeout (default: the model's catalog `http_timeout_secs`, else 300 s) and is
+  refused with `--model-kind acp`.
+- A connection-refused, reset or closed peer before the prompt is sent is an outage, not an episode result:
+  the same episode is retried with 5 s -> 60 s backoff for `--outage-budget` seconds (default 900; each wait
+  is logged), after a fresh isolation preflight (plus the warm-up proof again, since the akh may have
+  restarted). When the budget is spent the run stops with `lilith::dojo::acp_outage_exhausted` and records
+  nothing for the episodes not reached. A connection lost after the prompt was sent is an error episode
+  (`lilith::dojo::acp_connection_lost`), retried on resume, and does not stop the batch.
 - `--key-file` is the ACP principal's token (`secrets/dojo-teacher.key`, scoped to the teacher akh).
   `--akh-config` (read-only) checks the rendered workspace is sealed and records its model, its sha256 and
   its `system_prompt` sha256 in `provenance.json` next to the probe (daemon version, memory size); it is

@@ -41,6 +41,8 @@ class PeerState:
     prompts_served: int = 0
     turns: int | None = None    # the akh's cumulative `usage.turns`; None = the akh reports no turn count
     token: str = TOKEN
+    close_on_initialize: int = 0  # accept the connection, then drop it on the first N `initialize` requests
+    close_on_prompt: int = 0      # drop the connection on the first N `session/prompt` requests (mid-turn loss)
 
 
 class ScriptContext:
@@ -166,12 +168,36 @@ class FakeAkhomed:
         self.sessions: list[dict] = []
         self.cancelled: list[str] = []
         self.contexts: list[ScriptContext] = []
-        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server.bind(("127.0.0.1", 0))
-        self._server.listen(8)
+        self._port = 0
         self._stop = False
         self._lock = threading.Lock()
+        self._conns: list[_Conn] = []
+        self._listen()
+
+    def _listen(self) -> None:
+        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server.bind(("127.0.0.1", self._port))
+        self._server.listen(8)
+        self._port = self._server.getsockname()[1]
+
+    def go_away(self, *, drop_connections: bool = True) -> None:
+        """The core goes down: nothing listens on the port any more (connection refused)."""
+        server, self._server = self._server, None
+        server.close()
+        if drop_connections:
+            for conn in self._conns:
+                try:
+                    conn.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                conn.sock.close()
+        self._conns.clear()
+
+    def come_back(self) -> None:
+        """The core is up again on the same port."""
+        self._listen()
+        threading.Thread(target=self._accept, args=(self._server,), daemon=True).start()
 
     def _settling(self) -> bool:
         if self.state.stale_for > 0:
@@ -181,7 +207,7 @@ class FakeAkhomed:
 
     @property
     def endpoint(self) -> str:
-        return f"tcp://127.0.0.1:{self._server.getsockname()[1]}"
+        return f"tcp://127.0.0.1:{self._port}"
 
     def record(self, message: dict) -> None:
         with self._lock:
@@ -190,20 +216,22 @@ class FakeAkhomed:
                 self.cancelled.append(message["params"]["sessionId"])
 
     def __enter__(self) -> "FakeAkhomed":
-        threading.Thread(target=self._accept, daemon=True).start()
+        threading.Thread(target=self._accept, args=(self._server,), daemon=True).start()
         return self
 
     def __exit__(self, *exc) -> None:
         self._stop = True
-        self._server.close()
+        if self._server is not None:
+            self._server.close()
 
-    def _accept(self) -> None:
+    def _accept(self, server: socket.socket) -> None:
         while not self._stop:
             try:
-                sock, _ = self._server.accept()
+                sock, _ = server.accept()
             except OSError:
                 return
             conn = _Conn(sock, self)
+            self._conns.append(conn)
             threading.Thread(target=self._read, args=(conn,), daemon=True).start()
             threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
 
@@ -236,6 +264,10 @@ class FakeAkhomed:
             method, params, rid = message.get("method"), message.get("params") or {}, message.get("id")
             if rid is None:
                 continue
+            if method == "initialize" and self.state.close_on_initialize > 0:
+                self.state.close_on_initialize -= 1
+                conn.sock.close()
+                return
             if method == "initialize":
                 authorized = params.get("_meta", {}).get("authorization") == f"Bearer {self.state.token}"
                 if not authorized:
@@ -275,6 +307,10 @@ class FakeAkhomed:
                 session = {"id": f"s{len(self.sessions) + 1}", **params}
                 self.sessions.append(session)
                 conn.send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": session["id"]}})
+            elif method == "session/prompt" and self.state.close_on_prompt > 0:
+                self.state.close_on_prompt -= 1
+                conn.sock.close()
+                return
             elif method == "session/prompt":
                 session = next(s for s in self.sessions if s["id"] == params["sessionId"])
                 ctx = ScriptContext(self, conn, session, params["prompt"])

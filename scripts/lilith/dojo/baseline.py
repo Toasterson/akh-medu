@@ -65,6 +65,7 @@ from dojo.runner import (
     compose_system_prompt,
     prompt_bundle_sha256,
 )
+from dojo.model_profile import CATALOG_RELATIVE, ResolvedTimeout, load_catalog, resolve_http_timeout, resolve_turn_timeout
 from dojo.snapshot import SnapshotStore, canonical_json, sha256_hex
 from dojo.splits import Split, SplitConfig, assign_splits
 
@@ -152,19 +153,75 @@ def snapshot_root_sha256(store: SnapshotStore) -> str:
     return sha256_hex(canonical_json([[i, store.get(i).manifest_sha256] for i in store.ids]))
 
 
+# What a resume must match: only what changes the measurement. `teacher` is not compared as a blob:
+# its `declared` hash covers the whole rendered TOML (comments, rendered budgets), and `agent_info` and
+# `memory` are what the running core reported at probe time, so all three move with a redeploy
+# without changing what the teacher is. See `run_identity`.
 IDENTITY_KEYS = ("runner", "dojo", "git_sha", "snapshot_root_sha256", "floors_sha256", "prompt_sha256",
-                 "system_prompt_sha256", "model_kind", "model_id", "endpoint_host", "temperature", "max_tokens",
-                 "max_rounds", "episode_token_cap", "context_window", "seed", "split", "families", "limit", "teacher")
+                 "system_prompt_sha256", "tools_sha256", "model_kind", "model_id", "endpoint_host", "temperature",
+                 "max_tokens", "max_rounds", "episode_token_cap", "context_window", "seed", "split", "families", "limit")
+# The teacher's identity: the akh, the model and effort that answer, the prompt it holds, and the
+# isolation invariants (no own tools, session-only surface, no transcript capture, how the prompt
+# and the replay tools arrive).
+TEACHER_IDENTITY_KEYS = ("akh", "own_tools", "prompt_delivery", "tool_transport")
+TEACHER_DECLARED_IDENTITY_KEYS = ("backend", "model", "reasoning_effort", "tool_surface", "capture_transcripts",
+                                  "system_prompt_sha256")
+# Recorded only by newer runs: an earlier provenance without them is not refused for lacking them.
+LATE_IDENTITY_KEYS = frozenset({"tools_sha256", "teacher.declared.reasoning_effort",
+                                "teacher.declared.capture_transcripts"})
+# Deployment provenance: recorded on every run, reported when a resume changes it, never refused.
+DEPLOYMENT_KEYS = ("teacher.declared.sha256", "teacher.declared.path", "teacher.declared.model_profile",
+                   "teacher.agent_info", "teacher.memory", "timeouts")
+_MISSING = object()
 
 
-def check_resume(out: Path, provenance: Mapping[str, Any]) -> None:
+def _flat(provenance: Mapping[str, Any], keys: Sequence[str]) -> dict[str, Any]:
+    """`keys` (dotted paths into the provenance) -> value, `_MISSING` where the path does not exist."""
+    out: dict[str, Any] = {}
+    for key in keys:
+        node: Any = provenance
+        for part in key.split("."):
+            node = node.get(part, _MISSING) if isinstance(node, Mapping) else _MISSING
+            if node is _MISSING:
+                break
+        out[key] = node
+    return out
+
+
+def run_identity(provenance: Mapping[str, Any]) -> dict[str, Any]:
+    keys = [*IDENTITY_KEYS]
+    if isinstance(provenance.get("teacher"), Mapping):
+        keys += [f"teacher.{k}" for k in TEACHER_IDENTITY_KEYS]
+        keys += [f"teacher.declared.{k}" for k in TEACHER_DECLARED_IDENTITY_KEYS]
+    return _flat(provenance, keys)
+
+
+def _shown(value: Any) -> str:
+    text = "<absent>" if value is _MISSING else json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+def deployment_changes(earlier: Mapping[str, Any], provenance: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    """Non-identity provenance that differs between a run and its resume (was -> now)."""
+    before, after = _flat(earlier, DEPLOYMENT_KEYS), _flat(provenance, DEPLOYMENT_KEYS)
+    return {k: {"was": _shown(before[k]), "now": _shown(after[k])} for k in DEPLOYMENT_KEYS
+            if before[k] != after[k] and not (before[k] is _MISSING and after[k] is _MISSING)}
+
+
+def check_resume(out: Path, provenance: Mapping[str, Any]) -> dict | None:
+    """Refuse a resume whose identity differs from the first run's; returns the earlier provenance
+    (None for a fresh directory)."""
     path = out / PROVENANCE_FILE
     if not path.exists():
-        return
+        return None
     earlier = json.loads(path.read_text())
-    differing = [k for k in IDENTITY_KEYS if earlier.get(k) != provenance.get(k)]
+    before, after = run_identity(earlier), run_identity(provenance)
+    differing = [k for k in after if before.get(k, _MISSING) != after[k]
+                 and not (before.get(k, _MISSING) is _MISSING and k in LATE_IDENTITY_KEYS)]
     if differing:
-        raise RunProvenanceError(f"{out} was started with a different {', '.join(differing)}")
+        detail = "; ".join(f"{k}: {_shown(before.get(k, _MISSING))} -> {_shown(after[k])}" for k in differing)
+        raise RunProvenanceError(f"{out} was started with a different {', '.join(differing)} ({detail})")
+    return earlier
 
 
 # --- records --------------------------------------------------------------------------------------------------
@@ -346,8 +403,19 @@ def run_batch(store: SnapshotStore, chosen: Sequence[Chosen], adapter: ModelAdap
     has the same `run_traced(spec, tools) -> RunResult`. Without it `adapter` drives the loop."""
     out = config.out
     out.mkdir(parents=True, exist_ok=True)
-    check_resume(out, provenance)
-    (out / PROVENANCE_FILE).write_text(json.dumps(dict(provenance), indent=2, sort_keys=True) + "\n")
+    earlier = check_resume(out, provenance)
+    record = dict(provenance)
+    if earlier is not None:
+        history = list(earlier.get("deployment_history") or [])
+        changed = deployment_changes(earlier, provenance)
+        if changed:
+            history.append({"at": provenance.get("started_at"), "changed": changed})
+            progress("resume: deployment-only changes (not part of the run identity): "
+                     + "; ".join(f"{k} {v['was']} -> {v['now']}" for k, v in changed.items()))
+        record["deployment_history"] = history
+        if earlier.get("outage_history"):
+            record["outage_history"] = earlier["outage_history"]
+    (out / PROVENANCE_FILE).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
     done = {eid for eid, v in read_jsonl_latest(out / VERIFICATION_FILE).items() if v["status"] == "ok"}
     todo = [c for c in chosen if c.spec.episode_id not in done]
     progress(f"{len(chosen)} episodes selected, {len(chosen) - len(todo)} already complete, {len(todo)} to run")
@@ -517,9 +585,21 @@ def render_compare(result: Mapping[str, Any]) -> str:
 # --- CLI --------------------------------------------------------------------------------------------------------------------
 
 
+def model_catalog(args: argparse.Namespace) -> dict | None:
+    """The ADR 123 model catalog in the run's checkout (`--repo`), or None when it is not there."""
+    return load_catalog(args.repo / CATALOG_RELATIVE)
+
+
+def http_timeout(args: argparse.Namespace) -> ResolvedTimeout:
+    """The in-process arm's per-request HTTP timeout: --timeout, else the catalog row for the model
+    (ADR 123 `http_timeout_secs`), else the historical 300 s."""
+    model = args.model or (DEFAULT_ANTHROPIC_MODEL if args.model_kind == "anthropic" else "")
+    return resolve_http_timeout(model, model_catalog(args), flag=args.timeout)
+
+
 def build_adapter(args: argparse.Namespace) -> ModelAdapter:
     secret = load_secret(env=args.key_env, file=args.key_file)
-    policy = HttpPolicy(timeout_s=args.timeout, max_attempts=args.attempts, backoff_s=args.backoff)
+    policy = HttpPolicy(timeout_s=http_timeout(args).seconds, max_attempts=args.attempts, backoff_s=args.backoff)
     temperature = None if args.omit_temperature else args.temperature
     if args.model_kind == "openai":
         base = args.base_url or (args.base_url_file.read_text().strip() if args.base_url_file else None)
@@ -576,7 +656,16 @@ def _add_run_arguments(p: argparse.ArgumentParser) -> None:
                    help="tokens the in-process loop keeps the running request inside: each tool result is cut to fit "
                         "what is left after the system prompt, tool schemas and conversation, minus --max-tokens "
                         "(production #458; keep it below the serving window)")
-    p.add_argument("--timeout", type=float, default=300.0)
+    p.add_argument("--timeout", type=float, default=None,
+                   help="in-process arms: one model HTTP request, in seconds (default: the model's catalog row "
+                        "`http_timeout_secs`, ADR 123, else 300). Not used by acp: see --turn-timeout")
+    p.add_argument("--turn-timeout", type=float, default=None,
+                   help="acp: seconds one teacher turn (`session/prompt`) may take (default: the teacher akh's "
+                        "resolved turn deadline from --akh-config ([model_profile] or its catalog row) plus a "
+                        "margin; 1800 when that cannot be read). Recorded in provenance")
+    p.add_argument("--outage-budget", type=float, default=900.0,
+                   help="acp: seconds to wait for an unreachable ACP endpoint (a core restart) before the batch "
+                        "stops, retrying the same episode with 5 s -> 60 s backoff (0 = stop at the first outage)")
     p.add_argument("--attempts", type=int, default=4, help="HTTP attempts per model call (429/5xx/transport)")
     p.add_argument("--backoff", type=float, default=2.0)
     p.add_argument("--label", default=None, help="name of this arm in compare tables (default: model id)")
@@ -591,6 +680,10 @@ def _acp_run(args: argparse.Namespace, store: SnapshotStore, chosen, system: Sys
     from dojo import acp_teacher as T
     from dojo.mcp_gateway import ReplayMcpGateway
 
+    if args.timeout is not None:
+        raise DojoError("--timeout is the in-process arms' HTTP timeout; it no longer sets the teacher's turn timeout",
+                        help="pass --turn-timeout SECONDS to override the teacher turn deadline, or leave both off so "
+                             "it follows the akh's resolved turn deadline (--akh-config)")
     if args.concurrency != 1:
         raise DojoError("--model-kind acp runs one episode at a time",
                         help="drop --concurrency (or pass 1): the isolation check compares the teacher akh's memory "
@@ -603,14 +696,21 @@ def _acp_run(args: argparse.Namespace, store: SnapshotStore, chosen, system: Sys
         T.verify_prompt_parity(declared, system)
     secret = load_secret(env=args.key_env, file=args.key_file)
     runner_config = RunnerConfig(max_rounds=args.max_rounds, episode_token_cap=args.episode_token_cap)
+    turn = resolve_turn_timeout(declared, model_catalog(args), flag=args.turn_timeout)
+    progress = lambda line: print(line, file=sys.stderr, flush=True)  # noqa: E731
+    progress(f"teacher turn timeout {turn.seconds:.0f}s ({turn.source.value}"
+             + (f": akh deadline {turn.deadline_s:.0f}s + {turn.margin_s:.0f}s margin" if turn.deadline_s else "")
+             + (f"; {turn.note}" if turn.note else "") + ")")
     with ReplayMcpGateway() as gateway:
         runner = T.AcpEpisodeRunner(T.tcp_connector(endpoint), secret, system, gateway,
                                     T.AcpTeacherConfig(akh=akh, endpoint_host=T.endpoint_host(endpoint),
-                                                       turn_timeout_s=args.timeout, runner=runner_config,
-                                                       placement=placement, warm_up=not args.no_warm_up))
+                                                       turn_timeout_s=turn.seconds, runner=runner_config,
+                                                       placement=placement, warm_up=not args.no_warm_up,
+                                                       outage=T.OutagePolicy(budget_s=args.outage_budget)),
+                                    notify=progress)
         probe = runner.probe()  # refuses a teacher with tools of its own before anything is written
         provenance = {
-            **_base_provenance(args, store, system, families, selection),
+            **_base_provenance(args, store, system, families, selection, tools_sha256_of(store, chosen, oracle)),
             "context_window": None,  # the akh bounds tool results itself (#458), against its own context_window
             "model_kind": T.KIND,
             "model_id": runner.model_id,
@@ -618,12 +718,17 @@ def _acp_run(args: argparse.Namespace, store: SnapshotStore, chosen, system: Sys
             "temperature": None,
             "max_tokens": None,
             "teacher": {**probe, "declared": declared},
+            # Deployment settings, not identity: the prompt timeout follows the akh's deadline.
+            "timeouts": {"turn": turn.to_dict(), "outage_budget_s": args.outage_budget},
             # Not part of the resume identity: it differs between the run that absorbed the init and its resumes.
             **({"teacher_warm_up": runner.warm_up_report} if runner.warm_up_report else {}),
         }
         config = BatchConfig(args.out, 1, runner_config)
-        summary = run_batch(store, chosen, None, system, oracle, config, provenance, args.label or runner.model_id,
-                            progress=lambda line: print(line, file=sys.stderr, flush=True), episode_runner=runner)
+        try:
+            summary = run_batch(store, chosen, None, system, oracle, config, provenance, args.label or runner.model_id,
+                                progress=progress, episode_runner=runner)
+        finally:
+            _record_outages(args.out, provenance, runner.outages)
     interrupted = summary.pop("_interrupted", False)
     print(render_summary(summary))
     if interrupted:
@@ -631,8 +736,32 @@ def _acp_run(args: argparse.Namespace, store: SnapshotStore, chosen, system: Sys
     return 1 if summary["overall"]["errors"] else 0
 
 
+def _record_outages(out: Path, provenance: Mapping[str, Any], waits: Sequence[Mapping[str, Any]]) -> None:
+    """Append this invocation's outage waits to the run's provenance (non-identity evidence)."""
+    path = out / PROVENANCE_FILE
+    if not waits or not path.exists():
+        return
+    record = json.loads(path.read_text())
+    record["outage_history"] = [*(record.get("outage_history") or []),
+                                {"at": provenance.get("started_at"), "waits": list(waits)}]
+    path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+
+
+def tools_sha256_of(store: SnapshotStore, chosen: Sequence[Chosen], oracle) -> str | None:
+    """Hash of the tool list the first selected episode's broker offers (what `dry_run_report` sizes).
+    Part of the run identity: a resume against different tool schemas would mix two measurements."""
+    if not chosen:
+        return None
+    from dojo.runner import Broker
+
+    with tempfile.TemporaryDirectory() as tmp:
+        snapshot = store.get(chosen[0].spec.snapshot_id)
+        servers, _ = episode_servers(snapshot, DojoLedger(Path(tmp) / "l.jsonl", forbidden_roots=(store.root,)), oracle)
+        return Broker(servers).tools_sha256
+
+
 def _base_provenance(args: argparse.Namespace, store: SnapshotStore, system: SystemPrompt, families,
-                     selection) -> dict:
+                     selection, tools_sha256: str | None = None) -> dict:
     return {
         "schema": "lilith/dojo-run@1",
         "runner": RUNNER_VERSION,
@@ -644,6 +773,7 @@ def _base_provenance(args: argparse.Namespace, store: SnapshotStore, system: Sys
         "system_prompt_sha256": system.sha256,
         "prompt_sha256": prompt_bundle_sha256(system),
         "prompt_sources": dict(system.sources),
+        "tools_sha256": tools_sha256,
         "max_rounds": args.max_rounds,
         "episode_token_cap": args.episode_token_cap,
         "context_window": args.context_window,
@@ -678,7 +808,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         return _acp_run(args, store, chosen, system, oracle, families, selection)
     adapter = build_adapter(args)
     provenance = {
-        **_base_provenance(args, store, system, families, selection),
+        **_base_provenance(args, store, system, families, selection, tools_sha256_of(store, chosen, oracle)),
+        "timeouts": {"http": http_timeout(args).to_dict()},
         "model_kind": adapter.kind,
         "model_id": adapter.model_id,
         "endpoint_host": adapter.endpoint_host,
