@@ -512,7 +512,7 @@ class AcpEpisodeRunner:
     # `_akh/tools` answers stale=True while the previous episode's turn is still settling
     # (cancellation, post-turn bookkeeping). Wait for the akh to go idle before verifying its
     # surface; any other answer (stale missing, or still stale at the deadline) is refused.
-    IDLE_WAIT_S = 120.0
+    IDLE_WAIT_S = 900.0   # a cancelled turn cannot interrupt an in-flight model request; GLM turns take minutes
     IDLE_POLL_S = 2.0
 
     def _list_own_tools(self, client: AcpClient) -> dict:
