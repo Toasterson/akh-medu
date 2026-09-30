@@ -151,7 +151,16 @@ class Evidence:
         self.reads = [r for r in episode.receipts if r.is_read]
 
     def mentions(self, wid: str) -> bool:
-        return any(wid == s for r in self.reads for s in _strings(r.response))
+        """The id appears verbatim in an answered receipt, from any server: a tracker row, or a git ref
+        such as `anima/<id>`. That is evidence the work item exists, not of its phase."""
+        return bool(wid) and any(wid in s for r in self.reads for s in _strings(r.response))
+
+    def has_tracker_state(self, wid: str) -> bool:
+        """A tracker receipt that states something about this work item's phase or blockers."""
+        if self.phases(wid):
+            return True
+        return any(d.get("work_item_id") == wid or (d.get("id") == wid and "current_phase" in d)
+                   for r in self.reads for d in _dicts(r.response))
 
     def phases(self, wid: str) -> set[str]:
         out: set[str] = set()
@@ -234,6 +243,23 @@ class ClaimCheck:
             else:
                 self.add(citation is Citation.BACKED, f"{what}: cited receipt not issued in this episode")
 
+    def add_unbacked(self, what: str) -> None:
+        """A claim counted in the score but not a hard constraint."""
+        self.total += 1
+        self.unbacked.append(what)
+
+    def add_status(self, ok: bool, wids: list[str], what: str, ev: "Evidence") -> None:
+        """A phase/status claim about work items. It needs a tracker receipt. When none states anything
+        about the items but each id is seen verbatim in some receipt (existence is backed, e.g. only a git
+        branch `anima/<id>` names it) the claim is `unbacked`, soft; a claim a tracker receipt contradicts,
+        or about an id no receipt shows, is fabrication."""
+        if ok:
+            self.add(True, what)
+        elif wids and all(ev.mentions(w) and not ev.has_tracker_state(w) for w in wids):
+            self.add_unbacked(f"{what}: id seen in a receipt, but no tracker receipt backs the claimed status")
+        else:
+            self.add(False, what)
+
     @property
     def score(self) -> float | None:
         return None if self.total == 0 else self.backed / self.total
@@ -259,7 +285,7 @@ def check_document_claims(doc: Mapping[str, Any], ev: Evidence) -> ClaimCheck:
                     ok = ev.blocked(wid)
                 else:
                     ok = bool(ev.phases(wid) & BUCKET_PHASES[bucket])
-                check.add(ok, f"{bucket.value}:{wid}")
+                check.add_status(ok, [wid], f"{bucket.value}:{wid}", ev)
                 check.add_citations(ev.citations((item or {}).get("receipts")), wid)
     elif contract == C.COMMITMENT:
         for wid in _entity_ids(doc.get("entities")):
@@ -267,7 +293,7 @@ def check_document_claims(doc: Mapping[str, Any], ev: Evidence) -> ClaimCheck:
         status = doc.get("status") or {}
         if status.get("state") == H.CommitmentState.CLOSED.value:
             ents = _entity_ids(doc.get("entities"))
-            check.add(any(PHASE_DONE in ev.phases(w) for w in ents), "closed without a done receipt")
+            check.add_status(any(PHASE_DONE in ev.phases(w) for w in ents), ents, "closed without a done receipt", ev)
             check.add_citations(ev.citations(status.get("evidence")), "closing evidence")
     elif contract in (C.ACTION_ITEM,):
         for wid in _entity_ids(doc.get("entities")):
@@ -277,7 +303,8 @@ def check_document_claims(doc: Mapping[str, Any], ev: Evidence) -> ClaimCheck:
         if subject.get("kind") == "work-item":
             check.add(ev.mentions(str(subject.get("id"))), "guidance subject")
     elif contract == C.PARK_TRIAGE:
-        check.add(PHASE_PARKED in ev.phases(str(doc.get("work_item"))), "parked status")
+        check.add_status(PHASE_PARKED in ev.phases(str(doc.get("work_item"))), [str(doc.get("work_item"))],
+                         "parked status", ev)
     elif contract == C.LANDED_VERDICT:
         verdict = ev.ancestry(str(doc.get("commit")))
         claimed = doc.get("verdict") == C.LandedVerdict.LANDED.value
