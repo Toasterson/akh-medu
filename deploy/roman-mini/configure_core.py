@@ -372,7 +372,8 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
             board = fa.with_board_agent_id(fa.board_identity(events, role), agent_id)
             doc = fa.render_workspace(existing, role, prompt, servers, board,
                                       exec_table={"kind": "none"}, inference=spec.inference,
-                                      chief_of_staff=fa.render_chief_of_staff(root, lilith))
+                                      chief_of_staff=fa.render_chief_of_staff(root, lilith),
+                                      pinned_tools=fa.skill_pinned_tools(cos_source))
             toml[path] = fa.dump_toml(doc, fa.workspace_comments(fa.LILITH_WORKSPACE_COMMENTS,
                                                                  spec.inference.model),
                                       header=f"{role}: full akh (ADR 113), Chief of Staff (ADR 116). "

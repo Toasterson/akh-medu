@@ -864,15 +864,15 @@ impl Agent {
                 }
             };
 
-        // Capture the exact system prompt for this complete turn. Session-local
+        // Snapshot the advertised manifests for this complete turn. Session-local
         // MCP manifests must not race through a workspace-keyed backend cache.
+        // The system prompt is prepared from them once the offered catalog is
+        // known (below).
         let manifests = self
             .tool_registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .list_advertised_manifests();
-        let manifest_refs: Vec<&super::tool_manifest::ToolManifest> = manifests.iter().collect();
-        let prepared_chat = backend.prepare_turn(agent_id, self.psyche.as_ref(), &manifest_refs);
         let visual_evidence = match backend.ground_prompt_images(prompt_images) {
             Ok(evidence) => evidence,
             Err(error) => {
@@ -905,6 +905,9 @@ impl Agent {
         // past ~14 tools — the model sees the K tools most likely to matter, and
         // permission gating still applies at dispatch.
         let mut retrieval_scoping_active = false;
+        // Whether the interactive-turn cap scoped the catalog: the system
+        // prompt's tool section then lists only the offered tools.
+        let mut interactive_scoped = false;
         if let Some(k) = std::env::var("AKH_AGENT_TOOL_RETRIEVAL")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -951,6 +954,30 @@ impl Agent {
                 "wake tool catalog relevance-scoped (ADR 123)"
             );
             tools = scoped.tools;
+        } else if wake.is_none()
+            && let Some(k) = self.turn_tool_cap()
+            && k < tools.len()
+        {
+            // ADR 123 amendment 2026-09-30: an interactive turn offers the
+            // profile's `max_tools_per_turn` tools — the akh's pinned core
+            // first, name-sorted, then relevance picks, name-sorted — so the
+            // tool block stays small and its prefix stays byte-stable.
+            let scoped = scope_turn_catalog(&tools, &self.pinned_tools, k, |rest, picks| {
+                super::organ::retrieve_scoped(rest, user_prompt, picks, Some(engine))
+            });
+            retrieval_scoping_active = true;
+            interactive_scoped = true;
+            tracing::info!(
+                target: "akh::model_profile",
+                agent_id,
+                cap = k,
+                from = tools.len(),
+                offered = scoped.tools.len(),
+                pinned = scoped.pinned.len(),
+                unavailable = ?scoped.unavailable,
+                "interactive tool catalog scoped to the pinned core + relevance picks (ADR 123)"
+            );
+            tools = scoped.tools;
         } else if let Some(k) = backend.preferred_tool_count()
             && k < tools.len()
         {
@@ -979,6 +1006,28 @@ impl Agent {
                 return Some(AgenticTurnOutcome::Refused);
             }
         }
+
+        // Capture the exact system prompt for this complete turn. A scoped
+        // interactive turn describes only what it offers, so the prompt's tool
+        // section shrinks with the catalog and never names a tool the model has
+        // no schema for; otherwise every advertised tool is listed, as before.
+        let prepared_chat = {
+            let offered: Option<std::collections::HashSet<&str>> = interactive_scoped.then(|| {
+                tools
+                    .iter()
+                    .filter_map(|t| t["function"]["name"].as_str())
+                    .collect()
+            });
+            let manifest_refs: Vec<&super::tool_manifest::ToolManifest> = manifests
+                .iter()
+                .filter(|m| {
+                    offered
+                        .as_ref()
+                        .is_none_or(|names| names.contains(m.name.as_str()))
+                })
+                .collect();
+            backend.prepare_turn(agent_id, self.psyche.as_ref(), &manifest_refs)
+        };
 
         // Phase 44m (ADR 065 D12.1): capture the deferred-tool set — what was
         // in `full_catalog` but NOT offered this round — so the ACP `_akh/usage`
@@ -2189,6 +2238,15 @@ impl Agent {
         }
     }
 
+    /// How many tools an interactive turn is offered (ADR 123 amendment
+    /// 2026-09-30), the pinned core included. `None`: the whole catalog.
+    pub(crate) fn turn_tool_cap(&self) -> Option<usize> {
+        self.model_profile
+            .as_ref()
+            .and_then(|p| p.max_tools_per_turn.as_ref())
+            .map(|s| s.value as usize)
+    }
+
     /// How many relevance-scoped tools a reactor wake is offered (ADR 123),
     /// before the tools it names are added back. `None`: no cap.
     pub(crate) fn wake_tool_cap(&self) -> Option<usize> {
@@ -2253,6 +2311,73 @@ pub(crate) fn scope_wake_catalog(
     ScopedWakeCatalog {
         tools,
         pinned,
+        unavailable,
+    }
+}
+
+/// The catalog an interactive turn is offered (ADR 123 amendment 2026-09-30).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScopedTurnCatalog {
+    /// The pinned core (name-sorted), then the relevance picks (name-sorted).
+    pub(crate) tools: Vec<Value>,
+    /// The pinned tool names that were offered.
+    pub(crate) pinned: Vec<String>,
+    /// Pinned names this akh does not have.
+    pub(crate) unavailable: Vec<String>,
+}
+
+/// Scope `full` (name-sorted, as [`ollama_tool_catalog`] builds it) for an
+/// interactive turn: every tool in `pinned` that the akh has, then up to
+/// `cap - pinned` of the others as ranked by `retrieve(rest, picks)`.
+///
+/// Both groups are **name-sorted**, whatever order `pinned` or the ranking
+/// arrives in. The request a prefix-caching model server sees is then
+/// byte-identical up to the first relevance pick, and fully identical from
+/// turn to turn when the pinned core fills the cap. Pins are never dropped,
+/// even past the cap.
+pub(crate) fn scope_turn_catalog(
+    full: &[Value],
+    pinned: &[String],
+    cap: usize,
+    retrieve: impl FnOnce(&[Value], usize) -> Vec<Value>,
+) -> ScopedTurnCatalog {
+    let name_of = |tool: &Value| tool["function"]["name"].as_str().map(str::to_string);
+    let mut wanted: Vec<&String> = pinned.iter().collect();
+    wanted.sort();
+    wanted.dedup();
+    let mut tools: Vec<Value> = Vec::new();
+    let mut offered = Vec::new();
+    let mut unavailable = Vec::new();
+    for name in wanted {
+        match full
+            .iter()
+            .find(|t| name_of(t).as_deref() == Some(name.as_str()))
+        {
+            Some(tool) => {
+                tools.push(tool.clone());
+                offered.push(name.clone());
+            }
+            None => unavailable.push(name.clone()),
+        }
+    }
+    let rest: Vec<Value> = full
+        .iter()
+        .filter(|t| !name_of(t).is_some_and(|n| offered.contains(&n)))
+        .cloned()
+        .collect();
+    let picks = cap.saturating_sub(offered.len());
+    let mut chosen: Vec<Value> = if picks == 0 {
+        Vec::new()
+    } else if rest.len() <= picks {
+        rest
+    } else {
+        retrieve(&rest, picks).into_iter().take(picks).collect()
+    };
+    chosen.sort_by_key(|t| name_of(t).unwrap_or_default());
+    tools.extend(chosen);
+    ScopedTurnCatalog {
+        tools,
+        pinned: offered,
         unavailable,
     }
 }

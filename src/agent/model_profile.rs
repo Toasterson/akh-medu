@@ -232,6 +232,10 @@ pub struct ModelProfile {
     /// Relevance-scoped tools offered to a reactor wake.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tools_per_wake: Option<u32>,
+    /// Tools offered to an interactive (ACP / T3 / chat) turn, the akh's
+    /// pinned core included (ADR 123 amendment 2026-09-30).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tools_per_turn: Option<u32>,
 }
 
 impl ModelProfile {
@@ -246,6 +250,7 @@ impl ModelProfile {
         "max_output_tokens",
         "context_window",
         "max_tools_per_wake",
+        "max_tools_per_turn",
     ];
 
     /// Whether no field is set.
@@ -265,6 +270,7 @@ impl ModelProfile {
             max_output_tokens: self.max_output_tokens.or(lower.max_output_tokens),
             context_window: self.context_window.or(lower.context_window),
             max_tools_per_wake: self.max_tools_per_wake.or(lower.max_tools_per_wake),
+            max_tools_per_turn: self.max_tools_per_turn.or(lower.max_tools_per_turn),
         }
     }
 
@@ -275,7 +281,7 @@ impl ModelProfile {
             field,
             location: location.to_string(),
         };
-        let checks: [(&'static str, bool); 8] = [
+        let checks: [(&'static str, bool); 9] = [
             ("max_tokens_per_day", self.max_tokens_per_day == Some(0)),
             ("max_tokens_per_wake", self.max_tokens_per_wake == Some(0)),
             ("turn_deadline_secs", self.turn_deadline_secs == Some(0)),
@@ -284,6 +290,7 @@ impl ModelProfile {
             ("max_output_tokens", self.max_output_tokens == Some(0)),
             ("context_window", self.context_window == Some(0)),
             ("max_tools_per_wake", self.max_tools_per_wake == Some(0)),
+            ("max_tools_per_turn", self.max_tools_per_turn == Some(0)),
         ];
         match checks.into_iter().find(|(_, is_zero)| *is_zero) {
             Some((field, _)) => Err(zero(field)),
@@ -576,6 +583,8 @@ pub struct ResolvedModelProfile {
     pub context_window: Option<Setting<u64>>,
     /// `None`: a wake sees the whole catalog.
     pub max_tools_per_wake: Option<Setting<u32>>,
+    /// `None`: an interactive turn sees the whole catalog.
+    pub max_tools_per_turn: Option<Setting<u32>>,
 }
 
 /// Parse a positive integer env var; blank, zero or garbage count as unset.
@@ -680,6 +689,7 @@ impl ResolvedModelProfile {
         let max_output_tokens = tiered!(max_output_tokens, locations.max_output_tokens);
         let context_window = tiered!(context_window, locations.context_window);
         let max_tools_per_wake = tiered!(max_tools_per_wake, "model_profile");
+        let max_tools_per_turn = tiered!(max_tools_per_turn, "model_profile");
 
         Ok(Self {
             model: model.to_string(),
@@ -694,6 +704,7 @@ impl ResolvedModelProfile {
             max_output_tokens,
             context_window,
             max_tools_per_wake,
+            max_tools_per_turn,
         })
     }
 
@@ -741,6 +752,7 @@ impl ResolvedModelProfile {
             max_output_tokens = %opt(&self.max_output_tokens, "server-default"),
             context_window = %opt(&self.context_window, "model-reported"),
             max_tools_per_wake = %opt(&self.max_tools_per_wake, "all"),
+            max_tools_per_turn = %opt(&self.max_tools_per_turn, "all"),
             "model profile resolved (ADR 123)"
         );
     }

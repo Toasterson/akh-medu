@@ -6,5 +6,23 @@
   "domains": ["chief-of-staff", "coordination", "governance", "illumos"],
   "weight_size_bytes": 0,
   "triples_file": "triples.json",
-  "procedures_file": "procedures.md"
+  "procedures_file": "procedures.md",
+  "pinned_tools": [
+    "kg_query",
+    "mcp__anima__get_thread",
+    "mcp__anima__get_work_item",
+    "mcp__anima__list_plans",
+    "mcp__anima__list_work_items",
+    "mcp__anima__post_message",
+    "mcp__anima__search_documents",
+    "mcp__anima__stranded_work_items",
+    "mcp__djehuty__board_inbox",
+    "mcp__djehuty__board_post_thread",
+    "mcp__djehuty__board_send_inbox",
+    "mcp__seshat__seshat_search",
+    "memory_recall",
+    "memory_write",
+    "tool_query",
+    "user_interact"
+  ]
 }

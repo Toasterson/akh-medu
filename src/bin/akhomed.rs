@@ -3794,6 +3794,8 @@ impl ServerState {
             .map_err(|e| format!("workspace {name}: {:?}", miette::Report::new(e)))?;
         profile.log(name);
         agent.set_model_profile(profile);
+        // ADR 123 amendment: the interactive turn's pinned tool core.
+        agent.set_pinned_tools(akh_config.pinned_tools.iter().cloned());
 
         // ADR 076: inject the OpenClaw self-import surface for akhs that opted in
         // (`openclaw_import = true`). The read-root unlock is already applied via
@@ -5264,6 +5266,7 @@ impl akh_medu::acp::ServerControl for ServerState {
                         // apply from the next turn.
                         profile.log(&ws);
                         a.set_model_profile(profile);
+                        a.set_pinned_tools(cfg.pinned_tools.iter().cloned());
                         if let Some(runtime) = runtime {
                             a.set_agent_runtime(runtime);
                         }
