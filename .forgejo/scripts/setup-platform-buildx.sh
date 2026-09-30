@@ -12,7 +12,15 @@ fi
 if [ -z "${AKH_BUILDX_BUILDER:-}" ]; then
   docker run --privileged --rm tonistiigi/binfmt:qemu-v9.2.0 --install arm64,amd64
   builder="akh-platform-${SOLSTICE_RUN_ID:-${GITHUB_RUN_ID:-$$}}"
-  docker buildx create --name "$builder" --driver docker-container --use
+  mkdir -p "$HOME/.config/akh-ci"
+  cat > "$HOME/.config/akh-ci/buildkitd.toml" <<'TOML'
+[worker.oci]
+  max-parallelism = 1
+TOML
+  # Group jobs provide concurrency. Serialize architecture stages within each
+  # builder so two Rust linkers do not exhaust one runner VM's memory.
+  docker buildx create --name "$builder" --driver docker-container \
+    --buildkitd-config "$HOME/.config/akh-ci/buildkitd.toml" --use
 else
   docker buildx use "$AKH_BUILDX_BUILDER"
 fi
