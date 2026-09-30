@@ -33,6 +33,7 @@ on:
   push:
     branches: [main, develop]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test-session-platform:
@@ -46,17 +47,22 @@ jobs:
           if ! command -v cargo >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           fi
+      - name: Install Python 3.12 for platform and Roman contracts
+        run: |
+          sh .forgejo/scripts/install-ci-python.sh
+          "$HOME/.local/bin/akh-ci-python" .forgejo/scripts/test_build_platform_images.py
       - name: Verify independent daemon profiles and platform contracts
         run: |
           test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
-          sh .forgejo/scripts/run-logged.sh daemon-profiles python3 scripts/session-platform/check-profiles.py
+          sh .forgejo/scripts/run-logged.sh daemon-profiles "$HOME/.local/bin/akh-ci-python" scripts/session-platform/check-profiles.py
           # Every akh-session-services feature except the GPU backends: `metal`
           # pulls objc2 (Apple-only) and `hip`/`vulkan` need driver SDKs, none
           # of which exist on the Linux runner, so `--all-features` cannot build here.
           sh .forgejo/scripts/run-logged.sh platform-tests cargo test --quiet --locked -p akh-session-services --features session,runtime,candle-runtime,core-integration-tests,executor,sandbox,events,helpers,client,admin,profiling,trigger,kagent -p akh-runtime -p akh-session-types -p akh-service-store
       - name: Verify Roman observer and escalation recovery
-        run: python3 -m unittest discover -s deploy/roman-mini -p 'test_*.py'
+        run: |
+          "$HOME/.local/bin/akh-ci-python" -m unittest discover -s deploy/roman-mini -p 'test_*.py'
 
   # Sokar artifact daemon (Phase 52, ADR 108): unit + integration tests on the
   # OpenDAL memory/fs services. Postgres and MinIO contract tests skip or are
@@ -645,3 +651,68 @@ jobs:
             fi
           fi
           echo "chart publish step complete"
+
+  platform-images-home:
+    runs-on: rust
+    needs: [test-session-platform, check-akh-medu, test-akh-medu, test-sokar, check-seshat]
+    steps:
+      - name: Install Python and bounded group builder
+        run: |
+          sh .forgejo/scripts/install-ci-python.sh
+          if [ "$(sh .forgejo/scripts/resolve-branch.sh)" = main ]; then
+            sh .forgejo/scripts/setup-platform-buildx.sh
+          fi
+      - name: Build or collect verified home images
+        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/build-platform-images.py home
+
+  platform-images-core:
+    runs-on: rust
+    needs: [test-session-platform, check-akh-medu, test-akh-medu, test-sokar, check-seshat]
+    steps:
+      - name: Install Python and bounded group builder
+        run: |
+          sh .forgejo/scripts/install-ci-python.sh
+          if [ "$(sh .forgejo/scripts/resolve-branch.sh)" = main ]; then
+            sh .forgejo/scripts/setup-platform-buildx.sh
+          fi
+      - name: Build or collect verified core images
+        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/build-platform-images.py core
+
+  platform-images-daemons:
+    runs-on: rust
+    needs: [test-session-platform, check-akh-medu, test-akh-medu, test-sokar, check-seshat]
+    steps:
+      - name: Install Python and bounded group builder
+        run: |
+          sh .forgejo/scripts/install-ci-python.sh
+          if [ "$(sh .forgejo/scripts/resolve-branch.sh)" = main ]; then
+            sh .forgejo/scripts/setup-platform-buildx.sh
+          fi
+      - name: Build or collect verified daemons images
+        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/build-platform-images.py daemons
+
+  platform-images-fleet:
+    runs-on: rust
+    needs: [platform-images-daemons, docker-seshd, docker-sokard, docker-akh-transcripts]
+    steps:
+      - name: Install Python and bounded group builder
+        run: |
+          sh .forgejo/scripts/install-ci-python.sh
+          if [ "$(sh .forgejo/scripts/resolve-branch.sh)" = main ]; then
+            sh .forgejo/scripts/setup-platform-buildx.sh
+          fi
+      - name: Build or collect verified fleet images
+        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/build-platform-images.py fleet
+
+  platform-images-collect:
+    runs-on: rust
+    needs: [platform-images-home, platform-images-core, platform-images-daemons, platform-images-fleet]
+    steps:
+      - name: Install Python and bounded group builder
+        run: |
+          sh .forgejo/scripts/install-ci-python.sh
+          if [ "$(sh .forgejo/scripts/resolve-branch.sh)" = main ]; then
+            sh .forgejo/scripts/setup-platform-buildx.sh
+          fi
+      - name: Build or collect verified collect images
+        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/build-platform-images.py collect
