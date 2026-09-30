@@ -2,9 +2,15 @@
 # Build and install llama.cpp's llama-server for Lilith on hephaistos (ADR 121). Idempotent.
 #
 #   bash scripts/lilith/hephaistos/build_server.sh                 # HIP/ROCm build for gfx1100
-#   bash scripts/lilith/hephaistos/build_server.sh --backend vulkan
+#   bash scripts/lilith/hephaistos/build_server.sh --backend vulkan --install-deps
 #   bash scripts/lilith/hephaistos/build_server.sh --check         # verify only, change nothing
 #   bash scripts/lilith/hephaistos/build_server.sh --install-deps  # apt-get the build tools first
+#   bash scripts/lilith/hephaistos/build_server.sh --toolchain-only  # resolve + verify the toolchain, build nothing
+#
+# The live server on hephaistos is the VULKAN build (ADR 121): the HIP build of the pinned commit
+# fails with ROCm 6.3.4 (pins.json llama_cpp.hip_rocm_known_bad_through), so HIP is refused there
+# until ROCm is upgraded. On Ubuntu 22.04 the Vulkan build needs the pinned LunarG SDK
+# (pins.json vulkan_sdk), which --install-deps downloads into the work directory.
 #
 # The source is the exact commit pinned in pins.json (llama.cpp v0.5.0), fetched by SHA and
 # verified; the install goes to $PREFIX/llama.cpp/<commit12>-<backend>/ and $PREFIX/current
@@ -19,6 +25,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 BACKEND=hip
 CHECK_ONLY=0
 INSTALL_DEPS=0
+TOOLCHAIN_ONLY=0
 JOBS="${LILITH_BUILD_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 # Flags run_server.sh passes; a build without one of them would fail at service start.
 REQUIRED_FLAGS=(--api-key-file --jinja --chat-template-file --reasoning-format --kv-unified-per-slot
@@ -29,8 +36,9 @@ while [[ $# -gt 0 ]]; do
     --backend) BACKEND="${2:-}"; shift 2 ;;
     --check) CHECK_ONLY=1; shift ;;
     --install-deps) INSTALL_DEPS=1; shift ;;
+    --toolchain-only) TOOLCHAIN_ONLY=1; shift ;;
     --jobs) JOBS="${2:-}"; shift 2 ;;
-    -h | --help) sed -n '2,15p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h | --help) sed -n '2,21p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die lilith::heph::usage "unknown argument '$1'" "see --help" ;;
   esac
 done
@@ -44,9 +52,19 @@ SRC="$WORK/llama.cpp"
 BUILD="$WORK/build-$BACKEND"
 
 if [[ "$INSTALL_DEPS" == 1 ]]; then
-  log "installing build tools with apt-get (cmake, ninja, git, python3-venv, build-essential)"
-  as_root apt-get install -y cmake ninja-build git python3-venv build-essential pkg-config
-  if [[ "$BACKEND" == vulkan ]]; then as_root apt-get install -y libvulkan-dev glslc mesa-vulkan-drivers; fi
+  log "installing build tools with apt-get (cmake, ninja, git, python3-venv, build-essential, curl)"
+  as_root apt-get install -y cmake ninja-build git python3-venv build-essential pkg-config curl
+  if [[ "$BACKEND" == vulkan ]]; then
+    # No glslc here: Ubuntu 22.04 has no such package. glslc and current headers come from the pinned SDK below.
+    as_root apt-get install -y libvulkan-dev mesa-vulkan-drivers
+  else
+    # ROCm's clang uses the highest installed GCC's libstdc++; without its -dev package the HIP
+    # configure fails with "cuda_wrappers/cmath: 'cmath' file not found".
+    GCC_MAJOR="$(highest_gcc_major)"
+    [[ -n "$GCC_MAJOR" ]] || die lilith::heph::libstdcxx "no GCC found under $GCC_LIB_DIR" \
+      "install build-essential first, or set LILITH_GCC_LIB_DIR"
+    as_root apt-get install -y "libstdc++-$GCC_MAJOR-dev"
+  fi
 fi
 
 preflight() {
@@ -54,15 +72,37 @@ preflight() {
   need_cmd git "bash $0 --install-deps"
   need_cmd c++ "bash $0 --install-deps (build-essential)"
   if [[ "$BACKEND" == hip ]]; then
-    need_cmd hipconfig "install ROCm (the training venv host already has it: ls /opt/rocm*); add /opt/rocm/bin to PATH"
+    local rocm_ver gcc_major known_bad
+    add_rocm_to_path
+    need_cmd hipconfig "install ROCm (the training venv host already has it: ls /opt/rocm*); $ROCM_ROOT/bin is added to PATH when it exists"
+    rocm_ver="$(rocm_version)"
+    known_bad="$(pin llama_cpp.hip_rocm_known_bad_through)"
+    if [[ "$rocm_ver" != none ]] && "${TOOLS[@]}" version-le "$rocm_ver" "$known_bad"; then
+      if [[ "${LILITH_ALLOW_OLD_ROCM:-0}" != 1 ]]; then
+        die lilith::heph::rocm_version "ROCm $rocm_ver is known bad for llama.cpp ${COMMIT:0:12}: the HIP build fails on gfx1100 with 'Invalid dpp_ctrl value: wavefront shifts are not supported on GFX10+' (known bad through $known_bad)" \
+          "build the Vulkan backend instead: bash $0 --backend vulkan --install-deps (this is what serves Lilith on hephaistos), or upgrade ROCm past $known_bad; LILITH_ALLOW_OLD_ROCM=1 overrides to test a newer compiler fix"
+      fi
+      log "WARNING: ROCm $rocm_ver is known bad through $known_bad; LILITH_ALLOW_OLD_ROCM=1 set, building anyway"
+    fi
+    [[ "$rocm_ver" != none ]] || log "WARNING: could not read the ROCm version ($ROCM_ROOT/.info/version); not checking it against the known-bad range"
     need_cmd rocminfo "install rocminfo with ROCm"
     rocminfo 2>/dev/null | grep "$GPU_TARGET" >/dev/null || die lilith::heph::gpu \
       "rocminfo does not list a $GPU_TARGET device" \
       "this build targets the RX 7900 XTX; check the driver (dmesg | grep amdgpu), or use --backend vulkan"
     [[ -f "$(hipconfig -R)/include/hipblas/hipblas.h" ]] || die lilith::heph::rocm \
       "hipBLAS headers are missing under $(hipconfig -R)" "sudo apt-get install -y hipblas-dev rocblas-dev"
+    gcc_major="$(highest_gcc_major)"
+    if [[ -n "$gcc_major" && ! -f "$CXX_INCLUDE_DIR/$gcc_major/cmath" ]]; then
+      die lilith::heph::libstdcxx "GCC $gcc_major is the highest installed, and ROCm's clang uses it, but libstdc++-$gcc_major-dev is missing ($CXX_INCLUDE_DIR/$gcc_major/cmath)" \
+        "sudo apt-get install -y libstdc++-$gcc_major-dev (or bash $0 --install-deps)"
+    fi
   else
-    need_cmd glslc "bash $0 --backend vulkan --install-deps"
+    # The system toolchain when it is enough, else the pinned SDK (downloaded only under --install-deps).
+    if vulkan_system_sufficient; then
+      log "using the system Vulkan toolchain (glslc present, headers 1.x.$(vulkan_headers_patch))"
+    else
+      use_vulkan_sdk "$INSTALL_DEPS"
+    fi
   fi
 }
 
@@ -91,7 +131,7 @@ PY
 }
 dest_note="$DEST"
 
-if check_install "$DEST"; then
+if [[ "$TOOLCHAIN_ONLY" == 0 ]] && check_install "$DEST"; then
   log "llama-server ${COMMIT:0:12} ($BACKEND) is already installed at $DEST and passes its checks"
   if [[ "$CHECK_ONLY" == 0 ]]; then
     as_root install -d -m 755 "$PREFIX"
@@ -100,10 +140,14 @@ if check_install "$DEST"; then
   fi
   exit 0
 fi
-[[ "$CHECK_ONLY" == 0 ]] || die lilith::heph::not_built "no complete build of ${COMMIT:0:12} ($BACKEND) at $DEST" \
+[[ "$CHECK_ONLY" == 0 || "$TOOLCHAIN_ONLY" == 1 ]] || die lilith::heph::not_built "no complete build of ${COMMIT:0:12} ($BACKEND) at $DEST" \
   "run: bash $0 --backend $BACKEND"
 
 preflight
+if [[ "$TOOLCHAIN_ONLY" == 1 ]]; then
+  log "toolchain ok ($BACKEND): vulkan_sdk=${VULKAN_SDK_VERSION:-system} rocm=$(rocm_version)"
+  exit 0
+fi
 need_free_gib "$WORK" 6 "the llama.cpp source and build"
 ensure_llama_source "$SRC"
 
@@ -127,9 +171,18 @@ fi
 # shellcheck disable=SC2206
 [[ -z "${LILITH_CMAKE_EXTRA:-}" ]] || CMAKE_ARGS+=(${LILITH_CMAKE_EXTRA})
 
+# A build directory configured with another toolchain (system headers vs the SDK, another ROCm)
+# caches the old compiler and headers; start clean whenever the toolchain changed.
+TOOLCHAIN_ID="$BACKEND sdk=${VULKAN_SDK_VERSION:-system} rocm=$(rocm_version)"
+if [[ -d "$BUILD" && "$(cat "$BUILD/.lilith-toolchain" 2>/dev/null || true)" != "$TOOLCHAIN_ID" ]]; then
+  log "toolchain changed since the last configure; removing $BUILD"
+  rm -rf "$BUILD"
+fi
+
 log "configuring ($BACKEND, ${GPU_TARGET}); build dir $BUILD"
 cmake "${CMAKE_ARGS[@]}" > "$WORK/cmake-$BACKEND.log" 2>&1 || die lilith::heph::cmake \
-  "cmake configure failed" "see $WORK/cmake-$BACKEND.log (tail -n 40); a missing ROCm device library needs HIP_DEVICE_LIB_PATH (llama.cpp docs/build.md)"
+  "cmake configure failed" "see $WORK/cmake-$BACKEND.log (tail -n 40); a missing ROCm device library needs HIP_DEVICE_LIB_PATH (llama.cpp docs/build.md); 'cmath file not found' = libstdc++-<N>-dev for the highest GCC"
+mkdir -p "$BUILD" && printf '%s\n' "$TOOLCHAIN_ID" > "$BUILD/.lilith-toolchain"
 log "building with $JOBS jobs (a HIP build takes 10-25 minutes)"
 cmake --build "$BUILD" --config Release -j "$JOBS" --target llama-server llama-bench \
   > "$WORK/build-$BACKEND.log" 2>&1 || die lilith::heph::build "build failed" "see $WORK/build-$BACKEND.log (tail -n 60)"
@@ -142,14 +195,20 @@ for binary in llama-server llama-bench; do
     "see $WORK/build-$BACKEND.log"
   cp "$BUILD/bin/$binary" "$STAGE/bin/$binary"
 done
-ROCM_VERSION="$(cat "$(hipconfig -R 2>/dev/null || echo /nonexistent)/.info/version" 2>/dev/null || echo none)"
+ROCM_VERSION="$(rocm_version)"
+export VULKAN_SDK_VERSION VULKAN_SDK_SHA256
 python3 - "$STAGE/BUILD.json" "$COMMIT" "$(pin llama_cpp.tag)" "$BACKEND" "$GPU_TARGET" "$ROCM_VERSION" \
-  "$(python3 "$HEPH_DIR/heph_tools.py" sha256 "$STAGE/bin/llama-server")" <<'PY'
-import datetime, json, platform, sys
-out, commit, tag, backend, gpu, rocm, sha = sys.argv[1:8]
+  "$(python3 "$HEPH_DIR/heph_tools.py" sha256 "$STAGE/bin/llama-server")" "$(vulkan_headers_patch)" <<'PY'
+import datetime, json, os, platform, sys
+out, commit, tag, backend, gpu, rocm, sha, vk_headers = sys.argv[1:9]
+sdk = os.environ.get("VULKAN_SDK_VERSION") or None
 with open(out, "w") as handle:
     json.dump({"schema": "lilith/llama-server-build@1", "commit": commit, "tag": tag, "backend": backend,
                "gpu_target": gpu if backend == "hip" else None, "rocm": rocm if backend == "hip" else None,
+               # Vulkan provenance: the pinned SDK used for glslc + headers (null = the system toolchain).
+               "vulkan_sdk": sdk if backend == "vulkan" else None,
+               "vulkan_sdk_sha256": (os.environ.get("VULKAN_SDK_SHA256") or None) if backend == "vulkan" and sdk else None,
+               "system_vulkan_header_patch": (vk_headers or None) if backend == "vulkan" and not sdk else None,
                "llama_server_sha256": sha, "host": platform.node(),
                "built_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
               handle, indent=2, sort_keys=True)
