@@ -62,7 +62,8 @@ if [[ ! -f "$ENV_FILE" ]]; then
   log "created $ENV_FILE from server.env.example (edit it, then restart the unit)"
 fi
 env_value() { # env_value KEY: the value in server.env
-  sed -n "s/^$1=//p" "$ENV_FILE" | tail -n1
+  # $ETC is 0750 root:lilith-serve (it also holds the API key), so read it as root.
+  as_root sed -n "s/^$1=//p" "$ENV_FILE" | tail -n1
 }
 HOST="$(env_value LILITH_LLAMA_HOST)"
 PORT="$(env_value LILITH_LLAMA_PORT)"
