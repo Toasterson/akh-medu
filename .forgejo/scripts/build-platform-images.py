@@ -42,7 +42,9 @@ REQUIRED_BINARIES = {
     'akh-transcripts': {'akh-harvest', 'akh-derive', 'akh-transcripts-mcp'},
 }
 HEAP_BINARIES = {name: binary for name, (binary, _) in DAEMONS.items()} | {
-    'home-runtime': 'akhrtd', 'home-services': 'akhsessd', 'home-control': 'akheventd'}
+    'home-runtime': 'akhrtd', 'home-services': 'akhsessd', 'home-control': 'akheventd',
+    'workspace': 'akhexecd', 'vesta-sandbox': 'akhexecd'}
+WORKSPACE_MALLOC_CONF = 'prof:true,prof_active:true,lg_prof_sample:19'
 
 
 def publish_manifest(evidence, name, sha):
@@ -365,6 +367,25 @@ def native_conformance(image, arch):
     return receipts
 
 
+def workspace_dockerfile(source):
+    # The reviewed source has an identity-export target after the workspace.
+    # Enable sampling in the workspace image itself so image-only pod updates
+    # preserve existing emptyDir data without requiring immutable env changes.
+    boundary = 'FROM scratch AS identity'
+    if source.count(boundary) != 1:
+        raise RuntimeError('unexpected workspace identity target')
+    return source.replace(boundary, 'ENV MALLOC_CONF=' + WORKSPACE_MALLOC_CONF + '\n' + boundary)
+
+
+def workspace_profiling_smoke(image):
+    actual = run('docker', 'run', '--rm', '--platform', 'linux/amd64',
+        '--entrypoint', 'python3', image, '-c',
+        'import os; print(os.environ.get("MALLOC_CONF", ""))', capture=True)
+    if actual != WORKSPACE_MALLOC_CONF:
+        raise RuntimeError('workspace image does not enable heap sampling by default')
+    return [smoke_heap(image, 'amd64', 'akhexecd')]
+
+
 def binary_hashes(image, binaries):
     return json.loads(run('docker', 'run', '--rm', '--platform', 'linux/amd64',
         '--entrypoint', 'python3', image, '-c',
@@ -411,7 +432,8 @@ def build_vesta(evidence, context, tag):
     record['inputs'] = {'WORKSPACE_IMAGE': workspace['image'], 'KUBECTL_VERSION': version}
     record['homelab_source_commit'] = HOMELAB_SHA
     record['smoke'] = {'amd64': {'binaries': ['akhexecd', 'akh-service'],
-        'binary_sha256': hashes, 'kubectl_version': version, 'yamllint': True, 'ssh': True}}
+        'binary_sha256': hashes, 'kubectl_version': version, 'yamllint': True, 'ssh': True,
+        'heap': workspace_profiling_smoke(pinned)}}
     evidence['images']['vesta-sandbox'] = record
 
 
@@ -443,7 +465,12 @@ def workspace_and_relay(evidence, tag, sha):
                 if '@sha256:' not in value:
                     raise RuntimeError('workspace input is not immutable: ' + key)
                 command += ['--build-arg', key + '=' + value]
-        run(*command, str(context))
+        with tempfile.TemporaryDirectory(prefix='akh-workspace-build-') as directory:
+            if name == 'workspace':
+                dockerfile = Path(directory) / 'Dockerfile'
+                dockerfile.write_text(workspace_dockerfile((context / 'workspace.Dockerfile').read_text()))
+                command[command.index('-f') + 1] = str(dockerfile)
+            run(*command, str(context))
         record = image_manifest(image, arches)
         record['homelab_source_commit'] = HOMELAB_SHA
         record['smoke'] = {}
@@ -454,7 +481,8 @@ def workspace_and_relay(evidence, tag, sha):
                 run('docker', 'run', '--rm', '--platform', 'linux/' + arch, '--entrypoint', '/bin/sh', image,
                     '-ec', 'git --no-lazy-fetch --version; node --version; test -s /usr/local/share/akh/workspace-identity.json')
                 record['smoke'][arch] = {'binaries': ['akhexecd', 'akh-service'], 'workspace_identity': True,
-                    'binary_sha256': binary_hashes(image, ['akhexecd', 'akh-service'])}
+                    'binary_sha256': binary_hashes(image, ['akhexecd', 'akh-service']),
+                    'heap': workspace_profiling_smoke(record['image'])}
             else:
                 run('docker', 'run', '--rm', '--platform', 'linux/' + arch, '--entrypoint', 'python3', image, '--version')
                 run('docker', 'run', '--rm', '--platform', 'linux/' + arch, '--entrypoint', 'ssh', image, '-V')
