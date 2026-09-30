@@ -7,7 +7,11 @@
 > acceptance. Preserves ADR 113 full-Akh ownership and ADR 114 structural live /
 > learned shadow decisions. This is a planned capability, not a runtime release.
 
-> Last updated: 2026-09-30 (**Sealed tool surface** — per-akh
+> Last updated: 2026-09-30 (**Model-family prompt guidance** — opt-in
+> `prompt_guidance` layer in the generated system prompt, live-tool conventions,
+> MCP `$ref` inlining; [ADR 122](decisions/122-model-family-prompt-guidance.md),
+> [evaluation](research/2026-09-30-glm-kimi-run-evaluation.md)).
+> Previously 2026-09-30 (**Sealed tool surface** — per-akh
 > `tool_surface = "session-only"` seals the tool registry to client-pushed
 > ACP MCP servers, for the Lilith C4 dojo teacher; see "Permission layer"
 > below and [the plan](plans/2026-09-29-lilith-c4-teacher-via-akh.md)).
@@ -406,6 +410,13 @@ control commands), discovered via the PID record's ACP socket/TCP endpoints.
   filter) and `/effort` switch the live model over `_akh/model/*`.
 - **First-class akh** (`src/akh_config.rs`, ADR-053): `akh.toml` pins
   `{model + ollama endpoint + system prompt}` per workspace.
+- **Model-family prompt guidance** (`src/agent/prompt_guidance.rs`, ADR-122):
+  opt-in `prompt_guidance = "off|auto|generic|glm|kimi"` in `akh.toml` adds a
+  machine-owned *Execution Discipline* section (+ GLM/Kimi addendum, family from
+  the model id) to `assemble_system_prompt` on the Ollama, OpenAI and `/v1`
+  context paths, and reduces the operating conventions to lines whose tools are
+  live. Off (default) leaves the prompt unchanged. MCP property schemas inline
+  local `$ref`s (`McpToolDescriptor::parse`).
 - **Filesystem sandbox** (`src/fs/`, ADR-060): a `Filesystem` trait with a
   `LocalFs` backend confining reads/writes to separate allow-listed roots with
   symlink-safe canonical containment (no-follow-symlinks walks, depth caps).
