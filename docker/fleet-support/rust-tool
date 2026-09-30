@@ -1,0 +1,13 @@
+#!/bin/sh
+# Keep build caches outside the repository and the toolchain immutable.
+set -eu
+export HOME=/data/home
+export CARGO_HOME=/data/cargo
+export CARGO_TARGET_DIR=/data/target
+export RUSTUP_HOME=/usr/local/rustup
+export CARGO_INCREMENTAL=0
+if [ -x /usr/local/bin/sccache ] && [ -n "${SCCACHE_BUCKET:-}" ]; then
+    export RUSTC_WRAPPER=/usr/local/bin/sccache
+fi
+mkdir -p "$HOME" "$CARGO_HOME" "$CARGO_TARGET_DIR"
+exec "/usr/local/cargo/bin/$(basename "$0")" "$@"
