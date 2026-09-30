@@ -726,6 +726,113 @@ pub struct McpToolDescriptor {
     pub annotations: McpToolAnnotations,
 }
 
+/// Local schema definitions of one MCP `inputSchema` (`$defs`, or the older
+/// `definitions`), used to make each lifted property schema self-contained.
+struct SchemaDefs<'a> {
+    defs: Option<&'a serde_json::Map<String, Value>>,
+    legacy: Option<&'a serde_json::Map<String, Value>>,
+}
+
+/// Nesting bound for `$ref` inlining; a recursive definition stops here and
+/// keeps its (then dangling) `$ref` rather than expanding forever.
+const MAX_REF_DEPTH: usize = 8;
+
+impl<'a> SchemaDefs<'a> {
+    fn of(input_schema: &'a Value) -> Self {
+        Self {
+            defs: input_schema.get("$defs").and_then(Value::as_object),
+            legacy: input_schema.get("definitions").and_then(Value::as_object),
+        }
+    }
+
+    fn lookup(&self, reference: &str) -> Option<&'a Value> {
+        if let Some(name) = reference.strip_prefix("#/$defs/") {
+            self.defs?.get(name)
+        } else if let Some(name) = reference.strip_prefix("#/definitions/") {
+            self.legacy?.get(name)
+        } else {
+            None
+        }
+    }
+
+    /// Return `schema` with every resolvable local `$ref` replaced by its
+    /// definition. Sibling keywords of a `$ref` (e.g. `description`) win over
+    /// the definition's own. Unresolvable references are left unchanged.
+    fn inline(&self, schema: &Value) -> Value {
+        if self.defs.is_none() && self.legacy.is_none() {
+            return schema.clone();
+        }
+        self.inline_at(schema, 0)
+    }
+
+    fn inline_at(&self, schema: &Value, depth: usize) -> Value {
+        match schema {
+            Value::Object(obj) => {
+                if let Some(target) = obj
+                    .get("$ref")
+                    .and_then(Value::as_str)
+                    .filter(|_| depth < MAX_REF_DEPTH)
+                    .and_then(|r| self.lookup(r))
+                {
+                    let mut resolved = match self.inline_at(target, depth + 1) {
+                        Value::Object(map) => map,
+                        other => return other,
+                    };
+                    for (key, value) in obj {
+                        if key != "$ref" {
+                            resolved.insert(key.clone(), self.inline_at(value, depth + 1));
+                        }
+                    }
+                    return Value::Object(resolved);
+                }
+                Value::Object(
+                    obj.iter()
+                        .map(|(k, v)| (k.clone(), self.inline_at(v, depth)))
+                        .collect(),
+                )
+            }
+            Value::Array(items) => {
+                Value::Array(items.iter().map(|v| self.inline_at(v, depth)).collect())
+            }
+            other => other.clone(),
+        }
+    }
+}
+
+/// The JSON type a property schema expects, for argument coercion.
+///
+/// `type` when it names one (the first non-`null` entry of a type array);
+/// otherwise `object` when the schema has `properties`, or the single type
+/// shared by every `oneOf` / `anyOf` variant (a tagged union of objects is an
+/// object); otherwise `string`.
+fn schema_type(schema: &Value) -> &str {
+    match &schema["type"] {
+        Value::String(ty) => return ty,
+        Value::Array(types) => {
+            if let Some(ty) = types
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|t| *t != "null")
+            {
+                return ty;
+            }
+        }
+        _ => {}
+    }
+    if schema.get("properties").is_some() {
+        return "object";
+    }
+    for key in ["oneOf", "anyOf"] {
+        if let Some(variants) = schema[key].as_array().filter(|v| !v.is_empty()) {
+            let first = schema_type(&variants[0]);
+            if variants.iter().all(|v| schema_type(v) == first) {
+                return first;
+            }
+        }
+    }
+    "string"
+}
+
 impl McpToolDescriptor {
     /// Parse one raw `tools/list` entry. Returns `None` if it has no usable name.
     pub fn parse(descriptor: &Value) -> Option<Self> {
@@ -744,17 +851,26 @@ impl McpToolDescriptor {
             })
             .unwrap_or_default();
 
+        // Each property is advertised to the model on its own, so a local
+        // `$ref` into the tool's `$defs` / `definitions` would dangle once the
+        // property is lifted out of `inputSchema`. Inline them here (the
+        // 2026-09-30 evaluation: vesta's board posts failed 9 of 9 on a bare
+        // `{"$ref": "#/$defs/RetentionPolicy"}` the model could not resolve).
+        let defs = SchemaDefs::of(&descriptor["inputSchema"]);
         let params = descriptor["inputSchema"]["properties"]
             .as_object()
             .map(|props| {
                 props
                     .iter()
-                    .map(|(pname, pschema)| McpToolParam {
-                        name: pname.clone(),
-                        ty: pschema["type"].as_str().unwrap_or("string").to_string(),
-                        required: required.contains(pname),
-                        description: pschema["description"].as_str().unwrap_or("").to_string(),
-                        schema: pschema.clone(),
+                    .map(|(pname, pschema)| {
+                        let schema = defs.inline(pschema);
+                        McpToolParam {
+                            name: pname.clone(),
+                            ty: schema_type(&schema).to_string(),
+                            required: required.contains(pname),
+                            description: schema["description"].as_str().unwrap_or("").to_string(),
+                            schema,
+                        }
                     })
                     .collect()
             })
@@ -1361,6 +1477,106 @@ mod tests {
     }
 
     // ── Shared descriptor adaptation ─────────────────────────────────────────
+
+    /// The shape of the Agent Board `board_post_thread` schema that failed 9 of
+    /// 9 vesta posts: a property that is only a `$ref` into `$defs`.
+    fn board_post_descriptor() -> Value {
+        json!({
+            "name": "board_post_thread",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "retention": {"$ref": "#/$defs/RetentionPolicy", "description": "How long to keep it"},
+                    "payload": {"type": "object"},
+                    "legacy": {"$ref": "#/definitions/Legacy"},
+                    "missing": {"$ref": "#/$defs/Nope"}
+                },
+                "required": ["retention"],
+                "$defs": {
+                    "RetentionPolicy": {
+                        "oneOf": [
+                            {"type": "object", "properties": {"kind": {"const": "durable"}}, "required": ["kind"]},
+                            {"type": "object", "properties": {"kind": {"const": "ttl"}, "ttl": {"$ref": "#/$defs/Seconds"}}}
+                        ],
+                        "description": "definition text"
+                    },
+                    "Seconds": {"type": "integer", "minimum": 1},
+                    "Loop": {"type": "object", "properties": {"next": {"$ref": "#/$defs/Loop"}}}
+                },
+                "definitions": {"Legacy": {"type": "boolean"}}
+            }
+        })
+    }
+
+    #[test]
+    fn descriptor_inlines_local_refs_so_lifted_properties_are_self_contained() {
+        let d = McpToolDescriptor::parse(&board_post_descriptor()).expect("descriptor");
+        let param = |name: &str| d.params.iter().find(|p| p.name == name).unwrap().clone();
+
+        let retention = param("retention");
+        assert!(
+            retention.schema.get("$ref").is_none(),
+            "{}",
+            retention.schema
+        );
+        assert_eq!(
+            retention.schema["oneOf"][0]["properties"]["kind"]["const"],
+            "durable"
+        );
+        // Nested refs inside the definition resolve too.
+        assert_eq!(
+            retention.schema["oneOf"][1]["properties"]["ttl"]["type"],
+            "integer"
+        );
+        // The property's own sibling keywords win over the definition's.
+        assert_eq!(retention.description, "How long to keep it");
+        assert_eq!(retention.schema["description"], "How long to keep it");
+        // A tagged union of objects is an object for coercion purposes.
+        assert_eq!(retention.ty, "object");
+
+        assert_eq!(param("legacy").ty, "boolean");
+        // An unresolvable ref is left as it was, not dropped.
+        assert_eq!(param("missing").schema["$ref"], "#/$defs/Nope");
+        assert_eq!(param("missing").ty, "string");
+        // No `$defs` leak into the advertised property schemas.
+        assert!(d.params.iter().all(|p| p.schema.get("$defs").is_none()));
+    }
+
+    #[test]
+    fn stringified_union_object_is_coerced_back_to_json() {
+        let d = McpToolDescriptor::parse(&board_post_descriptor()).expect("descriptor");
+        let args =
+            d.build_args(&ToolInput::new().with_param("retention", "{\"kind\": \"durable\"}"));
+        assert_eq!(args["retention"], json!({"kind": "durable"}));
+    }
+
+    #[test]
+    fn recursive_definitions_terminate() {
+        let defs = json!({"$defs": {"Loop": {"type": "object", "properties": {"next": {"$ref": "#/$defs/Loop"}}}}});
+        let inlined = SchemaDefs::of(&defs).inline(&json!({"$ref": "#/$defs/Loop"}));
+        let mut node = &inlined;
+        let mut depth = 0;
+        while let Some(next) = node["properties"].get("next") {
+            node = next;
+            depth += 1;
+        }
+        assert!(depth <= MAX_REF_DEPTH, "{depth}");
+        assert_eq!(node["$ref"], "#/$defs/Loop", "the bound keeps the last ref");
+    }
+
+    #[test]
+    fn schema_type_reads_type_arrays_and_unions() {
+        assert_eq!(
+            schema_type(&json!({"type": ["null", "integer"]})),
+            "integer"
+        );
+        assert_eq!(schema_type(&json!({"properties": {}})), "object");
+        assert_eq!(
+            schema_type(&json!({"anyOf": [{"type": "string"}, {"type": "integer"}]})),
+            "string"
+        );
+        assert_eq!(schema_type(&json!({})), "string");
+    }
 
     #[test]
     fn descriptor_parses_annotations_and_params() {
