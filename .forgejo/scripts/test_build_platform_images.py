@@ -203,6 +203,43 @@ class PromotionTests(unittest.TestCase):
                 images.released_set()
 
 
+class GitOpsBundleTests(unittest.TestCase):
+    def evidence(self):
+        partials, sha = CollectionTests().partials()
+        return images.assemble_partials(partials, sha)
+
+    def test_bundle_has_only_exact_verified_pins_and_source(self):
+        evidence = self.evidence()
+        config = images.gitops_release_config(evidence)
+        self.assertEqual(config['metadata']['namespace'], 'flux-system')
+        self.assertEqual(config['metadata']['labels']['reconcile.fluxcd.io/watch'], 'Enabled')
+        self.assertEqual(set(config['data']), set(images.GITOPS_IMAGES) | {'AKH_SOURCE_COMMIT'})
+        for key, name in images.GITOPS_IMAGES.items():
+            self.assertEqual(config['data'][key], evidence['images'][name]['image'])
+
+    def test_partial_release_cannot_be_a_gitops_source(self):
+        evidence = self.evidence()
+        evidence['complete'] = False
+        with self.assertRaisesRegex(RuntimeError, 'complete verified'):
+            images.gitops_release_config(evidence)
+
+    def test_mutable_image_cannot_enter_digest_bundle(self):
+        evidence = self.evidence()
+        evidence['images']['workspace']['image'] = 'registry/workspace:main-ready'
+        with self.assertRaisesRegex(RuntimeError, 'immutable digest'):
+            images.gitops_release_config(evidence)
+
+    def test_publish_complete_artifact_includes_flux_files_in_same_layer(self):
+        evidence = self.evidence()
+        def inspect(*args, **kwargs):
+            context = Path(args[-1])
+            self.assertIn('COPY image-set.json release-configmap.yaml kustomization.yaml /', (context / 'Dockerfile').read_text())
+            self.assertEqual(json.loads((context / 'release-configmap.yaml').read_text()), images.gitops_release_config(evidence))
+            self.assertIn('--provenance=false', args)
+        with patch.object(images, 'run', side_effect=inspect):
+            images.publish_manifest(evidence, 'akh-image-set', evidence['source_commit'])
+
+
 class WorkspaceProfilingTests(unittest.TestCase):
     def test_sampling_default_is_in_workspace_target_not_identity_export(self):
         source = Path('docker/fleet-support/workspace.Dockerfile').read_text()
