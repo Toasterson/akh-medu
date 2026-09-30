@@ -27,10 +27,10 @@ GROUPS = {
     'home': {'home-runtime', 'home-services', 'home-control'},
     'core': {'core-service', 'akh'},
     'daemons': set(DAEMONS) | {'trigger', 'client', 'connect', 'kagent'},
-    'fleet': {'workspace', 'relay', 'seshd', 'sokard', 'akh-transcripts'},
+    'fleet': {'workspace', 'relay', 'vesta-sandbox', 'seshd', 'sokard', 'akh-transcripts'},
 }
 EXPECTED = set.union(*GROUPS.values())
-AMD64_ONLY = {'workspace', 'seshd', 'sokard', 'akh-transcripts'}
+AMD64_ONLY = {'workspace', 'vesta-sandbox', 'seshd', 'sokard', 'akh-transcripts'}
 REQUIRED_BINARIES = {
     'home-runtime': {'akhrtd', 'akhsessd', 'akheventd', 'akhexecd', 'akh-service', 'akh-runtime-profile'},
     'home-services': {'akhrtd', 'akhsessd', 'akheventd', 'akhexecd', 'akh-service'},
@@ -38,7 +38,7 @@ REQUIRED_BINARIES = {
     'sessions': {'akhsessd'}, 'runtime': {'akhrtd', 'akh-service', 'akh-runtime-profile'},
     'executor': {'akhexecd', 'akh-service'}, 'sandbox': {'akhsbxd'}, 'events': {'akheventd'},
     'trigger': {'akh-trigger'}, 'client': {'akh-acp'}, 'connect': {'akh-connect'}, 'kagent': {'akh-kagent'},
-    'workspace': {'akhexecd', 'akh-service'}, 'seshd': {'seshd'}, 'sokard': {'sokard'},
+    'workspace': {'akhexecd', 'akh-service'}, 'vesta-sandbox': {'akhexecd', 'akh-service'}, 'seshd': {'seshd'}, 'sokard': {'sokard'},
     'akh-transcripts': {'akh-harvest', 'akh-derive', 'akh-transcripts-mcp'},
 }
 HEAP_BINARIES = {name: binary for name, (binary, _) in DAEMONS.items()} | {
@@ -139,6 +139,17 @@ def assemble_partials(partials, sha):
             result['provider_versions'] = partial.get('provider_versions', {})
         if group == 'fleet' and partial.get('homelab_source_commit') != HOMELAB_SHA:
             raise RuntimeError('fleet support source mismatch')
+    workspace = result['images']['workspace']
+    vesta = result['images']['vesta-sandbox']
+    if vesta.get('inputs', {}).get('WORKSPACE_IMAGE') != workspace.get('image'):
+        raise RuntimeError('Vesta workspace base differs from verified fleet image')
+    for name in ('akhexecd', 'akh-service'):
+        expected_hash = workspace['smoke']['amd64'].get('binary_sha256', {}).get(name, '')
+        actual_hash = vesta['smoke']['amd64'].get('binary_sha256', {}).get(name, '')
+        if len(expected_hash) != 64 or actual_hash != expected_hash:
+            raise RuntimeError('Vesta executor differs from verified workspace binary')
+    if vesta['smoke']['amd64'].get('kubectl_version') != 'v1.32.2':
+        raise RuntimeError('Vesta kubectl smoke proof missing')
     for arch in ARCHES:
         for provider in ('codex', 'claude'):
             receipt = result['native_conformance'].get(arch, {}).get(provider, {})
@@ -354,6 +365,56 @@ def native_conformance(image, arch):
     return receipts
 
 
+def binary_hashes(image, binaries):
+    return json.loads(run('docker', 'run', '--rm', '--platform', 'linux/amd64',
+        '--entrypoint', 'python3', image, '-c',
+        'import hashlib,json,pathlib; print(json.dumps({n:hashlib.sha256(pathlib.Path("/usr/local/bin",n).read_bytes()).hexdigest() for n in '
+        + repr(list(binaries)) + '}))', capture=True))
+
+
+def vesta_dockerfile(source, workspace_image):
+    # Preserve the exact vendored homelab source, replacing only its obsolete
+    # workspace base with this run's already verified immutable workspace.
+    if '@sha256:' not in workspace_image:
+        raise RuntimeError('Vesta workspace input must be immutable')
+    lines = source.splitlines()
+    bases = [i for i, line in enumerate(lines) if line.startswith('FROM ')]
+    if len(bases) != 1 or not lines[bases[0]].startswith('FROM code.aopc.cloud/toasterson/akh-workspace@sha256:'):
+        raise RuntimeError('unexpected Vesta base-image recipe')
+    lines[bases[0]] = 'FROM ' + workspace_image
+    return '\n'.join(lines) + '\n'
+
+
+def build_vesta(evidence, context, tag):
+    workspace = evidence['images']['workspace']
+    image = REGISTRY + '/vesta-sandbox:' + tag
+    with tempfile.TemporaryDirectory(prefix='akh-vesta-build-') as directory:
+        dockerfile = Path(directory) / 'Dockerfile'
+        dockerfile.write_text(vesta_dockerfile((context / 'vesta.Dockerfile').read_text(), workspace['image']))
+        run('docker', 'buildx', 'build', '--platform', 'linux/amd64', '-f', str(dockerfile),
+            '--build-arg', 'KUBECTL_VERSION=v1.32.2', '-t', image,
+            '--label', 'org.opencontainers.image.revision=' + evidence['source_commit'],
+            '--label', 'it.wegmueller.homelab.revision=' + HOMELAB_SHA, '--push', str(context))
+    record = image_manifest(image, ['amd64'])
+    pinned = record['image']
+    for binary in ('akhexecd', 'akh-service'):
+        smoke_binary(pinned, 'amd64', binary)
+    hashes = binary_hashes(pinned, ['akhexecd', 'akh-service'])
+    if hashes != workspace['smoke']['amd64']['binary_sha256']:
+        raise RuntimeError('Vesta packaging changed verified executor binaries')
+    version = json.loads(run('docker', 'run', '--rm', '--entrypoint', 'kubectl', pinned,
+        'version', '--client', '-o', 'json', capture=True))['clientVersion']['gitVersion']
+    if version != 'v1.32.2':
+        raise RuntimeError('unexpected Vesta kubectl version')
+    run('docker', 'run', '--rm', '--entrypoint', '/bin/sh', pinned, '-ec',
+        'yamllint --version; ssh -V; git --no-lazy-fetch --version; test -d /seed')
+    record['inputs'] = {'WORKSPACE_IMAGE': workspace['image'], 'KUBECTL_VERSION': version}
+    record['homelab_source_commit'] = HOMELAB_SHA
+    record['smoke'] = {'amd64': {'binaries': ['akhexecd', 'akh-service'],
+        'binary_sha256': hashes, 'kubectl_version': version, 'yamllint': True, 'ssh': True}}
+    evidence['images']['vesta-sandbox'] = record
+
+
 def workspace_and_relay(evidence, tag, sha):
     # Vendored nonsecret build inputs avoid a new private-repository CI credential.
     context = Path('docker/fleet-support')
@@ -392,7 +453,8 @@ def workspace_and_relay(evidence, tag, sha):
                 smoke_binary(image, arch, 'akh-service')
                 run('docker', 'run', '--rm', '--platform', 'linux/' + arch, '--entrypoint', '/bin/sh', image,
                     '-ec', 'git --no-lazy-fetch --version; node --version; test -s /usr/local/share/akh/workspace-identity.json')
-                record['smoke'][arch] = {'binaries': ['akhexecd', 'akh-service'], 'workspace_identity': True}
+                record['smoke'][arch] = {'binaries': ['akhexecd', 'akh-service'], 'workspace_identity': True,
+                    'binary_sha256': binary_hashes(image, ['akhexecd', 'akh-service'])}
             else:
                 run('docker', 'run', '--rm', '--platform', 'linux/' + arch, '--entrypoint', 'python3', image, '--version')
                 run('docker', 'run', '--rm', '--platform', 'linux/' + arch, '--entrypoint', 'ssh', image, '-V')
@@ -400,6 +462,7 @@ def workspace_and_relay(evidence, tag, sha):
         if name == 'workspace':
             record['inputs'] = inputs
         evidence['images'][name] = record
+    build_vesta(evidence, context, tag)
     evidence['homelab_source_commit'] = HOMELAB_SHA
 
 
