@@ -8,10 +8,10 @@
   "triples_file": "triples.json",
   "procedures_file": "procedures.md",
   "pinned_tools": [
-    "kg_query",
     "mcp__anima__get_thread",
-    "mcp__anima__get_work_item",
+    "mcp__anima__get_work_item_detail",
     "mcp__anima__list_plans",
+    "mcp__anima__list_projects",
     "mcp__anima__list_work_items",
     "mcp__anima__post_message",
     "mcp__anima__search_documents",

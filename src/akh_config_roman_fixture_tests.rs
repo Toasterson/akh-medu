@@ -257,7 +257,9 @@ fn lilith_workspace_resolves_the_local_gemma_profile() {
     assert_eq!(profile.max_tools_per_turn.map(|s| s.value), Some(16));
     assert_eq!(cfg.pinned_tools.len(), 16, "{:?}", cfg.pinned_tools);
     assert!(cfg.pinned_tools.is_sorted(), "{:?}", cfg.pinned_tools);
-    assert!(cfg.pinned_tools.iter().any(|t| t == "mcp__anima__get_work_item"));
+    assert!(cfg.pinned_tools.iter().any(|t| t == "mcp__anima__get_work_item_detail"));
+    assert!(cfg.pinned_tools.iter().any(|t| t == "mcp__anima__list_projects"));
+    assert!(!cfg.pinned_tools.iter().any(|t| t == "mcp__anima__get_work_item"));
     let openai = cfg.to_openai_config().unwrap().unwrap();
     assert_eq!(openai.context_window, Some(49_152));
     assert_eq!(openai.timeout_secs, 600);
