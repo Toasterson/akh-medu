@@ -56,7 +56,7 @@ preflight() {
   if [[ "$BACKEND" == hip ]]; then
     need_cmd hipconfig "install ROCm (the training venv host already has it: ls /opt/rocm*); add /opt/rocm/bin to PATH"
     need_cmd rocminfo "install rocminfo with ROCm"
-    rocminfo 2>/dev/null | grep -q "$GPU_TARGET" || die lilith::heph::gpu \
+    rocminfo 2>/dev/null | grep "$GPU_TARGET" >/dev/null || die lilith::heph::gpu \
       "rocminfo does not list a $GPU_TARGET device" \
       "this build targets the RX 7900 XTX; check the driver (dmesg | grep amdgpu), or use --backend vulkan"
     [[ -f "$(hipconfig -R)/include/hipblas/hipblas.h" ]] || die lilith::heph::rocm \

@@ -71,9 +71,9 @@ case "$HOST" in
     "set it to the LAN address (192.168.1.114); the endpoint is plain HTTP, so it must not bind every interface" ;;
 esac
 if [[ "${LILITH_NO_SYSTEMD:-0}" != 1 ]]; then
-  ip -4 -o addr show 2>/dev/null | grep -q "inet ${HOST}/" || die lilith::heph::bind \
+  ip -4 -o addr show 2>/dev/null | grep "inet ${HOST}/" >/dev/null || die lilith::heph::bind \
     "$HOST is not an address of this host" "ip -4 addr; set LILITH_LLAMA_HOST in $ENV_FILE to this host's LAN address"
-  if ss -H -ltn "sport = :$PORT" 2>/dev/null | grep -q .; then
+  if ss -H -ltn "sport = :$PORT" 2>/dev/null | grep . >/dev/null; then
     systemctl is-active --quiet "$UNIT_NAME" || die lilith::heph::port "port $PORT is already in use" \
       "ss -ltnp 'sport = :$PORT'; stop what holds it or change LILITH_LLAMA_PORT in $ENV_FILE"
   fi
