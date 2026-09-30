@@ -152,6 +152,13 @@ def assemble_partials(partials, sha):
 
 
 def run(*args, capture=False):
+    # Solstice's per-line transport can throttle verbose successful compiler
+    # output. Reuse the existing archive-job wrapper: retain full diagnostics
+    # on failure, emit the image label and elapsed time on success.
+    if not capture and args[:3] == ('docker', 'buildx', 'build'):
+        tag_option = '--tag' if '--tag' in args else '-t'
+        label = 'build-' + args[args.index(tag_option) + 1]
+        args = ('sh', '.forgejo/scripts/run-logged.sh', label, *args)
     result = subprocess.run(args, check=True, text=True,
                             stdout=subprocess.PIPE if capture else None)
     return result.stdout.strip() if capture else None

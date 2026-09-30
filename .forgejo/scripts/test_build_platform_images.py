@@ -10,6 +10,23 @@ images = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(images)
 
 
+class BuildLogTests(unittest.TestCase):
+    def test_build_output_uses_existing_failure_preserving_wrapper(self):
+        command = ('docker', 'buildx', 'build', '--tag', 'registry/image:main-sha', '--push', '.')
+        with patch.object(images.subprocess, 'run') as run:
+            images.run(*command)
+            self.assertEqual(run.call_args.args[0],
+                ('sh', '.forgejo/scripts/run-logged.sh', 'build-registry/image:main-sha', *command))
+            self.assertTrue(run.call_args.kwargs['check'])
+
+    def test_captured_manifest_output_remains_machine_readable(self):
+        result = images.subprocess.CompletedProcess([], 0, '{"manifests": []}\n', '')
+        with patch.object(images.subprocess, 'run', return_value=result) as run:
+            self.assertEqual(images.run('docker', 'buildx', 'imagetools', 'inspect', '--raw',
+                'registry/image', capture=True), '{"manifests": []}')
+            self.assertEqual(run.call_args.args[0][0], 'docker')
+
+
 class ProfileTests(unittest.TestCase):
     def test_counts_samples_without_counting_string_table(self):
         self.assertEqual(images.sample_count(b'\x12\x02\x08\x01\x32\x02ok\x12\x02\x08\x02'), 2)
