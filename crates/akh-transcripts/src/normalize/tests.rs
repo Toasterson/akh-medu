@@ -4,11 +4,11 @@
 //! `docs/wayfinder/transcript-harvest/assets/source-format-stability.md`.
 
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::model::{RecordKey, RecordOrigin, Source, StreamKind, VerbatimRecord};
 
-use super::{normalize, EventKind, Outcome};
+use super::{EventKind, Outcome, normalize};
 
 fn record(source: Source, record_type: &str, payload: Value) -> VerbatimRecord {
     VerbatimRecord {
@@ -166,7 +166,11 @@ mod claude_code {
 
     #[test]
     fn user_empty_content_array_is_noise() {
-        let rec = record(Source::ClaudeCode, "user", json!({"message": {"content": []}}));
+        let rec = record(
+            Source::ClaudeCode,
+            "user",
+            json!({"message": {"content": []}}),
+        );
         assert!(matches!(normalize(&rec, Utc::now()), Outcome::Noise { .. }));
     }
 
@@ -181,7 +185,11 @@ mod claude_code {
 
     #[test]
     fn user_content_wrong_type_is_degraded() {
-        let rec = record(Source::ClaudeCode, "user", json!({"message": {"content": 42}}));
+        let rec = record(
+            Source::ClaudeCode,
+            "user",
+            json!({"message": {"content": 42}}),
+        );
         let ev = as_degraded(normalize(&rec, Utc::now()));
         assert_eq!(ev.kind, EventKind::Prompt);
         assert!(ev.degraded);
@@ -265,20 +273,24 @@ mod claude_code {
 
     #[test]
     fn assistant_content_not_array_is_degraded() {
-        let rec = record(Source::ClaudeCode, "assistant", json!({"message": {"content": 7}}));
+        let rec = record(
+            Source::ClaudeCode,
+            "assistant",
+            json!({"message": {"content": 7}}),
+        );
         let ev = as_degraded(normalize(&rec, Utc::now()));
         assert_eq!(ev.kind, EventKind::Reply);
         assert!(ev.degraded);
-        assert!(ev
-            .degraded_reason
-            .as_deref()
-            .unwrap()
-            .contains("number"));
+        assert!(ev.degraded_reason.as_deref().unwrap().contains("number"));
     }
 
     #[test]
     fn attachment_is_context() {
-        let rec = record(Source::ClaudeCode, "attachment", json!({"content": "a file"}));
+        let rec = record(
+            Source::ClaudeCode,
+            "attachment",
+            json!({"content": "a file"}),
+        );
         let ev = as_event(normalize(&rec, Utc::now()));
         assert_eq!(ev.kind, EventKind::Context);
         assert_eq!(ev.text.as_deref(), Some("a file"));
@@ -298,7 +310,11 @@ mod claude_code {
 
     #[test]
     fn system_other_subtype_is_undetermined() {
-        let rec = record(Source::ClaudeCode, "system", json!({"subtype": "hook_output"}));
+        let rec = record(
+            Source::ClaudeCode,
+            "system",
+            json!({"subtype": "hook_output"}),
+        );
         match normalize(&rec, Utc::now()) {
             Outcome::Undetermined { record_type } => assert_eq!(record_type, "system:hook_output"),
             other => panic!("expected Undetermined, got {other:?}"),
@@ -307,7 +323,11 @@ mod claude_code {
 
     #[test]
     fn ai_title_is_session_meta() {
-        let rec = record(Source::ClaudeCode, "ai-title", json!({"aiTitle": "Fix the bug"}));
+        let rec = record(
+            Source::ClaudeCode,
+            "ai-title",
+            json!({"aiTitle": "Fix the bug"}),
+        );
         let ev = as_event(normalize(&rec, Utc::now()));
         assert_eq!(ev.kind, EventKind::SessionMeta);
         assert_eq!(ev.subkind.as_deref(), Some("ai-title"));
@@ -325,7 +345,11 @@ mod claude_code {
 
     #[test]
     fn started_is_lifecycle_subagent_started() {
-        let rec = record(Source::ClaudeCode, "started", json!({"agentId": "agent-abc"}));
+        let rec = record(
+            Source::ClaudeCode,
+            "started",
+            json!({"agentId": "agent-abc"}),
+        );
         let ev = as_event(normalize(&rec, Utc::now()));
         assert_eq!(ev.kind, EventKind::Lifecycle);
         assert_eq!(ev.subkind.as_deref(), Some("subagent_started"));
@@ -384,7 +408,9 @@ mod codex {
         let rec = record(
             Source::Codex,
             "response_item",
-            response_item(json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]})),
+            response_item(
+                json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}),
+            ),
         );
         let ev = as_event(normalize(&rec, Utc::now()));
         assert_eq!(ev.kind, EventKind::Prompt);
@@ -397,7 +423,9 @@ mod codex {
         let rec = record(
             Source::Codex,
             "response_item",
-            response_item(json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "sure"}]})),
+            response_item(
+                json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "sure"}]}),
+            ),
         );
         let ev = as_event(normalize(&rec, Utc::now()));
         assert_eq!(ev.kind, EventKind::Reply);
@@ -409,7 +437,9 @@ mod codex {
         let rec = record(
             Source::Codex,
             "response_item",
-            response_item(json!({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "system prompt bits"}]})),
+            response_item(
+                json!({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "system prompt bits"}]}),
+            ),
         );
         let ev = as_event(normalize(&rec, Utc::now()));
         assert_eq!(ev.kind, EventKind::Context);
@@ -459,12 +489,17 @@ mod codex {
         let rec = record(
             Source::Codex,
             "response_item",
-            response_item(json!({"type": "reasoning", "summary": [], "encrypted_content": "gAAAAA-ciphertext-blob"})),
+            response_item(
+                json!({"type": "reasoning", "summary": [], "encrypted_content": "gAAAAA-ciphertext-blob"}),
+            ),
         );
         let ev = as_event(normalize(&rec, Utc::now()));
         assert_eq!(ev.kind, EventKind::Thought);
         assert_eq!(ev.subkind.as_deref(), Some("encrypted"));
-        assert_eq!(ev.text, None, "must never surface encrypted_content as text");
+        assert_eq!(
+            ev.text, None,
+            "must never surface encrypted_content as text"
+        );
     }
 
     #[test]
@@ -474,7 +509,9 @@ mod codex {
         let rec = record(
             Source::Codex,
             "response_item",
-            response_item(json!({"type": "reasoning", "summary": ["some summary text"], "encrypted_content": "blob"})),
+            response_item(
+                json!({"type": "reasoning", "summary": ["some summary text"], "encrypted_content": "blob"}),
+            ),
         );
         let ev = as_event(normalize(&rec, Utc::now()));
         assert_eq!(ev.text, None);
@@ -482,11 +519,16 @@ mod codex {
 
     #[test]
     fn custom_tool_call_and_function_call_are_tool_call() {
-        for (t, id_field) in [("custom_tool_call", "call_id"), ("function_call", "call_id")] {
+        for (t, id_field) in [
+            ("custom_tool_call", "call_id"),
+            ("function_call", "call_id"),
+        ] {
             let rec = record(
                 Source::Codex,
                 "response_item",
-                response_item(json!({"type": t, "name": "shell", id_field: "c1", "input": {"cmd": "ls"}})),
+                response_item(
+                    json!({"type": t, "name": "shell", id_field: "c1", "input": {"cmd": "ls"}}),
+                ),
             );
             let ev = as_event(normalize(&rec, Utc::now()));
             assert_eq!(ev.kind, EventKind::ToolCall, "{t}");
@@ -500,7 +542,9 @@ mod codex {
         let rec = record(
             Source::Codex,
             "response_item",
-            response_item(json!({"type": "function_call", "name": "shell", "id": "c2", "arguments": {"cmd": "pwd"}})),
+            response_item(
+                json!({"type": "function_call", "name": "shell", "id": "c2", "arguments": {"cmd": "pwd"}}),
+            ),
         );
         let ev = as_event(normalize(&rec, Utc::now()));
         assert_eq!(ev.tool_call_id.as_deref(), Some("c2"));
@@ -523,14 +567,22 @@ mod codex {
 
     #[test]
     fn response_item_missing_payload_is_degraded() {
-        let rec = record(Source::Codex, "response_item", json!({"type": "response_item"}));
+        let rec = record(
+            Source::Codex,
+            "response_item",
+            json!({"type": "response_item"}),
+        );
         let ev = as_degraded(normalize(&rec, Utc::now()));
         assert!(ev.degraded);
     }
 
     #[test]
     fn response_item_unknown_payload_type_is_undetermined() {
-        let rec = record(Source::Codex, "response_item", response_item(json!({"type": "mystery_payload"})));
+        let rec = record(
+            Source::Codex,
+            "response_item",
+            response_item(json!({"type": "mystery_payload"})),
+        );
         match normalize(&rec, Utc::now()) {
             Outcome::Undetermined { record_type } => {
                 assert_eq!(record_type, "response_item:mystery_payload")
@@ -704,7 +756,10 @@ mod opencode {
 
     #[test]
     fn message_updated_user_is_prompt() {
-        let rec = wrapped("message.updated.1", json!({"role": "user", "text": "hello"}));
+        let rec = wrapped(
+            "message.updated.1",
+            json!({"role": "user", "text": "hello"}),
+        );
         let ev = as_event(normalize(&rec, Utc::now()));
         assert_eq!(ev.kind, EventKind::Prompt);
         assert_eq!(ev.text.as_deref(), Some("hello"));
@@ -712,7 +767,10 @@ mod opencode {
 
     #[test]
     fn message_updated_assistant_is_reply() {
-        let rec = wrapped("message.updated.1", json!({"role": "assistant", "text": "hi back"}));
+        let rec = wrapped(
+            "message.updated.1",
+            json!({"role": "assistant", "text": "hi back"}),
+        );
         let ev = as_event(normalize(&rec, Utc::now()));
         assert_eq!(ev.kind, EventKind::Reply);
     }
@@ -775,7 +833,11 @@ mod opencode {
     #[test]
     fn version_suffix_is_stripped_for_dispatch() {
         // Same base type, different version suffix, must dispatch the same.
-        for t in ["session.created.1", "session.created.2", "session.created.42"] {
+        for t in [
+            "session.created.1",
+            "session.created.2",
+            "session.created.42",
+        ] {
             let rec = wrapped(t, json!({"title": "t"}));
             let ev = as_event(normalize(&rec, Utc::now()));
             assert_eq!(ev.kind, EventKind::SessionMeta, "{t}");
@@ -787,7 +849,11 @@ mod opencode {
         // Defensive fallback if the wrapper shape ever changes upstream:
         // normalize should not panic, it should just find nothing useful
         // and degrade or fall through, never crash.
-        let rec = record(Source::Opencode, "message.updated", json!({"role": "user", "text": "hi"}));
+        let rec = record(
+            Source::Opencode,
+            "message.updated",
+            json!({"role": "user", "text": "hi"}),
+        );
         let ev = as_event(normalize(&rec, Utc::now()));
         assert_eq!(ev.kind, EventKind::Prompt);
         assert_eq!(ev.text.as_deref(), Some("hi"));

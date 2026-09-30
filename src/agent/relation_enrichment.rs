@@ -616,7 +616,9 @@ fn link_orphaned_entities(
     let mut added = 0usize;
 
     // Link consecutive orphan pairs so each gets at least one outgoing edge.
-    for pair in orphans.chunks(2) {
+    // `chunks_exact`: an odd orphan count leaves the last one unpaired rather
+    // than yielding a one-element chunk (which panicked on `pair[1]`).
+    for pair in orphans.chunks_exact(2) {
         if added >= max_links {
             break;
         }
@@ -675,6 +677,27 @@ mod tests {
         assert_eq!(report.entity_count, 2);
         assert_eq!(report.relation_count, 1);
         assert!((report.ratio - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn orphan_linking_tolerates_an_odd_orphan_count() {
+        let engine = test_engine();
+        let ids: Vec<SymbolId> = (0..3u32)
+            .map(|i| {
+                engine
+                    .resolve_or_create_entity(&format!("orphan:{i}"))
+                    .unwrap()
+            })
+            .collect();
+        let predicate = engine.resolve_or_create_relation("rel").unwrap();
+        let sentinel = engine.resolve_or_create_entity("sentinel").unwrap();
+        // Four entities have no outgoing triples (three orphans plus the
+        // sentinel); make the count odd by giving the sentinel an edge.
+        engine
+            .add_triple(&Triple::new(sentinel, predicate, ids[0]))
+            .unwrap();
+        let added = link_orphaned_entities(&engine, predicate, 10, sentinel).unwrap();
+        assert_eq!(added, 1, "three orphans pair once; the last stays unpaired");
     }
 
     #[test]

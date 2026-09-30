@@ -29,7 +29,7 @@
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::StreamRef;
 use crate::error::{TranscriptError, TranscriptResult};
@@ -63,7 +63,8 @@ pub fn discover(root: &Path) -> TranscriptResult<Vec<StreamRef>> {
 
     let mut out = Vec::new();
     for row in rows {
-        let aggregate_id = row.map_err(|e| TranscriptError::adapter_opencode_query(DISCOVER_QUERY, e))?;
+        let aggregate_id =
+            row.map_err(|e| TranscriptError::adapter_opencode_query(DISCOVER_QUERY, e))?;
         out.push(StreamRef {
             source: Source::Opencode,
             session_id: aggregate_id,
@@ -107,7 +108,13 @@ pub fn read_stream(
         let (id, seq, event_type, data) =
             row.map_err(|e| TranscriptError::adapter_opencode_query(READ_QUERY, e))?;
         records.push(build_record(
-            stream, seq, &id, &event_type, &data, machine, &path_str,
+            stream,
+            seq,
+            &id,
+            &event_type,
+            &data,
+            machine,
+            &path_str,
         ));
         // Next unseen seq is one past the highest we've read.
         next_offset = next_offset.max(u64::try_from(seq).unwrap_or(0) + 1);
@@ -246,9 +253,15 @@ mod tests {
         let streams = discover(&db_path).unwrap();
         let (records, next_offset) = read_stream(&streams[0], 0, "m").unwrap();
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].origin.record_type.as_deref(), Some("session.created"));
+        assert_eq!(
+            records[0].origin.record_type.as_deref(),
+            Some("session.created")
+        );
         assert_eq!(records[0].origin.schema_marker.as_deref(), Some("1"));
-        assert_eq!(records[1].origin.record_type.as_deref(), Some("message.updated"));
+        assert_eq!(
+            records[1].origin.record_type.as_deref(),
+            Some("message.updated")
+        );
         assert_eq!(next_offset, 2);
     }
 

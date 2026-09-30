@@ -163,7 +163,7 @@ async fn main() -> ExitCode {
     }
 
     let interval = Duration::from_secs(env_u64("AKH_TRANSCRIPTS_DERIVE_INTERVAL_SECS", 30));
-    tracing::info!(target: "akh_transcripts::derive", 
+    tracing::info!(target: "akh_transcripts::derive",
         interval_secs = interval.as_secs(),
         batch_streams = config.batch_streams,
         embed = embedder.is_some(),
@@ -176,7 +176,9 @@ async fn main() -> ExitCode {
                 tracing::error!(target: "akh_transcripts::derive", "akh-derive: singleton advisory lock is now held by another process; exiting so the supervisor restarts us cleanly");
                 std::process::exit(3);
             }
-            Err(err) => tracing::error!(target: "akh_transcripts::derive", "akh-derive: could not re-assert the singleton lock: {err:?}"),
+            Err(err) => {
+                tracing::error!(target: "akh_transcripts::derive", "akh-derive: could not re-assert the singleton lock: {err:?}")
+            }
         }
         match derive::run_pass(&db, &config, embedder.as_ref()).await {
             Ok(summary) => tracing::info!(target: "akh_transcripts::derive", "{}", summary),

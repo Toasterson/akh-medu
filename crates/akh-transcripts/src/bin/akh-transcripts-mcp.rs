@@ -65,7 +65,7 @@ fn default_bind() -> String {
 /// four tools keep working, rather than the whole server refusing to start.
 fn load_embedder() -> Option<akh_embed::SharedEmbedder> {
     let Some(dir) = std::env::var_os("AKH_TRANSCRIPTS_MODEL_DIR") else {
-        tracing::warn!(target: "akh_transcripts::mcp", 
+        tracing::warn!(target: "akh_transcripts::mcp",
             "AKH_TRANSCRIPTS_MODEL_DIR is not set — search_transcripts will return a clear \
              error; list_sessions, get_session, get_lines, and grep_transcripts are unaffected"
         );
@@ -78,7 +78,7 @@ fn load_embedder() -> Option<akh_embed::SharedEmbedder> {
             Some(Arc::new(Mutex::new(embedder)))
         }
         Err(error) => {
-            tracing::warn!(target: "akh_transcripts::mcp", 
+            tracing::warn!(target: "akh_transcripts::mcp",
                 %error,
                 dir = %dir.display(),
                 "embedding model failed to load — search_transcripts will return a clear error"

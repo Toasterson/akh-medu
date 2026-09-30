@@ -39,7 +39,10 @@ use akh_transcripts::model::Source;
 
 /// Agent-session transcript harvester (ADR 119).
 #[derive(Debug, Parser)]
-#[command(name = "akh-harvest", about = "Agent-session transcript harvester (ADR 119)")]
+#[command(
+    name = "akh-harvest",
+    about = "Agent-session transcript harvester (ADR 119)"
+)]
 struct Cli {
     /// Run once and exit. This is the only mode this binary has ever had —
     /// the flag exists because the systemd unit already passes it and a
@@ -92,7 +95,11 @@ async fn main() -> miette::Result<()> {
     // its only purpose is accepting the flag the systemd unit already
     // passes, per `process-model.md`'s "a `--watch` mode remains available
     // later" note.
-    tracing::debug!(once = cli.once, dry_run = cli.dry_run, "akh-harvest starting");
+    tracing::debug!(
+        once = cli.once,
+        dry_run = cli.dry_run,
+        "akh-harvest starting"
+    );
 
     let cfg = HarvestConfig::from_env()?;
     let opts = RunOptions {

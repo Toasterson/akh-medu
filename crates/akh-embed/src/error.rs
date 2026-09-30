@@ -48,7 +48,9 @@ pub enum EmbedError {
     #[error("tokenization error: {0}")]
     #[diagnostic(
         code(akh_embed::tokenize),
-        help("Check that the input text is valid UTF-8 and that tokenizer.json matches the model.")
+        help(
+            "Check that the input text is valid UTF-8 and that tokenizer.json matches the model."
+        )
     )]
     Tokenize(String),
 

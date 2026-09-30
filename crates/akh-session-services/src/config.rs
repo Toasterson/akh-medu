@@ -1,8 +1,8 @@
+use crate::route_filter::{JsonPointer, RouteFilter};
 use crate::types::{
     streaming::{StreamingConfig, StreamingConfigError},
     *,
 };
-use crate::route_filter::{JsonPointer, RouteFilter};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,

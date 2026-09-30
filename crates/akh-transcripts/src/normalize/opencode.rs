@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use crate::model::{EventKind, VerbatimRecord};
 
-use super::{finish_single, record_type_of, DerivationError, NormalizedEvent, Outcome};
+use super::{DerivationError, NormalizedEvent, Outcome, finish_single, record_type_of};
 
 pub(super) fn normalize(record: &VerbatimRecord, observed_at: DateTime<Utc>) -> Outcome {
     let record_type = record_type_of(record);
@@ -47,7 +47,9 @@ pub(super) fn normalize(record: &VerbatimRecord, observed_at: DateTime<Utc>) -> 
 /// mapping table dispatches on.
 fn strip_version_suffix(event_type: &str) -> (&str, Option<&str>) {
     match event_type.rsplit_once('.') {
-        Some((base, suffix)) if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) => {
+        Some((base, suffix))
+            if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) =>
+        {
             (base, Some(suffix))
         }
         _ => (event_type, None),
@@ -70,11 +72,16 @@ fn normalize_session_meta(
     finish_single(ev)
 }
 
-fn normalize_message_updated(record: &VerbatimRecord, doc: &Value, observed_at: DateTime<Utc>) -> Outcome {
-    let role = doc
-        .get("role")
-        .and_then(Value::as_str)
-        .or_else(|| doc.get("info").and_then(|i| i.get("role")).and_then(Value::as_str));
+fn normalize_message_updated(
+    record: &VerbatimRecord,
+    doc: &Value,
+    observed_at: DateTime<Utc>,
+) -> Outcome {
+    let role = doc.get("role").and_then(Value::as_str).or_else(|| {
+        doc.get("info")
+            .and_then(|i| i.get("role"))
+            .and_then(Value::as_str)
+    });
 
     let kind = match role {
         Some("user") => EventKind::Prompt,
@@ -82,16 +89,17 @@ fn normalize_message_updated(record: &VerbatimRecord, doc: &Value, observed_at: 
         Some(other) => {
             return Outcome::Undetermined {
                 record_type: format!("message.updated:role={other}"),
-            }
+            };
         }
         None => {
-            let ev = NormalizedEvent::new(record.key.clone(), observed_at, EventKind::Prompt).degrade(
-                DerivationError::MissingField {
-                    record_type: "message.updated".to_string(),
-                    field: "role",
-                }
-                .to_string(),
-            );
+            let ev = NormalizedEvent::new(record.key.clone(), observed_at, EventKind::Prompt)
+                .degrade(
+                    DerivationError::MissingField {
+                        record_type: "message.updated".to_string(),
+                        field: "role",
+                    }
+                    .to_string(),
+                );
             return finish_single(ev);
         }
     };
@@ -102,17 +110,22 @@ fn normalize_message_updated(record: &VerbatimRecord, doc: &Value, observed_at: 
     finish_single(ev)
 }
 
-fn normalize_part_updated(record: &VerbatimRecord, doc: &Value, observed_at: DateTime<Utc>) -> Outcome {
+fn normalize_part_updated(
+    record: &VerbatimRecord,
+    doc: &Value,
+    observed_at: DateTime<Utc>,
+) -> Outcome {
     let part = match doc.get("part") {
         Some(p) => p,
         None => {
-            let ev = NormalizedEvent::new(record.key.clone(), observed_at, EventKind::Context).degrade(
-                DerivationError::MissingField {
-                    record_type: "message.part.updated".to_string(),
-                    field: "part",
-                }
-                .to_string(),
-            );
+            let ev = NormalizedEvent::new(record.key.clone(), observed_at, EventKind::Context)
+                .degrade(
+                    DerivationError::MissingField {
+                        record_type: "message.part.updated".to_string(),
+                        field: "part",
+                    }
+                    .to_string(),
+                );
             return finish_single(ev);
         }
     };
@@ -152,7 +165,9 @@ fn normalize_part_updated(record: &VerbatimRecord, doc: &Value, observed_at: Dat
                     .or_else(|| part.get("result"))
                     .map(|v| v.to_string())
             } else {
-                part.get("input").or_else(|| part.get("state")).map(|v| v.to_string())
+                part.get("input")
+                    .or_else(|| part.get("state"))
+                    .map(|v| v.to_string())
             };
             finish_single(ev)
         }

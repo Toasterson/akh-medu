@@ -6,7 +6,7 @@
 #[cfg(feature = "candle-backend")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use akh_medu::nlu::vision_tower::VisionTower;
-    use candle_core::{quantized::gguf_file, Device, Tensor};
+    use candle_core::{Device, Tensor, quantized::gguf_file};
     use clap::Parser;
     use std::{path::PathBuf, time::Instant};
 
@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!(
                 "device {other} is unavailable in this build; rebuild with the matching feature"
             )
-            .into())
+            .into());
         }
     };
 
@@ -69,7 +69,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|v| (*v as f64 - mean).powi(2))
         .sum::<f64>()
         / values.len() as f64;
-    let norm = values.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    let norm = values
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
     println!(
         "{}",
         serde_json::json!({

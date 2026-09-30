@@ -29,8 +29,8 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::Value;
 
-use super::scan::{self, seq_lines};
 use super::StreamRef;
+use super::scan::{self, seq_lines};
 use crate::error::{TranscriptError, TranscriptResult};
 use crate::model::{RecordKey, RecordOrigin, Source, StreamKind, VerbatimRecord};
 
@@ -248,7 +248,10 @@ mod tests {
         let streams = discover(root).unwrap();
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].stream_id, "01a0a5dd-a9f6-7091-9926-d286bae5623e");
-        assert_eq!(streams[0].session_id, "01a09e99-5594-7a61-aa97-6cf242b8d102");
+        assert_eq!(
+            streams[0].session_id,
+            "01a09e99-5594-7a61-aa97-6cf242b8d102"
+        );
         assert_ne!(streams[0].stream_id, streams[0].session_id);
     }
 
@@ -269,11 +272,18 @@ mod tests {
 
         let streams = discover(root).unwrap();
         assert_eq!(streams.len(), 1);
-        assert_eq!(streams[0].session_id, "01a09e99-5594-7a61-aa97-6cf242b8d102");
+        assert_eq!(
+            streams[0].session_id,
+            "01a09e99-5594-7a61-aa97-6cf242b8d102"
+        );
 
         let (records, _) = read_stream(&streams[0], 0, "m").unwrap();
         assert_eq!(records.len(), 2);
-        assert!(records.iter().all(|r| r.key.session_id == "01a09e99-5594-7a61-aa97-6cf242b8d102"));
+        assert!(
+            records
+                .iter()
+                .all(|r| r.key.session_id == "01a09e99-5594-7a61-aa97-6cf242b8d102")
+        );
     }
 
     /// Unknown top-level types (e.g. the undetermined `world_state`) are not
@@ -294,7 +304,10 @@ mod tests {
         let streams = discover(root).unwrap();
         let (records, _) = read_stream(&streams[0], 0, "m").unwrap();
         assert_eq!(records.len(), 2);
-        assert_eq!(records[1].origin.record_type.as_deref(), Some("world_state"));
+        assert_eq!(
+            records[1].origin.record_type.as_deref(),
+            Some("world_state")
+        );
         assert!(records[1].payload.is_some());
     }
 

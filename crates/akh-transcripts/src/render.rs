@@ -126,18 +126,34 @@ pub fn render(event: &NormalizedEvent) -> Render {
             }
         }
         Tier::Prose => {
-            field(&mut segments, "t", event.text.as_deref().map(collapse_whitespace));
+            field(
+                &mut segments,
+                "t",
+                event.text.as_deref().map(collapse_whitespace),
+            );
         }
         Tier::Bounded(cap) => match event.kind {
             EventKind::ToolCall => {
                 field(&mut segments, "n", event.tool_name.clone());
-                field(&mut segments, "a", event.text.as_deref().map(|t| truncate(t, cap)));
+                field(
+                    &mut segments,
+                    "a",
+                    event.text.as_deref().map(|t| truncate(t, cap)),
+                );
             }
             EventKind::ToolResult => {
-                field(&mut segments, "o", event.text.as_deref().map(|t| truncate(t, cap)));
+                field(
+                    &mut segments,
+                    "o",
+                    event.text.as_deref().map(|t| truncate(t, cap)),
+                );
             }
             _ => {
-                field(&mut segments, "t", event.text.as_deref().map(|t| truncate(t, cap)));
+                field(
+                    &mut segments,
+                    "t",
+                    event.text.as_deref().map(|t| truncate(t, cap)),
+                );
             }
         },
     }
@@ -296,6 +312,9 @@ mod tests {
         ev.tool_name = Some("Bash".to_string());
         ev.text = Some(r#"{"command":"cargo test"}"#.to_string());
         let rendered = render(&ev).0;
-        assert_eq!(rendered, r#"414 tool_call | n Bash | a {"command":"cargo test"}"#);
+        assert_eq!(
+            rendered,
+            r#"414 tool_call | n Bash | a {"command":"cargo test"}"#
+        );
     }
 }
