@@ -945,6 +945,8 @@ pub struct OpenAiChatBackend {
     /// Explicit operator prompt from `akh.toml`, if any — composed with the
     /// machine-owned sections by [`assemble_system_prompt`](super::model_manager::assemble_system_prompt).
     explicit_prompt: Option<String>,
+    /// Resolved model-family guidance (ADR 122); `None` = layer off.
+    guidance: Option<super::prompt_guidance::ModelFamily>,
     /// The assembled prompt for the current psyche. `RwLock` because `prepare`
     /// takes `&self` (the trait is shared behind an `Arc`).
     system_prompt: RwLock<String>,
@@ -962,9 +964,18 @@ impl OpenAiChatBackend {
         Self {
             client: OpenAiClient::new(config),
             explicit_prompt,
+            guidance: None,
             system_prompt: RwLock::new(initial),
             reachable: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Enable the model-family guidance layer (ADR 122) from the akh's
+    /// `prompt_guidance` setting, resolved against this backing's model id.
+    #[must_use]
+    pub fn with_prompt_guidance(mut self, setting: super::prompt_guidance::PromptGuidance) -> Self {
+        self.guidance = setting.resolve(self.client.model());
+        self
     }
 
     fn prompt(&self) -> String {
@@ -987,6 +998,7 @@ impl OpenAiChatBackend {
             self.explicit_prompt.as_deref(),
             super::model_manager::detect_prompt_mode(self.client.model()),
             manifests,
+            self.guidance,
         );
         if let Ok(mut slot) = self.system_prompt.write() {
             *slot = assembled.clone();
@@ -1507,6 +1519,37 @@ mod tests {
         assert_eq!(out[1]["content"], "out-a");
         assert_eq!(out[2]["content"], "out-b");
         assert_ne!(out[1]["tool_call_id"], out[2]["tool_call_id"]);
+    }
+
+    #[test]
+    fn prompt_guidance_is_off_by_default_and_opt_in() {
+        use crate::agent::prompt_guidance::{GUIDANCE_HEADING, PromptGuidance, guidance_section};
+        let glm = OpenAiConfig {
+            model: "zai-org/GLM-5.3".into(),
+            ..Default::default()
+        };
+        let plain = OpenAiChatBackend::new(glm.clone(), Some("Voice.".into()));
+        assert!(
+            !plain
+                .prepare_turn("a1", None, &[])
+                .system_prompt()
+                .unwrap_or_default()
+                .contains(GUIDANCE_HEADING)
+        );
+        let guided = OpenAiChatBackend::new(glm, Some("Voice.".into()))
+            .with_prompt_guidance(PromptGuidance::Auto);
+        let prompt = guided.prepare_turn("a1", None, &[]);
+        let prompt = prompt.system_prompt().unwrap_or_default();
+        assert!(prompt.ends_with(&guidance_section(
+            crate::agent::prompt_guidance::ModelFamily::Glm
+        )));
+        let off = OpenAiChatBackend::new(cfg(), None).with_prompt_guidance(PromptGuidance::Off);
+        assert!(
+            !off.prepare_turn("a1", None, &[])
+                .system_prompt()
+                .unwrap_or_default()
+                .contains(GUIDANCE_HEADING)
+        );
     }
 
     #[test]

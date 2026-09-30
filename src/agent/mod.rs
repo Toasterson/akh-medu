@@ -91,6 +91,7 @@ pub mod preference;
 pub mod priority_reasoning;
 pub mod project;
 pub mod promotion;
+pub mod prompt_guidance;
 pub mod provider_failure;
 #[cfg(feature = "daemon")]
 pub mod reactor;
@@ -284,6 +285,7 @@ pub use preference::{
 };
 pub use priority_reasoning::{Audience, PriorityArgument, PriorityVerdict, Value};
 pub use project::{Agenda, Project, ProjectAssignment, ProjectPredicates, ProjectStatus};
+pub use prompt_guidance::{ModelFamily, PromptGuidance};
 #[cfg(feature = "daemon")]
 pub use reactor::{
     MisfirePolicy, ReactorAction, ReactorClaim, ReactorEvent, ReactorSchedule, ReactorState,

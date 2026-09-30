@@ -292,6 +292,11 @@ impl Agent {
             runtime.explicit_prompt.as_deref(),
             super::model_manager::detect_prompt_mode(runtime.model.as_deref().unwrap_or("")),
             &refs,
+            // ADR 122: coding-agent runtimes (Codex / Claude) carry their
+            // provider harness's own system prompt; the guidance layer is
+            // not stacked on top of it. Their model-family guidance lives in
+            // the Anima runtime profile (docs/ai/research/2026-09-30-glm-kimi-run-evaluation.md).
+            None,
         );
         if let Some(c) = &controller {
             instructions.push_str(&format!("\n\n{}", c.system_context()));

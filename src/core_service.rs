@@ -496,6 +496,9 @@ async fn context(
             config.system_prompt.as_deref(),
             crate::agent::model_manager::detect_prompt_mode(config.model.as_deref().unwrap_or("")),
             &[],
+            config
+                .prompt_guidance
+                .resolve(config.model.as_deref().unwrap_or("")),
         );
         let mut evidence = vec![];
         if let Some(context) = crate::nlu::kg_context::build_kg_context(
