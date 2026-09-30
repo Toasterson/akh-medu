@@ -6,8 +6,11 @@ Serves snapshot t_k over MCP JSON-RPC with the live tool names and schemas:
 - `tools/list` returns the recorded Anima tool contract verbatim, with its
   sha256 (the recorder's `tool_contract_sha256`) in `_meta`.
 - `tools/call` of a recorded read tool answers with the recorded bytes of the
-  same call and arguments. A read the recorder did not capture answers
-  `isError` ("not recorded"); nothing is invented.
+  same call and arguments, or of a recorded call whose arguments are provably
+  equivalent under the tool's input schema (`replay_match`; the receipt keeps
+  both the requested and the matched arguments). A read the recorder did not
+  capture answers `isError` ("not recorded", with a machine-readable
+  `reason`); nothing is invented.
 - Every other tool in the contract (the writes) is appended to the **dojo
   tenancy ledger** (append-only, hash-chained JSONL) and acknowledged. The
   server has no network client: nothing reaches production.
@@ -43,6 +46,7 @@ if __package__ in (None, ""):
 from dojo.contracts import PermissionProfile, Tier
 from dojo.episode import ReceiptSource, ToolReceipt
 from dojo.errors import DojoError, LedgerError
+from dojo.replay_match import ArgumentMatch, recorded_shape, resolve_recorded_read, resolve_ref
 from dojo.snapshot import MAIN_REF, Snapshot, SnapshotStore, canonical_json, sha256_hex
 
 PROTOCOL_VERSION = "2025-03-26"
@@ -186,7 +190,8 @@ class ReceiptLog:
         self.receipts: list[ToolReceipt] = []
 
     def issue(self, *, server: str, tool: str, arguments: Mapping[str, Any], response: Any,
-              response_sha256: str, source: ReceiptSource, snapshot: Snapshot) -> ToolReceipt:
+              response_sha256: str, source: ReceiptSource, snapshot: Snapshot,
+              match: ArgumentMatch | None = None, error_reason: str | None = None) -> ToolReceipt:
         receipt = ToolReceipt(
             call_id=f"r{len(self.receipts) + 1}",
             server=server,
@@ -197,6 +202,9 @@ class ReceiptLog:
             source=source,
             snapshot_id=snapshot.id,
             observed_at=snapshot.unix_time,
+            matched_arguments=None if match is None or match.exact else dict(match.matched),
+            match_rules=() if match is None else match.rules,
+            error_reason=error_reason,
         )
         self.receipts.append(receipt)
         return receipt
@@ -296,22 +304,28 @@ class ReplayServer(_McpServer):
 
     def call(self, name: str, arguments: Mapping[str, Any]) -> tuple[ToolReceipt, Any, bool]:
         if self.is_read(name):
-            found = self.snapshot.answer(name, arguments) if name in ANIMA_READ_TOOLS else None
+            found = None
+            if name in ANIMA_READ_TOOLS:
+                found = resolve_recorded_read(self.snapshot, name, (self.tool(name) or {}).get("inputSchema"), arguments)
             if found is None:
-                payload = {"error": "not recorded", "tool": name, "arguments": dict(arguments),
+                reason = recorded_shape(self.snapshot, name) if name in ANIMA_READ_TOOLS else "tool-not-recorded"
+                payload = {"error": "not recorded", "reason": reason, "tool": name, "arguments": dict(arguments),
                            "snapshot": self.snapshot.id}
-                return self._issue(name, arguments, payload, sha256_hex(canonical_json(payload)), ReceiptSource.ERROR), payload, True
-            payload, ref = found
-            return self._issue(name, arguments, payload, ref.sha256, ReceiptSource.SNAPSHOT), payload, False
+                receipt = self._issue(name, arguments, payload, sha256_hex(canonical_json(payload)), ReceiptSource.ERROR,
+                                      error_reason=reason)
+                return receipt, payload, True
+            receipt = self._issue(name, arguments, found.payload, found.ref.sha256, ReceiptSource.SNAPSHOT, match=found.match)
+            return receipt, found.payload, False
         entry = self.ledger.append(self.snapshot.id, self.name, name, arguments)
         payload = {"accepted": True, "dojo_tenancy": self.ledger.tenancy, "ledger_seq": entry.seq,
                    "entry_sha256": entry.entry_sha256}
         return self._issue(name, arguments, payload, sha256_hex(canonical_json(payload)), ReceiptSource.LEDGER), payload, False
 
     def _issue(self, name: str, arguments: Mapping[str, Any], payload: Any, digest: str,
-               source: ReceiptSource) -> ToolReceipt:
+               source: ReceiptSource, match: ArgumentMatch | None = None, error_reason: str | None = None) -> ToolReceipt:
         return self.receipts.issue(server=self.name, tool=name, arguments=arguments, response=payload,
-                                   response_sha256=digest, source=source, snapshot=self.snapshot)
+                                   response_sha256=digest, source=source, snapshot=self.snapshot,
+                                   match=match, error_reason=error_reason)
 
 
 GIT_TOOLS: list[dict] = [
@@ -352,21 +366,34 @@ class DojoGitServer(_McpServer):
             if found is not None:
                 payload, ref = found
                 return self._issue(name, arguments, payload, ref.sha256, ReceiptSource.SNAPSHOT), payload, False
-            payload = {"error": "not recorded", "tool": name}
-            return self._issue(name, arguments, payload, sha256_hex(canonical_json(payload)), ReceiptSource.ERROR), payload, True
+            payload = {"error": "not recorded", "reason": "arguments-not-recorded", "tool": name}
+            return self._issue(name, arguments, payload, sha256_hex(canonical_json(payload)), ReceiptSource.ERROR,
+                               error_reason="arguments-not-recorded"), payload, True
         commit = str(arguments.get("commit", ""))
-        ref = str(arguments.get("ref") or MAIN_REF)
-        tip = self.snapshot.git_refs.get(ref)
+        requested = arguments.get("ref")
+        requested = str(requested) if requested else None
+        ref, rules = resolve_ref(self.snapshot.git_refs, requested)
+        tip = self.snapshot.git_refs.get(ref) if ref else None
         verdict = self.oracle.is_ancestor(commit, tip) if (self.oracle and tip and commit) else None
-        payload = {"commit": commit, "ref": ref, "ref_sha": tip, "is_ancestor": verdict}
+        payload = {"commit": commit, "ref": ref or requested or MAIN_REF, "ref_sha": tip, "is_ancestor": verdict}
+        if rules:
+            payload["requested_ref"] = requested
         is_error = verdict is None
+        reason = None
+        if is_error:
+            reason = ("commit-missing" if not commit else "ref-not-recorded" if tip is None
+                      else "commit-unknown-to-oracle")
+            payload["reason"] = reason
         source = ReceiptSource.ERROR if is_error else ReceiptSource.ORACLE
-        return self._issue(name, arguments, payload, sha256_hex(canonical_json(payload)), source), payload, is_error
+        match = ArgumentMatch(dict(arguments), {"commit": commit, "ref": ref}, rules) if rules and ref else None
+        return self._issue(name, arguments, payload, sha256_hex(canonical_json(payload)), source,
+                           match=match, error_reason=reason), payload, is_error
 
     def _issue(self, name: str, arguments: Mapping[str, Any], payload: Any, digest: str,
-               source: ReceiptSource) -> ToolReceipt:
+               source: ReceiptSource, match: ArgumentMatch | None = None, error_reason: str | None = None) -> ToolReceipt:
         return self.receipts.issue(server=self.name, tool=name, arguments=arguments, response=payload,
-                                   response_sha256=digest, source=source, snapshot=self.snapshot)
+                                   response_sha256=digest, source=source, snapshot=self.snapshot,
+                                   match=match, error_reason=error_reason)
 
 
 def episode_servers(snapshot: Snapshot, ledger: DojoLedger, oracle: AncestryOracle | None) -> tuple[dict[str, _McpServer], ReceiptLog]:

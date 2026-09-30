@@ -14,6 +14,7 @@ from dojo.errors import DojoError
 from dojo.mcp_gateway import ReplayMcpGateway
 from dojo.model_adapters import Secret
 from dojo.replay_server import DojoLedger, StaticAncestryOracle, episode_servers
+from dojo.snapshot import sha256_hex
 from fake_acp import TOKEN, FakeAkhomed, PeerState
 from fake_llm import FakeLLM
 from fixtures import T0, WI
@@ -326,6 +327,79 @@ def test_teacher_config_must_be_sealed(tmp_path):
         T.read_teacher_config(bad, "dojo-teacher")
 
 
+# --- prompt placement parity ---------------------------------------------------------------------------------------
+
+
+def sealed_toml(tmp_path, prompt, name="dojo-teacher.toml"):
+    path = tmp_path / name
+    path.write_text('name = "dojo-teacher"\nmodel = "glm-5.3"\nbackend = "ollama"\ncapture_transcripts = false\n'
+                    f'tool_surface = "session-only"\nsystem_prompt = {json.dumps(prompt, ensure_ascii=False)}\n'
+                    '[mcp]\nservers = []\n')
+    return path
+
+
+def test_akh_system_placement_sends_the_task_alone(park_world, tmp_path):
+    """The dojo prompt is the akh's system prompt; the prompt turn is exactly the parent's user message."""
+    item = the_p_item(park_world)
+    servers, _ = servers_for(park_world, item, tmp_path)
+    with FakeAkhomed(park_akh) as peer, ReplayMcpGateway() as gateway:
+        runner = teacher(peer, gateway, placement=T.PromptPlacement.AKH_SYSTEM)
+        result = runner.run_traced(item.spec, servers)
+        assert runner.probe()["prompt_delivery"] == "akh-system-prompt"
+    assert result.trace.status == "ok" and result.trace.contract_ok
+    (blocks,) = [c.prompt_blocks for c in peer.contexts]
+    assert len(blocks) == 1 and SYSTEM.text not in blocks[0]["text"] and T.PROMPT_PREAMBLE not in blocks[0]["text"]
+    assert sha256_hex(blocks[0]["text"].encode("utf-8")) == result.trace.user_prompt_sha256
+
+
+def test_session_turn_placement_is_the_recorded_legacy_layout(park_world, tmp_path):
+    item = the_p_item(park_world)
+    servers, _ = servers_for(park_world, item, tmp_path)
+    with FakeAkhomed(park_akh) as peer, ReplayMcpGateway() as gateway:
+        runner = teacher(peer, gateway)
+        runner.run_traced(item.spec, servers)
+        assert runner.probe()["prompt_delivery"] == "acp-session-prompt"
+    assert SYSTEM.text in peer.contexts[0].prompt_text
+
+
+def test_prompt_parity_is_verified_against_the_rendered_akh_config(tmp_path):
+    ok = T.read_teacher_config(sealed_toml(tmp_path, SYSTEM.text), "dojo-teacher")
+    assert ok["system_prompt_sha256"] == SYSTEM.sha256
+    T.verify_prompt_parity(ok, SYSTEM)
+    other = T.read_teacher_config(sealed_toml(tmp_path, "You are the teacher.", "o.toml"), "dojo-teacher")
+    with pytest.raises(T.PromptParityRefusal, match="system_prompt is sha256"):
+        T.verify_prompt_parity(other, SYSTEM)
+    unset = tmp_path / "u.toml"
+    unset.write_text('name = "dojo-teacher"\ncapture_transcripts = false\ntool_surface = "session-only"\n')
+    with pytest.raises(T.PromptParityRefusal, match="not set"):
+        T.verify_prompt_parity(T.read_teacher_config(unset, "dojo-teacher"), SYSTEM)
+    with pytest.raises(T.PromptParityRefusal, match="--akh-config"):
+        T.verify_prompt_parity(None, SYSTEM)
+
+
+def test_cli_defaults_to_akh_placement_and_refuses_an_unverified_prompt(park_world, tmp_path, capsys):
+    key = tmp_path / "dojo-teacher.key"
+    key.write_text(TOKEN + "\n")
+    key.chmod(0o600)
+    common = ["run", "--root", str(park_world.root), "--repo", str(Path(R.REPO_ROOT)), "--family", "park-triage",
+              "--split", "all", "--model-kind", "acp", "--key-file", str(key), "--allow-dirty", "--label", "teacher"]
+    with FakeAkhomed(park_akh) as peer:
+        endpoint = ["--acp-endpoint", peer.endpoint]
+        assert B.main([*common, *endpoint, "--out", str(tmp_path / "none")]) == 2  # no --akh-config
+        wrong = sealed_toml(tmp_path, "You are the teacher.", "wrong.toml")
+        assert B.main([*common, *endpoint, "--akh-config", str(wrong), "--out", str(tmp_path / "wrong")]) == 2
+        assert peer.sessions == []  # refused before a session was opened
+        good = sealed_toml(tmp_path, SYSTEM.text)
+        out = tmp_path / "good"
+        assert B.main([*common, *endpoint, "--akh-config", str(good), "--out", str(out)]) == 0
+    prov = json.loads((out / "provenance.json").read_text())
+    assert prov["teacher"]["prompt_delivery"] == "akh-system-prompt"
+    assert prov["teacher"]["declared"]["system_prompt_sha256"] == SYSTEM.sha256 == prov["system_prompt_sha256"]
+    assert all(len(c.prompt_blocks) == 1 for c in peer.contexts)
+    err = capsys.readouterr().err
+    assert "teacher_prompt_parity" in err and "--teacher-prompt session" in err
+
+
 # --- batch + CLI ---------------------------------------------------------------------------------------------------
 
 
@@ -356,7 +430,8 @@ def test_cli_acp_run_compare_and_refusals(park_world, tmp_path, capsys):
     key.write_text(TOKEN + "\n")
     key.chmod(0o600)
     common = ["run", "--root", str(park_world.root), "--repo", str(Path(R.REPO_ROOT)), "--family", "park-triage",
-              "--split", "all", "--model-kind", "acp", "--key-file", str(key), "--allow-dirty", "--label", "teacher"]
+              "--split", "all", "--model-kind", "acp", "--key-file", str(key), "--allow-dirty", "--label", "teacher",
+              "--teacher-prompt", "session"]
     with FakeAkhomed(park_akh) as peer:
         out = tmp_path / "teacher"
         assert B.main([*common, "--acp-endpoint", peer.endpoint, "--out", str(out)]) == 0

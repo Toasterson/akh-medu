@@ -13,7 +13,8 @@ same tool names and schemas, and the same result encoding.
 
 Pieces
 - `compose_system_prompt`: Lilith's role prompt (`deploy/roman-mini/roles/lilith.md`, with
-  `{mcp_servers}` filled) + the chief-of-staff skill procedures + a short dojo addendum. Its
+  `{mcp_servers}` filled) + the chief-of-staff skill procedures + a short dojo addendum
+  (`roles/addenda/dojo-teacher.md`, which the dojo-teacher akh renders as its `system_prompt`). Its
   sha256 is recorded in the result.
 - `Broker`: exposes the replay servers' live tools as `mcp__<server>__<tool>`, routes each call
   through the servers' JSON-RPC handlers, and returns the result with `_meta` (receipt id,
@@ -50,6 +51,12 @@ from dojo.episode import (
     StepRecord,
     ToolCall,
 )
+from dojo.context_budget import (
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_RESERVED_OUTPUT,
+    bound_tool_result,
+    estimate_running_tokens,
+)
 from dojo.errors import BrokerError, DojoError, ModelError
 from dojo.model_adapters import (
     AssistantReply,
@@ -72,28 +79,7 @@ DOJO_SERVERS = ("anima", "git")
 
 # --- prompt --------------------------------------------------------------------------------------
 
-DOJO_ADDENDUM = """\
-# This session is a dojo replay
-
-You are working a recorded moment of the operator's fleet, not production. The servers are the
-recorded ones ({mcp_servers}). Reads answer from the recording; a write goes to a scratch ledger
-and reaches nothing. Only what a tool returned in this session counts as evidence.
-
-- Every tool result is a JSON object: `isError`, `result` (the server's answer) and `_meta`
-  (`lilith/receipt` = the receipt id, `lilith/digest`, `lilith/observed_at` in unix seconds).
-- Where a document asks for receipts, cite each one you read from as
-  `{"kind": "tool-call", "reference": "<lilith/receipt>", "observed_at": <lilith/observed_at>,
-  "digest": "<lilith/digest>"}`. A receipt you did not get from a tool result is a fabrication.
-- For a tier T2 or T3 tool call, add the `cos_declaration` argument as the skill describes.
-- Read what you need with the tools, then give your answer. Your answer is a message with no tool
-  call. It is exactly one JSON object and nothing else:
-  - a contract document (the object is the document itself, with its `contract` field), or
-  - a board message: `{"kind": "message", "recipient": "<akh or agent>", "recipient_class":
-    "<executor|implementer|product-manager|product-owner|operator>", "protocol":
-    "coordination/request@v1", "payload": {...}, "follow_up_at": <unix seconds>}`.
-- The task names the contract. Use the language tag it gives in the document's `language` field, and
-  write prose fields in that language.
-"""
+DOJO_ADDENDUM_FILE = "deploy/roman-mini/roles/addenda/dojo-teacher.md"  # also rendered into the dojo-teacher akh
 
 FAMILY_TASKS: Mapping[Family, str] = {
     Family.BRIEFING: (
@@ -178,11 +164,13 @@ def compose_system_prompt(repo_root: Path = REPO_ROOT, servers: Sequence[str] = 
     """Lilith's role file, then the chief-of-staff procedures (as `deploy/roman-mini/full_akh.py`
     joins them for her akh), then the dojo addendum. Same text for every model."""
     role_path = repo_root / "deploy" / "roman-mini" / "roles" / "lilith.md"
+    addendum_path = repo_root / DOJO_ADDENDUM_FILE
     procedures, procedures_path = _procedures_text(repo_root / "skills" / "chief-of-staff")
     names = ", ".join(servers)
     body = "\n".join([role_path.read_text(), procedures]).replace(MCP_SERVERS_PLACEHOLDER, names)
-    text = body.rstrip("\n") + "\n\n" + DOJO_ADDENDUM.replace(MCP_SERVERS_PLACEHOLDER, names)
-    sources = {str(p.relative_to(repo_root)): sha256_hex(p.read_bytes()) for p in (role_path, procedures_path)}
+    text = body.rstrip("\n") + "\n\n" + addendum_path.read_text().replace(MCP_SERVERS_PLACEHOLDER, names)
+    sources = {str(p.relative_to(repo_root)): sha256_hex(p.read_bytes())
+               for p in (role_path, procedures_path, addendum_path)}
     return SystemPrompt(text, sources)
 
 
@@ -416,6 +404,10 @@ class RunnerConfig:
     episode_token_cap: int = 64_000  # completion tokens over the whole episode
     max_result_chars: int = 60_000
     why_chars: int = 500
+    # The window the in-process loop keeps the running request inside (`context_budget`, mirroring
+    # production #458). `reserved_output_tokens` is the per-call completion cap.
+    context_window: int = DEFAULT_CONTEXT_WINDOW
+    reserved_output_tokens: int = DEFAULT_RESERVED_OUTPUT
 
 
 class EpisodeStatus:
@@ -440,6 +432,7 @@ class RunTrace:
     protocol_errors: list[str] = dataclasses.field(default_factory=list)
     declarations: list[dict] = dataclasses.field(default_factory=list)
     transcript: list[dict] = dataclasses.field(default_factory=list)
+    truncations: list[dict] = dataclasses.field(default_factory=list)  # tool results cut to fit the window
     user_prompt_sha256: str = ""
     tools_sha256: str = ""
 
@@ -498,6 +491,7 @@ class ModelEpisodeRunner:
                              help="select the family with --dry-run to size it, or skip it (--family names the ones to run)")
         broker = Broker(tools, self.config.max_result_chars)
         specs = broker.tool_specs()
+        spec_by_name = {s.name: s for s in specs}
         now = _snapshot_now(tools)
         prompt = user_prompt(spec, now)
         trace.user_prompt_sha256 = sha256_hex(prompt.encode("utf-8"))
@@ -517,7 +511,13 @@ class ModelEpisodeRunner:
                 messages.append(ChatMessage("assistant", reply.content, reply.tool_calls))
                 for n, call in enumerate(reply.tool_calls):
                     outcome = broker.dispatch(call)
-                    messages.append(ChatMessage("tool", outcome.text, tool_call_id=call.id, is_error=outcome.is_error))
+                    bounded = bound_tool_result(
+                        call.name, spec_by_name.get(call.name), outcome.text, estimate_running_tokens(messages, specs),
+                        self.config.context_window, self.config.reserved_output_tokens)
+                    if bounded.truncation is not None:
+                        trace.truncations.append({"receipt": outcome.receipt_id, "round": round_no,
+                                                  **bounded.truncation.to_dict()})
+                    messages.append(ChatMessage("tool", bounded.content, tool_call_id=call.id, is_error=outcome.is_error))
                     trace.transcript[-1]["tool_calls"][n]["receipt"] = outcome.receipt_id
                     if outcome.problem is not None:
                         trace.protocol_errors.append(outcome.problem)

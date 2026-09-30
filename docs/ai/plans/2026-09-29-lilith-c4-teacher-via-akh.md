@@ -52,7 +52,7 @@ RunResult` as the in-process `ModelEpisodeRunner`, so `baseline.run_batch`, `fam
    triple counts are recorded. Only then does the runner call `session/new`
    (`cwd = akh-ws:dojo-teacher`, `_meta["akh/workspace"] = "dojo-teacher"`, `mcpServers` = the two
    gateway URLs).
-5. One `session/prompt` carries three text blocks: a two-line preamble, the **dojo system prompt**
+5. One `session/prompt`. With `--teacher-prompt akh` (the default since 2026-09-30, see §4) it carries the task alone, because the dojo system prompt is the akh's own `system_prompt`. With `--teacher-prompt session` it carries three text blocks: a two-line preamble, the **dojo system prompt**
    (`runner.compose_system_prompt`: role + chief-of-staff procedures + dojo addendum), and the **task**
    (`runner.user_prompt`).
 6. The akh runs its own agentic loop. Its bridge calls the gateway (`initialize`,
@@ -141,7 +141,7 @@ the tools the akh sends it, and the akh sends only the sealed catalog.
 
 | Aspect | In-process arm (parent, candidate) | Teacher arm (`acp`) | Delta |
 |---|---|---|---|
-| System prompt | `compose_system_prompt` as the system message | the same bytes, as the second text block of the first user turn. The akh's system prompt is the neutral `DOJO_TEACHER_PROMPT` plus akhomed's own "Available Tools" section built from the same catalog | Placement differs. `system_prompt_sha256` and `prompt_sha256` are identical, so `compare` does not warn. `provenance.teacher.prompt_delivery = acp-session-prompt` records the placement. |
+| System prompt | `compose_system_prompt` as the system message | **Default (`--teacher-prompt akh`, 2026-09-30):** the same bytes as the akh's own `system_prompt`, rendered by `configure_core.py` from the role file, the procedures and `roles/addenda/dojo-teacher.md`; the run is refused unless the rendered TOML's `system_prompt` hashes to the run's `system_prompt_sha256`. The prompt turn is the task alone. Legacy (`--teacher-prompt session`): the same bytes as the second text block of the first user turn | The role now matches. **Residual:** akhomed composes the text as the "Operator Instructions" section of its own system message, between a psyche identity paragraph and its machine-owned tool-operation and convention sections (not suppressible per akh without a Rust `prompt_mode`), and no `_akh/*` read exposes the active prompt, so the check covers the rendered file (restart the core after a render). `system_prompt_sha256` and `prompt_sha256` are identical, so `compare` does not warn. `provenance.teacher.prompt_delivery` records the placement. |
 | Task | `user_prompt(spec, now)` | the same bytes (third block). `user_prompt_sha256` is equal | none |
 | Tool names | `mcp__anima__<tool>`, `mcp__git__<tool>` | akhomed names pushed proxies `mcp__{sanitize(server)}__{tool}` (`mcp_bridge.rs:190`). `anima` and `git` are unchanged by sanitizing | none. `tools_sha256` is equal (tested) |
 | Tool schemas | recorded `inputSchema` verbatim | akhomed keeps `properties` + `required` (`agentic_chat.rs:1956-1966`) and drops undeclared arguments (`tools/mcp.rs:783-792`) | The recorded Anima contract (1 contract across all 20 snapshots, 80 tools) loses only `additionalProperties`, on 14 tools, and akhomed enforces it anyway by dropping undeclared arguments. |

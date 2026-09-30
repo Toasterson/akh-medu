@@ -467,7 +467,7 @@ def test_dirty_tree_is_refused_unless_allowed(tmp_path):
 
 def test_system_prompt_is_lilith_role_plus_skill_and_hashed():
     assert "You are Lilith" in SYSTEM.text and "Chief of Staff" in SYSTEM.text and "{mcp_servers}" not in SYSTEM.text
-    assert "anima, git" in SYSTEM.text and len(SYSTEM.sha256) == 64 and len(SYSTEM.sources) == 2
+    assert "anima, git" in SYSTEM.text and len(SYSTEM.sha256) == 64 and len(SYSTEM.sources) == 3
 
 
 # --- CLI end to end ---------------------------------------------------------------------------------------------------------------------------------

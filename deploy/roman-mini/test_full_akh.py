@@ -1597,7 +1597,38 @@ class DojoTeacherRenderTests(RenderFixture):
         for absent in ("board", "monitoring", "delegation", "chief_of_staff", "agent_runtime",
                        "related_workspaces", "shared_partitions", "openclaw_import", "extra_read_roots"):
             self.assertNotIn(absent, ws)
-        self.assertEqual(ws["system_prompt"], fa.DOJO_TEACHER_PROMPT)
+        # prompt parity: the dojo prompt the in-process arm sends as its system message
+        self.assertEqual(ws["system_prompt"], self.dojo_prompt())
+        self.assertNotEqual(ws["system_prompt"], fa.DOJO_TEACHER_PROMPT)
+
+    @staticmethod
+    def dojo_prompt():
+        """The in-process arm's system message, composed by the dojo runner itself."""
+        lilith = SOURCE.parents[1] / "scripts/lilith"
+        sys.path.insert(0, str(lilith))
+        try:
+            from dojo.runner import compose_system_prompt
+            return compose_system_prompt(SOURCE.parents[1]).text
+        finally:
+            sys.path.remove(str(lilith))
+
+    def test_rendered_dojo_prompt_is_byte_identical_to_the_runners(self):
+        prompt = fa.dojo_teacher_system_prompt(SOURCE / "roles", SOURCE.parents[1] / "skills/chief-of-staff")
+        self.assertEqual(prompt, self.dojo_prompt())
+        self.assertNotIn(fa.MCP_SERVERS_PLACEHOLDER, prompt)
+        self.assertIn("anima, git", prompt)
+
+    def test_neutral_prompt_switch_keeps_the_generic_prompt(self):
+        self.configure(prompt="neutral")
+        self.render()
+        self.assertEqual(self.toml(self.WS)["system_prompt"], fa.DOJO_TEACHER_PROMPT)
+
+    def test_dojo_prompt_needs_the_skillpack_and_a_known_switch(self):
+        (self.root / fa.DOJO_TEACHER_CONFIG_FILE).write_text(json.dumps({"prompt": "loud"}))
+        with self.assertRaisesRegex(fa.RenderError, "prompt"):
+            self.render()
+        with self.assertRaisesRegex(fa.RenderError, "composed prompt"):
+            fa.render_dojo_teacher_workspace(None, fa.DojoTeacherSettings())
 
     def test_principal_reaches_the_teacher_alone(self):
         self.configure(model="deepseek-v4.1", reasoning_effort="high")
@@ -1641,7 +1672,7 @@ class DojoTeacherRenderTests(RenderFixture):
 
     def test_malformed_switch_fails_before_writing(self):
         for body, needle in (("{", "not valid JSON"), ('{"modle": "x"}', "unknown keys"),
-                             ('{"model": "a b"}', "model"), ('{"reasoning_effort": "extreme"}', "reasoning_effort"),
+                             ('{"model": "a b"}', "model"), ('{"prompt": 1}', "prompt"), ('{"reasoning_effort": "extreme"}', "reasoning_effort"),
                              ("[]", "JSON object")):
             with self.subTest(body=body):
                 (self.root / fa.DOJO_TEACHER_CONFIG_FILE).write_text(body)
