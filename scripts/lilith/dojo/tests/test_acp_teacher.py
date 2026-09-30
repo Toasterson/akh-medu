@@ -18,7 +18,8 @@ from dojo.snapshot import sha256_hex
 from fake_acp import TOKEN, FakeAkhomed, PeerState
 from fake_llm import FakeLLM
 from fixtures import T0, WI
-from test_runner import adapter, one_spec, park_doc, park_script, provenance, tool_results
+from fake_llm import Call, Say
+from test_runner import adapter, one_spec, park_doc, park_script, provenance, receipt_from, tool_results
 
 SYSTEM = R.compose_system_prompt()
 SECRET = Secret(TOKEN)
@@ -38,6 +39,9 @@ def receipt_of(text: str) -> dict:
 
 def park_akh(ctx):
     """The fake akh's model: read the parked item through the replay tools, answer with receipts."""
+    if "Situation (JSON):" not in ctx.prompt_text:  # the warm-up prompt
+        ctx.say("ready")
+        return
     wid = ctx.situation["work_item"]
     seen = ctx.call("mcp__anima__get_work_item_detail", {"id": wid,
                     "cos_declaration": {"tier": "read", "receipts": []}}, text="Reading the item first.")
@@ -282,19 +286,128 @@ def test_provider_error_is_an_unscored_episode(park_world, tmp_path):
 
 
 def test_round_cap_cancels_the_turn(park_world, tmp_path):
+    """The cap is in model turns: each round here is a model request that speaks, then calls."""
     item = the_p_item(park_world)
     servers, log = servers_for(park_world, item, tmp_path)
 
     def loops(ctx):
-        for _ in range(4):
-            ctx.call("mcp__anima__get_work_item_detail", {"id": "p"})
+        for n in range(4):
+            ctx.call("mcp__anima__get_work_item_detail", {"id": "p"}, text=f"Round {n + 1}.")
         return "cancelled"
 
     with FakeAkhomed(loops) as peer, ReplayMcpGateway() as gateway:
         result = teacher(peer, gateway, runner=R.RunnerConfig(max_rounds=2)).run_traced(item.spec, servers)
     assert peer.cancelled == ["s1"]
     assert result.trace.status == "ok" and result.trace.answer_status == "round-cap"
+    assert "2 model turns" in result.trace.answer_notes[0]
+    assert result.trace.rounds >= 2 and result.trace.rounds_source == "derived"  # the fake akh keeps going after the cancel
     assert len(result.episode.steps) == len(log.receipts)  # every call the servers saw is a step
+
+
+def test_parallel_calls_of_one_model_turn_are_one_round(park_world, tmp_path):
+    """Four calls in one model turn (only tool output between them) cost one round, as in-process."""
+    item = the_p_item(park_world)
+    servers, _ = servers_for(park_world, item, tmp_path)
+
+    def batched(ctx):
+        seen = [ctx.call("mcp__anima__get_work_item_detail", {"id": "p"}, text="One request, four reads." if n == 0 else "")
+                for n in range(4)]
+        ctx.model_turns = 2  # the request that made the four calls, and the answer
+        ctx.say(json.dumps(park_doc("p", "conflict", "rebase", [receipt_of(seen[0])])))
+
+    with FakeAkhomed(batched, PeerState(turns=7)) as peer, ReplayMcpGateway() as gateway:
+        result = teacher(peer, gateway, runner=R.RunnerConfig(max_rounds=2)).run_traced(item.spec, servers)
+    assert peer.cancelled == []
+    assert result.trace.answer_status == "document"
+    assert (result.trace.rounds, result.trace.rounds_source) == (2, "reported")
+    assert len(result.episode.receipts) == 4
+
+
+def test_the_answer_turn_counts_like_the_parent(park_world, tmp_path):
+    """The parent has `max_rounds` requests including the one that answers: cap-1 rounds of reads and
+    an answer is fine, cap rounds of reads and an answer is not."""
+    item = the_p_item(park_world)
+
+    def read_rounds(n):
+        def script(ctx):
+            seen = ""
+            for i in range(n):
+                seen = ctx.call("mcp__anima__get_work_item_detail", {"id": "p"}, text=f"Round {i + 1}.")
+            ctx.model_turns = n + 1
+            ctx.say(json.dumps(park_doc("p", "conflict", "rebase", [receipt_of(seen)])))
+        return script
+
+    outcomes = {}
+    for n in (2, 3):
+        servers, _ = servers_for(park_world, item, tmp_path, f"l{n}.jsonl")
+        with FakeAkhomed(read_rounds(n), PeerState(turns=0)) as peer, ReplayMcpGateway() as gateway:
+            result = teacher(peer, gateway, runner=R.RunnerConfig(max_rounds=3)).run_traced(item.spec, servers)
+        outcomes[n] = (result.trace.answer_status, result.trace.rounds)
+    assert outcomes == {2: ("document", 3), 3: ("round-cap", 4)}
+
+    # the in-process arm gives the same verdicts for the same behaviour
+    for n, expected in ((2, "document"), (3, "round-cap")):
+        servers, _ = servers_for(park_world, item, tmp_path, f"p{n}.jsonl")
+
+        def script(body, index, n=n):
+            results = tool_results(body, "openai")
+            if len(results) < n:
+                return Call("mcp__anima__get_work_item_detail", {"id": "p"})
+            return Say(json.dumps(park_doc("p", "conflict", "rebase", [receipt_from(results[-1])])))
+
+        with FakeLLM("openai", script) as fake:
+            parent = R.ModelEpisodeRunner(adapter(fake, "openai"), SYSTEM, R.RunnerConfig(max_rounds=3)).run_traced(item.spec, servers)
+        assert parent.trace.answer_status == expected
+
+
+def test_answer_past_the_cap_is_a_round_cap_even_when_the_stream_merged_rounds(park_world, tmp_path):
+    """A model that says nothing between its rounds hides them from the stream; the akh's own count
+    (read after the turn) still enforces the cap."""
+    item = the_p_item(park_world)
+    servers, _ = servers_for(park_world, item, tmp_path)
+
+    def silent(ctx):
+        for _ in range(3):
+            seen = ctx.call("mcp__anima__get_work_item_detail", {"id": "p"})
+        ctx.model_turns = 4
+        ctx.say(json.dumps(park_doc("p", "conflict", "rebase", [receipt_of(seen)])))
+
+    with FakeAkhomed(silent, PeerState(turns=0)) as peer, ReplayMcpGateway() as gateway:
+        result = teacher(peer, gateway, runner=R.RunnerConfig(max_rounds=2)).run_traced(item.spec, servers)
+    assert result.trace.answer_status == "round-cap" and result.trace.rounds == 4
+    assert result.trace.rounds_source == "reported" and "model turn 4" in result.trace.answer_notes[0]
+
+
+def test_round_counter_boundaries():
+    c = T.RoundCounter(limit=2)
+    assert not c.output("thinking", thought=True)
+    assert not c.call_started("a_1") and c.rounds == 1
+    c.call_updated("a_1", "completed")
+    assert not c.output("[mcp__anima__x:ok] {...}\n", thought=True)  # tool echo: not model output
+    assert not c.call_started("a_2") and c.rounds == 1                 # same round
+    c.call_updated("a_2", "failed")
+    assert not c.output("second request", thought=False)
+    assert not c.call_started("a_3") and c.rounds == 2
+    c.call_updated("a_3", "completed")
+    assert c.output("a third request begins", thought=True)             # past the cap, all calls done
+    assert c.call_started("a_4") and c.rounds == 3
+
+
+def test_round_counter_does_not_cap_while_calls_are_open():
+    c = T.RoundCounter(limit=1)
+    c.call_started("a_1")
+    assert not c.output("chatter while a call is running", thought=True)  # not a new request: a call is open
+    c.call_updated("a_1", "completed")
+    assert c.output("next request", thought=False)
+
+
+def test_model_turns_prefers_the_akhs_count_but_never_undercuts_the_stream():
+    state = T._TurnState(counter=T.RoundCounter(limit=9, rounds=3))
+    assert T.model_turns(state, 5) == (5, "reported")
+    assert T.model_turns(state, 2) == (4, "derived")   # the ledger cannot have fewer turns than the stream showed
+    assert T.model_turns(state, None) == (4, "derived")
+    state.capped = True
+    assert T.model_turns(state, None) == (3, "derived")
 
 
 def test_wrong_token_is_a_transport_error_and_never_leaks(park_world, tmp_path):
@@ -437,11 +550,16 @@ def test_cli_acp_run_compare_and_refusals(park_world, tmp_path, capsys):
         assert B.main([*common, "--acp-endpoint", peer.endpoint, "--out", str(out)]) == 0
         # resume: nothing re-runs
         assert B.main([*common, "--acp-endpoint", peer.endpoint, "--out", str(out)]) == 0
-        assert len(peer.sessions) == 2
+        episode_sessions = [x for x in peer.sessions if x["mcpServers"]]
+        warm_sessions = [x for x in peer.sessions if not x["mcpServers"]]
+        assert len(episode_sessions) == 2  # one ACP session per episode
+        assert len(warm_sessions) == 4     # two warm-up prompts per invocation (the run and its resume)
         assert B.main([*common, "--acp-endpoint", peer.endpoint, "--out", str(tmp_path / "c"), "--concurrency", "2"]) == 2
     prov = json.loads((out / "provenance.json").read_text())
     assert prov["model_kind"] == "acp" and prov["model_id"] == "akh:dojo-teacher"
     assert prov["teacher"]["own_tools"] == 0 and prov["teacher"]["memory"] == {"symbols": 10, "triples": 20}
+    # the warm-up report sits beside the teacher identity, not inside it (a resume must still match)
+    assert prov["teacher_warm_up"]["interned_symbols"] == 0 and "warm_up" not in prov["teacher"]
     assert B.main(["compare", str(out), str(out)]) == 0
     with FakeAkhomed(park_akh, PeerState(own_tools=["http_fetch"])) as peer:
         assert B.main([*common, "--acp-endpoint", peer.endpoint, "--out", str(tmp_path / "leaky")]) == 2
@@ -449,3 +567,87 @@ def test_cli_acp_run_compare_and_refusals(park_world, tmp_path, capsys):
     printed = capsys.readouterr()
     assert "teacher_isolation" in printed.err and "one episode at a time" in printed.err
     assert TOKEN not in printed.out + printed.err
+
+
+# --- warm-up: absorb a one-time init, prove it was one-time -------------------------------------------------------
+
+
+def warm_teacher(peer, gateway, **config):
+    return teacher(peer, gateway, warm_up=True, **config)
+
+
+def test_warm_up_absorbs_a_one_time_init_and_names_what_was_interned(park_world, tmp_path):
+    """The 2026-09-30 abort: 515 -> 517 symbols, 473 triples, on the first episode after a core restart."""
+    item = the_p_item(park_world)
+    servers, _ = servers_for(park_world, item, tmp_path)
+    state = PeerState(symbols=515, triples=473, grow_first_prompt=2)
+    with FakeAkhomed(park_akh, state) as peer, ReplayMcpGateway() as gateway:
+        runner = warm_teacher(peer, gateway)
+        probe = runner.probe()
+        assert probe["memory"] == {"symbols": 517, "triples": 473}  # the baseline is taken after the init
+        report = runner.warm_up_report
+        assert report["before"] == {"symbols": 515, "triples": 473} and report["after"] == probe["memory"]
+        assert report["interned_symbols"] == 2 and report["interned_labels"] == ["interned-516", "interned-517"]
+        assert report["prompts"] == 2 and "tool" in report["prompt"]
+        assert "warm_up" not in probe  # the identity a resume compares must not carry the pre-init count
+        result = runner.run_traced(item.spec, servers)  # no refusal: the episode leaves the memory as it found it
+    assert result.trace.status == "ok" and result.trace.answer_status == "document"
+    # the warm-up sessions pushed no MCP server and carried only the warm-up text
+    assert peer.sessions[0]["mcpServers"] == [] and peer.sessions[1]["mcpServers"] == []
+    assert peer.contexts[0].prompt_text == T.WARM_UP_PROMPT
+
+
+def test_without_warm_up_the_same_teacher_aborts_on_its_first_episode(park_world, tmp_path):
+    item = the_p_item(park_world)
+    servers, _ = servers_for(park_world, item, tmp_path)
+    with FakeAkhomed(park_akh, PeerState(symbols=515, triples=473, grow_first_prompt=2)) as peer, ReplayMcpGateway() as gateway:
+        runner = teacher(peer, gateway)
+        assert runner.probe()["memory"] == {"symbols": 515, "triples": 473} and runner.warm_up_report is None
+        with pytest.raises(T.IsolationRefusal, match=r"\(515, 473\) -> \(517, 473\)"):
+            runner.run_traced(item.spec, servers)
+
+
+def test_warm_up_refuses_a_per_turn_write(park_world, tmp_path):
+    with FakeAkhomed(park_akh, PeerState(symbols=10, triples=20, grow_each_prompt=1)) as peer, ReplayMcpGateway() as gateway:
+        with pytest.raises(T.IsolationRefusal, match="per-turn write, not a one-time init"):
+            warm_teacher(peer, gateway).probe()
+
+
+def test_warm_up_never_allows_a_triple_write(park_world, tmp_path):
+    with FakeAkhomed(park_akh, PeerState(triples_each_prompt=1)) as peer, ReplayMcpGateway() as gateway:
+        with pytest.raises(T.IsolationRefusal, match="wrote a triple during warm-up prompt 1"):
+            warm_teacher(peer, gateway).probe()
+
+
+def test_warm_up_turn_may_not_call_any_tool(park_world, tmp_path):
+    with FakeAkhomed(lambda ctx: ctx.start_foreign_tool("http_fetch")) as peer, ReplayMcpGateway() as gateway:
+        with pytest.raises(T.IsolationRefusal, match="not a replay tool"):
+            warm_teacher(peer, gateway).probe()
+
+
+def test_warm_up_works_when_the_akh_does_not_list_symbols(park_world, tmp_path):
+    with FakeAkhomed(park_akh, PeerState(grow_first_prompt=1, symbols_list=False)) as peer, ReplayMcpGateway() as gateway:
+        runner = warm_teacher(peer, gateway)
+        runner.probe()
+    assert runner.warm_up_report["interned_symbols"] == 1 and runner.warm_up_report["interned_labels"] is None
+
+
+def test_cli_warm_up_absorbs_the_init_and_a_resume_still_matches(park_world, tmp_path):
+    key = tmp_path / "dojo-teacher.key"
+    key.write_text(TOKEN + "\n")
+    key.chmod(0o600)
+    common = ["run", "--root", str(park_world.root), "--repo", str(Path(R.REPO_ROOT)), "--family", "park-triage",
+              "--split", "all", "--model-kind", "acp", "--key-file", str(key), "--allow-dirty", "--label", "teacher",
+              "--teacher-prompt", "session"]
+    out = tmp_path / "teacher"
+    with FakeAkhomed(park_akh, PeerState(symbols=515, triples=473, grow_first_prompt=2)) as peer:
+        assert B.main([*common, "--acp-endpoint", peer.endpoint, "--out", str(out)]) == 0
+        prov = json.loads((out / "provenance.json").read_text())
+        assert prov["teacher"]["memory"] == {"symbols": 517, "triples": 473}
+        assert prov["teacher_warm_up"]["before"] == {"symbols": 515, "triples": 473}
+        assert prov["teacher_warm_up"]["interned_labels"] == ["interned-516", "interned-517"]
+        # resume against the same akh (now at 517): the identity is unchanged, so it is accepted
+        assert B.main([*common, "--acp-endpoint", peer.endpoint, "--out", str(out)]) == 0
+    with FakeAkhomed(park_akh, PeerState(symbols=515, triples=473, grow_first_prompt=2)) as peer:
+        # with --no-warm-up the same akh aborts on its first episode, as on 2026-09-30
+        assert B.main([*common, "--no-warm-up", "--acp-endpoint", peer.endpoint, "--out", str(tmp_path / "raw")]) == 2

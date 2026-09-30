@@ -152,6 +152,25 @@ the in-process model loop; the akh runs its own loop and calls the tools itself:
   episodes. The akh side is sealed by `tool_surface = "session-only"` (akhomed removes every tool of its
   own and refuses later registrations; `AkhConfig::validate_tool_surface` refuses boards, static MCP
   servers, executors, federated or shared memory, transcript capture and autonomy).
+- **Warm-up before the baseline** (on by default; `--no-warm-up` skips it). The first prompt a fresh akhomed
+  process serves for the teacher can intern a few symbols (2026-09-30: 515 -> 517 symbols, 473 triples, on the
+  first episode after a core restart; a long-lived process moved nothing across nine episodes). Two identical
+  tool-less prompts (`WARM_UP_PROMPT`, no MCP server) run before the baseline is read: **triples must not change
+  on either**; symbols may grow on the first only, and the second must leave the memory exactly as the first left it.
+  A per-turn write therefore still refuses the run (`teacher_isolation`), and the check across and within episodes
+  stays exact. The report (`teacher_warm_up` in `provenance.json`, outside the resume identity) gives the counts
+  before and after and names the interned symbols by label (`_akh/symbols/list`). Evidence that a plain turn
+  interns nothing by itself: `a_plain_turn_interns_nothing_after_the_first_and_never_writes_triples` (agentic loop)
+  and `acp_sessions_on_a_non_capturing_akh_write_no_triples_and_no_symbols_after_the_first` (whole ACP path).
+- **Round cap = model turns, in both arms.** `--max-rounds` (default 20) is the number of model requests per episode
+  including the one that answers, in-process and through the akh. The teacher's turn count is the akh's own
+  `_akh/usage.turns` difference over the prompt (exact when the akh reports it after the turn; otherwise the derived count stands). ACP has no round boundary and
+  `_akh/usage` is not a live source (stale while the agent is busy; D-H), so the live cancel derives rounds from the stream
+  (`RoundCounter`): the calls of one round arrive back to back with only tool output between them, and any model
+  output (thinking or text, other than the `[tool:ok]` echo) after a call opens a new round. The derived count is a
+  lower bound (a model that speaks nothing between rounds merges them), so the live cancel never fires early; the
+  verdict then uses the exact count: an answer that took more than `--max-rounds` turns is a `round-cap`, as
+  it would have been in-process. `rounds_source` in the episode record says which figure was used.
 - Episodes run one at a time (`--concurrency` > 1 is refused). Usage is the difference of the akh's
   `_akh/usage` counters over the turn. A provider error (`error[...]` chunk, refusal, timeout) is an
   unscored episode, retried on resume, like a model endpoint failure.
@@ -165,6 +184,33 @@ the in-process model loop; the akh runs its own loop and calls the tools itself:
   prompt and needs `--teacher-prompt session`.
 - The in-process arm bounds the running request to `--context-window` (default 49152 tokens) minus
   `--max-tokens`; the teacher's akh bounds tool results itself (#458) against its own `context_window`.
+
+## Free-form query tools
+
+`find`, `seshat_search`, `seshat_wish`, `search_documents` and `search_library` answer a query against a live
+index (ripgrep over the repository, Seshat's embeddings). A snapshot holds no answer to an arbitrary query, so the
+replay answers every call with the same structured error, for every arm:
+`{"error": "not replayable in the dojo", "reason": "not-replayable", ...}` (`isError: true`, receipt source `error`,
+`error_reason: "not-replayable"`). Decision: **error receipt, not hidden from `tools/list`.**
+
+- Kept listed: the recorded contract is served verbatim (same `tools_sha256`, same prompt as production), so the exam
+  measures the tool discipline it will meet live (probe once, switch tools after a failure) and the teacher and the
+  parent stay comparable. A tool hidden from the list would still be called by name from memory and fail as an
+  unknown-tool protocol error, which is a worse signal.
+- Cost: a model can waste rounds on them. Rounds are counted in model turns and capped, and the call is visible in
+  `replay_audit.py` as class (d) "by design". If a later run shows the waste dominating, the switch is one line
+  (drop the names from `tools/list`); do it for both arms and rerun both.
+- Scoring: a receipt that answered with this error is *unbacked* when cited (lower provenance, never fabrication). It
+  also keeps `seshat_wish` (operator-class in the profile) from being written to the scratch ledger.
+
+## Recorded tool surface
+
+Besides the per-item reads, the recorder captures `list_projects`, `get_plan` (every plan), `get_work_item_by_id` and
+`get_work_item_forensics` (live items; parked items only for `detail` projects), `stranded_work_items` (per project and
+global), and the global `lane_occupancy`, `overdue_ci_dispatches`, `list_prompts`, `list_workflows`, `seshat_status`
+(see `README-recorder.md`). Snapshots recorded before this change hold none of them and answer `tool-not-recorded`.
+`list_projects` has no page token: the recorder asks for a page of 200 too and marks the record `complete` when both
+answers are the same bytes, so a caller's `page_size` of at least the listing's length is provably the same query.
 
 ## Replay fidelity
 
@@ -194,7 +240,7 @@ errors, and an error receipt carries a machine-readable `error_reason` (`tool-no
 
 `replay_audit.py --root R [--repo .] RESULT_DIR...` re-asks every errored receipt of finished runs and
 classifies it: (a) equivalent, answered now; (b) genuinely unrecorded; (c) other (a filter the recorder did not
-apply, a scope argument, an object the clone lacks). Runs made before a change of these rules are not
+apply, a scope argument, an object the clone lacks); (d) by design, a free-form query tool. Runs made before a change of these rules are not
 comparable to runs after it: rerun the baselines.
 
 ## Design choices worth knowing

@@ -152,7 +152,7 @@ def make_anima_handler(call_log):
     def router(name, args):
         call_log.append((name, args))
         if name == "list_plans":
-            return {"plans": [], "next_page_token": None}
+            return {"plans": [{"id": "pl1"}], "next_page_token": None}
         if name == "list_work_items":
             if args.get("page_token") == "p2":
                 return {"work_items": [WI3], "next_page_token": None}
@@ -171,6 +171,17 @@ def make_anima_handler(call_log):
             return {"messages": []}
         if name == "get_project_ci_status":
             return {"resolvable": True}
+        if name == "get_plan":
+            return {"plan": {"id": args["id"]}}
+        if name == "get_work_item_by_id":
+            return {"work_item": {"id": args["id"]}}
+        if name == "get_work_item_forensics":
+            return {"work_item_id": args["work_item_id"], "events": []}
+        if name == "list_projects":
+            return {"projects": [{"id": "proj"}], "total": 1}
+        if name in ("list_prompts", "list_workflows", "seshat_status", "lane_occupancy", "overdue_ci_dispatches",
+                    "stranded_work_items"):
+            return {name: [], "args": args}
         raise AssertionError(f"unexpected tool {name}")
 
     def handler(method, params):
@@ -201,6 +212,7 @@ def test_anima_collector_full_capture_first_run(tmp_path):
     assert names.count("get_work_item_detail") == 1  # only the one live item (w2)
     assert names.count("get_wi_loop_state") == 1
     assert names.count("get_thread") == 3  # first run: every item is "changed"
+    assert result.extra["tool_surface_work_items"] == 1
     assert result.extra["work_item_count"] == 3
     assert result.extra["live_work_item_count"] == 1
     assert result.extra["changed_item_count"] == 3
@@ -650,3 +662,82 @@ def test_unknown_profile_is_rejected():
     import pytest as _pytest
     with _pytest.raises(ValueError):
         m.AnimaCollector(profile="everything")
+
+
+# --- tool surface: the deterministic reads the dojo models use (C4, D-A/D-B) ---------------------------------------
+
+def _run_collector(tmp_path, **kw):
+    call_log = []
+    transport = ScriptedTransport(make_anima_handler(call_log))
+    collector = m.AnimaCollector(project_id="proj", mcp_url="http://fake", pat_resolver=lambda: "t", transport=transport, **kw)
+    ctx = m.SnapshotContext(root=tmp_path, timestamp="20260101T000000Z", previous_work_items={})
+    return collector.collect(ctx), call_log
+
+
+def test_tool_surface_off_records_none_of_the_extra_reads(tmp_path):
+    _, log = _run_collector(tmp_path, tool_surface=False)
+    names = {n for n, _ in log}
+    assert not names & {"get_plan", "get_work_item_by_id", "get_work_item_forensics", "list_projects", "stranded_work_items"}
+
+
+def test_tool_surface_primary_records_globals_and_per_item_reads(tmp_path):
+    result, log = _run_collector(tmp_path, global_reads=True)
+    calls = [(n, a) for n, a in log]
+    names = [n for n, _ in calls]
+    # per live item (w2 is the only live one): by-id and forensics
+    assert ("get_work_item_by_id", {"id": "w2"}) in calls
+    assert ("get_work_item_forensics", {"work_item_id": "w2"}) in calls
+    assert names.count("get_work_item_by_id") == 1 and names.count("get_work_item_forensics") == 1
+    # per project: stranded scoped to the project
+    assert ("stranded_work_items", {"project_id": "proj"}) in calls
+    assert ("get_plan", {"id": "pl1"}) in calls
+    # globals, once: the argument sets the models were seen to use
+    for name, args in m.GLOBAL_TOOL_SURFACE_READS:
+        assert (name, args) in calls, name
+    assert ("list_projects", {}) in calls and ("list_projects", {"page_size": m.LISTING_PROOF_PAGE_SIZE}) in calls
+    # the listing is proven complete (200 asked, 1 returned, same bytes) and both records say so
+    listing = [r for r in result.responses if r.call == "list_projects"]
+    assert [r.complete for r in listing] == [True, True]
+    assert listing[0].sha256 == listing[1].sha256
+    assert all("complete" not in r.to_dict() for r in result.responses if r.call != "list_projects")
+    assert result.status == "ok"
+
+
+def test_tool_surface_non_primary_project_records_no_globals(tmp_path):
+    _, log = _run_collector(tmp_path)  # "proj" is not the primary project: global_reads defaults to False
+    names = {n for n, _ in log}
+    assert not names & {"list_projects", "list_prompts", "lane_occupancy", "overdue_ci_dispatches", "seshat_status"}
+    assert "stranded_work_items" in names  # the per-project scope is still recorded
+
+
+def test_tool_surface_detail_profile_reads_by_id_and_forensics_only_for_parked_items(tmp_path):
+    _, log = _run_collector(tmp_path, profile="detail")
+    assert "get_work_item_by_id" not in {n for n, _ in log}  # w2 is working, not parked
+    parked = dict(WI2, id="w9", current_phase="parked", parked_reason="retry-budget")
+    assert m._is_parked(parked) and m._is_parked(dict(WI2, parked_reason="x")) and not m._is_parked(WI2)
+
+
+def test_listing_not_provably_complete_is_not_marked(tmp_path):
+    client = m.McpClient(url="http://fake", token="t", client_name="test", transport=ScriptedTransport(
+        lambda method, params: tool_call_envelope({"projects": list(range(3)) if params["arguments"] == {} else list(range(4))})
+        if method == "tools/call" else {"protocolVersion": "x", "capabilities": {}}))
+    records = []
+    result = m.CollectorResult(status="ok")
+    m.AnimaCollector._record_listing(client, lambda *a, **k: records.append((a, k)), result, "list_projects")
+    assert [k["complete"] for _, k in records] == [None, None]  # the two answers differ: truncated, not proven
+
+
+def test_extra_reads_are_read_tools_and_no_write_tool_slipped_in():
+    assert {"get_plan", "get_work_item_by_id", "get_work_item_forensics", "list_projects", "seshat_status", "list_prompts",
+            "list_workflows", "stranded_work_items", "lane_occupancy", "overdue_ci_dispatches"} <= m.ANIMA_READ_TOOLS
+    for free_form in ("find", "seshat_search", "seshat_wish", "search_documents", "search_library"):
+        assert free_form not in m.ANIMA_READ_TOOLS  # not replayable, so never recorded
+
+
+def test_call_estimate_for_the_twelve_project_run():
+    """Documented estimate (README-recorder.md): the 2026-09-30 run recorded 1225 + 1020 live items across the
+    detail projects. Added: 2 x live items of the full-profile projects, parked items of the detail ones,
+    one get_plan per plan, one stranded call per project, and 9 globals."""
+    full_live, detail_parked, plans, projects, globals_ = 202, 3, 24, 12, 2 + len(m.GLOBAL_TOOL_SURFACE_READS)
+    added = 2 * (full_live + detail_parked) + plans + projects + globals_
+    assert added == 455

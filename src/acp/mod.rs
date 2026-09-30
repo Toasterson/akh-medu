@@ -9671,6 +9671,77 @@ tags = []
         AkhAcpAgent::new(engine, shared_agent, processor)
     }
 
+    /// Immediate-answer backend for the memory-isolation test below.
+    struct AnswerBackend;
+
+    impl crate::agent::chat_backend::ChatBackend for AnswerBackend {
+        fn label(&self) -> &str {
+            "fake-answer"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            _conversation: &[serde_json::Value],
+            _tools: &[serde_json::Value],
+            _request_seq: usize,
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            Ok(crate::agent::ollama::AssistantTurn {
+                content: "ready".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// Lilith C4 dojo teacher, memory isolation (WI 01a0e270-475e): the dojo runner refuses a
+    /// teacher whose `_akh/health` symbol or triple count moves across an episode. This measures
+    /// what the whole ACP path (`session/new` + `session/prompt` on a fresh connection, agentic
+    /// loop, no transcript capture) writes to the knowledge graph: which symbols appear on the
+    /// first session and whether any appear on the next ones.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_sessions_on_a_non_capturing_akh_write_no_triples_and_no_symbols_after_the_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-isolation.sock");
+        let me = workspace_with_chat_backend(std::sync::Arc::new(AnswerBackend));
+        let engine = Arc::clone(me.engine.as_ref().expect("held-mode engine"));
+        me.agent
+            .as_ref()
+            .expect("held-mode agent")
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_capture_transcripts(false);
+        let labels = |engine: &Engine| -> std::collections::BTreeSet<String> {
+            engine.all_symbols().into_iter().map(|s| s.label).collect()
+        };
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let loop_task =
+            tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let triples = engine.triple_count();
+        let mut previous = labels(&engine);
+        let mut new_per_session = Vec::new();
+        for _ in 0..3 {
+            let stream = connect_with_retry(&sock).await;
+            let answer = unix_client_prompt(stream, "Situation: park triage of a work item").await;
+            assert!(answer.contains("ready"), "unexpected answer {answer:?}");
+            let now = labels(&engine);
+            new_per_session.push(now.difference(&previous).cloned().collect::<Vec<_>>());
+            previous = now;
+            assert_eq!(engine.triple_count(), triples, "a session wrote a triple");
+        }
+        eprintln!("new symbols per ACP session: {new_per_session:?}");
+        assert!(
+            new_per_session[1..].iter().all(Vec::is_empty),
+            "a later session interned symbols: {new_per_session:?}"
+        );
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = loop_task.await;
+    }
+
     /// WI-259 tier-1 acceptance test: the full ACP-transport claim. Two real
     /// `session/prompt` turns, each over its own Unix-socket connection but
     /// against the SAME shared workspace `Agent` (`serve_unix_loop` clones

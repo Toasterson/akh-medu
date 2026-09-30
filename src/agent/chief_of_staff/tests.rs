@@ -515,6 +515,37 @@ fn classification_uses_exact_names_then_longest_prefix_then_fails_closed() {
     );
 }
 
+#[test]
+fn read_only_diagnostics_are_t0_and_the_operator_class_writes_beside_them_stay_t3() {
+    // Dojo run evaluation D-D (2026-09-30): these three were filed by the `mcp__anima__*` catch-all
+    // as operator-class writes, so reading them counted as an unannounced operator action.
+    let profile = shipped_profile();
+    let class = |name: &str| profile.classify(&manifest(name, ToolEffect::Mutating));
+    for read in [
+        "mcp__anima__stranded_work_items",
+        "mcp__anima__lane_occupancy",
+        "mcp__anima__overdue_ci_dispatches",
+        "mcp__anima__session_lease_would_reclaim",
+        "mcp__anima__witness_gap_distribution",
+        "mcp__anima__resolve_project_by_git_remote",
+        "mcp__runpod__list-pods",
+        "mcp__runpod__get-pod",
+        "mcp__runpod__stream-pod-logs",
+    ] {
+        assert_eq!(class(read), ToolClass::T0Read, "{read}");
+    }
+    for write in [
+        "mcp__anima__unpark_work_item",
+        "mcp__anima__run_scheduler_tick",
+        "mcp__anima__seshat_wish",
+        "mcp__runpod__create-pod",
+        "mcp__runpod__delete-pod",
+        "mcp__runpod__pod-action",
+    ] {
+        assert_eq!(class(write), ToolClass::T3OperatorClass, "{write}");
+    }
+}
+
 // ── T3 taken and announced ──────────────────────────────────────────────────
 
 #[test]

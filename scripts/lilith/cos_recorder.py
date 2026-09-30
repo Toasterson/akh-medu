@@ -88,6 +88,19 @@ ANIMA_READ_TOOLS: frozenset[str] = frozenset({
     "list_changes",
     "get_project_ci_status",
     "get_scheduling_state",
+    # The tool surface the dojo models actually use beyond the per-item reads (C4, 2026-09-30
+    # run evaluation D-A/D-B). Every one is a documented read: Anima's descriptions say
+    # "Read-only" or list/get/status; `seshat_status` reports archive counters.
+    "list_projects",
+    "get_plan",
+    "get_work_item_by_id",
+    "get_work_item_forensics",
+    "seshat_status",
+    "list_prompts",
+    "list_workflows",
+    "stranded_work_items",
+    "lane_occupancy",
+    "overdue_ci_dispatches",
 })
 
 LIVE_PHASES_EXCLUDED = {"done"}
@@ -305,6 +318,10 @@ class ResponseRecord:
     project_id: str | None = None
     # Only set for get_thread: "none" = explicit absent result (no thread / no messages).
     thread_state: str | None = None
+    # Only set for a token-less listing the recorder proved complete (it also asked for a page
+    # larger than the answer and got the same bytes): a caller's smaller-or-equal page size is
+    # then answered by this record (dojo `replay_match`, rule `page-size-satisfied`).
+    complete: bool | None = None
 
     def to_dict(self) -> dict:
         out: dict[str, Any] = {"call": self.call, "args": self.args, "sha256": self.sha256}
@@ -312,6 +329,8 @@ class ResponseRecord:
             out["project_id"] = self.project_id
         if self.thread_state:
             out["thread_state"] = self.thread_state
+        if self.complete is not None:
+            out["complete"] = self.complete
         return out
 
 
@@ -432,6 +451,24 @@ def _detail_thread_signal(detail: Any) -> str:
 
 
 ANIMA_PROFILES = frozenset({"full", "detail"})
+PARKED_PHASE = "parked"
+# A listing page larger than any project list; used to prove a token-less listing complete.
+LISTING_PROOF_PAGE_SIZE = 200
+# Global (project-independent) reads, recorded once per run by the primary collector: the argument
+# sets the models were seen to use. `stranded_work_items` is also recorded per project.
+GLOBAL_TOOL_SURFACE_READS: tuple[tuple[str, dict], ...] = (
+    ("list_prompts", {}),
+    ("list_workflows", {}),
+    ("seshat_status", {}),
+    ("lane_occupancy", {}),
+    ("overdue_ci_dispatches", {}),
+    ("stranded_work_items", {}),
+    ("stranded_work_items", {"include_tracked": True}),
+)
+
+
+def _is_parked(work_item: dict) -> bool:
+    return str(work_item.get("current_phase", "")).lower() == PARKED_PHASE or bool(work_item.get("parked_reason"))
 ABSENT_THREAD_BODY = {"thread": None, "thread_state": "none"}
 
 
@@ -446,12 +483,21 @@ class AnimaCollector:
     # carries the thread messages); get_thread is called only when the detail says they were
     # elided. Cuts a large project's per-run reads by roughly 5x.
     profile: str = "full"
+    # Also record the deterministic reads the dojo models use (plans, `get_work_item_by_id`,
+    # forensics, diagnostics, and the global listings). Roughly +20% calls on a 12-project run;
+    # the `detail` profile records by-id/forensics only for parked items.
+    tool_surface: bool = True
+    # Project-independent reads (list_projects, prompts, workflows, seshat_status, lane occupancy,
+    # overdue CI, stranded) once per run: only the primary project's collector by default.
+    global_reads: bool | None = None
     name: str = dataclasses.field(default="anima", init=False)
 
     def __post_init__(self) -> None:
         if self.profile not in ANIMA_PROFILES:
             raise ValueError(f"unknown Anima profile {self.profile!r}; expected one of {sorted(ANIMA_PROFILES)}")
         self.name = anima_collector_name(self.project_id)
+        if self.global_reads is None:
+            self.global_reads = self.project_id == ANIMA_PROJECT_ID
 
     def collect(self, ctx: SnapshotContext) -> CollectorResult:
         result = CollectorResult(status="ok")
@@ -474,10 +520,12 @@ class AnimaCollector:
             return result
         result.tool_contract_sha256, _ = store_object(ctx.root, {"tools": tools})
 
-        def record(cname: str, cargs: dict, response: Any, thread_state: str | None = None) -> None:
+        def record(cname: str, cargs: dict, response: Any, thread_state: str | None = None,
+                   complete: bool | None = None) -> None:
             digest, stored_new = store_object(ctx.root, response)
             result.responses.append(
-                ResponseRecord(cname, cargs, digest, stored_new, project_id=self.project_id, thread_state=thread_state)
+                ResponseRecord(cname, cargs, digest, stored_new, project_id=self.project_id,
+                               thread_state=thread_state, complete=complete)
             )
 
         def call(cname: str, cargs: dict) -> Any:
@@ -548,12 +596,56 @@ class AnimaCollector:
 
         call("get_project_ci_status", {"project_id": self.project_id})
 
+        if self.tool_surface:
+            self._collect_tool_surface(client, call, record, result, plans_items, live_items)
+
         ctx.current_work_items.update({wi["id"]: wi for wi in work_items if wi.get("id")})
 
         if result.status == "ok" and not result.responses:
             result.status = "error"
             result.errors.append("no responses captured")
         return result
+
+    def _collect_tool_surface(self, client: "McpClient", call: Callable[[str, dict], Any], record: Callable[..., None],
+                              result: "CollectorResult", plans: list[dict], live_items: list[dict]) -> None:
+        """Deterministic reads beyond the per-item ones (C4 dojo D-A/D-B, 2026-09-30).
+
+        Per project: `get_plan` for every plan, `stranded_work_items` scoped to the project, and for
+        live items `get_work_item_by_id` + `get_work_item_forensics` (the `detail` profile: parked
+        items only). Once per run (primary collector): the global listings and diagnostics. Free-form
+        query tools (`find`, `seshat_search`, ...) are not replayable and are never recorded."""
+        for plan in plans:
+            if plan.get("id"):
+                call("get_plan", {"id": plan["id"]})
+        call("stranded_work_items", {"project_id": self.project_id})
+        targets = live_items if self.profile == "full" else [wi for wi in live_items if _is_parked(wi)]
+        for wi in targets:
+            wid = wi.get("id")
+            if wid:
+                call("get_work_item_by_id", {"id": wid})
+                call("get_work_item_forensics", {"work_item_id": wid})
+        result.extra["tool_surface_work_items"] = len([wi for wi in targets if wi.get("id")])
+        if not self.global_reads:
+            return
+        self._record_listing(client, record, result, "list_projects")
+        for name, args in GLOBAL_TOOL_SURFACE_READS:
+            call(name, dict(args))
+
+    @staticmethod
+    def _record_listing(client: "McpClient", record: Callable[..., None], result: "CollectorResult", name: str) -> None:
+        """Record a token-less listing as the default call sees it, and mark it complete when a call
+        for a much larger page returns the same bytes (so the listing was not truncated)."""
+        try:
+            default = call_read_tool(client, ANIMA_READ_TOOLS, name, {})
+            sized = call_read_tool(client, ANIMA_READ_TOOLS, name, {"page_size": LISTING_PROOF_PAGE_SIZE})
+        except Exception as error:
+            result.errors.append(f"{name}: {redact(str(error))}")
+            result.status = "partial"
+            return
+        lists = [v for v in sized.values() if isinstance(v, list)] if isinstance(sized, dict) else []
+        complete = default == sized and len(lists) == 1 and len(lists[0]) < LISTING_PROOF_PAGE_SIZE
+        record(name, {}, default, complete=complete or None)
+        record(name, {"page_size": LISTING_PROOF_PAGE_SIZE}, sized, complete=complete or None)
 
     @staticmethod
     def _paginate(call: Callable[[str, dict], Any], name: str, base_args: dict) -> list[dict]:

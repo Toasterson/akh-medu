@@ -3059,6 +3059,67 @@ mod tests {
         }
     }
 
+    /// Lilith C4 dojo teacher, memory-isolation evidence (WI 01a0e270-475e): what a plain
+    /// turn writes to the KG. The dojo runner refuses a teacher whose `_akh/health` symbol or
+    /// triple count moves across an episode, so the question is which counts move on a turn
+    /// of a passthrough, non-capturing akh, and whether it happens once or on every turn.
+    #[test]
+    fn a_plain_turn_interns_nothing_after_the_first_and_never_writes_triples() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent.set_capture_transcripts(false);
+        agent.set_context_manager(std::sync::Arc::new(
+            crate::agent::context::PassThroughManager,
+        ));
+        agent.set_chat_backend(std::sync::Arc::new(RecordingAnswerBackend {
+            conversations: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            answer_seq: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let labels = |engine: &Engine| -> std::collections::BTreeSet<String> {
+            engine.all_symbols().into_iter().map(|s| s.label).collect()
+        };
+        let mut previous = labels(&engine);
+        let triples = engine.triple_count();
+        // What akhomed builds around a workspace's first ACP connection (`get_nlu_pipeline`, the
+        // per-workspace `ChatProcessor`) is not part of any turn; measure it apart.
+        let processor = crate::chat::ChatProcessor::new(&engine, crate::nlu::NluPipeline::new());
+        drop(processor);
+        let after_processor = labels(&engine);
+        eprintln!(
+            "new symbols from building the ChatProcessor: {:?}",
+            after_processor.difference(&previous).collect::<Vec<_>>()
+        );
+        previous = after_processor;
+        let mut new_per_turn = Vec::new();
+        for n in 0..3 {
+            let state =
+                std::sync::Mutex::new(ConversationState::new(&format!("session-{n}"), "narrative"));
+            assert_eq!(
+                agent.run_agentic_turn_with_conversation_state(
+                    &engine,
+                    "dojo-teacher",
+                    "Situation: park triage of a work item",
+                    &sink,
+                    &cancel,
+                    false,
+                    &state,
+                ),
+                Some(AgenticTurnOutcome::Completed)
+            );
+            let now = labels(&engine);
+            new_per_turn.push(now.difference(&previous).cloned().collect::<Vec<_>>());
+            previous = now;
+            assert_eq!(engine.triple_count(), triples, "turn {n} wrote a triple");
+        }
+        eprintln!("new symbols per turn: {new_per_turn:?}");
+        assert!(
+            new_per_turn[1..].iter().all(Vec::is_empty),
+            "a later turn interned symbols: {new_per_turn:?}"
+        );
+    }
+
     #[test]
     fn supplied_conversation_states_retain_history_without_cross_session_bleed() {
         let engine = test_engine();

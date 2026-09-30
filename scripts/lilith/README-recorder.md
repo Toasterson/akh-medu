@@ -51,6 +51,22 @@ interactive runs.
 |---|---|---|
 | `anima` | `ok`, `partial`, `error` | Akh-Medu project: plans, work items (paginated), per live item detail / loop state / sessions / changes / scheduling state, per-item thread, project CI status. |
 | `anima:<project_id>` | same | One extra collector per additional Anima project, identical shape (see "Several Anima projects"). |
+
+### Tool surface (dojo D-A/D-B, 2026-09-30)
+
+Every Anima collector also records the deterministic reads the dojo models use (`AnimaCollector.tool_surface`,
+default on): `get_plan` for every plan, `stranded_work_items {project_id}`, and for live items
+`get_work_item_by_id` + `get_work_item_forensics` (the `detail` profile: **parked items only**). The primary project's
+collector adds the global reads once per run: `list_projects` (twice: default and `page_size: 200`, marked `complete`
+in the manifest when both answers are the same bytes), `list_prompts`, `list_workflows`, `seshat_status`,
+`lane_occupancy`, `overdue_ci_dispatches`, `stranded_work_items {}` and `{include_tracked: true}`. Free-form query
+tools (`find`, `seshat_search`, `seshat_wish`, ...) are never recorded: the dojo answers them "not replayable".
+
+Added calls per run, from the 2026-09-30 snapshot (202 live items in the full-profile project; 1,020 in the two
+large `detail` projects, 3 of them parked; 24 plans; 12 projects): 2 x 205 (by-id + forensics) + 24 (plans) + 12
+(stranded per project) + 9 (globals) = **about 455**, on top of ~2,275 Anima calls today (+20%). Forensics is the
+heaviest payload (up to 200 events per item); the object store deduplicates unchanged answers between runs. Future
+snapshots only; nothing is back-filled.
 | `git` | `ok`, `error` | `git ls-remote` of the akh-medu remote. |
 | `board` | `ok`, `partial`, `error`, `not_configured` | Agent Board REST, GET only: `/v1/agents`, `/v1/message-types`, `/v1/threads`, and the messages of every **open** thread (forward `next-cursor` pagination, up to 50 pages of 200 per thread; hitting the cap marks the run `partial`). The inbox is never read. `not_configured` until `--board-secrets-file` / `LILITH_BOARD_SECRETS` names a token file. |
 | `fleet` | `ok`, `partial`, `error`, `not_configured` | GET of each endpoint in a fleet config (`--fleet-config` / `LILITH_FLEET_CONFIG`); see below. `not_configured` without one. |

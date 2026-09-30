@@ -76,7 +76,9 @@ class World:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def snapshot(self, when: datetime, items: list[WI], main_sha: str = MAIN_1, tools: list[dict] | None = None) -> str:
+    def snapshot(self, when: datetime, items: list[WI], main_sha: str = MAIN_1, tools: list[dict] | None = None,
+                 extra: tuple[tuple[str, dict, Any, dict], ...] = ()) -> str:
+        """`extra`: more recorded reads, `(call, args, payload, manifest fields)`."""
         sid = when.strftime("%Y%m%dT%H%M%SZ")
         responses: list[dict] = []
 
@@ -115,6 +117,9 @@ class World:
             })
             put("get_scheduling_state", {"work_item_id": w.id}, {"work_item_id": w.id, "retry_count": 0})
         put("get_project_ci_status", {"project_id": PROJECT}, {"resolvable": True})
+        for call, args, payload, fields in extra:
+            put(call, args, payload)
+            responses[-1].update(fields)
         contract_sha, _ = rec.store_object(self.root, {"tools": tools if tools is not None else TOOLS})
         refs_payload = {"remote": rec.GIT_REMOTE, "refs": [{"ref": "HEAD", "sha": main_sha},
                                                            {"ref": "refs/heads/main", "sha": main_sha}]}

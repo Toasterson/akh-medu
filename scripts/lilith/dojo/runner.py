@@ -426,7 +426,8 @@ class RunTrace:
     answer_notes: list[str] = dataclasses.field(default_factory=list)
     schema_errors: list[str] = dataclasses.field(default_factory=list)
     contract_ok: bool = False  # answered with the family's contract and it passed its schema
-    rounds: int = 0
+    rounds: int = 0  # model turns (requests), in every arm
+    rounds_source: str = "model-requests"  # model-requests (in-process) | reported | derived (teacher, acp_teacher.model_turns)
     usage: Usage = Usage()
     latency_ms: int = 0
     protocol_errors: list[str] = dataclasses.field(default_factory=list)
