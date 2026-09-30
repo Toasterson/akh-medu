@@ -62,6 +62,7 @@ PAYLOAD_FILES = (
     'scripts/lilith/dojo/hindsight.py',
     'scripts/lilith/dojo/language.py',
     'scripts/lilith/dojo/replay_server.py',
+    'scripts/lilith/dojo/replay_match.py',
     'scripts/lilith/dojo/reward.py',
     'scripts/lilith/dojo/snapshot.py',
 )
