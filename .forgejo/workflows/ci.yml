@@ -55,6 +55,7 @@ jobs:
         run: |
           sh .forgejo/scripts/install-ci-python.sh
           "$HOME/.local/bin/akh-ci-python" .forgejo/scripts/test_build_platform_images.py
+          "$HOME/.local/bin/akh-ci-python" .forgejo/scripts/test_run_logged.py
       - name: Verify independent daemon profiles and platform contracts
         run: |
           test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
