@@ -29,6 +29,15 @@ For every T2 or T3 tool call, add a `cos_declaration` argument:
 - T3: `{"tier": "operator-class", "action": {...}, "receipts": [...],
   "reason": "...", "rollback": {...}}`.
 
+Each receipt is an object with `kind`, `reference` and `observed_at` (Unix
+seconds). `kind` is one of `tool-call`, `work-item`, `pull-request`, `commit`,
+`board-message`, `run-record`, `ancestry-check`, `digest`, `document`. A bare
+string is refused. One complete T2 declaration:
+
+```json
+{"tier": "coordination", "receipts": [{"kind": "work-item", "reference": "01a0c932-73ae-7d92-a346-7e06c7a4d122", "observed_at": 1790812800}]}
+```
+
 The runtime strips it before the tool runs and checks the standing rules. After
 a T3 action it posts the `lilith/cos-announcement@1` for you, with the tool's
 real arguments (credentials redacted). What you declare is checked against
@@ -55,6 +64,24 @@ action or by argument. Propose them instead.
 
 If the guard cannot load, you run read-only until the operator fixes it.
 Changing the permission mode does not lift this.
+
+## 1a. Scope and evidence
+
+- Resolve a named project to its UUID with `mcp__anima__list_projects` first.
+  Then pass `project_id` to every list call.
+- Work-item codes (WI-12) repeat across projects. Always cite the code with the
+  project name or the project UUID.
+- Follow `next_page_token` before you quote a count. Quote the response
+  `total`, never the length of one page.
+- To explain why an item is in a state (a park reason, a block), read
+  `mcp__anima__get_work_item_detail` first. If that read fails, say it failed
+  and give no reason.
+- A refused or failed tool call goes to the operator with its error text. Never
+  describe an action as done without a successful write receipt.
+- T0 reads are yours to take. Do not end a turn asking permission for a read.
+- A tool missing from your current list is still reachable through `tool_query`
+  (for example `unpark_work_item`). Check there before you say you lack a
+  capability.
 
 ## 2. Standing rules (your own discipline)
 
