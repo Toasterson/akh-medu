@@ -76,8 +76,15 @@ class CollectionTests(unittest.TestCase):
                         proof['heap'] = [{'binary': images.HEAP_BINARIES[name], 'profile_samples': 1, 'application_symbols': True}]
                     smoke[arch] = proof
                 partial['images'][name] = {'source_commit': sha, 'tag': 'registry/' + name + ':main-' + sha,
+                    'image': 'registry/' + name + '@sha256:' + 'c' * 64,
                     'index_digest': 'sha256:' + 'c' * 64, 'platform_digests': {arch: 'sha256:' + arch for arch in arches}, 'smoke': smoke}
             partials[group] = partial
+        workspace = partials['fleet']['images']['workspace']
+        vesta = partials['fleet']['images']['vesta-sandbox']
+        for record in (workspace, vesta):
+            record['smoke']['amd64']['binary_sha256'] = {'akhexecd': 'e' * 64, 'akh-service': 'f' * 64}
+        vesta['inputs'] = {'WORKSPACE_IMAGE': workspace['image']}
+        vesta['smoke']['amd64']['kubectl_version'] = 'v1.32.2'
         return partials, sha
 
     def test_partial_set_cannot_be_promoted(self):
@@ -98,12 +105,24 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'heap smoke proof missing'):
             images.assemble_partials(partials, sha)
 
+    def test_stale_vesta_base_cannot_be_promoted(self):
+        partials, sha = self.partials()
+        partials['fleet']['images']['vesta-sandbox']['inputs']['WORKSPACE_IMAGE'] = 'registry/old@sha256:' + 'd' * 64
+        with self.assertRaisesRegex(RuntimeError, 'Vesta workspace base'):
+            images.assemble_partials(partials, sha)
+
+    def test_changed_vesta_executor_cannot_be_promoted(self):
+        partials, sha = self.partials()
+        partials['fleet']['images']['vesta-sandbox']['smoke']['amd64']['binary_sha256']['akhexecd'] = '0' * 64
+        with self.assertRaisesRegex(RuntimeError, 'Vesta executor differs'):
+            images.assemble_partials(partials, sha)
+
     def test_complete_commit_matched_set_is_accepted(self):
         partials, sha = self.partials()
         result = images.assemble_partials(partials, sha)
         self.assertTrue(result['complete'])
         self.assertEqual(set(result['images']), images.EXPECTED)
-        self.assertEqual(len(result['images']), 19)
+        self.assertEqual(len(result['images']), 20)
 
 
 class PromotionTests(unittest.TestCase):
@@ -182,6 +201,27 @@ class PromotionTests(unittest.TestCase):
              patch.object(images, 'read_manifest', return_value={'complete': False}):
             with self.assertRaisesRegex(RuntimeError, 'invalid verified release marker'):
                 images.released_set()
+
+
+class VestaRecipeTests(unittest.TestCase):
+    def test_only_reviewed_base_line_changes(self):
+        source = Path('docker/fleet-support/vesta.Dockerfile').read_text()
+        image = 'registry/workspace@sha256:' + 'a' * 64
+        result = images.vesta_dockerfile(source, image)
+        before = source.splitlines()
+        after = result.splitlines()
+        changes = [(a, b) for a, b in zip(before, after) if a != b]
+        self.assertEqual(len(before), len(after))
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0][1], 'FROM ' + image)
+
+    def test_mutable_workspace_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, 'must be immutable'):
+            images.vesta_dockerfile('FROM scratch', 'registry/workspace:main-ready')
+
+    def test_unexpected_recipe_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, 'unexpected Vesta'):
+            images.vesta_dockerfile('FROM scratch', 'registry/workspace@sha256:' + 'a' * 64)
 
 
 if __name__ == '__main__':

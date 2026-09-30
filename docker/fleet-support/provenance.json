@@ -11,7 +11,11 @@
     "agent-board-coordination/references/agent-secrets.md": "b8b67aeca20009ad0475e7b19e16b5eb5932a26e338e9944e91f3d06c8afd1c1",
     "agent-board-coordination/references/scenarios.md": "34478155a11160beba152293cfcf5b23142918f4a35c67e29b5bd2b848d87fa1",
     "agent-board-coordination/agents/openai.yaml": "7ed77798ca674dcde0936f03b7f988bd69cb4fb9e63d1b7f8d5a97b95c0de6d4",
-    "agent-board-coordination/scripts/board_request.py": "8050f0b2c7fcc3ea80d5de9620c08e73becb77a8f80ac31158207101cad721e7"
+    "agent-board-coordination/scripts/board_request.py": "8050f0b2c7fcc3ea80d5de9620c08e73becb77a8f80ac31158207101cad721e7",
+    "vesta.Dockerfile": "856cef7bd9ea1153b93f528535c4c100ad88b8d4924464d2af0b95c2be67a049"
   },
-  "homelab_source_commit": "f17aa7a76b27bcba198cf2afbd34e65c82e95a11"
+  "homelab_source_commit": "f17aa7a76b27bcba198cf2afbd34e65c82e95a11",
+  "source_paths": {
+    "vesta.Dockerfile": "clusters/talos.wegmueller.it/vesta-sandbox/image/Dockerfile"
+  }
 }
