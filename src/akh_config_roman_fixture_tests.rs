@@ -222,7 +222,39 @@ fn roman_workspaces_load_without_dropped_keys() {
         assert_eq!(cfg.name(), role);
         assert_eq!(cfg.backend, ChatBacking::Ollama);
         assert!(cfg.chief_of_staff.is_none());
+        // ADR 123: no per-akh budget is rendered; the GLM-5.3 catalog row sets it.
+        assert!(
+            cfg.autonomy.budget.is_empty(),
+            "{role}: no [autonomy.budget] override"
+        );
+        let profile = cfg
+            .resolve_model_profile()
+            .expect("the Roman profile resolves");
+        assert_eq!(profile.catalog_entry.as_deref(), Some("glm-5.3"));
+        assert_eq!(
+            profile.daily_budget(),
+            crate::agent::autonomy::AutonomyBudget {
+                max_tokens_per_day: 1_500_000,
+                max_turns_per_day: 96,
+            }
+        );
+        assert_eq!(profile.max_tokens_per_wake.map(|s| s.value), Some(250_000));
+        assert_eq!(profile.max_tools_per_wake.map(|s| s.value), Some(24));
     }
+}
+
+/// ADR 123: Lilith's rendered workspace resolves the local Gemma 4 row, with
+/// her `[openai_endpoint] context_window` as the per-akh window.
+#[test]
+fn lilith_workspace_resolves_the_local_gemma_profile() {
+    let rendered = rendered_lilith();
+    let cfg = load_without_unknown_keys(&rendered.toml);
+    let profile = cfg.resolve_model_profile().expect("resolves");
+    assert_eq!(profile.catalog_entry.as_deref(), Some("gemma-4-12b"));
+    assert_eq!(profile.max_tools_per_wake.map(|s| s.value), Some(16));
+    let openai = cfg.to_openai_config().unwrap().unwrap();
+    assert_eq!(openai.context_window, Some(49_152));
+    assert_eq!(openai.timeout_secs, 600);
 }
 
 /// Lilith C4 (ADR 116): the sealed dojo teacher `configure_core.py` renders
@@ -247,4 +279,8 @@ fn dojo_teacher_workspace_loads_sealed() {
     assert!(
         cfg.board.is_none() && cfg.chief_of_staff.is_none() && cfg.related_workspaces.is_empty()
     );
+    // ADR 123: the teacher's turns run on the GLM-5.3 row; autonomy stays off.
+    let profile = cfg.resolve_model_profile().expect("resolves");
+    assert_eq!(profile.catalog_entry.as_deref(), Some("glm-5.3"));
+    assert_eq!(profile.turn_deadline_secs.value, 1_800);
 }

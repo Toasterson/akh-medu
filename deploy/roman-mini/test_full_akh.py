@@ -157,7 +157,11 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(ws["model"], "glm-5.3")
             self.assertEqual(ws["ollama_endpoint"], fa.OLLAMA_CLOUD)
             self.assertTrue(ws["autonomy"]["enabled"])
-            self.assertEqual(ws["autonomy"]["budget"], {"max_tokens_per_day": 250000, "max_turns_per_day": 40})
+            # ADR 123: no per-akh budget; akhomed resolves it from the model catalog.
+            self.assertNotIn("budget", ws["autonomy"])
+            text = (self.root / f"core-config/akh-medu/workspaces/{role}.toml").read_text()
+            self.assertIn("catalog.toml row `glm-5.3`", text)
+            self.assertIn("Per UTC day: 1500000 tokens, 96 turns", text)
             self.assertTrue(ws["capture_transcripts"])
             self.assertEqual(ws["exec"], {"kind": "none"})
             self.assertEqual(ws["board"], {"url": "http://127.0.0.1:18089",
@@ -402,6 +406,30 @@ class RenderTests(unittest.TestCase):
         self.assertEqual([e["id"] for e in vesta["enable"]], [s["id"] for s in (a["schedule"] for a in vesta["apply"])])
         body = apply_reactor_seeds.requests_for(vesta, enable=False)[0]
         self.assertEqual((body["akh"], body["tool"], body["arguments"]["operation"]), ("vesta", "reactor_manage", "add"))
+
+    def test_reactor_seeds_pin_the_route_tools_the_role_holds(self):
+        # ADR 123: wakes are relevance-scoped; each route keeps the tools it needs.
+        vesta = json.loads((self.root / "config/reactor-seeds/vesta.json").read_text())
+        schedules = {a["schedule"]["rule"]["source"]: a["schedule"]["action"] for a in vesta["apply"]}
+        monitoring = schedules["roman-alerts/monitoring.changed"]["required_tools"]
+        self.assertEqual(monitoring, ["monitoring_snapshot", "memory_recall", "memory_write"],
+                         "the fixture grants no board_post_thread, so it is not pinned")
+        inbox = schedules["roman-inbox-vesta/djehuty.inbox"]["required_tools"]
+        self.assertIn("mcp__board__board_send_inbox", inbox)
+        held = set(fa.tool_renames(json.loads((self.root / "config/sessions.json").read_text()), "vesta").values())
+        for action in schedules.values():
+            for tool in action.get("required_tools", []):
+                self.assertIn(tool, held | fa.NATIVE_CORE_TOOLS, "only tools the role holds are pinned")
+
+    def test_rerender_drops_a_stale_per_akh_budget(self):
+        path = self.root / "core-config/akh-medu/workspaces/janus.toml"
+        text = path.read_text().replace("[autonomy]\nenabled = true\n",
+                                        "[autonomy]\nenabled = true\n\n[autonomy.budget]\n"
+                                        "max_tokens_per_day = 250000\nmax_turns_per_day = 40\n", 1)
+        path.write_text(text)
+        self.assertIn("budget", self.toml("core-config/akh-medu/workspaces/janus.toml")["autonomy"])
+        configure_core.render(self.root, self.prov, self.binary, "0" * 64, source=SOURCE)
+        self.assertNotIn("budget", self.toml("core-config/akh-medu/workspaces/janus.toml")["autonomy"])
 
     # ── PR 6: Anima source, data-driven Laya routing, skill, schema ──────────
 
@@ -2052,6 +2080,44 @@ class PlanTests(RenderFixture):
 
 
 @NEEDS_TOMLLIB
+class ModelCatalogTests(unittest.TestCase):
+    """ADR 123: the renderer reads the catalog akhomed compiles in, with the same lookup."""
+
+    def test_catalog_rows_match_the_rust_lookup(self):
+        catalog = fa.load_model_catalog()
+        row, glm = fa.catalog_profile("glm-5.3", catalog=catalog)
+        self.assertEqual(row, "glm-5.3")
+        self.assertEqual((glm["max_tokens_per_day"], glm["max_turns_per_day"], glm["max_tools_per_wake"]),
+                         (1_500_000, 96, 24))
+        self.assertEqual(fa.catalog_profile("GLM-5.3:cloud", catalog=catalog)[0], "glm-5.3")
+        self.assertEqual(fa.catalog_profile("glm-5.3-flash", catalog=catalog)[0], "glm-5.3-flash")
+        self.assertEqual(fa.catalog_profile("glm-5.4", catalog=catalog)[0], "glm-5.3", "longest prefix")
+        self.assertEqual(fa.catalog_profile("lilith", catalog=catalog)[0], "gemma-4-12b")
+        self.assertEqual(fa.catalog_profile("gpt-6-astra", catalog=catalog), (None, {}))
+        _, low = fa.catalog_profile("glm-5.3", "low", catalog=catalog)
+        self.assertEqual(low["max_rounds"], 16)
+        self.assertEqual(low["max_tokens_per_day"], 1_500_000, "unset effort fields keep the row")
+        for entry in catalog["models"]:
+            self.assertEqual(set(entry["profile"]), set(fa.PROFILE_FIELDS), entry["id"])
+
+    def test_renderer_owned_model_without_a_row_fails_closed(self):
+        with self.assertRaisesRegex(fa.RenderError, "no row for model"):
+            fa.workspace_comments({}, "mystery-model")
+        comments = fa.workspace_comments({"autonomy": "No background work."}, "mystery-model",
+                                         require_row=False, wakes=False)
+        self.assertIn("global defaults", comments["autonomy"])
+        self.assertTrue(comments["autonomy"].startswith("No background work."))
+
+    def test_bad_catalog_is_a_render_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "catalog.toml"
+            path.write_text("schema_version = 2\n")
+            with self.assertRaisesRegex(fa.RenderError, "schema_version"):
+                fa.load_model_catalog(path)
+            with self.assertRaisesRegex(fa.RenderError, "missing"):
+                fa.load_model_catalog(Path(temp) / "absent.toml")
+
+
 class TomlWriterTests(unittest.TestCase):
     def test_round_trips_escapes_and_inline_tables(self):
         doc = {"s": 'quote " back \\ tab\t del\x7f nl\n é', "n": 3, "b": False,

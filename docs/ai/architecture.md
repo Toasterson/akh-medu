@@ -7,7 +7,13 @@
 > acceptance. Preserves ADR 113 full-Akh ownership and ADR 114 structural live /
 > learned shadow decisions. This is a planned capability, not a runtime release.
 
-> Last updated: 2026-09-30 (**Model-family prompt guidance** — opt-in
+> Last updated: 2026-09-30 (**Per-model profiles** — budgets, turn deadline,
+> round cap, HTTP timeout, output cap, working window and wake tool count
+> resolved per akh from the compiled model catalog
+> `data/model-profiles/catalog.toml` (`src/agent/model_profile.rs`,
+> `[model_profile]` override); reactor wakes are relevance-scoped with pinned
+> route tools and a per-wake token budget; [ADR 123](decisions/123-per-model-budgets-timeouts.md)).
+> Previously 2026-09-30 (**Model-family prompt guidance** — opt-in
 > `prompt_guidance` layer in the generated system prompt, live-tool conventions,
 > MCP `$ref` inlining; [ADR 122](decisions/122-model-family-prompt-guidance.md),
 > [evaluation](research/2026-09-30-glm-kimi-run-evaluation.md)).
@@ -410,6 +416,22 @@ control commands), discovered via the PID record's ACP socket/TCP endpoints.
   filter) and `/effort` switch the live model over `_akh/model/*`.
 - **First-class akh** (`src/akh_config.rs`, ADR-053): `akh.toml` pins
   `{model + ollama endpoint + system prompt}` per workspace.
+- **Per-model profile** (`src/agent/model_profile.rs`, ADR-123): one
+  `ResolvedModelProfile` per akh (daily/per-wake tokens, turn deadline, max
+  rounds, HTTP timeout, max output tokens, working window, wake tool count),
+  each value tagged with its source. Resolution: per-akh `[model_profile]` (or
+  the legacy `[autonomy.budget]` / `[openai_endpoint]` keys; both at once is
+  refused) > the compiled catalog `data/model-profiles/catalog.toml` row for
+  (model, `reasoning_effort`) > the global default (env var, else constant).
+  akhomed logs one `model profile resolved` line per akh. The agentic loop
+  takes its round cap and deadline from it (catalog limits do not cap
+  autonomous dispatch; explicit ones do); Ollama gets `num_predict` and the
+  timeout, OpenAI `max_tokens`/timeout/window. A reactor wake
+  (`Agent::run_wake_turn`) is relevance-scoped to `max_tools_per_wake`
+  (`scope_wake_catalog`: route `required_tools` + tools named in the trusted
+  prompt first, then top-K by `organ::retrieve_scoped`), stopped at
+  `max_tokens_per_wake` (`TurnStop::TokenBudget`, forced synthesis, settled as
+  done) and never runs past its reactor lease.
 - **Model-family prompt guidance** (`src/agent/prompt_guidance.rs`, ADR-122):
   opt-in `prompt_guidance = "off|auto|generic|glm|kimi"` in `akh.toml` adds a
   machine-owned *Execution Discipline* section (+ GLM/Kimi addendum, family from
@@ -565,10 +587,13 @@ native tool through a bridge-owned permission policy and requires the extra
   variants, including `Harvest`, `MemoryHygiene` (53j), `Reactor`,
   `SleepCycle`, `IdleCycle`). The sleep tick runs `Harvest`, then
   `MemoryHygiene`, then `SleepCycle`, each independent of the others' failure.
-  `AutonomyGovernor` enforces a per-akh daily `AutonomyBudget`
-  (`max_tokens_per_day = 250_000`, `max_turns_per_day = 40`, UTC day) in front
-  of LLM-cost tasks (librarian, reactor `LlmTurn`, knowledge extraction,
-  knowledge elicitation); reflection and goal generation make no LLM calls and
+  `AutonomyGovernor` enforces a per-akh daily `AutonomyBudget` (UTC day) in
+  front of LLM-cost tasks. Since ADR 123 the budget is the akh's resolved
+  model profile (`AkhConfig::effective_autonomy`): `[model_profile]` or
+  `[autonomy.budget]` override > the catalog row for (model, effort) > the
+  global default (`250_000` tokens, `40` turns). LLM-cost tasks are the
+  librarian, reactor `LlmTurn`, knowledge extraction and knowledge
+  elicitation; reflection and goal generation make no LLM calls and
   are free. Every task runs through one wrapper recording outcome
   (`Ran|SkippedDisabled|SkippedBudget|SkippedContended|Failed`), duration, LLM
   usage and fact deltas as OTLP metrics. `Harvest` runs as its own task on the

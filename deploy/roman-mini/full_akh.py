@@ -20,6 +20,7 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -27,7 +28,10 @@ from urllib.parse import urlparse
 ROLES = ("janus", "minerva", "vesta")
 MODEL = "glm-5.3"
 OLLAMA_CLOUD = {"kind": "cloud", "base_url": "https://ollama.com", "api_key": "env:ROMAN_OLLAMA_KEY"}
-BUDGET = {"max_tokens_per_day": 250_000, "max_turns_per_day": 40}
+# ADR 123: budgets, deadlines and the wake tool count come from the model catalog, which
+# akhomed compiles in and resolves per akh. The renderer writes no `[autonomy.budget]` (that
+# would pin a per-akh override) and reads the same file only to document the resolved profile.
+MODEL_CATALOG = Path(__file__).resolve().parents[2] / "data/model-profiles/catalog.toml"
 CORE_LISTEN = "127.0.0.1:18430"
 ACP_TCP_PORT = 18444
 BUILD_COMMAND = "cargo build --release --locked --features server --bin akhomed"
@@ -525,6 +529,92 @@ def rename_tools(text: str, renames: dict[str, str]) -> str:
     for (server, remote), native in NATIVE_TOOLS.items():
         text = text.replace(f"mcp__{server}__{remote}", native)
     return text
+
+
+# ── Model catalog (ADR 123) ──────────────────────────────────────────────────
+
+PROFILE_FIELDS = ("max_tokens_per_day", "max_turns_per_day", "max_tokens_per_wake", "turn_deadline_secs",
+                  "max_rounds", "http_timeout_secs", "max_output_tokens", "context_window",
+                  "max_tools_per_wake")
+
+
+def load_model_catalog(path: Path = MODEL_CATALOG) -> dict:
+    """The model catalog akhomed compiles in (`data/model-profiles/catalog.toml`)."""
+    try:
+        catalog = tomllib.loads(path.read_text())
+    except FileNotFoundError as error:
+        raise RenderError(f"the model catalog is missing at {path}; render from a full akh-medu checkout "
+                          "of origin/main") from error
+    except tomllib.TOMLDecodeError as error:
+        raise RenderError(f"{path} is not valid TOML ({error})") from error
+    if catalog.get("schema_version") != 1:
+        raise RenderError(f"{path}: schema_version {catalog.get('schema_version')!r}; this renderer reads 1")
+    return catalog
+
+
+def normalize_model_id(model: str) -> str:
+    """Same normalization as `model_profile::normalize_model_id` in Rust."""
+    base = model.strip().lower().rsplit("/", 1)[-1]
+    for tag in (":cloud", "-cloud"):
+        if base.endswith(tag):
+            return base[: -len(tag)]
+    return base
+
+
+def catalog_profile(model: str, effort: str | None = None,
+                    catalog: dict | None = None) -> tuple[str | None, dict]:
+    """(row id, profile) for `model` at `effort`, as akhomed resolves it: an exact id wins,
+    else the longest prefix; the effort override is laid over the row. (None, {}) when the
+    catalog has no row (akhomed then keeps the global defaults)."""
+    catalog = catalog if catalog is not None else load_model_catalog()
+    model_id = normalize_model_id(model)
+    rows = catalog.get("models", [])
+    row = next((r for r in rows if model_id in {normalize_model_id(i) for i in r.get("ids", [])}), None)
+    if row is None:
+        hits = [(len(normalize_model_id(p)), r) for r in rows for p in r.get("prefixes", [])
+                if model_id.startswith(normalize_model_id(p))]
+        row = max(hits, key=lambda hit: hit[0])[1] if hits else None
+    if row is None:
+        return None, {}
+    profile = {k: v for k, v in row.get("profile", {}).items() if k in PROFILE_FIELDS}
+    profile.update(row.get("effort", {}).get(effort or "", {}))
+    return row["id"], profile
+
+
+def profile_comment(model: str, effort: str | None = None, catalog: dict | None = None,
+                    *, wakes: bool = True) -> str:
+    """The `[autonomy]` comment naming the profile akhomed resolves for this akh."""
+    row, p = catalog_profile(model, effort, catalog)
+    if row is None:
+        return (f"Model profile (ADR 123): the catalog has no row for {model!r}, so akhomed keeps the\n"
+                "global defaults (250000 tokens / 40 turns per UTC day, 300 s turns).")
+    label = f"`{row}`" + (f" at effort `{effort}`" if effort else "")
+    lines = [f"Model profile (ADR 123): data/model-profiles/catalog.toml row {label}."]
+    if wakes:
+        lines.append(f"Per UTC day: {p['max_tokens_per_day']} tokens, {p['max_turns_per_day']} turns. Per wake: "
+                     f"{p['max_tokens_per_wake']} tokens, {p['max_tools_per_wake']} relevance-scoped tools")
+        lines.append("plus the tools its route names (reactor seeds `required_tools`).")
+    lines.append(f"Per turn: {p['turn_deadline_secs']} s, {p['max_rounds']} rounds, {p['max_output_tokens']} output "
+                 f"tokens per request, {p['http_timeout_secs']} s HTTP, a {p['context_window']}-token window.")
+    lines.append("Override per akh in [model_profile]; this renderer writes none.")
+    return "\n".join(lines)
+
+
+def workspace_comments(base: dict[str, str], model: str, effort: str | None = None,
+                       catalog: dict | None = None, *, require_row: bool = True,
+                       wakes: bool = True) -> dict[str, str]:
+    """`base` plus the `autonomy` comment for this akh's model profile. `require_row`
+    fails the render closed when the catalog has no row for a renderer-owned model;
+    `wakes` is False for an akh without background work (the dojo teacher)."""
+    row, _ = catalog_profile(model, effort, catalog)
+    if row is None and require_row:
+        raise RenderError(f"data/model-profiles/catalog.toml has no row for model {model!r}; add one (ADR 123) "
+                          "before rendering, or the akh would silently run on the global defaults")
+    comments = dict(base)
+    prefix = comments.get("autonomy")
+    text = profile_comment(model, effort, catalog, wakes=wakes)
+    comments["autonomy"] = f"{prefix}\n{text}" if prefix else text
+    return comments
 
 
 # ── Workspace TOML ───────────────────────────────────────────────────────────
@@ -1051,8 +1141,9 @@ def render_workspace(existing: dict | None, role: str, prompt: str, servers: lis
     doc[inference.endpoint_table] = dict(inference.endpoint)
     autonomy = dict(doc.get("autonomy") or {})
     autonomy["enabled"] = True
+    # ADR 123: no per-akh budget; akhomed resolves it from the model catalog. A stale
+    # `[autonomy.budget]` (the pre-ADR-123 250000/40) would pin the old budget as an override.
     autonomy.pop("budget", None)
-    autonomy["budget"] = dict(BUDGET)
     autonomy["tasks"] = autonomy.pop("tasks", {})
     doc["autonomy"] = autonomy
     doc["exec"] = exec_table if exec_table is not None else {"kind": "none"}
@@ -2027,6 +2118,27 @@ def wake_prompt(session: dict, role: str) -> str:
     return rename_tools(text[:cut].strip(), tool_renames(session, role))
 
 
+# ADR 123: the tools each route kind always needs. A wake's catalog is relevance-scoped to
+# the model profile's `max_tools_per_wake`; these are offered on top of it, first. Only tools
+# the role holds are rendered (native memory tools are core registry tools every akh has).
+ROUTE_REQUIRED_TOOLS = {
+    "inbox": ("mcp__board__board_inbox", "mcp__board__board_acknowledge", "mcp__board__board_send_inbox",
+              "mcp__board__board_post_thread", "memory_recall", "memory_write"),
+    "changes": ("mcp__anima__get_work_item", "mcp__anima__get_plan", "memory_recall", "memory_write"),
+    "monitoring": ("monitoring_snapshot", "mcp__board__board_post_thread", "memory_recall", "memory_write"),
+    "laya": ("mcp__laya__record_fixer_result", "memory_recall", "memory_write"),
+    "intervention": ("mcp__anima__get_work_item", "memory_recall", "memory_write"),
+    "clock": ("memory_recall", "memory_write"),
+}
+NATIVE_CORE_TOOLS = frozenset({"memory_recall", "memory_write"})
+
+
+def route_required_tools(kind: str, session: dict, role: str) -> list[str]:
+    """The route kind's required tools that `role` actually holds."""
+    held = set(tool_renames(session, role).values()) | NATIVE_CORE_TOOLS
+    return [tool for tool in ROUTE_REQUIRED_TOOLS.get(kind, ()) if tool in held]
+
+
 def reactor_seeds(events: dict, session: dict, role: str,
                   report_thread: str | None = STATUS_THREAD, source: Path | None = None,
                   retired: list[dict] | None = None) -> dict:
@@ -2053,6 +2165,9 @@ def reactor_seeds(events: dict, session: dict, role: str,
         source = f"{route['source']}/{route['event_type']}"
         action = {"kind": "llm_turn", "prompt": prompt + "\n\n" + focus, "allow_tools": True,
                   "exit_condition": exit_condition}
+        required = route_required_tools(kind, session, role)
+        if required:
+            action["required_tools"] = required
         if reports and report_thread:
             action["report_thread"] = report_thread
         schedules.append({"id": "roman-" + route["id"], "name": f"{role}: {source}",

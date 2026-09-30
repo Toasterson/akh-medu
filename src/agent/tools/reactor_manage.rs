@@ -203,7 +203,7 @@ impl Tool for ReactorManageTool {
                 },
                 "action": {
                     "type": "object",
-                    "description": "Tagged action: llm_turn {prompt, agent_id?, allow_tools?, require_mutation?, exit_condition, report_thread?}, djehuty_reply, trigger, or training_monitor. llm_turn is tool-free by default; with allow_tools it REQUIRES exit_condition (ADR 105: what done/failed look like). report_thread is an Agent Board thread UUID that receives a coordination/status@v1 message after every run. A woken event's payload is appended to the prompt as untrusted data."
+                    "description": "Tagged action: llm_turn {prompt, agent_id?, allow_tools?, require_mutation?, exit_condition, report_thread?, required_tools?}, djehuty_reply, trigger, or training_monitor. llm_turn is tool-free by default; with allow_tools it REQUIRES exit_condition (ADR 105: what done/failed look like). report_thread is an Agent Board thread UUID that receives a coordination/status@v1 message after every run. A woken event's payload is appended to the prompt as untrusted data. A tool-enabled llm_turn is offered a relevance-scoped catalog (ADR 123); required_tools lists tool names it always gets, as does any tool the prompt or exit_condition names exactly."
                 },
                 "coalesce": {"type": "boolean", "description": "Event schedules only: keep just the newest pending event (replaceable state notifications, never commands)."},
                 "misfire_policy": {"type": "string", "enum": ["skip", "run_once"]},

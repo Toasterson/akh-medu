@@ -14,6 +14,9 @@ base_url = "https://ollama.com"
 api_key = "env:ROMAN_OLLAMA_KEY"
 
 # No background work: the teacher only answers dojo episodes, one ACP session each.
+# Model profile (ADR 123): data/model-profiles/catalog.toml row `glm-5.3`.
+# Per turn: 1800 s, 30 rounds, 32768 output tokens per request, 300 s HTTP, a 262144-token window.
+# Override per akh in [model_profile]; this renderer writes none.
 [autonomy]
 enabled = false
 

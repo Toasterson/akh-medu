@@ -302,6 +302,11 @@ pub struct Agent {
     /// (Ollama). `None` ⇒ the Ollama path via `model_manager`.
     pub(crate) chat_backend: Option<std::sync::Arc<dyn super::chat_backend::ChatBackend>>,
     pub(crate) agent_runtime: Option<std::sync::Arc<super::runtime::AgentRuntime>>,
+    /// The akh's resolved per-model profile (ADR 123): turn deadline, round
+    /// cap, working window, per-wake token budget and wake tool count for the
+    /// agentic loop. `None` (tests, embedded use) keeps the loop's global
+    /// defaults and env overrides.
+    pub(crate) model_profile: Option<super::model_profile::ResolvedModelProfile>,
     /// Working-context assembly strategy (Phase 44a, ADR 065). `None` ⇒ the
     /// byte-identical pass-through manager (current behaviour). When set,
     /// `run_agentic_turn` builds each prompt through it.
@@ -1151,6 +1156,7 @@ impl Agent {
             model_manager: None,
             chat_backend: None,
             agent_runtime: None,
+            model_profile: None,
             context_manager: std::sync::Mutex::new(None),
             note_catalog: std::sync::Mutex::new(None),
             last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -2556,6 +2562,17 @@ impl Agent {
     ) {
         self.chat_backend = Some(backend);
         self.agent_runtime = None;
+    }
+
+    /// Set the akh's resolved per-model profile (ADR 123). akhomed resolves
+    /// it from `akh.toml` at load and again on an ACP `model/set`.
+    pub fn set_model_profile(&mut self, profile: super::model_profile::ResolvedModelProfile) {
+        self.model_profile = Some(profile);
+    }
+
+    /// The akh's resolved per-model profile, if one was set.
+    pub fn model_profile(&self) -> Option<&super::model_profile::ResolvedModelProfile> {
+        self.model_profile.as_ref()
     }
 
     /// Select a coding-agent session runtime instead of the native model loop.
@@ -4719,6 +4736,7 @@ impl Agent {
             model_manager: None,
             chat_backend: None,
             agent_runtime: None,
+            model_profile: None,
             context_manager: std::sync::Mutex::new(None),
             note_catalog: std::sync::Mutex::new(None),
             last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),

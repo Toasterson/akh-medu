@@ -57,7 +57,8 @@ pub enum AkhConfigError {
             "Check akh.toml for TOML syntax errors and that field types match — e.g. \
              `[ollama_endpoint]` needs `kind = \"local\"` or `kind = \"cloud\"`, \
              `path_mode` is `\"local\"` or `\"remote\"`, and `[autonomy.budget]` accepts \
-             only `max_tokens_per_day` and `max_turns_per_day`."
+             only `max_tokens_per_day` and `max_turns_per_day`, and `[model_profile]` only \
+             the per-model limits listed in data/model-profiles/catalog.toml (ADR 123)."
         )
     )]
     Parse { path: String, message: String },
@@ -102,6 +103,11 @@ pub enum AkhConfigError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     McpServers(#[from] crate::agent::tools::mcp_config::McpServersConfigError),
+
+    /// The akh's per-model profile (ADR 123) does not resolve.
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    ModelProfile(#[from] crate::agent::model_profile::ModelProfileError),
 
     #[error(transparent)]
     #[diagnostic(transparent)]
@@ -353,9 +359,15 @@ pub struct AutonomyConfig {
     pub tasks: std::collections::BTreeMap<String, bool>,
     /// Daily limits for LLM-cost background work (librarian, knowledge
     /// elicitation, knowledge extraction via an external API, reactor model
-    /// turns). Defaults to 250 000 tokens and 40 turns per UTC day.
-    #[serde(default)]
-    pub budget: crate::agent::autonomy::AutonomyBudget,
+    /// turns). Each limit set here is a per-akh override; an absent one comes
+    /// from the model catalog row for the akh's model (ADR 123), else 250 000
+    /// tokens and 40 turns per UTC day. [`AkhConfig::effective_autonomy`]
+    /// carries the resolved budget to the daemon.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::autonomy::AutonomyBudgetOverride::is_empty"
+    )]
+    pub budget: crate::agent::autonomy::AutonomyBudgetOverride,
     /// Which tools the idle OODA cycle may choose on its own. Defaults to
     /// `safe` (manifest `Safe`, not MCP-proxied). `all` takes effect only
     /// together with an explicit `tasks.idle_cycle = true`.
@@ -368,7 +380,7 @@ impl Default for AutonomyConfig {
         Self {
             enabled: true,
             tasks: std::collections::BTreeMap::new(),
-            budget: crate::agent::autonomy::AutonomyBudget::default(),
+            budget: crate::agent::autonomy::AutonomyBudgetOverride::default(),
             idle_cycle_tools: crate::agent::autonomy::IdleCycleTools::default(),
         }
     }
@@ -1142,10 +1154,11 @@ pub struct OpenAiEndpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<usize>,
 
-    /// Per-request timeout. Agentic coding turns are long-running; defaults to
-    /// 600 s.
-    #[serde(default = "default_openai_timeout_secs")]
-    pub timeout_secs: u64,
+    /// Per-request (total) timeout in seconds. A per-akh override of the
+    /// model profile's `http_timeout_secs` (ADR 123); `None` takes the model
+    /// catalog row, else 600 s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 
     /// Cap on generated tokens per turn. `None` ⇒ the server's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1154,10 +1167,6 @@ pub struct OpenAiEndpoint {
     /// Sampling temperature. `None` ⇒ the server's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-}
-
-fn default_openai_timeout_secs() -> u64 {
-    600
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1307,6 +1316,23 @@ pub struct AkhConfig {
     #[serde(default)]
     pub autonomy: AutonomyConfig,
 
+    /// Per-akh overrides of the per-model profile (ADR 123): daily and
+    /// per-wake token budgets, turn deadline, round cap, HTTP timeout, output
+    /// cap, working context window and the wake tool count. Unset fields come
+    /// from the model catalog row for `(model, reasoning_effort)`, else the
+    /// global default; see [`Self::resolve_model_profile`].
+    ///
+    /// ```toml
+    /// [model_profile]
+    /// max_tokens_per_day = 2000000
+    /// max_tools_per_wake = 32
+    /// ```
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::model_profile::ModelProfile::is_empty"
+    )]
+    pub model_profile: crate::agent::model_profile::ModelProfile,
+
     /// MCP bridge policy for client-pushed servers (`session/new`). Defaults
     /// to graceful degradation (`require_pushed_mcp = false`).
     #[serde(default)]
@@ -1421,6 +1447,7 @@ impl Default for AkhConfig {
             openai_endpoint: None,
             agent_runtime: None,
             autonomy: AutonomyConfig::default(),
+            model_profile: crate::agent::model_profile::ModelProfile::default(),
             mcp: McpConfig::default(),
             board: None,
             monitoring: None,
@@ -1536,6 +1563,10 @@ impl AkhConfig {
             monitoring.validate(cfg.name())?;
         }
         cfg.validate_tool_surface()?;
+        // ADR 123: a profile that does not resolve (a duplicated or zero
+        // limit, an unknown effort level) refuses the akh at load instead of
+        // surfacing mid-turn.
+        cfg.resolve_model_profile()?;
         Ok((cfg, Self::unknown_keys(&raw)))
     }
 
@@ -1673,6 +1704,12 @@ impl AkhConfig {
             (
                 "autonomy",
                 &["enabled", "tasks", "budget", "idle_cycle_tools"],
+            ),
+            // Values are checked by serde (`deny_unknown_fields` on
+            // `ModelProfile`); listed here so the table itself is known.
+            (
+                "model_profile",
+                crate::agent::model_profile::ModelProfile::FIELDS,
             ),
             (
                 "memory",
@@ -1885,6 +1922,21 @@ impl AkhConfig {
             ollama.model = model.clone();
         }
         ollama.reasoning_effort = self.reasoning_effort.clone();
+        // ADR 123: the per-model HTTP timeout and output cap. `load_checked`
+        // already refused a profile that does not resolve; a config built in
+        // code that does not resolve keeps the global defaults.
+        match self.resolve_model_profile() {
+            Ok(profile) => {
+                ollama.timeout_secs = profile.http_timeout_secs.value;
+                ollama.num_predict = profile.max_output_tokens.map(|s| s.value);
+            }
+            Err(error) => tracing::warn!(
+                target: "akh::model_profile",
+                akh = %self.workspace.name,
+                error = ?miette::Report::new(error),
+                "model profile does not resolve; the Ollama client keeps the global defaults"
+            ),
+        }
         ModelManagerConfig {
             ollama,
             system_prompt: self.system_prompt.clone(),
@@ -1926,16 +1978,160 @@ impl AkhConfig {
                 field: "model",
             })?;
 
+        // ADR 123: the endpoint's timeout / window / output cap are per-akh
+        // overrides folded into the profile; unset ones come from the catalog.
+        let profile = self.resolve_model_profile()?;
         Ok(Some(crate::agent::openai_backend::OpenAiConfig {
             base_url: endpoint.base_url.clone(),
             api_key: endpoint.api_key.clone(),
             model,
-            timeout_secs: endpoint.timeout_secs,
-            context_window: endpoint.context_window,
-            max_tokens: endpoint.max_tokens,
+            timeout_secs: profile.http_timeout_secs.value,
+            context_window: profile
+                .context_window
+                .map(|s| usize::try_from(s.value).unwrap_or(usize::MAX)),
+            max_tokens: profile.max_output_tokens.map(|s| s.value),
             temperature: endpoint.temperature,
             reasoning_effort: self.reasoning_effort.clone(),
         }))
+    }
+
+    /// The akh's reasoning effort as a typed level (ADR 123).
+    ///
+    /// For the native model backings an unknown value is refused, because
+    /// the Ollama and OpenAI paths would silently drop it and the profile
+    /// would be resolved for the wrong effort. Codex/Claude runtimes pass
+    /// their own effort vocabulary through unchanged, so for them an
+    /// unrecognized value resolves as "default effort".
+    pub fn reasoning_effort_level(
+        &self,
+    ) -> Result<
+        Option<crate::agent::model_profile::ReasoningEffort>,
+        crate::agent::model_profile::ModelProfileError,
+    > {
+        use crate::agent::model_profile::{ModelProfileError, ReasoningEffort};
+        let Some(raw) = self.reasoning_effort.as_deref() else {
+            return Ok(None);
+        };
+        match ReasoningEffort::parse(raw) {
+            Some(level) => Ok(Some(level)),
+            None if matches!(self.backend, ChatBacking::Codex | ChatBacking::Claude) => Ok(None),
+            None => Err(ModelProfileError::UnknownEffort {
+                akh: self.workspace.name.clone(),
+                value: raw.to_string(),
+            }),
+        }
+    }
+
+    /// Resolve this akh's per-model profile (ADR 123): `[model_profile]` and
+    /// the legacy per-akh spellings, over the catalog row for `(model,
+    /// reasoning_effort)`, over the global default.
+    ///
+    /// The legacy spellings are `[autonomy.budget] max_tokens_per_day /
+    /// max_turns_per_day` and `[openai_endpoint] timeout_secs / max_tokens /
+    /// context_window`. Setting a limit both there and in `[model_profile]` is
+    /// refused, so there is one answer to "where does this number come from".
+    pub fn resolve_model_profile(
+        &self,
+    ) -> Result<
+        crate::agent::model_profile::ResolvedModelProfile,
+        crate::agent::model_profile::ModelProfileError,
+    > {
+        use crate::agent::model_profile::{
+            AkhOverrides, GlobalDefaults, ModelCatalog, ModelProfileError, OverrideLocations,
+            ProfileRequest, ResolvedModelProfile,
+        };
+        let akh = self.workspace.name.as_str();
+        let mut profile = self.model_profile;
+        let mut locations = OverrideLocations::default();
+        let fold = |field: &'static str,
+                    slot: &mut Option<u64>,
+                    legacy: Option<u64>,
+                    legacy_location: &'static str,
+                    location: &mut &'static str|
+         -> Result<(), ModelProfileError> {
+            match (*slot, legacy) {
+                (Some(_), Some(_)) => Err(ModelProfileError::DuplicateSetting {
+                    akh: akh.to_string(),
+                    field,
+                    first: "[model_profile]",
+                    second: legacy_location,
+                }),
+                (None, Some(value)) => {
+                    *slot = Some(value);
+                    *location = legacy_location;
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        };
+        fold(
+            "max_tokens_per_day",
+            &mut profile.max_tokens_per_day,
+            self.autonomy.budget.max_tokens_per_day,
+            "[autonomy.budget]",
+            &mut locations.max_tokens_per_day,
+        )?;
+        let mut turns = profile.max_turns_per_day.map(u64::from);
+        fold(
+            "max_turns_per_day",
+            &mut turns,
+            self.autonomy.budget.max_turns_per_day.map(u64::from),
+            "[autonomy.budget]",
+            &mut locations.max_turns_per_day,
+        )?;
+        profile.max_turns_per_day = turns.map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+        let defaults = if self.backend == ChatBacking::OpenAi {
+            GlobalDefaults::OPENAI
+        } else {
+            GlobalDefaults::OLLAMA
+        };
+        if self.backend == ChatBacking::OpenAi
+            && let Some(endpoint) = &self.openai_endpoint
+        {
+            fold(
+                "http_timeout_secs",
+                &mut profile.http_timeout_secs,
+                endpoint.timeout_secs,
+                "[openai_endpoint] timeout_secs",
+                &mut locations.http_timeout_secs,
+            )?;
+            let mut output = profile.max_output_tokens.map(u64::from);
+            fold(
+                "max_output_tokens",
+                &mut output,
+                endpoint.max_tokens.map(u64::from),
+                "[openai_endpoint] max_tokens",
+                &mut locations.max_output_tokens,
+            )?;
+            profile.max_output_tokens = output.map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+            fold(
+                "context_window",
+                &mut profile.context_window,
+                endpoint.context_window.map(|n| n as u64),
+                "[openai_endpoint] context_window",
+                &mut locations.context_window,
+            )?;
+        }
+        let request = ProfileRequest {
+            akh,
+            model: self.model.as_deref(),
+            effort: self.reasoning_effort_level()?,
+            overrides: AkhOverrides { profile, locations },
+            defaults,
+        };
+        ResolvedModelProfile::resolve(ModelCatalog::builtin()?, &request)
+    }
+
+    /// `[autonomy]` with the budget replaced by the resolved profile's daily
+    /// budget (ADR 123): what the daemon's governor enforces.
+    pub fn effective_autonomy(
+        &self,
+    ) -> Result<AutonomyConfig, crate::agent::model_profile::ModelProfileError> {
+        let profile = self.resolve_model_profile()?;
+        Ok(AutonomyConfig {
+            budget: crate::agent::autonomy::AutonomyBudgetOverride::exact(profile.daily_budget()),
+            ..self.autonomy.clone()
+        })
     }
 
     /// Resolve `model` for a `backend = "grug"` akh. Relative bundle paths
@@ -2002,12 +2198,19 @@ mod tests {
             cfg.autonomy.enabled,
             "automation is on by default (ADR 113 decision 6)"
         );
+        assert!(
+            cfg.autonomy.budget.is_empty(),
+            "no per-akh override: the model profile resolves the budget (ADR 123)"
+        );
         assert_eq!(
-            cfg.autonomy.budget,
-            crate::agent::autonomy::AutonomyBudget {
-                max_tokens_per_day: 250_000,
-                max_turns_per_day: 40,
-            }
+            cfg.effective_autonomy().expect("resolves").budget,
+            crate::agent::autonomy::AutonomyBudgetOverride::exact(
+                crate::agent::autonomy::AutonomyBudget {
+                    max_tokens_per_day: 250_000,
+                    max_turns_per_day: 40,
+                }
+            ),
+            "an akh with no model keeps the global default"
         );
         assert_eq!(cfg.ollama_endpoint, OllamaEndpoint::default());
         assert!(cfg.model.is_none());
@@ -2313,6 +2516,197 @@ mod tests {
         );
     }
 
+    // ── ADR 123: per-model profile ──
+
+    fn load_src(src: &str) -> AkhConfigResult<(AkhConfig, Vec<UnknownConfigKey>)> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        std::fs::write(&path, src).unwrap();
+        AkhConfig::load_checked(&path)
+    }
+
+    #[test]
+    fn model_profile_resolves_catalog_row_for_a_roman() {
+        let (cfg, unknown) = load_src(
+            r#"
+            name = "janus"
+            model = "glm-5.3"
+            [ollama_endpoint]
+            kind = "cloud"
+            api_key = "env:ROMAN_OLLAMA_KEY"
+        "#,
+        )
+        .expect("loads");
+        assert!(unknown.is_empty());
+        let profile = cfg.resolve_model_profile().expect("resolves");
+        assert_eq!(profile.catalog_entry.as_deref(), Some("glm-5.3"));
+        assert_eq!(profile.max_tokens_per_day.value, 1_500_000);
+        assert_eq!(profile.max_tools_per_wake.as_ref().unwrap().value, 24);
+        let autonomy = cfg.effective_autonomy().expect("resolves");
+        assert_eq!(
+            autonomy
+                .budget
+                .over(crate::agent::autonomy::AutonomyBudget::default()),
+            profile.daily_budget()
+        );
+        let mm = cfg.to_model_manager_config();
+        assert_eq!(mm.ollama.timeout_secs, 300, "catalog HTTP timeout");
+        assert_eq!(mm.ollama.num_predict, Some(32_768), "catalog output cap");
+    }
+
+    #[test]
+    fn model_profile_table_overrides_and_is_a_known_table() {
+        let (cfg, unknown) = load_src(
+            r#"
+            name = "janus"
+            model = "glm-5.3"
+            reasoning_effort = "low"
+            [model_profile]
+            max_tokens_per_day = 2000000
+            max_tools_per_wake = 40
+        "#,
+        )
+        .expect("loads");
+        assert!(
+            unknown.is_empty(),
+            "[model_profile] is a known table: {unknown:?}"
+        );
+        let profile = cfg.resolve_model_profile().unwrap();
+        assert_eq!(profile.max_tokens_per_day.value, 2_000_000);
+        assert_eq!(
+            profile.max_tokens_per_day.source,
+            crate::agent::model_profile::ProfileSource::AkhOverride("model_profile")
+        );
+        assert_eq!(profile.max_tools_per_wake.unwrap().value, 40);
+        assert_eq!(
+            profile.max_rounds.unwrap().value,
+            16,
+            "the low-effort catalog row"
+        );
+        let reloaded: AkhConfig = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(
+            reloaded.model_profile, cfg.model_profile,
+            "round-trips through save"
+        );
+    }
+
+    #[test]
+    fn model_profile_typos_and_conflicts_are_refused() {
+        let typo = load_src(
+            r#"
+            name = "janus"
+            [model_profile]
+            max_round = 3
+        "#,
+        )
+        .unwrap_err();
+        assert!(matches!(typo, AkhConfigError::Parse { .. }));
+        assert!(typo.to_string().contains("max_round"), "{typo}");
+
+        let twice = load_src(
+            r#"
+            name = "janus"
+            [autonomy.budget]
+            max_tokens_per_day = 1000
+            [model_profile]
+            max_tokens_per_day = 2000
+        "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                twice,
+                AkhConfigError::ModelProfile(
+                    crate::agent::model_profile::ModelProfileError::DuplicateSetting {
+                        field: "max_tokens_per_day",
+                        ..
+                    }
+                )
+            ),
+            "{twice:?}"
+        );
+
+        let effort = load_src(
+            r#"
+            name = "janus"
+            model = "glm-5.3"
+            reasoning_effort = "xhigh"
+        "#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            effort,
+            AkhConfigError::ModelProfile(
+                crate::agent::model_profile::ModelProfileError::UnknownEffort { .. }
+            )
+        ));
+
+        let zero = load_src(
+            r#"
+            name = "janus"
+            [model_profile]
+            http_timeout_secs = 0
+        "#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            zero,
+            AkhConfigError::ModelProfile(
+                crate::agent::model_profile::ModelProfileError::ZeroLimit { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn legacy_budget_and_openai_limits_are_per_akh_overrides() {
+        let (cfg, _) = load_src(
+            r#"
+            name = "lilith"
+            model = "lilith"
+            backend = "openai"
+            [openai_endpoint]
+            base_url = "http://10.0.0.5:8080/v1"
+            context_window = 49152
+            max_tokens = 4096
+            [autonomy.budget]
+            max_turns_per_day = 12
+        "#,
+        )
+        .expect("loads");
+        let profile = cfg.resolve_model_profile().unwrap();
+        assert_eq!(profile.catalog_entry.as_deref(), Some("gemma-4-12b"));
+        assert_eq!(profile.max_turns_per_day.value, 12);
+        assert_eq!(
+            profile.max_turns_per_day.source,
+            crate::agent::model_profile::ProfileSource::AkhOverride("[autonomy.budget]")
+        );
+        assert_eq!(profile.max_tokens_per_day.value, 3_000_000, "catalog");
+        let openai = cfg.to_openai_config().unwrap().unwrap();
+        assert_eq!(openai.context_window, Some(49_152));
+        assert_eq!(
+            openai.max_tokens,
+            Some(4_096),
+            "the endpoint key wins over the catalog"
+        );
+        assert_eq!(
+            openai.timeout_secs, 600,
+            "the catalog row for a local Gemma 4"
+        );
+    }
+
+    #[test]
+    fn codex_runtime_effort_vocabulary_is_not_refused() {
+        let mut cfg = AkhConfig::with_name("astra");
+        cfg.backend = ChatBacking::Codex;
+        cfg.model = Some("gpt-6-astra".into());
+        cfg.reasoning_effort = Some("xhigh".into());
+        let profile = cfg
+            .resolve_model_profile()
+            .expect("a runtime passes its effort through");
+        assert_eq!(profile.effort, None);
+        assert_eq!(profile.catalog_entry, None);
+    }
+
     #[test]
     fn autonomy_budget_typos_are_refused() {
         let src = r#"
@@ -2338,9 +2732,15 @@ mod tests {
             max_turns_per_day = 12
         "#;
         let cfg: AkhConfig = toml::from_str(src).expect("parse");
-        assert_eq!(cfg.autonomy.budget.max_turns_per_day, 12);
+        assert_eq!(cfg.autonomy.budget.max_turns_per_day, Some(12));
+        assert_eq!(cfg.autonomy.budget.max_tokens_per_day, None);
+        let budget = cfg
+            .resolve_model_profile()
+            .expect("resolves")
+            .daily_budget();
+        assert_eq!(budget.max_turns_per_day, 12);
         assert_eq!(
-            cfg.autonomy.budget.max_tokens_per_day,
+            budget.max_tokens_per_day,
             crate::agent::autonomy::AutonomyBudget::DEFAULT_MAX_TOKENS_PER_DAY,
             "an omitted limit keeps its default"
         );
@@ -2703,8 +3103,9 @@ mod tests {
         assert_eq!(openai.base_url, "https://inference.hetzner.com/api/v1");
         assert_eq!(openai.model, "DeepSeek-V4-Flash-0731");
         assert_eq!(openai.context_window, Some(131072));
-        // Unset default, not a hardcoded value.
-        assert_eq!(openai.timeout_secs, 600);
+        // Unset in the TOML: the model catalog's DeepSeek V4 Flash row
+        // (ADR 123), not a hardcoded value.
+        assert_eq!(openai.timeout_secs, 240);
         // No unknown keys: the new table is registered in the schema.
         let raw: toml::Value = toml::from_str(toml_src).expect("raw parse");
         assert!(
@@ -2764,7 +3165,7 @@ mod tests {
             base_url: "https://inference.hetzner.com/api/v1".into(),
             api_key: Some("env:HETZNER_INFERENCE_KEY".into()),
             context_window: Some(131072),
-            timeout_secs: 600,
+            timeout_secs: Some(600),
             max_tokens: None,
             temperature: None,
         });

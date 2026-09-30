@@ -351,7 +351,9 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
                                      "of origin/main (or set \"prompt\": \"neutral\" in config/dojo-teacher.json)")
             teacher_prompt = fa.dojo_teacher_system_prompt(source / "roles", skill_source)
         toml[path] = fa.dump_toml(fa.render_dojo_teacher_workspace(existing, teacher, teacher_prompt),
-                                  fa.DOJO_TEACHER_COMMENTS,
+                                  fa.workspace_comments(fa.DOJO_TEACHER_COMMENTS, teacher.model,
+                                                        teacher.reasoning_effort, require_row=False,
+                                                        wakes=False),
                                   header=f"{fa.DOJO_TEACHER}: sealed Lilith C4 dojo teacher (ADR 116; "
                                          "tool_surface = session-only, an exam instrument, not a working akh). "
                                          "Rendered by configure_core.py.")
@@ -371,7 +373,8 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
             doc = fa.render_workspace(existing, role, prompt, servers, board,
                                       exec_table={"kind": "none"}, inference=spec.inference,
                                       chief_of_staff=fa.render_chief_of_staff(root, lilith))
-            toml[path] = fa.dump_toml(doc, fa.LILITH_WORKSPACE_COMMENTS,
+            toml[path] = fa.dump_toml(doc, fa.workspace_comments(fa.LILITH_WORKSPACE_COMMENTS,
+                                                                 spec.inference.model),
                                       header=f"{role}: full akh (ADR 113), Chief of Staff (ADR 116). "
                                              "Rendered by configure_core.py.")
             continue
@@ -394,7 +397,7 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
                                   monitoring=fa.monitoring_config(session, role, root, observer_retired=live),
                                   exec_table=fa.render_exec(role, fa.vesta_sandbox(root)),
                                   inference=spec.inference)
-        toml[path] = fa.dump_toml(doc, fa.WORKSPACE_COMMENTS,
+        toml[path] = fa.dump_toml(doc, fa.workspace_comments(fa.WORKSPACE_COMMENTS, spec.inference.model),
                                   header=f"{role}: full akh (ADR 113). Rendered by configure_core.py.")
         seeds[role] = fa.reactor_seeds(staged, session, role, source=source, retired=retired_routes)
     return Rendered(toml=toml, seeds=seeds, staged=staged, core=fa.render_core_config(core, root, akhs),
