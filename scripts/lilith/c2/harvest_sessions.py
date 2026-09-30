@@ -8,7 +8,9 @@ Reads captured turns through the core's read-only ACP `_akh/transcripts/list`
 (never a store file: opening a live SQLite store corrupts it). Writes under
 `--out` (default `/Volumes/akh-medu-runs/lilith/c2`):
 
-    sessions/<session-id>.json     turns, tool calls with receipts, timings, model provenance
+    sessions/<session-id>.json     turns, tool calls with receipts, timings, model provenance;
+                                   `user_prompt` is raw, `operator_text` drops the trailing tag blocks
+                                   the client app injects (`<runtime_info>...</runtime_info>`)
     corrections.jsonl              one `CorrectionRecord` per `✎` message (see c2/marker.py)
     corrections-unmatched.jsonl    corrections with no recorder snapshot at or before the turn
     autonomous.jsonl               turns the akh ran on its own (dispatch), outside any session
@@ -63,6 +65,35 @@ def extract_ids(*texts: Any) -> list[str]:
 
 # --- normalisation --------------------------------------------------------------------------------
 
+# A client (the T3 app) appends provider preamble to every operator message as top-level XML-tag
+# blocks, e.g. `<runtime_info>...</runtime_info>`. The tag names are lowercase snake_case identifiers,
+# so the rule is the shape, not a list of known names.
+_BLOCK_OPEN = re.compile(r"<([a-z][a-z0-9]*(?:_[a-z0-9]+)*)>")
+
+
+def _blocks_to_end(text: str, start: int) -> bool:
+    """True when `text[start:]` is nothing but well-formed `<tag>...</tag>` blocks and whitespace."""
+    pos = start
+    while True:
+        opened = _BLOCK_OPEN.match(text, pos)
+        if opened is None:
+            return text[pos:].strip() == ""
+        close = text.find(f"</{opened.group(1)}>", opened.end())
+        if close < 0:
+            return False
+        pos = close + len(opened.group(1)) + 3
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+
+
+def operator_text(prompt: str) -> str:
+    """`prompt` without its trailing run of client-injected tag blocks (the operator's own words)."""
+    for opened in _BLOCK_OPEN.finditer(prompt):
+        at_boundary = opened.start() == 0 or prompt[opened.start() - 1].isspace()
+        if at_boundary and _blocks_to_end(prompt, opened.start()):
+            return prompt[:opened.start()].rstrip()
+    return prompt
+
 def _tier(tool: str) -> str:
     try:
         from dojo.contracts import PermissionProfile
@@ -90,12 +121,14 @@ def normalise_turn(row: Mapping[str, Any]) -> dict[str, Any]:
     when = parse_iso(payload.get("ts")) or parse_iso(row.get("applied_at"))
     calls = [_tool_call(t) for t in payload.get("tools") or [] if isinstance(t, Mapping)]
     answer = payload.get("agent_answer") or ""
+    prompt = payload.get("user_prompt") or ""
     return {
         "seq": row.get("seq"),
         "ts": when.isoformat() if when else None,
         "applied_at": row.get("applied_at"),
         "model": payload.get("model"),
-        "user_prompt": payload.get("user_prompt") or "",
+        "user_prompt": prompt,
+        "operator_text": operator_text(prompt),
         "agent_answer": answer,
         "dispatch": bool(payload.get("dispatch")),
         "tool_calls": calls,
@@ -141,7 +174,7 @@ def build_session(turns: Sequence[dict], workspace: str, endpoint: str) -> dict[
     rendered: list[dict] = []
     previous: dict | None = None
     for index, turn in enumerate(turns):
-        correction = parse_correction(turn["user_prompt"])
+        correction = parse_correction(turn["operator_text"])
         gap_ms = int((_when(turn) - _when(previous)).total_seconds() * 1000) if previous else None
         rendered.append({
             "index": index,
