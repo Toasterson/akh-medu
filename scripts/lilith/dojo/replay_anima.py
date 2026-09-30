@@ -35,7 +35,7 @@ import enum
 import weakref
 from typing import Any, Mapping
 
-from dojo.snapshot import PRIMARY_ANIMA_COLLECTOR, Snapshot
+from dojo.snapshot import PRIMARY_ANIMA_COLLECTOR, Snapshot, SnapshotStore
 
 DEFAULT_PAGE_SIZE = 50
 RECORDED_HISTORY_PAGE = 50  # the tool's default change/message page, which is what the recorder asked for
@@ -268,6 +268,34 @@ def derive_list_work_items(snapshot: Snapshot, arguments: Mapping[str, Any]) -> 
     return Derived(payload, tuple(rules), matched)
 
 
+PROJECT_METADATA_FIELDS = ("name", "description", "git_remote", "status")
+_NAMES: dict[str, tuple[str, dict[str, dict]] | None] = {}
+
+
+def project_metadata(snapshot: Snapshot) -> tuple[str, dict[str, dict]] | None:
+    """(snapshot id, project id -> recorded project entry) from the earliest snapshot under the same root
+    that recorded `list_projects` itself. Project metadata (name, git remote) is stable across snapshots;
+    a snapshot made before the recorder captured the call still has the project ids and lacks the names."""
+    key = str(snapshot.root)
+    if key not in _NAMES:
+        found = None
+        try:
+            store = SnapshotStore(snapshot.root)
+            for candidate in store.snapshots():
+                entries: dict[str, dict] = {}
+                for response in candidate.by_call("list_projects"):
+                    for entry in _first_list(candidate.load_object(response.sha256)):
+                        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+                            entries.setdefault(entry["id"], entry)
+                if entries:
+                    found = (candidate.id, entries)
+                    break
+        except OSError:
+            found = None
+        _NAMES[key] = found
+    return _NAMES[key]
+
+
 def derive_list_projects(snapshot: Snapshot, arguments: Mapping[str, Any]) -> DeriveResult:
     collectors = _collector_projects(snapshot)
     if not collectors or any(True for _ in snapshot.by_call("list_projects")):
@@ -279,15 +307,22 @@ def derive_list_projects(snapshot: Snapshot, arguments: Mapping[str, Any]) -> De
     if isinstance(size, bool) or not isinstance(size, (int, float)) or int(size) != size or size < 1:
         return DeriveMiss(MissReason.ARGUMENTS_NOT_RECORDED, f"page_size {size!r} is not a positive integer")
     projects = []
+    names = project_metadata(snapshot)
+    named = False
     for cname, pid in sorted(collectors.items(), key=_collector_order):
         extra = snapshot.collector(cname).get("extra") or {}
         entry: dict[str, Any] = {"id": pid}
+        recorded = names[1].get(pid) if names else None  # only ids this snapshot's collectors hold: no later project leaks in
+        if recorded:
+            entry.update({k: recorded[k] for k in PROJECT_METADATA_FIELDS if k in recorded})
+            named = True
         for key in ("work_item_count", "plan_count"):
             if isinstance(extra.get(key), int):
                 entry[key] = extra[key]
         projects.append(entry)
     payload = {"projects": projects[: int(size)], "total": len(projects), "next_page_token": None}
-    return Derived(payload, ("derive:list_projects<-collectors",), {})
+    source = f"derive:list_projects<-collectors+names@{names[0]}" if names and named else "derive:list_projects<-collectors"
+    return Derived(payload, (source,), {})
 
 
 def derive_get_work_item_by_id(snapshot: Snapshot, arguments: Mapping[str, Any]) -> DeriveResult:

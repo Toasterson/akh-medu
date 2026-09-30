@@ -61,7 +61,7 @@ def detail(wi):
             "prs": [], "change_history": [], "thread_messages": [], "thread_messages_elided": False}
 
 
-def build_root(root, truncate_walk=False):
+def build_root(root, truncate_walk=False, when=WHEN, projects=None):
     responses = {"anima": [], f"anima:{P2}": []}
 
     def put(collector, call, args, payload):
@@ -90,6 +90,8 @@ def build_root(root, truncate_walk=False):
             put("anima" if wi["project_id"] == P1 else f"anima:{P2}", "get_work_item_detail", {"id": wi["id"]}, detail(wi))
     for collector, project in (("anima", P1), (f"anima:{P2}", P2)):
         put(collector, "get_project_ci_status", {"project_id": project}, {"resolvable": True})
+    if projects is not None:  # a later recorder that captured list_projects itself
+        put("anima", "list_projects", {}, {"projects": projects, "total": len(projects)})
     contract_sha, _ = rec.store_object(root, {"tools": TOOLS})
     refs_sha, _ = rec.store_object(root, {"remote": rec.GIT_REMOTE, "refs": [{"ref": "refs/heads/main", "sha": "1" * 40}]})
     collectors = {
@@ -103,9 +105,10 @@ def build_root(root, truncate_walk=False):
         "board": {"status": "ok", "errors": [], "responses": []},
         "fleet": {"status": "ok", "errors": [], "responses": []},
     }
-    rec.atomic_write_json(root / SID / "manifest.json", {"schema": rec.SCHEMA, "timestamp": WHEN.isoformat(),
+    sid = when.strftime("%Y%m%dT%H%M%SZ")
+    rec.atomic_write_json(root / sid / "manifest.json", {"schema": rec.SCHEMA, "timestamp": when.isoformat(),
                                                          "collectors": collectors})
-    return SnapshotStore(root).get(SID)
+    return SnapshotStore(root).get(sid)
 
 
 @pytest.fixture
@@ -191,6 +194,35 @@ def test_list_projects_answers_from_the_recorded_project_set(server):
     assert not error and [p["id"] for p in payload["projects"]] == [P1, P2] and payload["total"] == 2
     error, first = call(server, "list_projects", {"page_size": 1})
     assert not error and [p["id"] for p in first["projects"]] == [P1]
+
+
+def test_derived_list_projects_takes_names_from_the_earliest_snapshot_that_recorded_them(tmp_path):
+    root = tmp_path / "snapshots"
+    old = build_root(root)  # recorded before the recorder captured list_projects: ids only
+    meta = {"description": "d", "git_remote": "ssh://git/x.git", "status": "active"}
+    later_when = datetime(2026, 9, 30, 8, 0, tzinfo=timezone.utc)
+    later = build_root(root, when=later_when, projects=[
+        {"id": P1, "name": "Alpha", **meta}, {"id": P2, "name": "Beta", **meta},
+        {"id": "33333333-3333-7333-8333-333333333333", "name": "Later project", **meta}])
+    newest = build_root(root, when=datetime(2026, 10, 1, 8, 0, tzinfo=timezone.utc), projects=[
+        {"id": P1, "name": "Alpha renamed", **meta}])
+    server = ReplayServer(old, DojoLedger(tmp_path / "l.jsonl"))
+    error, payload = call(server, "list_projects", {})
+    assert not error and payload["total"] == 2  # the later project is not in this snapshot's collectors
+    assert [(p["id"], p["name"]) for p in payload["projects"]] == [(P1, "Alpha"), (P2, "Beta")]  # earliest wins
+    assert all(p["git_remote"] == meta["git_remote"] and p["status"] == "active" for p in payload["projects"])
+    assert all(p["work_item_count"] >= 1 for p in payload["projects"])
+    assert server.receipts.receipts[-1].match_rules == (f"derive:list_projects<-collectors+names@{later.id}",)
+    # a snapshot that recorded the call itself keeps its own bytes
+    own = ReplayServer(newest, DojoLedger(tmp_path / "l2.jsonl"))
+    error, payload = call(own, "list_projects", {})
+    assert not error and payload["projects"][0]["name"] == "Alpha renamed" and own.receipts.receipts[-1].match_rules == ()
+
+
+def test_derived_list_projects_keeps_ids_only_when_no_snapshot_recorded_names(server):
+    error, payload = call(server, "list_projects", {})
+    assert not error and all("name" not in p for p in payload["projects"])
+    assert server.receipts.receipts[-1].match_rules == ("derive:list_projects<-collectors",)
 
 
 def test_work_item_lookups_answer_for_every_recorded_item(server):
