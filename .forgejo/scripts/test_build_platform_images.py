@@ -89,5 +89,41 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(len(result['images']), 19)
 
 
+class PromotionTests(unittest.TestCase):
+    def evidence(self):
+        return {'complete': True, 'source_commit': 'a' * 40, 'images': {
+            'home-runtime': {'image': 'registry/runtime@sha256:verified',
+                             'platform_digests': {'arm64': 'sha256:arm'},
+                             'native_receipts_embedded': True}}}
+
+    def test_incomplete_set_never_changes_live_channel(self):
+        evidence = self.evidence()
+        evidence['complete'] = False
+        with patch.object(images, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'complete commit-matched'):
+                images.promote_verified_set(evidence, 'a' * 40)
+            run.assert_not_called()
+
+    def test_native_receipts_required_before_promotion(self):
+        evidence = self.evidence()
+        evidence['images']['home-runtime'].pop('native_receipts_embedded')
+        with patch.object(images, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'embedded CI receipts'):
+                images.promote_verified_set(evidence, 'a' * 40)
+            run.assert_not_called()
+
+    def test_outdated_pipeline_cannot_roll_channel_back(self):
+        with patch.object(images, 'run', return_value='b' * 40 + '\trefs/heads/main') as run:
+            self.assertFalse(images.promote_verified_set(self.evidence(), 'a' * 40))
+            self.assertEqual(run.call_count, 1)
+
+    def test_current_verified_digest_is_promoted_and_checked(self):
+        with patch.object(images, 'run', side_effect=['a' * 40 + '\trefs/heads/main', None]) as run, \
+             patch.object(images, 'image_manifest', return_value={'platform_digests': {'arm64': 'sha256:arm'}}):
+            self.assertTrue(images.promote_verified_set(self.evidence(), 'a' * 40))
+            self.assertEqual(run.call_args.args, ('docker', 'buildx', 'imagetools', 'create',
+                '--tag', 'registry/runtime:main-ready', 'registry/runtime@sha256:verified'))
+
+
 if __name__ == '__main__':
     unittest.main()

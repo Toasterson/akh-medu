@@ -129,6 +129,56 @@ def run(*args, capture=False):
     return result.stdout.strip() if capture else None
 
 
+def bundle_native_receipts(image, record, receipts):
+    """Ship measured receipts with the exact binaries that produced them."""
+    with tempfile.TemporaryDirectory(prefix='akh-native-receipts-') as directory:
+        root = Path(directory)
+        for arch in ARCHES:
+            (root / (arch + '.json')).write_text(json.dumps(receipts[arch]) + '\n')
+        (root / 'Dockerfile').write_text(
+            'ARG BASE\nFROM ${BASE}\nARG TARGETARCH\n'
+            'COPY ${TARGETARCH}.json /usr/local/share/akh/native-conformance.json\n')
+        run('docker', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64',
+            '--build-arg', 'BASE=' + record['image'], '--tag', image, '--push', directory)
+    bundled = image_manifest(image, ARCHES)
+    for arch in ARCHES:
+        pinned = image.split(':main-')[0] + '@' + bundled['platform_digests'][arch]
+        measured = receipts[arch]['codex']['runtime_artifact_sha256']
+        # A packaging-only layer must not change any measured runtime artifact.
+        actual = json.loads(run('docker', 'run', '--rm', '--platform', 'linux/' + arch,
+            '--entrypoint', 'python3', pinned, '-c',
+            'import hashlib,json,pathlib; print(json.dumps({p:hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() for p in '
+            + repr(list(measured)) + '}))', capture=True))
+        if actual != measured:
+            raise RuntimeError('receipt packaging changed measured native binaries: ' + arch)
+        embedded = json.loads(run('docker', 'run', '--rm', '--platform', 'linux/' + arch,
+            '--entrypoint', 'cat', pinned, '/usr/local/share/akh/native-conformance.json', capture=True))
+        if embedded != receipts[arch]:
+            raise RuntimeError('embedded native receipts differ from CI measurements: ' + arch)
+    return {**record, **bundled, 'native_receipts_embedded': True}
+
+
+def promote_verified_set(evidence, sha):
+    """Keel watches only this channel, never intermediate build tags."""
+    if evidence.get('complete') is not True or evidence.get('source_commit') != sha:
+        raise RuntimeError('only a complete commit-matched image set can be promoted')
+    if not evidence['images']['home-runtime'].get('native_receipts_embedded'):
+        raise RuntimeError('automatic native updates require embedded CI receipts')
+    for name, record in sorted(evidence['images'].items()):
+        # An older, slower pipeline may finish after a newer main build. It may
+        # retain its immutable artifacts, but must not move the live channel.
+        current = run('git', 'ls-remote', 'origin', 'refs/heads/main', capture=True).split()[0]
+        if current != sha:
+            print('Main advanced; immutable image set retained without further promotion.', flush=True)
+            return False
+        alias = record['image'].split('@')[0] + ':main-ready'
+        run('docker', 'buildx', 'imagetools', 'create', '--tag', alias, record['image'])
+        live = image_manifest(alias, list(record['platform_digests']))
+        if live['platform_digests'] != record['platform_digests']:
+            raise RuntimeError('promoted channel differs from verified image set: ' + name)
+    return True
+
+
 def sample_count(raw):
     """Count top-level protobuf Profile.sample messages without dependencies."""
     def varint(offset):
@@ -332,6 +382,7 @@ def build_set(group):
             if live['index_digest'] != image['index_digest'] or live['platform_digests'] != image['platform_digests']:
                 raise RuntimeError('registry digest changed since group smoke: ' + name)
         publish_manifest(evidence, 'akh-image-set', sha)
+        evidence['channel_promoted'] = promote_verified_set(evidence, sha)
         print('AKH_NATIVE_CONFORMANCE_JSON=' + json.dumps(evidence['native_conformance']['arm64'], separators=(',', ':')), flush=True)
         print('AKH_IMAGE_SET_MANIFEST_JSON=' + json.dumps(evidence, separators=(',', ':')), flush=True)
         return
@@ -372,6 +423,8 @@ def build_set(group):
                 run('docker', 'run', '--rm', '--platform', 'linux/' + arch, '--entrypoint', '/bin/sh', pinned,
                     '-ec', 'codex --version | grep -F 0.153.4; claude --version | grep -F 2.1.269')
                 evidence['native_conformance'][arch] = native_conformance(pinned, arch)
+        if name == 'home-runtime':
+            record = bundle_native_receipts(image, record, evidence['native_conformance'])
         evidence['images'][name] = record
     if group == 'fleet':
         daemon_partial = read_partial('daemons', sha)
