@@ -557,6 +557,10 @@ def _add_run_arguments(p: argparse.ArgumentParser) -> None:
                    help="acp: where the teacher gets the dojo system prompt. akh (default): the akh's own system_prompt, "
                         "like the parent's system message; the run is refused unless --akh-config's system_prompt is the "
                         "run's prompt. session: inside the first user turn (a recorded placement difference)")
+    p.add_argument("--no-warm-up", action="store_true",
+                   help="acp: skip the two tool-less warm-up prompts that absorb the akh's one-time initialisation "
+                        "before the memory baseline is taken (the isolation check stays exact either way; without "
+                        "the warm-up the first episode after a core restart can abort on a 2-symbol init)")
     p.add_argument("--base-url", default=None)
     p.add_argument("--base-url-file", type=Path, default=None)
     p.add_argument("--model", default=None)
@@ -603,7 +607,7 @@ def _acp_run(args: argparse.Namespace, store: SnapshotStore, chosen, system: Sys
         runner = T.AcpEpisodeRunner(T.tcp_connector(endpoint), secret, system, gateway,
                                     T.AcpTeacherConfig(akh=akh, endpoint_host=T.endpoint_host(endpoint),
                                                        turn_timeout_s=args.timeout, runner=runner_config,
-                                                       placement=placement))
+                                                       placement=placement, warm_up=not args.no_warm_up))
         probe = runner.probe()  # refuses a teacher with tools of its own before anything is written
         provenance = {
             **_base_provenance(args, store, system, families, selection),
@@ -614,6 +618,8 @@ def _acp_run(args: argparse.Namespace, store: SnapshotStore, chosen, system: Sys
             "temperature": None,
             "max_tokens": None,
             "teacher": {**probe, "declared": declared},
+            # Not part of the resume identity: it differs between the run that absorbed the init and its resumes.
+            **({"teacher_warm_up": runner.warm_up_report} if runner.warm_up_report else {}),
         }
         config = BatchConfig(args.out, 1, runner_config)
         summary = run_batch(store, chosen, None, system, oracle, config, provenance, args.label or runner.model_id,

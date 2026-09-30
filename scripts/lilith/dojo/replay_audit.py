@@ -8,6 +8,8 @@ the replay resolver against the receipt's snapshot and classify the miss:
                    input schema (`replay_match`): the current replay answers it from recorded bytes;
 - (b) unrecorded   a genuinely unrecorded query: the tool was never recorded in that snapshot, or
                    it was recorded only for other identifiers (same argument keys, other values);
+- (d) by design    a free-form query tool (`find`, `seshat_search`, ...): not replayable in the dojo,
+                   identically for every arm;
 - (c) other        recorded tool, but the argument shape differs in a way that is not an
                    equivalence (a filter the recorder did not apply, a larger page than was
                    recorded, a missing scope argument, an object the local git clone lacks).
@@ -30,12 +32,13 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dojo.replay_match import recorded_shape, resolve_recorded_read, resolve_ref
-from dojo.replay_server import ANIMA_READ_TOOLS, AncestryOracle, GitAncestryOracle
+from dojo.replay_server import ANIMA_READ_TOOLS, NOT_REPLAYABLE_ANIMA_TOOLS, AncestryOracle, GitAncestryOracle
 from dojo.snapshot import MAIN_REF, Snapshot, SnapshotStore
 
 CLASS_EQUIVALENT = "a"
 CLASS_UNRECORDED = "b"
 CLASS_OTHER = "c"
+CLASS_BY_DESIGN = "d"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -61,11 +64,15 @@ def classify(snapshot: Snapshot, server: str, tool: str, arguments: Mapping[str,
     contract = snapshot.tool_contract()
     if contract is not None:
         schema = next((t.get("inputSchema") for t in contract[0] if t.get("name") == tool), None)
+    if tool in NOT_REPLAYABLE_ANIMA_TOOLS:
+        return Miss(server, tool, keys, "not-replayable", CLASS_BY_DESIGN, "free-form query")
     old = recorded_shape(snapshot, tool) if tool in ANIMA_READ_TOOLS else "tool-not-recorded"
     if tool in ANIMA_READ_TOOLS:
         found = resolve_recorded_read(snapshot, tool, schema, arguments)
         if found is not None:
             return Miss(server, tool, keys, old, CLASS_EQUIVALENT, ", ".join(found.match.rules))
+        if old == "tool-not-recorded":  # an allowlisted read this snapshot (recorded before the tool surface grew) never made
+            return Miss(server, tool, keys, old, CLASS_UNRECORDED, "tool never recorded in this snapshot")
         recorded_keys = {tuple(sorted(k for k, v in r.args.items() if v is not None)) for r in snapshot.by_call(tool)}
         if keys in recorded_keys:
             return Miss(server, tool, keys, old, CLASS_UNRECORDED, "identifier value not recorded")
@@ -115,7 +122,7 @@ def render(name: str, groups: collections.Counter, errors: int, total: int) -> s
     by_class = collections.Counter()
     for group, n in groups.items():
         by_class[group[4]] += n
-    lines += ["", "Totals: " + ", ".join(f"({k}) {by_class[k]}" for k in "abc"), ""]
+    lines += ["", "Totals: " + ", ".join(f"({k}) {by_class[k]}" for k in "abcd"), ""]
     return "\n".join(lines)
 
 

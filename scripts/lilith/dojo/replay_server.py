@@ -63,7 +63,30 @@ ANIMA_READ_TOOLS: frozenset[str] = frozenset({
     "list_changes",
     "get_project_ci_status",
     "get_scheduling_state",
+    "list_projects",
+    "get_plan",
+    "get_work_item_by_id",
+    "get_work_item_forensics",
+    "seshat_status",
+    "list_prompts",
+    "list_workflows",
+    "stranded_work_items",
+    "lane_occupancy",
+    "overdue_ci_dispatches",
 })
+
+# Free-form query tools. Their answer depends on the query text and on a live index (ripgrep over the
+# repository, Seshat's embeddings); a snapshot holds no answer to an arbitrary query, so the replay
+# answers every call with the same structured "not replayable" error, for every arm. They stay in
+# `tools/list` (the recorded contract is served verbatim); see README "Free-form query tools".
+NOT_REPLAYABLE_ANIMA_TOOLS: frozenset[str] = frozenset({
+    "find",
+    "seshat_search",
+    "seshat_wish",
+    "search_documents",
+    "search_library",
+})
+NOT_REPLAYABLE_REASON = "not-replayable"
 
 JSONRPC_METHOD_NOT_FOUND = -32601
 JSONRPC_INVALID_PARAMS = -32602
@@ -303,6 +326,13 @@ class ReplayServer(_McpServer):
         return name in ANIMA_READ_TOOLS or self.profile.server_tier(self.name, name) is Tier.T0_READ
 
     def call(self, name: str, arguments: Mapping[str, Any]) -> tuple[ToolReceipt, Any, bool]:
+        if name in NOT_REPLAYABLE_ANIMA_TOOLS:
+            payload = {"error": "not replayable in the dojo", "reason": NOT_REPLAYABLE_REASON, "tool": name,
+                       "arguments": dict(arguments), "snapshot": self.snapshot.id,
+                       "detail": "a free-form query over a live index: the recording holds no answer to it"}
+            receipt = self._issue(name, arguments, payload, sha256_hex(canonical_json(payload)), ReceiptSource.ERROR,
+                                  error_reason=NOT_REPLAYABLE_REASON)
+            return receipt, payload, True
         if self.is_read(name):
             found = None
             if name in ANIMA_READ_TOOLS:

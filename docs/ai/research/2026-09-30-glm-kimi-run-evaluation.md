@@ -337,6 +337,15 @@ These are the larger levers. Each needs its own WI.
 | D-H | `_akh/usage` delta for session-only akhs | akhomed ACP usage |
 | Roman render | OpenBao section present in rendered TOMLs but in no repo source (twice in vesta's); vesta's "no filesystem or shell tools" contradicts its grants | `deploy/roman-mini/roles/*`, render |
 
+### 6.1 Status of the dojo follow-ups (branch `fix/lilith-dojo-arm-parity`, Anima WI C4 01a0e270-475e-74d0-9701-c1806eab79d0)
+
+| Mode | Change |
+|---|---|
+| D-E | Both arms count the cap in model turns (default 20, answer turn included); the teacher's exact count is `_akh/usage.turns`, the live cancel is derived from the ACP stream (`acp_teacher.RoundCounter`). |
+| D-D | `stranded_work_items`, `lane_occupancy`, `overdue_ci_dispatches`, `session_lease_would_reclaim`, `witness_gap_distribution`, `resolve_project_by_git_remote` and the Runpod read tools are t0-read. |
+| D-A, D-B | The recorder captures `list_projects`, `get_plan`, `get_work_item_by_id`, `get_work_item_forensics`, `seshat_status`, `list_prompts`, `list_workflows` and the three diagnostics (future snapshots). Free-form query tools answer a structured `not-replayable` error in both arms. |
+| Teacher memory | A two-prompt warm-up absorbs the akh's one-time init before the memory baseline; a per-turn write or any triple write still refuses the run. |
+
 ## 7. Dojo A/B plan (do not run before the preconditions hold)
 
 **Goal.** Measure whether the guidance layer changes the teacher's tool discipline with GLM-5.3,

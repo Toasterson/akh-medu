@@ -77,6 +77,10 @@ _TOOL_ID = re.compile(r"^(?P<name>.+)_(?P<n>\d+)$")
 # How akhomed renders `AkhMessage::Error` as a message chunk (src/acp/mod.rs `to_session_update`).
 _AKH_ERROR = re.compile(r"^\s*error\[[^\]]+\]:")
 
+WARM_UP_PROMPT = "Reply with the single word: ready. Do not call any tool."
+# Symbols listed per warm-up report: labels only, so a one-time init is named without dumping memory.
+WARM_UP_LABELS_SHOWN = 20
+
 PROMPT_PREAMBLE = """\
 The two sections below are your complete instructions for this session. The first is your system
 prompt, the second is the task. Use only the tools listed for this session.
@@ -309,6 +313,62 @@ class AcpTeacherConfig:
     # The library default is the self-contained placement, which needs nothing from the akh's
     # config; the CLI defaults to AKH_SYSTEM and verifies the akh first (`verify_prompt_parity`).
     placement: PromptPlacement = PromptPlacement.SESSION_TURN
+    # Two throwaway tool-less prompts before the memory baseline (`AcpEpisodeRunner.warm_up`). The
+    # CLI turns it on (`--no-warm-up` off); the library default leaves the akh untouched.
+    warm_up: bool = False
+
+
+# The echo akhomed sends after every tool call: `AkhMessage::ToolResult` becomes an agent thought
+# chunk `[<tool>:ok|failed] <output>` (src/acp/mod.rs `to_session_update`). It is tool output, not
+# model output, so it never marks the start of a new model request.
+_TOOL_ECHO = re.compile(r"^\[[^\]\s:]+:(?:ok|failed)\] ")
+_TERMINAL_STATUSES = frozenset({"completed", "failed"})
+
+
+@dataclasses.dataclass
+class RoundCounter:
+    """Model turns that asked for tools, derived from the ACP stream (D-E in
+    docs/ai/research/2026-09-30-glm-kimi-run-evaluation.md).
+
+    The in-process arm's cap counts model turns. ACP has no round boundary of its own, and
+    `_akh/usage` is not a live source (it answers `stale` with no usage while the agent is busy, and read 0
+    in 7 of 9 smoke episodes: run evaluation D-H), so the live count is derived from the stream. akhomed runs one model request, then
+    executes that round's tool calls one after the other (`src/agent/agentic_chat.rs`), so:
+
+    - the calls of one round arrive back to back, with only tool output between them (their
+      completion updates and the `[tool:ok]` echo thought);
+    - a later model request streams thinking or answer text first. Any chunk that is not a tool echo,
+      after the previous call started, therefore opens a new round.
+
+    A model that emits no thinking and no text before its calls would merge two rounds: the live count
+    is a lower bound, so it never cancels early. The exact figure is the akh's own `turns` counter
+    (`_akh/usage`), read after the turn; the episode verdict uses that when the akh reports it.
+    """
+
+    limit: int
+    rounds: int = 0
+    _open: set[str] = dataclasses.field(default_factory=set)
+    _fresh: bool = True  # model output arrived since the last call started
+
+    def output(self, text: str, *, thought: bool) -> bool:
+        """A message or thought chunk. Returns True when the akh has begun a model request beyond
+        the cap (the previous round's calls all finished and the model is speaking again)."""
+        if not text or (thought and _TOOL_ECHO.match(text)):
+            return False
+        self._fresh = True
+        return self.rounds >= self.limit and not self._open
+
+    def call_started(self, call_id: str) -> bool:
+        """A `tool_call` update. Returns True when it belongs to a round beyond the cap."""
+        if self._fresh or self.rounds == 0:
+            self.rounds += 1
+            self._fresh = False
+        self._open.add(call_id)
+        return self.rounds > self.limit
+
+    def call_updated(self, call_id: str, status: object) -> None:
+        if status in _TERMINAL_STATUSES:
+            self._open.discard(call_id)
 
 
 @dataclasses.dataclass
@@ -321,6 +381,7 @@ class _TurnState:
     violations: list[str] = dataclasses.field(default_factory=list)
     permissions: list[dict] = dataclasses.field(default_factory=list)
     capped: bool = False  # the runner cancelled the turn at its round cap
+    counter: RoundCounter = dataclasses.field(default_factory=lambda: RoundCounter(limit=0))
 
     @property
     def answer(self) -> str:
@@ -353,6 +414,7 @@ class AcpEpisodeRunner:
         self.model_id = f"akh:{config.akh}"
         self.endpoint_host = config.endpoint_host
         self._memory_baseline: tuple[int, int] | None = None
+        self.warm_up_report: dict | None = None  # what `probe` measured; provenance records it beside the teacher
 
     # -- EpisodeRunner -----------------------------------------------------------------------------
 
@@ -401,14 +463,16 @@ class AcpEpisodeRunner:
             client = AcpClient(channel, self.secret, self.config.rpc_timeout_s)
             self._initialize(client)
             before = self._preflight(client)
-            usage_before = self._usage(client)
+            usage_before, turns_before = self._usage(client)
             with self.gateway.open(broker) as episode_tools:
-                turn, started, turn_ms, stop = self._turn(client, episode_tools, prompt, allowed)
-                usage_after = self._usage(client)
+                turn, started, turn_ms, stop = self._turn(client, episode_tools.acp_mcp_servers(),
+                                                          self._prompt_blocks(prompt), allowed)
+                usage_after, turns_after = self._usage(client)
                 self._postflight(client, before)
+                reported = (turns_after - turns_before) if turns_before is not None and turns_after is not None else None
                 used = Usage(max(0, usage_after.prompt_tokens - usage_before.prompt_tokens),
                              max(0, usage_after.completion_tokens - usage_before.completion_tokens), 0)
-                self._assemble(spec, episode_tools, turn, started, turn_ms, stop, used, now, trace, steps)
+                self._assemble(spec, episode_tools, turn, started, turn_ms, stop, used, reported, now, trace, steps)
         finally:
             channel.close()
 
@@ -420,6 +484,8 @@ class AcpEpisodeRunner:
         try:
             client = AcpClient(channel, self.secret, self.config.rpc_timeout_s)
             agent_info = self._initialize(client)
+            if self.config.warm_up and self.warm_up_report is None:
+                self.warm_up_report = self._warm_up(client)
             symbols, triples = self._preflight(client)
         finally:
             channel.close()
@@ -478,12 +544,68 @@ class AcpEpisodeRunner:
                 f"{self._memory_baseline} -> {counts}; an earlier episode's evidence could reach this one")
         return counts
 
-    def _usage(self, client: AcpClient) -> Usage:
-        """The akh's cumulative model usage (`_akh/usage`; the prompt response carries none).
-        Episodes run one at a time, so the difference across one turn is that turn's usage."""
+    def _warm_up(self, client: AcpClient) -> dict:
+        """Absorb a one-time initialisation, then prove it was one-time.
+
+        The first prompt an akhomed process serves for a workspace can intern a few symbols (the
+        2026-09-30 abort: 515 -> 517 symbols, 473 triples, on the first episode after a core restart;
+        nine episodes on a long-lived process moved nothing). Two identical tool-less prompts run
+        before the baseline is taken:
+
+        - triples must not change on either, ever;
+        - symbols may grow on the first, and only the first: the second must leave the memory exactly
+          as the first left it, so anything that grew is a one-time init and not a per-turn write.
+
+        The isolation check between and across episodes stays exact afterwards. The report names the
+        interned symbols by label (`_akh/symbols/list`, labels only) so the init is evidence, not a
+        guess."""
+        before = self._memory(client)
+        known = self._symbol_labels(client)
+        counts = [before]
+        for n in (1, 2):
+            turn, _, _, stop = self._turn(client, [], [{"type": "text", "text": WARM_UP_PROMPT}], frozenset())
+            if stop.get("stopReason") != "end_turn" or _AKH_ERROR.match(turn.answer):
+                raise AcpTransportError(
+                    f"the warm-up prompt {n} did not end normally (stopReason {stop.get('stopReason')!r}"
+                    + (f": {turn.answer[:200]}" if turn.answer else "") + ")")
+            counts.append(self._memory(client))
+            if counts[-1][1] != counts[-2][1]:
+                raise IsolationRefusal(
+                    f"akh {self.config.akh!r} wrote a triple during warm-up prompt {n}: triples "
+                    f"{counts[-2][1]} -> {counts[-1][1]}; a teacher may never write to its memory")
+        if counts[2] != counts[1]:
+            raise IsolationRefusal(
+                f"akh {self.config.akh!r} memory kept changing across two identical warm-up prompts (symbols, "
+                f"triples) {counts[1]} -> {counts[2]}: that is a per-turn write, not a one-time init, so an "
+                "episode's evidence could reach the next one")
+        labels = self._symbol_labels(client)
+        interned = sorted(labels - known) if known is not None and labels is not None else None
+        return {"prompt": WARM_UP_PROMPT, "prompts": 2, "before": {"symbols": before[0], "triples": before[1]},
+                "after": {"symbols": counts[2][0], "triples": counts[2][1]},
+                "interned_symbols": counts[1][0] - before[0],
+                "interned_labels": None if interned is None else interned[:WARM_UP_LABELS_SHOWN]}
+
+    def _symbol_labels(self, client: AcpClient) -> set[str] | None:
+        """Labels of every symbol in the akh (`_akh/symbols/list`), or None when it is not offered."""
+        try:
+            total = self._memory(client)[0]
+            listed = client.request("_akh/symbols/list", {"workspace": self.config.akh, "limit": total + 64}) or {}
+        except (AcpRpcError, IsolationRefusal):
+            return None
+        symbols = listed.get("symbols")
+        if not isinstance(symbols, list):
+            return None
+        return {str(s.get("label")) for s in symbols if isinstance(s, Mapping)}
+
+    def _usage(self, client: AcpClient) -> tuple[Usage, int | None]:
+        """The akh's cumulative model usage (`_akh/usage`; the prompt response carries none) and its
+        cumulative model-turn count (`turns`: one per model request; None when the akh reports
+        none). Episodes run one at a time, so the difference across one turn is that turn's."""
         listed = client.request("_akh/usage", {"workspace": self.config.akh}) or {}
         usage = listed.get("usage") or {}
-        return Usage(_int(usage.get("prompt_tokens")), _int(usage.get("completion_tokens")), 0)
+        turns = usage.get("turns")
+        return (Usage(_int(usage.get("prompt_tokens")), _int(usage.get("completion_tokens")), 0),
+                turns if isinstance(turns, int) and not isinstance(turns, bool) else None)
 
     def _postflight(self, client: AcpClient, before: tuple[int, int]) -> None:
         after = self._memory(client)
@@ -499,17 +621,36 @@ class AcpEpisodeRunner:
             raise IsolationRefusal(f"akh {self.config.akh!r} did not report its memory size (`_akh/health`)")
         return symbols, triples
 
-    def _turn(self, client: AcpClient, episode_tools: EpisodeTools, prompt: str,
+    def _prompt_blocks(self, prompt: str) -> list[dict]:
+        """The `session/prompt` content for one episode, by placement."""
+        if self.config.placement is PromptPlacement.AKH_SYSTEM:
+            return [{"type": "text", "text": prompt}]  # exactly the parent's user message
+        return [{"type": "text", "text": PROMPT_PREAMBLE},
+                {"type": "text", "text": "# System prompt\n\n" + self.system.text},
+                {"type": "text", "text": "# Task\n\n" + prompt}]
+
+    def _turn(self, client: AcpClient, mcp_servers: list, blocks: list[dict],
               allowed: frozenset[str]) -> tuple[_TurnState, float, int, Mapping[str, Any]]:
         created = client.request("session/new", {
             "cwd": f"akh-ws:{self.config.akh}",
-            "mcpServers": episode_tools.acp_mcp_servers(),
+            "mcpServers": mcp_servers,
             "_meta": {"akh/workspace": self.config.akh},
         }) or {}
         session_id = created.get("sessionId")
         if not isinstance(session_id, str) or not session_id:
             raise AcpTransportError("session/new returned no sessionId")
-        state = _TurnState()
+        state = _TurnState(counter=RoundCounter(limit=self.config.runner.max_rounds))
+
+        def cap_turn() -> None:
+            # The in-process loop's round cap, in model turns: the akh made (or is making) a
+            # request past `max_rounds`, so the parent could not have read this far.
+            if state.capped:
+                return
+            state.capped = True
+            try:
+                client.notify("session/cancel", {"sessionId": session_id})
+            except OSError:
+                pass
 
         def cancel(reason: str) -> None:
             state.violations.append(reason)
@@ -524,24 +665,27 @@ class AcpEpisodeRunner:
             update = params.get("update") or {}
             kind = update.get("sessionUpdate")
             if kind == "agent_message_chunk":
-                state.segments[-1].append(_text(update.get("content")))
+                text = _text(update.get("content"))
+                state.segments[-1].append(text)
+                if state.counter.output(text, thought=False):
+                    cap_turn()
             elif kind == "agent_thought_chunk":
-                state.reasoning.append(_text(update.get("content")))
+                text = _text(update.get("content"))
+                state.reasoning.append(text)
+                if state.counter.output(text, thought=True):
+                    cap_turn()
+            elif kind == "tool_call_update":
+                state.counter.call_updated(str(update.get("toolCallId") or ""), update.get("status"))
             elif kind == "tool_call":
                 call_id = str(update.get("toolCallId") or "")
                 name = tool_name_of(call_id, allowed)
                 state.tool_calls.append({"id": call_id, "name": name, "title": update.get("title")})
                 state.segments.append([])
+                over = state.counter.call_started(call_id)
                 if name not in allowed:
                     cancel(f"the akh started tool {name!r}, which is not a replay tool")
-                elif len(state.tool_calls) > self.config.runner.max_rounds and not state.capped:
-                    # The in-process loop's round cap, counted in tool calls (one or more per round),
-                    # so the teacher never gets more reads than the parent could have made.
-                    state.capped = True
-                    try:
-                        client.notify("session/cancel", {"sessionId": session_id})
-                    except OSError:
-                        pass
+                elif over:
+                    cap_turn()
 
         def on_request(method: str, params: Mapping[str, Any]) -> Any:
             if method == "session/request_permission":
@@ -554,12 +698,6 @@ class AcpEpisodeRunner:
                 return {"outcome": {"outcome": "cancelled"}}
             raise _Refuse(f"{method} is not offered by the dojo client")
 
-        if self.config.placement is PromptPlacement.AKH_SYSTEM:
-            blocks = [{"type": "text", "text": prompt}]  # exactly the parent's user message
-        else:
-            blocks = [{"type": "text", "text": PROMPT_PREAMBLE},
-                      {"type": "text", "text": "# System prompt\n\n" + self.system.text},
-                      {"type": "text", "text": "# Task\n\n" + prompt}]
         started = self._clock()
         try:
             response = client.request("session/prompt", {"sessionId": session_id, "prompt": blocks},
@@ -577,10 +715,10 @@ class AcpEpisodeRunner:
         return state, started, turn_ms, response
 
     def _assemble(self, spec: EpisodeSpec, episode_tools: EpisodeTools, turn: _TurnState, started: float,
-                  turn_ms: int, stop: Mapping[str, Any], used: Usage, now: int, trace: RunTrace,
-                  steps: list[StepRecord]) -> None:
+                  turn_ms: int, stop: Mapping[str, Any], used: Usage, reported_turns: int | None, now: int,
+                  trace: RunTrace, steps: list[StepRecord]) -> None:
         completion = used.completion_tokens
-        trace.rounds = len(turn.tool_calls) + 1
+        trace.rounds, trace.rounds_source = model_turns(turn, reported_turns)
         trace.latency_ms = turn_ms
         trace.usage = used
         previous = started
@@ -612,9 +750,16 @@ class AcpEpisodeRunner:
             **({"_meta": stop.get("_meta")} if stop.get("_meta") else {}),
         })
         reason = stop.get("stopReason")
+        cap = self.config.runner.max_rounds
         if turn.capped:
             trace.answer_status = "round-cap"
-            trace.answer_notes.append(f"cancelled after {self.config.runner.max_rounds} tool calls (the round cap)")
+            trace.answer_notes.append(f"cancelled beyond {cap} model turns (the round cap; {trace.rounds_source} count)")
+            return
+        if reason == "end_turn" and trace.rounds > cap:
+            # The in-process loop gives the model `cap` turns including the answer. This akh needed
+            # more (its own count, read after the turn), so the parent would have been cut off.
+            trace.answer_status = "round-cap"
+            trace.answer_notes.append(f"answered on model turn {trace.rounds} (the round cap is {cap}; {trace.rounds_source} count)")
             return
         if reason == "end_turn" and _AKH_ERROR.match(turn.answer) and not parse_answer(turn.answer).objects:
             # The akh reports a provider failure as an `error[<code>]: ...` message chunk and still
@@ -632,6 +777,19 @@ class AcpEpisodeRunner:
         raise AcpTransportError(f"the teacher turn ended with stopReason {reason!r}"
                                 + (f" ({json.dumps(stop.get('_meta'))[:200]})" if stop.get("_meta") else "")
                                 + (f": {turn.answer[:300]}" if turn.answer else ""))
+
+
+def model_turns(turn: _TurnState, reported: int | None) -> tuple[int, str]:
+    """Model turns this ACP prompt took, and where the figure came from.
+
+    `reported` is the difference of the akh's own `turns` counter across the prompt (exact: one per
+    model request). It is used when present and not below what the stream showed; otherwise the
+    figure is derived: the rounds that asked for tools, plus the answer turn unless the runner cut the
+    turn off first."""
+    observed = turn.counter.rounds
+    if reported is not None and reported >= observed:
+        return reported, "reported"
+    return observed + (0 if turn.capped else 1), "derived"
 
 
 def _text(content: Any) -> str:

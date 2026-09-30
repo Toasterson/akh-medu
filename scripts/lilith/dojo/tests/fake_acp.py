@@ -33,6 +33,13 @@ class PeerState:
     triples: int = 20
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    grow_first_prompt: int = 0   # symbols the first served prompt interns (a one-time init)
+    grow_each_prompt: int = 0    # symbols every served prompt interns (a per-turn write)
+    triples_each_prompt: int = 0
+    symbols_list: bool = True    # answer `_akh/symbols/list`
+    interned: list[str] = dataclasses.field(default_factory=list)
+    prompts_served: int = 0
+    turns: int | None = None    # the akh's cumulative `usage.turns`; None = the akh reports no turn count
     token: str = TOKEN
 
 
@@ -47,6 +54,7 @@ class ScriptContext:
         self.session = session
         self.prompt_blocks = prompt
         self.seen: list[str] = []  # every tool result text the "model" read
+        self.model_turns = 1  # model requests this prompt costs (a script that batches calls sets it)
 
     @property
     def prompt_text(self) -> str:
@@ -252,7 +260,17 @@ class FakeAkhomed:
             elif method == "_akh/usage":
                 conn.send({"jsonrpc": "2.0", "id": rid, "result": {"workspace": params.get("workspace"), "stale": False,
                     "usage": {"prompt_tokens": self.state.prompt_tokens,
-                              "completion_tokens": self.state.completion_tokens}}})
+                              "completion_tokens": self.state.completion_tokens,
+                              **({} if self.state.turns is None else {"turns": self.state.turns})}}})
+            elif method == "_akh/symbols/list":
+                if not self.state.symbols_list:
+                    conn.send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "not offered"}})
+                    continue
+                base = self.state.symbols - len(self.state.interned)
+                labels = [f"base-{i}" for i in range(base)] + list(self.state.interned)
+                conn.send({"jsonrpc": "2.0", "id": rid, "result": {
+                    "count": len(labels), "returned": min(len(labels), params.get("limit", 100)),
+                    "symbols": [{"label": label} for label in labels[: params.get("limit", 100)]]}})
             elif method == "session/new":
                 session = {"id": f"s{len(self.sessions) + 1}", **params}
                 self.sessions.append(session)
@@ -261,9 +279,17 @@ class FakeAkhomed:
                 session = next(s for s in self.sessions if s["id"] == params["sessionId"])
                 ctx = ScriptContext(self, conn, session, params["prompt"])
                 self.contexts.append(ctx)
+                self.state.prompts_served += 1
+                grown = (self.state.grow_first_prompt if self.state.prompts_served == 1 else 0) + self.state.grow_each_prompt
+                for _ in range(grown):
+                    self.state.symbols += 1
+                    self.state.interned.append(f"interned-{self.state.symbols}")
+                self.state.triples += self.state.triples_each_prompt
                 outcome = self.script(ctx)
                 self.state.prompt_tokens += 1000
                 self.state.completion_tokens += 250
+                if self.state.turns is not None:
+                    self.state.turns += ctx.model_turns
                 stop = outcome if isinstance(outcome, str) else "end_turn"
                 conn.send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": stop}})
             else:

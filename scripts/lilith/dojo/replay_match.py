@@ -22,7 +22,10 @@ next to the requested and the recorded arguments):
                               present and empty) and holds at most `n` items, or
                             * the recorded response has a next-page token and exactly `n`
                               items: a page is full iff a next page exists, so the server's
-                              page size *is* `n`.
+                              page size *is* `n`, or
+                            * the recorded response is a token-less single listing that the
+                              recorder marked `complete` (it got the same bytes for a much larger
+                              page) and holds at most `n` items (`list_projects`).
                             A smaller `n` (would truncate) or a larger `n` on a partial
                             listing (would return more than was recorded) is not equivalent
                             and stays an error.
@@ -143,12 +146,18 @@ def _next_page_key(payload: Mapping[str, Any]) -> str | None:
     return None
 
 
-def page_size_satisfied(payload: Any, size: int) -> bool:
-    """Would the live tool, asked for `size` items, have returned exactly this recorded response?"""
+def page_size_satisfied(payload: Any, size: int, complete: bool = False) -> bool:
+    """Would the live tool, asked for `size` items, have returned exactly this recorded response?
+
+    `complete` is the recorder's own proof that a token-less listing was not truncated (it asked for
+    a page larger than the answer and got the same bytes); without it a listing that has no
+    next-page key is not provably complete."""
     if not isinstance(payload, Mapping) or isinstance(size, bool) or size < 1:
         return False
     lists = [v for v in payload.values() if isinstance(v, list)]
     token_key = _next_page_key(payload)
+    if complete and token_key is None and len(lists) == 1:
+        return len(lists[0]) <= size
     if len(lists) != 1 or token_key is None:
         return False  # not one cursor-paginated listing: completeness is unknowable
     count = len(lists[0])
@@ -175,7 +184,8 @@ def resolve_recorded_read(snapshot: Snapshot, name: str, input_schema: Mapping[s
         key = sized[0]
         rest = {k: v for k, v in normalised.items() if k != key}
         response = snapshot.find(name, rest)
-        if response is not None and page_size_satisfied(snapshot.load_object(response.sha256), int(normalised[key])):
+        if response is not None and page_size_satisfied(snapshot.load_object(response.sha256), int(normalised[key]),
+                                                        bool(response.complete)):
             return _read(snapshot, response, ArgumentMatch(
                 requested, dict(response.args), (*rules, f"page-size-satisfied:{key}={int(normalised[key])}")))
     return None

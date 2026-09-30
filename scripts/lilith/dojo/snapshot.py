@@ -126,6 +126,8 @@ class RecordedResponse:
     sha256: str
     # Additive since multi-project capture; absent in older snapshots (all Akh-Medu).
     project_id: str | None = None
+    # Recorder proof that a token-less listing was not truncated (see `cos_recorder.ResponseRecord`).
+    complete: bool | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -228,7 +230,8 @@ class Snapshot:
         out = []
         for cname, cresult in sorted(self.manifest.get("collectors", {}).items()):
             for r in cresult.get("responses", []):
-                out.append(RecordedResponse(cname, r["call"], r.get("args") or {}, r["sha256"], r.get("project_id")))
+                out.append(RecordedResponse(cname, r["call"], r.get("args") or {}, r["sha256"], r.get("project_id"),
+                                              r.get("complete")))
         return tuple(out)
 
     @cached_property
