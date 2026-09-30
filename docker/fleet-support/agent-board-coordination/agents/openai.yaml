@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Board Coordination"
+  short_description: "Coordinate agents through typed board messages"
+  default_prompt: "Use $agent-board-coordination to coordinate this work through Agent Board."
