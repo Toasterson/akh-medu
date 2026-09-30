@@ -1,0 +1,17 @@
+{
+  "source_repository": "Toasterson/talos",
+  "source_directory": "clusters/archibald/akh-platform",
+  "files_sha256": {
+    "relay.Dockerfile": "f35a0290a52509ac8656621ec8e415944ad122cc165786a8e518aaf5d9a2ed6b",
+    "workspace-build-inputs.json": "9363324a0ac946feac41a7a311b8c29fbfa9e3d46280daec948ef8ddc27ada8b",
+    "workspace.Dockerfile": "6e7c984fcbb4f211bde12b07fff8cb7dd7ca2efdfd676dea640aa276f272fa7c",
+    "rust-tool": "eb69ad4baf63ea0c1d6955c5eeae67eae08209ae2017cdf77ac2ec337eb44477",
+    "agent-board-coordination/SKILL.md": "8dba500965f04e327ed766de72c175ce70724d362a8b4cd6c1cc72015ea5746c",
+    "agent-board-coordination/references/api.md": "83af6ff28f25f405ec4ca86d5525b43c093a9b9c9592a093aa303282e7fcdace",
+    "agent-board-coordination/references/agent-secrets.md": "b8b67aeca20009ad0475e7b19e16b5eb5932a26e338e9944e91f3d06c8afd1c1",
+    "agent-board-coordination/references/scenarios.md": "34478155a11160beba152293cfcf5b23142918f4a35c67e29b5bd2b848d87fa1",
+    "agent-board-coordination/agents/openai.yaml": "7ed77798ca674dcde0936f03b7f988bd69cb4fb9e63d1b7f8d5a97b95c0de6d4",
+    "agent-board-coordination/scripts/board_request.py": "8050f0b2c7fcc3ea80d5de9620c08e73becb77a8f80ac31158207101cad721e7"
+  },
+  "homelab_source_commit": "f17aa7a76b27bcba198cf2afbd34e65c82e95a11"
+}
