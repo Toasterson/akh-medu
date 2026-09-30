@@ -53,6 +53,11 @@ pub struct OllamaConfig {
     /// path is intentionally unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Cap on generated tokens per chat request, reasoning included (Ollama
+    /// `options.num_predict`). Set from the akh's model profile (ADR 123);
+    /// `None` (the default) omits it and leaves the server's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_predict: Option<u32>,
 }
 
 /// The `think` values Ollama's `/api/chat` accepts as a string (it also
@@ -77,6 +82,7 @@ impl Default for OllamaConfig {
             keep_alive: default_keep_alive(),
             api_key: None,
             reasoning_effort: None,
+            num_predict: None,
         }
     }
 }
@@ -682,6 +688,9 @@ impl OllamaClient {
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(tools.to_vec());
         }
+        if let Some(limit) = self.config.num_predict {
+            body["options"] = serde_json::json!({ "num_predict": limit });
+        }
         // Reasoning-effort hint (chat path only): Ollama's reasoning cloud models
         // (gpt-oss/glm) and the dedicated Qwen3.8 renderer accept
         // `think: "low"|"medium"|"high"|"max"`. Absent ⇒ model default.
@@ -850,6 +859,9 @@ impl OllamaClient {
         });
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(tools.to_vec());
+        }
+        if let Some(limit) = self.config.num_predict {
+            body["options"] = serde_json::json!({ "num_predict": limit });
         }
         if self.config.reasoning_effort.is_some() {
             if self.capabilities().supports_thinking {

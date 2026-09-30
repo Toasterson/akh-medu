@@ -109,6 +109,12 @@ pub enum ReactorAction {
         /// message after every run (ADR 105 rule 3).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         report_thread: Option<String>,
+        /// Tools this wake always needs (ADR 123). A wake's catalog is
+        /// relevance-scoped to the model profile's `max_tools_per_wake`;
+        /// these tools, and any tool the prompt or exit condition names by
+        /// its registered name, are offered on top of that.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        required_tools: Vec<String>,
     },
     /// Respond to a Djehuty thread event with a real model turn, then post the
     /// final answer back to the originating thread with a stable idempotency
@@ -1156,6 +1162,7 @@ mod tests {
             require_mutation: false,
             exit_condition: String::new(),
             report_thread: None,
+            required_tools: Vec::new(),
         }
     }
 
@@ -1475,6 +1482,7 @@ mod tests {
             require_mutation: false,
             exit_condition: exit_condition.into(),
             report_thread: None,
+            required_tools: Vec::new(),
         }
     }
 
@@ -1511,6 +1519,7 @@ mod tests {
             require_mutation: false,
             exit_condition: String::new(),
             report_thread: Some("not-a-uuid".into()),
+            required_tools: Vec::new(),
         };
         assert!(matches!(
             ReactorSchedule::new("t", "t", ScheduleRule::Once { at: 1 }, bad_thread, 0),

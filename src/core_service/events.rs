@@ -400,6 +400,7 @@ mod tests {
                 require_mutation: false,
                 exit_condition: String::new(),
                 report_thread: None,
+                required_tools: Vec::new(),
             },
             0,
         )

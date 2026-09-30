@@ -1,0 +1,248 @@
+# Model catalog: per-model defaults for an akh's budgets, limits and timeouts (ADR 123).
+#
+# One source of truth for two readers:
+# - akhomed compiles this file in (`src/agent/model_profile.rs`, `ModelCatalog::builtin`) and
+#   resolves each akh's profile at load: per-akh `[model_profile]` override > this catalog's
+#   row for (model, reasoning_effort) > the global default (env var, else the compiled constant).
+# - the Roman renderer (`deploy/roman-mini/full_akh.py`) reads it to document the profile it
+#   renders, so the rendered TOML and the running core agree.
+#
+# Every number here is an ESTIMATE derived in ADR 123 from the sources cited there (vendor docs,
+# Artificial Analysis throughput, ollama.com/pricing on 2026-09-30). Change a value by editing
+# this file, citing the reason in ADR 123's table, and re-rendering the Romans.
+#
+# Row matching (case-insensitive, a trailing `:cloud` tag ignored): an exact `ids` hit wins,
+# otherwise the longest `prefixes` hit. No hit: the global defaults apply unchanged.
+#
+# Fields (all optional; an absent field falls through to the next tier):
+#   max_tokens_per_day   prompt + completion tokens per UTC day for background work (the
+#                        `[autonomy.budget]` governor; subscription credit, not a hard API limit)
+#   max_turns_per_day    background model turns per UTC day
+#   max_tokens_per_wake  prompt + completion tokens one agentic turn may spend before it is
+#                        stopped and forced to answer with what it has
+#   turn_deadline_secs   wall clock of one agentic turn (checked between model rounds)
+#   max_rounds           model rounds (tool-call iterations) per agentic turn
+#   http_timeout_secs    one LLM HTTP request: Ollama = read/idle gap between stream chunks,
+#                        OpenAI-compatible = total request time
+#   max_output_tokens    generated tokens per request, reasoning included (Ollama `num_predict`,
+#                        OpenAI `max_tokens`)
+#   context_window       working context window; never above what the model reports
+#   max_tools_per_wake   relevance-scoped tool count offered to a reactor wake; tools the wake's
+#                        route or prompt names are always kept on top of it
+#
+# `[models.effort.<low|medium|high|max>]` overrides the row for that `reasoning_effort`; the
+# row itself describes the model at its default effort (what an akh without `reasoning_effort`
+# gets).
+
+schema_version = 1
+
+# ── Zhipu GLM on Ollama Cloud ────────────────────────────────────────────────
+# GLM-5.3: 1M context, 128K max output, default effort `max` (thinking always on), about 71 tok/s
+# and a 32 s time to first answer token at max effort (Artificial Analysis). $1.40 / $0.26 cached
+# / $4.40 per M tokens on Ollama Cloud.
+[[models]]
+id = "glm-5.3"
+ids = ["glm-5.3"]
+prefixes = ["glm-5"]
+serving = "ollama-cloud"
+[models.profile]
+max_tokens_per_day = 1_500_000
+max_turns_per_day = 96
+max_tokens_per_wake = 250_000
+turn_deadline_secs = 1_800
+max_rounds = 30
+http_timeout_secs = 300
+max_output_tokens = 32_768
+context_window = 262_144
+max_tools_per_wake = 24
+[models.effort.high]
+turn_deadline_secs = 1_500
+max_rounds = 28
+http_timeout_secs = 240
+max_output_tokens = 24_576
+[models.effort.medium]
+turn_deadline_secs = 1_500
+max_rounds = 28
+http_timeout_secs = 240
+max_output_tokens = 24_576
+[models.effort.low]
+max_tokens_per_wake = 150_000
+turn_deadline_secs = 600
+max_rounds = 16
+http_timeout_secs = 180
+max_output_tokens = 8_192
+
+[[models]]
+id = "glm-5.2"
+ids = ["glm-5.2"]
+serving = "ollama-cloud"
+[models.profile]
+max_tokens_per_day = 1_500_000
+max_turns_per_day = 96
+max_tokens_per_wake = 250_000
+turn_deadline_secs = 1_800
+max_rounds = 30
+http_timeout_secs = 300
+max_output_tokens = 32_768
+context_window = 262_144
+max_tools_per_wake = 24
+
+# GLM-5.3-flash: same window, 44 tok/s and a 48 s time to first answer token (slower than 5.3),
+# about a ninth of the price ($0.15 / $0.03 / $0.50).
+[[models]]
+id = "glm-5.3-flash"
+ids = ["glm-5.3-flash"]
+serving = "ollama-cloud"
+[models.profile]
+max_tokens_per_day = 6_000_000
+max_turns_per_day = 192
+max_tokens_per_wake = 400_000
+turn_deadline_secs = 2_400
+max_rounds = 32
+http_timeout_secs = 300
+max_output_tokens = 24_576
+context_window = 262_144
+max_tools_per_wake = 24
+
+# ── Moonshot Kimi on Ollama Cloud ────────────────────────────────────────────
+# Kimi K3: 1M context (Ollama /api/show 1,048,576), 131,072 default max completion, default
+# effort `max`, about 36 tok/s and a 60 s time to first answer token. The most expensive model
+# on the account: $3.00 / $0.30 / $15.00 per M.
+[[models]]
+id = "kimi-k3"
+ids = ["kimi-k3"]
+prefixes = ["kimi-k3"]
+serving = "ollama-cloud"
+[models.profile]
+max_tokens_per_day = 600_000
+max_turns_per_day = 48
+max_tokens_per_wake = 250_000
+turn_deadline_secs = 3_000
+max_rounds = 40
+http_timeout_secs = 600
+max_output_tokens = 32_768
+context_window = 262_144
+max_tools_per_wake = 32
+[models.effort.high]
+turn_deadline_secs = 2_000
+max_rounds = 30
+http_timeout_secs = 420
+max_output_tokens = 16_384
+[models.effort.medium]
+turn_deadline_secs = 2_000
+max_rounds = 30
+http_timeout_secs = 420
+max_output_tokens = 16_384
+[models.effort.low]
+max_tokens_per_wake = 150_000
+turn_deadline_secs = 900
+max_rounds = 16
+http_timeout_secs = 240
+max_output_tokens = 8_192
+
+# Kimi K2.6 / K2.7-code: 256K context, about 75 tok/s (K2.7-code), thinking always on with no
+# effort control. $0.95 / $0.16-0.19 / $4.00 per M.
+[[models]]
+id = "kimi-k2"
+ids = ["kimi-k2.7-code", "kimi-k2.6"]
+prefixes = ["kimi-k2"]
+serving = "ollama-cloud"
+[models.profile]
+max_tokens_per_day = 1_500_000
+max_turns_per_day = 96
+max_tokens_per_wake = 250_000
+turn_deadline_secs = 1_500
+max_rounds = 30
+http_timeout_secs = 300
+max_output_tokens = 16_384
+context_window = 262_144
+max_tools_per_wake = 24
+
+# ── DeepSeek on Ollama Cloud ─────────────────────────────────────────────────
+# V4-Pro: 1M context, 384K max output, default effort `high`, about 80 tok/s. $1.32 / $0.044 /
+# $3.96 per M at peak, half off-peak.
+[[models]]
+id = "deepseek-v4-pro"
+ids = ["deepseek-v4-pro"]
+prefixes = ["deepseek-v4"]
+serving = "ollama-cloud"
+[models.profile]
+max_tokens_per_day = 1_500_000
+max_turns_per_day = 96
+max_tokens_per_wake = 250_000
+turn_deadline_secs = 1_500
+max_rounds = 32
+http_timeout_secs = 300
+max_output_tokens = 32_768
+context_window = 262_144
+max_tools_per_wake = 24
+[models.effort.max]
+turn_deadline_secs = 2_400
+max_rounds = 40
+http_timeout_secs = 420
+max_output_tokens = 65_536
+[models.effort.low]
+max_tokens_per_wake = 150_000
+turn_deadline_secs = 600
+max_rounds = 16
+http_timeout_secs = 180
+max_output_tokens = 8_192
+
+# V4.1-Flash: 1M context, about 209 tok/s, very verbose but cheap ($0.30 / $0.006 / $1.20).
+[[models]]
+id = "deepseek-v4.1-flash"
+ids = ["deepseek-v4.1-flash", "deepseek-v4-flash"]
+prefixes = ["deepseek-v4.1-flash", "deepseek-v4-flash"]
+serving = "ollama-cloud"
+[models.profile]
+max_tokens_per_day = 5_000_000
+max_turns_per_day = 192
+max_tokens_per_wake = 400_000
+turn_deadline_secs = 900
+max_rounds = 40
+http_timeout_secs = 240
+max_output_tokens = 32_768
+context_window = 262_144
+max_tools_per_wake = 24
+[models.effort.max]
+turn_deadline_secs = 1_200
+max_output_tokens = 65_536
+
+# ── Local models ─────────────────────────────────────────────────────────────
+# Gemma 4 12B, Lilith's parent (ADR 116, ADR 121): llama.cpp llama-server (HIP, Q8_0, 12.7 GB)
+# on hephaistos' 24 GB RX 7900 XTX, two 65,536-token slots. Decode is memory-bound: at most about
+# 75 tok/s on 960 GB/s, about 50 tok/s measured on a comparable 24 GB card. Tokens cost no credit,
+# so the daily cap only bounds GPU time. Small models degrade past about 14 offered tools (ADR 089).
+[[models]]
+id = "gemma-4-12b"
+ids = ["gemma4:12b", "gemma-4-12b", "lilith"]
+prefixes = ["gemma4", "gemma-4"]
+serving = "local"
+[models.profile]
+max_tokens_per_day = 3_000_000
+max_turns_per_day = 96
+max_tokens_per_wake = 150_000
+turn_deadline_secs = 1_200
+max_rounds = 20
+http_timeout_secs = 600
+max_output_tokens = 8_192
+context_window = 49_152
+max_tools_per_wake = 16
+
+# Qwen 3.8 is not on Ollama Cloud (2026-09-30); a local qwen3.8:27b (256K context, about 43 tok/s)
+# is the nearest documented basis.
+[[models]]
+id = "qwen3.8"
+ids = ["qwen3.8:27b"]
+prefixes = ["qwen3.8", "qwen3"]
+serving = "local"
+[models.profile]
+max_tokens_per_day = 3_000_000
+max_turns_per_day = 96
+max_tokens_per_wake = 250_000
+turn_deadline_secs = 1_800
+max_rounds = 30
+http_timeout_secs = 600
+max_output_tokens = 16_384
+context_window = 131_072
+max_tools_per_wake = 20

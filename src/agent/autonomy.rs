@@ -1078,6 +1078,48 @@ impl Default for AutonomyBudget {
     }
 }
 
+/// `[autonomy.budget]` as an akh writes it: each limit optional (ADR 123).
+///
+/// A limit the akh sets is a per-akh override; an absent one comes from the
+/// model catalog row for the akh's model
+/// ([`crate::agent::model_profile`]), else the global default. The resolved
+/// [`AutonomyBudget`] is what the governor enforces.
+///
+/// Unknown keys are rejected when the TOML is loaded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AutonomyBudgetOverride {
+    /// Prompt plus completion tokens per UTC day.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens_per_day: Option<u64>,
+    /// Turns per UTC day.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns_per_day: Option<u32>,
+}
+
+impl AutonomyBudgetOverride {
+    /// Both limits set to `budget`.
+    pub const fn exact(budget: AutonomyBudget) -> Self {
+        Self {
+            max_tokens_per_day: Some(budget.max_tokens_per_day),
+            max_turns_per_day: Some(budget.max_turns_per_day),
+        }
+    }
+
+    /// Whether neither limit is set.
+    pub fn is_empty(&self) -> bool {
+        self.max_tokens_per_day.is_none() && self.max_turns_per_day.is_none()
+    }
+
+    /// The set limits over `base`.
+    pub fn over(self, base: AutonomyBudget) -> AutonomyBudget {
+        AutonomyBudget {
+            max_tokens_per_day: self.max_tokens_per_day.unwrap_or(base.max_tokens_per_day),
+            max_turns_per_day: self.max_turns_per_day.unwrap_or(base.max_turns_per_day),
+        }
+    }
+}
+
 /// A UTC calendar day, as whole days since the Unix epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

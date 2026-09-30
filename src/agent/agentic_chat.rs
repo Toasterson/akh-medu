@@ -141,6 +141,10 @@ pub(crate) enum TurnStop {
     /// failure mode where the model stopped requesting tools but the loop
     /// neither completed nor continued.
     WedgeTimeout,
+    /// A reactor wake spent its per-wake token budget (ADR 123,
+    /// `max_tokens_per_wake`). The turn still ends with a forced synthesis
+    /// of what it gathered.
+    TokenBudget,
 }
 
 /// Protocol-visible outcome of a neural turn.
@@ -165,6 +169,7 @@ impl TurnStop {
             Self::DeclaredButIdle => "no_work",
             Self::ContractUnsatisfied => "contract_unsatisfied",
             Self::WedgeTimeout => "no_progress",
+            Self::TokenBudget => "token_budget",
         }
     }
 
@@ -185,6 +190,7 @@ impl TurnStop {
             TurnStop::WedgeTimeout => {
                 "The turn has been inactive for too long without making progress"
             }
+            TurnStop::TokenBudget => "You have reached the token budget for this wake",
         }
     }
 }
@@ -394,7 +400,16 @@ fn verified_write(tool: &str, args: &Value, success: bool) -> bool {
 /// answers with what it gathered.
 struct RoundBudget {
     hard_max: usize,
+    /// Whether an operator stated the round cap (env var or per-akh
+    /// override); only explicit caps bound autonomous dispatch.
+    rounds_explicit: bool,
     timeout: Duration,
+    /// Whether an operator stated the deadline (see `rounds_explicit`).
+    deadline_explicit: bool,
+    /// Per-wake token budget (ADR 123); `None` outside reactor wakes.
+    token_cap: Option<u64>,
+    /// Prompt + completion tokens this turn has spent so far.
+    tokens_used: u64,
     repeat_limit: usize,
     wedge_timeout: Duration,
     started: Instant,
@@ -416,17 +431,54 @@ impl RoundBudget {
     /// overrides. A roomy window (GLM ~1M, gemma4-12b 262k) earns more rounds to
     /// drill through recalled episodes; a small/unknown one stays conservative.
     fn new(context_window: Option<usize>) -> Self {
-        let scaled = match context_window {
+        let rounds_env = env_usize("AKH_AGENT_MAX_ROUNDS");
+        let deadline_env = env_usize("AKH_AGENT_TURN_TIMEOUT_SECS");
+        Self::with_limits(
+            rounds_env.unwrap_or_else(|| Self::scaled_rounds(context_window)),
+            rounds_env.is_some(),
+            Duration::from_secs(
+                deadline_env
+                    .map(|n| n as u64)
+                    .unwrap_or(DEFAULT_TURN_TIMEOUT_SECS),
+            ),
+            deadline_env.is_some(),
+        )
+    }
+
+    /// The window-scaled round backstop (the global default when neither the
+    /// akh, the catalog nor `AKH_AGENT_MAX_ROUNDS` sets one).
+    fn scaled_rounds(context_window: Option<usize>) -> usize {
+        match context_window {
             Some(w) if w >= 200_000 => 30,
             Some(w) if w >= 32_000 => 20,
             _ => DEFAULT_MAX_ROUNDS,
+        }
+    }
+
+    /// Limits from the akh's resolved model profile (ADR 123), which already
+    /// folded the env vars in as its global-default tier.
+    fn from_profile(
+        profile: &super::model_profile::ResolvedModelProfile,
+        context_window: Option<usize>,
+    ) -> Self {
+        let (hard_max, rounds_explicit) = match &profile.max_rounds {
+            Some(setting) => (setting.value as usize, setting.source.is_explicit()),
+            None => (Self::scaled_rounds(context_window), false),
         };
-        let hard_max = env_usize("AKH_AGENT_MAX_ROUNDS").unwrap_or(scaled);
-        let timeout = Duration::from_secs(
-            env_usize("AKH_AGENT_TURN_TIMEOUT_SECS")
-                .map(|n| n as u64)
-                .unwrap_or(DEFAULT_TURN_TIMEOUT_SECS),
-        );
+        Self::with_limits(
+            hard_max,
+            rounds_explicit,
+            Duration::from_secs(profile.turn_deadline_secs.value),
+            profile.turn_deadline_secs.source.is_explicit(),
+        )
+    }
+
+    fn with_limits(
+        hard_max: usize,
+        rounds_explicit: bool,
+        timeout: Duration,
+        deadline_explicit: bool,
+    ) -> Self {
         let repeat_limit = env_usize("AKH_AGENT_REPEAT_LIMIT").unwrap_or(DEFAULT_REPEAT_LIMIT);
         let wedge_timeout = Duration::from_secs(
             env_usize("AKH_AGENT_WEDGE_TIMEOUT_SECS")
@@ -436,7 +488,11 @@ impl RoundBudget {
         let now = Instant::now();
         Self {
             hard_max,
+            rounds_explicit,
             timeout,
+            deadline_explicit,
+            token_cap: None,
+            tokens_used: 0,
             repeat_limit,
             wedge_timeout,
             started: now,
@@ -451,13 +507,32 @@ impl RoundBudget {
     /// Autonomous work has no implicit elapsed-time or round cutoff. Explicit
     /// operator limits remain supported; repetition and cancellation still stop it.
     fn for_dispatch(mut self) -> Self {
-        if env_usize("AKH_AGENT_MAX_ROUNDS").is_none() {
+        if !self.rounds_explicit {
             self.hard_max = usize::MAX;
         }
-        if env_usize("AKH_AGENT_TURN_TIMEOUT_SECS").is_none() {
+        if !self.deadline_explicit {
             self.timeout = Duration::MAX;
         }
         self
+    }
+
+    /// Cap this turn's token spend (a reactor wake's `max_tokens_per_wake`).
+    fn with_token_cap(mut self, cap: Option<u64>) -> Self {
+        self.token_cap = cap;
+        self
+    }
+
+    /// Never run past `cap` (a wake's reactor lease), whatever the deadline.
+    fn cap_deadline(mut self, cap: Option<Duration>) -> Self {
+        if let Some(cap) = cap {
+            self.timeout = self.timeout.min(cap);
+        }
+        self
+    }
+
+    /// Record the turn's cumulative prompt + completion tokens.
+    fn note_tokens(&mut self, total: u64) {
+        self.tokens_used = total;
     }
 
     /// Whether the turn must end before issuing another model call.
@@ -470,6 +545,8 @@ impl RoundBudget {
             Some(TurnStop::RepeatLoop)
         } else if self.last_request.elapsed() >= self.wedge_timeout {
             Some(TurnStop::WedgeTimeout)
+        } else if self.token_cap.is_some_and(|cap| self.tokens_used >= cap) {
+            Some(TurnStop::TokenBudget)
         } else {
             None
         }
@@ -653,6 +730,61 @@ impl Agent {
         is_autonomous_dispatch: bool,
         conversation_state: &std::sync::Mutex<ConversationState>,
     ) -> Option<AgenticTurnOutcome> {
+        self.run_agentic_turn_scoped(
+            engine,
+            agent_id,
+            user_prompt,
+            prompt_images,
+            sink,
+            cancel,
+            is_autonomous_dispatch,
+            conversation_state,
+            None,
+        )
+    }
+
+    /// Run one reactor wake (ADR 123): the same agentic turn, with the
+    /// catalog relevance-scoped to the model profile's `max_tools_per_wake`
+    /// (the tools `wake` names are always kept) and the turn capped at the
+    /// profile's `max_tokens_per_wake`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_wake_turn(
+        &self,
+        engine: &Engine,
+        agent_id: &str,
+        user_prompt: &str,
+        wake: &super::model_profile::WakeScope,
+        sink: &dyn MessageSink,
+        cancel: &std::sync::atomic::AtomicBool,
+        is_autonomous_dispatch: bool,
+        conversation_state: &std::sync::Mutex<ConversationState>,
+    ) -> Option<AgenticTurnOutcome> {
+        self.run_agentic_turn_scoped(
+            engine,
+            agent_id,
+            user_prompt,
+            &[],
+            sink,
+            cancel,
+            is_autonomous_dispatch,
+            conversation_state,
+            Some(wake),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_agentic_turn_scoped(
+        &self,
+        engine: &Engine,
+        agent_id: &str,
+        user_prompt: &str,
+        prompt_images: &[super::chat_backend::ChatPromptImage],
+        sink: &dyn MessageSink,
+        cancel: &std::sync::atomic::AtomicBool,
+        is_autonomous_dispatch: bool,
+        conversation_state: &std::sync::Mutex<ConversationState>,
+        wake: Option<&super::model_profile::WakeScope>,
+    ) -> Option<AgenticTurnOutcome> {
         // Phase 53g PR 4: a turn whose last provider call got an answer
         // proves the provider works again (e.g. the operator's ACP turn after
         // repairing a credential), so it reopens a closed provider gate.
@@ -666,6 +798,7 @@ impl Agent {
             cancel,
             is_autonomous_dispatch,
             conversation_state,
+            wake,
         );
         if observed.finish() == Some(super::provider_failure::ProviderObservation::Responded) {
             super::provider_failure::note_model_success(engine);
@@ -686,6 +819,7 @@ impl Agent {
         cancel: &std::sync::atomic::AtomicBool,
         is_autonomous_dispatch: bool,
         conversation_state: &std::sync::Mutex<ConversationState>,
+        wake: Option<&super::model_profile::WakeScope>,
     ) -> Option<AgenticTurnOutcome> {
         if let Some(runtime) = &self.agent_runtime {
             return Some(self.run_runtime_turn(
@@ -714,6 +848,9 @@ impl Agent {
         if !backend.available() {
             return None;
         }
+        // ADR 123: the working window is the model's reported window, capped
+        // by the akh's model profile. One read for the whole turn.
+        let context_window = self.working_context_window(backend.capabilities().context_window);
 
         // Explicit control is fail-closed. A malformed directive must not turn
         // into an ordinary interactive turn whose unsupported completion is
@@ -793,6 +930,27 @@ impl Agent {
                 "capping tool catalog (AKH_AGENT_MAX_TOOLS)"
             );
             tools.truncate(cap);
+        } else if let Some(wake) = wake
+            && let Some(k) = self.wake_tool_cap()
+        {
+            // ADR 123: a reactor wake sees the K tools most relevant to its
+            // prompt plus every tool its route or trusted text names, those
+            // first (the compacting manager trims tools from the end).
+            let scoped = scope_wake_catalog(&tools, wake, k, |catalog| {
+                super::organ::retrieve_scoped(catalog, user_prompt, k, Some(engine))
+            });
+            retrieval_scoping_active = scoped.tools.len() < tools.len();
+            tracing::info!(
+                target: "akh::model_profile",
+                agent_id,
+                cap = k,
+                from = tools.len(),
+                offered = scoped.tools.len(),
+                pinned = ?scoped.pinned,
+                unavailable = ?scoped.unavailable,
+                "wake tool catalog relevance-scoped (ADR 123)"
+            );
+            tools = scoped.tools;
         } else if let Some(k) = backend.preferred_tool_count()
             && k < tools.len()
         {
@@ -921,7 +1079,7 @@ impl Agent {
             // metadata for Candle, `/api/show` for Ollama) — e.g. gemma4-12B =
             // 262144, glm-5.2 = 1_000_000 — not a hardcoded guess. Falls back to
             // the default window when capabilities are unknown.
-            let budget = match backend.capabilities().context_window {
+            let budget = match context_window {
                 Some(window) => TokenBudget::new(window, DEFAULT_RESERVED_OUTPUT),
                 None => TokenBudget::default(),
             };
@@ -1033,10 +1191,27 @@ impl Agent {
         // iteration backstop + wall-clock cap + repeat-loop detection — instead of
         // a flat round count. The loop yields *why* it stopped so the turn can end
         // with a forced synthesis rather than a bare cutoff.
-        let mut budget = RoundBudget::new(backend.capabilities().context_window);
+        let mut budget = match &self.model_profile {
+            Some(profile) => RoundBudget::from_profile(profile, context_window),
+            None => RoundBudget::new(context_window),
+        };
         if is_autonomous_dispatch {
             budget = budget.for_dispatch();
         }
+        // ADR 123: a wake's own token budget, metered on this thread (the
+        // daemon's occurrence scope, which charges the daily budget, nests
+        // outside this one).
+        if let Some(wake) = wake {
+            budget = budget
+                .with_token_cap(
+                    self.model_profile
+                        .as_ref()
+                        .and_then(|p| p.max_tokens_per_wake.as_ref())
+                        .map(|s| s.value),
+                )
+                .cap_deadline(wake.lease_secs.map(Duration::from_secs));
+        }
+        let turn_usage = super::llm_metrics::UsageScope::open();
         // Turn-level metrics: track total prompt size and request count for diagnosing
         // pathological latency (work item "turns die quietly", ask 2).
         let mut turn_metrics = super::llm_metrics::TurnMetrics::new();
@@ -1049,7 +1224,7 @@ impl Agent {
         // 32768-token self-hosted vLLM) never sees a request that overshoots
         // it just because a chatty tool (an MCP call returning tens of KB of
         // JSON) ran mid-turn.
-        let token_budget = match backend.capabilities().context_window {
+        let token_budget = match context_window {
             Some(window) => {
                 super::context::TokenBudget::new(window, super::context::DEFAULT_RESERVED_OUTPUT)
             }
@@ -1057,6 +1232,7 @@ impl Agent {
         };
         let token_counter = super::context::HeuristicTokenCounter;
         let stop: TurnStop = loop {
+            budget.note_tokens(turn_usage.usage().total_tokens());
             if let Some(stop) = budget.exhausted() {
                 break stop;
             }
@@ -2001,6 +2177,84 @@ pub(crate) fn ollama_tool_catalog(registry: &ToolRegistry) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+impl Agent {
+    /// The working context window: `reported` (the model's own window) capped
+    /// by the akh's model profile (ADR 123), or `reported` alone without one.
+    pub(crate) fn working_context_window(&self, reported: Option<usize>) -> Option<usize> {
+        match &self.model_profile {
+            Some(profile) => profile.working_context_window(reported),
+            None => reported,
+        }
+    }
+
+    /// How many relevance-scoped tools a reactor wake is offered (ADR 123),
+    /// before the tools it names are added back. `None`: no cap.
+    pub(crate) fn wake_tool_cap(&self) -> Option<usize> {
+        self.model_profile
+            .as_ref()
+            .and_then(|p| p.max_tools_per_wake.as_ref())
+            .map(|s| s.value as usize)
+    }
+}
+
+/// The catalog a reactor wake is offered (ADR 123).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScopedWakeCatalog {
+    /// Pinned tools first, then the relevance-scoped rest.
+    pub(crate) tools: Vec<Value>,
+    /// The pinned tool names that were offered.
+    pub(crate) pinned: Vec<String>,
+    /// Tools the wake's route requires that this akh does not have.
+    pub(crate) unavailable: Vec<String>,
+}
+
+/// Scope `full` for a wake: the tools `wake` pins (route `required_tools`,
+/// then tools its trusted text names), then up to `k` of the others as
+/// ranked by `retrieve` (relevance to the prompt). Pinned tools come first so
+/// that a context manager trimming from the end keeps them; they never count
+/// against `k`. A catalog no larger than `k` plus the pins is returned whole.
+pub(crate) fn scope_wake_catalog(
+    full: &[Value],
+    wake: &super::model_profile::WakeScope,
+    k: usize,
+    retrieve: impl FnOnce(&[Value]) -> Vec<Value>,
+) -> ScopedWakeCatalog {
+    let name_of = |tool: &Value| tool["function"]["name"].as_str().map(str::to_string);
+    let names: Vec<String> = full.iter().filter_map(name_of).collect();
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let wanted = wake.pinned_names(&name_refs);
+    let mut pinned = Vec::new();
+    let mut unavailable = Vec::new();
+    let mut tools: Vec<Value> = Vec::new();
+    for name in wanted {
+        match full
+            .iter()
+            .find(|t| name_of(t).as_deref() == Some(name.as_str()))
+        {
+            Some(tool) => {
+                tools.push(tool.clone());
+                pinned.push(name);
+            }
+            None => unavailable.push(name),
+        }
+    }
+    let rest: Vec<Value> = full
+        .iter()
+        .filter(|t| !name_of(t).is_some_and(|n| pinned.contains(&n)))
+        .cloned()
+        .collect();
+    if rest.len() <= k {
+        tools.extend(rest);
+    } else {
+        tools.extend(retrieve(&rest).into_iter().take(k));
+    }
+    ScopedWakeCatalog {
+        tools,
+        pinned,
+        unavailable,
+    }
 }
 
 /// Re-add manifests named by a completion contract after catalog retrieval or
@@ -3658,6 +3912,169 @@ mod tests {
         assert_eq!(RoundBudget::new(Some(128_000)).hard_max, 20);
         assert_eq!(RoundBudget::new(Some(8_192)).hard_max, DEFAULT_MAX_ROUNDS);
         assert_eq!(RoundBudget::new(None).hard_max, DEFAULT_MAX_ROUNDS);
+    }
+
+    fn resolved_profile(
+        model: &str,
+        overrides: super::super::model_profile::ModelProfile,
+    ) -> super::super::model_profile::ResolvedModelProfile {
+        use super::super::model_profile::*;
+        ResolvedModelProfile::resolve_with_env(
+            ModelCatalog::builtin().unwrap(),
+            &ProfileRequest {
+                akh: "janus",
+                model: Some(model),
+                effort: None,
+                overrides: AkhOverrides {
+                    profile: overrides,
+                    locations: OverrideLocations::default(),
+                },
+                defaults: GlobalDefaults::OLLAMA,
+            },
+            &|_| None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn round_budget_follows_the_model_profile() {
+        use super::super::model_profile::ModelProfile;
+        let glm = resolved_profile("glm-5.3", ModelProfile::default());
+        let b = RoundBudget::from_profile(&glm, Some(262_144));
+        assert_eq!(b.hard_max, 30);
+        assert_eq!(b.timeout, Duration::from_secs(1_800));
+        // Catalog limits are defaults, not operator limits: dispatch lifts them.
+        let d = RoundBudget::from_profile(&glm, Some(262_144)).for_dispatch();
+        assert_eq!(d.hard_max, usize::MAX);
+        assert_eq!(d.timeout, Duration::MAX);
+        // A per-akh override is explicit and still caps dispatch.
+        let pinned = resolved_profile(
+            "glm-5.3",
+            ModelProfile {
+                max_rounds: Some(9),
+                turn_deadline_secs: Some(60),
+                ..ModelProfile::default()
+            },
+        );
+        let d = RoundBudget::from_profile(&pinned, None).for_dispatch();
+        assert_eq!(d.hard_max, 9);
+        assert_eq!(d.timeout, Duration::from_secs(60));
+        // An unknown model keeps the window-scaled backstop.
+        let other = resolved_profile("some-local-model", ModelProfile::default());
+        assert_eq!(
+            RoundBudget::from_profile(&other, Some(8_192)).hard_max,
+            DEFAULT_MAX_ROUNDS
+        );
+        assert_eq!(
+            RoundBudget::from_profile(&other, Some(262_144)).hard_max,
+            30
+        );
+    }
+
+    #[test]
+    fn wake_token_cap_stops_the_turn() {
+        let mut b = RoundBudget::new(None).with_token_cap(Some(1_000));
+        b.note_tokens(999);
+        assert_eq!(b.exhausted(), None);
+        b.note_tokens(1_000);
+        assert_eq!(b.exhausted(), Some(TurnStop::TokenBudget));
+        assert_eq!(TurnStop::TokenBudget.code(), "token_budget");
+        let mut uncapped = RoundBudget::new(None);
+        uncapped.note_tokens(u64::MAX);
+        assert_eq!(uncapped.exhausted(), None, "no cap outside wakes");
+    }
+
+    #[test]
+    fn a_wake_never_outlives_its_reactor_lease() {
+        let b = RoundBudget::new(None).cap_deadline(Some(Duration::from_secs(90)));
+        assert_eq!(b.timeout, Duration::from_secs(90));
+        let d = RoundBudget::new(None)
+            .for_dispatch()
+            .cap_deadline(Some(Duration::from_secs(900)));
+        assert_eq!(
+            d.timeout,
+            Duration::from_secs(900),
+            "the lease bounds dispatch too"
+        );
+        let long = RoundBudget::new(None).cap_deadline(Some(Duration::from_secs(9_000)));
+        assert_eq!(long.timeout, Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS));
+    }
+
+    fn tool(name: &str) -> Value {
+        json!({"type": "function", "function": {"name": name, "description": name, "parameters": {}}})
+    }
+
+    fn names(tools: &[Value]) -> Vec<&str> {
+        tools
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn wake_catalog_keeps_pins_first_and_caps_the_rest() {
+        use super::super::model_profile::WakeScope;
+        let full: Vec<Value> = [
+            "mcp__anima__get_work_item",
+            "mcp__anima__list_work_items",
+            "mcp__board__board_send_inbox",
+            "memory_write",
+            "monitoring_snapshot",
+            "mcp__laya__record_fixer_result",
+        ]
+        .iter()
+        .map(|n| tool(n))
+        .collect();
+        let wake = WakeScope {
+            required_tools: vec!["monitoring_snapshot".into(), "not_registered_here".into()],
+            trusted_text: "Coordinate with mcp__board__board_send_inbox.".into(),
+            lease_secs: None,
+        };
+        // The retriever sees only the unpinned tools and ranks them.
+        let scoped = scope_wake_catalog(&full, &wake, 2, |rest| {
+            assert!(!names(rest).contains(&"monitoring_snapshot"));
+            vec![rest[3].clone(), rest[0].clone(), rest[1].clone()]
+        });
+        assert_eq!(
+            names(&scoped.tools),
+            vec![
+                "monitoring_snapshot",
+                "mcp__board__board_send_inbox",
+                "mcp__laya__record_fixer_result",
+                "mcp__anima__get_work_item",
+            ],
+            "pins first, then the top K = 2 of the rest"
+        );
+        assert_eq!(
+            scoped.pinned,
+            vec!["monitoring_snapshot", "mcp__board__board_send_inbox"]
+        );
+        assert_eq!(scoped.unavailable, vec!["not_registered_here"]);
+
+        // A catalog within the cap is offered whole (pins still first).
+        let whole = scope_wake_catalog(&full, &wake, 10, |_| unreachable!("no ranking needed"));
+        assert_eq!(whole.tools.len(), full.len());
+        assert_eq!(names(&whole.tools)[0], "monitoring_snapshot");
+    }
+
+    /// ADR 123 measurement harness, not a check: writes the native tool
+    /// catalog of a default agent (what every akh carries before its MCP
+    /// servers attach) as the Ollama `tools` array to
+    /// `$AKH_ADR123_CATALOG_OUT`. The ADR's full-vs-scoped wake estimate adds
+    /// the Romans' MCP schemas to it.
+    #[test]
+    #[ignore = "measurement harness for ADR 123; run with --ignored"]
+    fn dump_native_tool_catalog_for_adr_123() {
+        let Some(out) = std::env::var_os("AKH_ADR123_CATALOG_OUT") else {
+            return;
+        };
+        let agent = Agent::new(test_engine(), AgentConfig::default()).unwrap();
+        let reg = agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let catalog = ollama_tool_catalog(&reg);
+        std::fs::write(out, serde_json::to_string_pretty(&catalog).unwrap()).unwrap();
     }
 
     #[test]

@@ -903,7 +903,16 @@ impl ServerState {
         let host_exec = self.config.read().await.exec.clone();
         match self.get_akh_config(name).await {
             Ok(cfg) => DaemonAkhSettings {
-                autonomy: cfg.autonomy.clone(),
+                // ADR 123: the budget is the akh's resolved model profile.
+                autonomy: cfg.effective_autonomy().unwrap_or_else(|error| {
+                    tracing::warn!(
+                        target: "akh::model_profile",
+                        workspace = %name,
+                        error = ?miette::Report::new(error),
+                        "model profile does not resolve; the daemon keeps the akh's own [autonomy.budget] over the global default"
+                    );
+                    cfg.autonomy.clone()
+                }),
                 exec: ExecPlacement::from(&cfg.effective_exec(host_exec.as_ref())),
                 board: cfg.board.clone(),
                 memory: cfg.memory,
@@ -3777,6 +3786,15 @@ impl ServerState {
         agent.set_model_manager(manager);
         agent.register_with_model_manager(name, name);
 
+        // ADR 123: the per-model profile (budgets, deadline, rounds, window,
+        // wake tool count). `get_akh_config` loaded through `load_checked`,
+        // which already refused a profile that does not resolve.
+        let profile = akh_config
+            .resolve_model_profile()
+            .map_err(|e| format!("workspace {name}: {:?}", miette::Report::new(e)))?;
+        profile.log(name);
+        agent.set_model_profile(profile);
+
         // ADR 076: inject the OpenClaw self-import surface for akhs that opted in
         // (`openclaw_import = true`). The read-root unlock is already applied via
         // `EngineConfig.extra_read_roots` in `get_engine`; here we add the
@@ -5217,6 +5235,11 @@ impl akh_medu::acp::ServerControl for ServerState {
                         })
                         .transpose()?;
                     let openai = cfg.to_openai_config().map_err(|e| e.to_string())?;
+                    // ADR 123: the new (model, effort) resolves its own profile;
+                    // one that does not resolve refuses the switch unsaved.
+                    let profile = cfg
+                        .resolve_model_profile()
+                        .map_err(|e| format!("{:?}", miette::Report::new(e)))?;
                     // Resolve the configured executor before persisting the update.
                     let agent = self.get_agent(&ws).await?;
 
@@ -5236,6 +5259,11 @@ impl akh_medu::acp::ServerControl for ServerState {
                         let mut a = agent.write().unwrap_or_else(|e| e.into_inner());
                         a.set_model_manager(Arc::new(AgentModelManager::new(mm_config)));
                         a.register_with_model_manager(&ws, &ws);
+                        // The daily budget stays the one the daemon started
+                        // with until the next daemon restart; the turn limits
+                        // apply from the next turn.
+                        profile.log(&ws);
+                        a.set_model_profile(profile);
                         if let Some(runtime) = runtime {
                             a.set_agent_runtime(runtime);
                         }

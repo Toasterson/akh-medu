@@ -550,8 +550,13 @@ impl AgentDaemon {
 
     /// Set the per-akh automation gating and budget (from `akh.toml`
     /// `[autonomy]`). Spend already recorded in the ledger is kept.
+    ///
+    /// Limits unset in `autonomy.budget` take the global default. akhomed
+    /// passes [`AkhConfig::effective_autonomy`](crate::akh_config::AkhConfig::effective_autonomy),
+    /// whose budget is the akh's resolved model profile (ADR 123).
     pub fn with_autonomy(mut self, autonomy: AutonomyConfig) -> Self {
-        self.governor.set_budget(autonomy.budget);
+        self.governor
+            .set_budget(autonomy.budget.over(AutonomyBudget::default()));
         self.autonomy = autonomy;
         self
     }
@@ -2427,6 +2432,9 @@ impl AgentDaemon {
                     agent_id,
                     allow_tools,
                     require_mutation,
+                    prompt: schedule_prompt,
+                    exit_condition,
+                    required_tools,
                     ..
                 } => (|| {
                     let prompt = claim.llm_turn_prompt().unwrap_or_default();
@@ -2466,18 +2474,41 @@ impl AgentDaemon {
                         return Ok((summary, true));
                     }
                     ticket = Some(self.admit_model_turn()?);
-                    let turn = guard.run_agentic_turn_with_conversation_state(
+                    // ADR 123: the wake's catalog is relevance-scoped; the
+                    // route's required tools and the tools its own (trusted)
+                    // prompt and exit condition name stay offered. The event
+                    // payload never pins a tool.
+                    let wake = super::model_profile::WakeScope {
+                        required_tools: required_tools.clone(),
+                        trusted_text: format!("{schedule_prompt}\n{exit_condition}"),
+                        lease_secs: Some(claim.schedule.lease_seconds.max(1)),
+                    };
+                    let turn = guard.run_wake_turn(
                         &engine,
                         agent_id,
                         prompt,
+                        &wake,
                         &sink,
                         &cancel,
                         *require_mutation,
                         &guard.conversation_state,
                     );
                     contact = agentic_turn_contact(turn.as_ref(), occurrence_scope.usage());
+                    let budget_stop = matches!(
+                        turn,
+                        Some(super::agentic_chat::AgenticTurnOutcome::Interrupted(
+                            super::agentic_chat::TurnStop::TokenBudget
+                        ))
+                    );
                     match turn {
-                        Some(super::agentic_chat::AgenticTurnOutcome::Completed) => {
+                        // A wake stopped at its per-wake token budget answered
+                        // with what it gathered (forced synthesis). Retrying
+                        // it would hit the same budget, so it settles like a
+                        // completed turn, with the stop named in the summary.
+                        Some(super::agentic_chat::AgenticTurnOutcome::Completed)
+                        | Some(super::agentic_chat::AgenticTurnOutcome::Interrupted(
+                            super::agentic_chat::TurnStop::TokenBudget,
+                        )) => {
                             let messages = sink.messages();
                             let mutation_completed = messages.iter().any(|message| {
                                 matches!(
@@ -2493,6 +2524,14 @@ impl AgentDaemon {
                                     tool_name: "reactor_llm_turn".into(),
                                     message: "scheduled LLM turn completed without the required successful mutation".into(),
                                 }.into())
+                            } else if budget_stop {
+                                Ok((
+                                    format!(
+                                        "LLM action stopped at the per-wake token budget (ADR 123) and answered with what it gathered ({} emitted messages)",
+                                        sink.len()
+                                    ),
+                                    true,
+                                ))
                             } else {
                                 Ok((
                                     format!(
@@ -3942,10 +3981,10 @@ mod tests {
 
     fn exhausted_autonomy() -> AutonomyConfig {
         AutonomyConfig {
-            budget: AutonomyBudget {
+            budget: crate::agent::autonomy::AutonomyBudgetOverride::exact(AutonomyBudget {
                 max_tokens_per_day: 250_000,
                 max_turns_per_day: 0,
-            },
+            }),
             ..AutonomyConfig::default()
         }
     }
@@ -4248,6 +4287,7 @@ mod tests {
                     require_mutation: false,
                     exit_condition: String::new(),
                     report_thread: None,
+                    required_tools: Vec::new(),
                 },
                 0,
             )
@@ -4480,6 +4520,7 @@ mod tests {
                 // ADR 105: a tool-enabled schedule needs an exit condition.
                 exit_condition: "the queue was checked once".into(),
                 report_thread: None,
+                required_tools: Vec::new(),
             },
             0,
         )
@@ -5205,6 +5246,7 @@ mod tests {
                     require_mutation: false,
                     exit_condition: String::new(),
                     report_thread: None,
+                    required_tools: Vec::new(),
                 },
                 0,
             )
@@ -5337,6 +5379,7 @@ mod tests {
                 require_mutation: false,
                 exit_condition: String::new(),
                 report_thread: report_thread.map(str::to_owned),
+                required_tools: Vec::new(),
             },
             0,
         )

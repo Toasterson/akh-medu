@@ -13,12 +13,13 @@ kind = "cloud"
 base_url = "https://ollama.com"
 api_key = "env:ROMAN_OLLAMA_KEY"
 
+# Model profile (ADR 123): data/model-profiles/catalog.toml row `glm-5.3`.
+# Per UTC day: 1500000 tokens, 96 turns. Per wake: 250000 tokens, 24 relevance-scoped tools
+# plus the tools its route names (reactor seeds `required_tools`).
+# Per turn: 1800 s, 30 rounds, 32768 output tokens per request, 300 s HTTP, a 262144-token window.
+# Override per akh in [model_profile]; this renderer writes none.
 [autonomy]
 enabled = true
-
-[autonomy.budget]
-max_tokens_per_day = 250000
-max_turns_per_day = 40
 
 [autonomy.tasks]
 
