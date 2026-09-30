@@ -81,6 +81,8 @@ pub mod openai_backend;
 pub mod openclaw;
 pub mod operator_channel;
 pub mod organ;
+#[cfg(test)]
+mod prefix_stability_tests;
 pub mod output;
 #[cfg(feature = "oxifed")]
 pub mod oxifed;

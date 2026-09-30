@@ -231,3 +231,136 @@ reviews on the same key; it does **not** fit Pro's $60 (see the operator decisio
   where the compacting manager trims first; wake pins are not.
 - Measure the scoped wakes on the live Romans (first-request tokens, wakes per day, missed-tool
   rate) after the redeploy, and tune `max_tools_per_wake`.
+
+## Amendment 2026-09-30 — stable prompt prefix and interactive tool budget
+
+> Branch `fix/stable-prompt-prefix`. Relates: [ADR 121](121-lilith-serving-on-hephaistos-llama-cpp.md)
+> (Lilith on llama.cpp), WI-357 (context-manager tail placement).
+
+### Problem
+
+Lilith's llama-server (ADR 121: Vulkan, prefill about 190 tok/s, decode about 36 tok/s) took
+about 150 s for every ACP turn, even for "one sentence: are you ready?": each request carried
+about 28,167 prompt tokens and none of them came from the prefix cache. The cache itself works
+(two identical direct requests: 38 s, then 0.5 s with 7,518 of 7,519 tokens cached), so the
+requests akhomed built were not prefix-stable.
+
+### Root cause (proved by `src/agent/prefix_stability_tests.rs`)
+
+`openai_backend::to_openai_messages` coalesced **every** conversation `system` message into the
+leading system message. The context manager emits the session seed, schema digest, note
+frontmatter, KG context and recalled episodes as `system` messages (WI-357 had already moved
+the per-turn ones to the tail, just before the last user turn), and the agent loop adds the VSA
+reasoning context, completion contract and image evidence the same way. Gemma 4's pinned
+template (and Qwen's) renders the system text **before** the tool declarations. So the per-turn
+text landed in front of the ~25k-token tool block. The regression test drives the real
+`OpenAiChatBackend` through two turns of one session and the first turn of a second session
+against a mock server and renders the bodies in Gemma 4 order. Before the fix, the first
+difference was at byte 7,032 of a 29,737-byte system + tools head: the end of the base system
+prompt, where `Session so far:` (turn 2) or `Relevant knowledge from your memory:` (new session)
+began. After the fix, the heads are byte-identical and the first difference is at byte 29,749,
+inside the first user turn.
+
+The server makes a partial match worse. Gemma 4 uses a 1,024-token sliding window on 40 of its
+48 layers. For such a model, llama-server can restore a cached prefix only from a **context
+checkpoint**, and the pinned build places checkpoints at user-message starts (the first one,
+the last one, and at least `--checkpoint-min-step` = 8,192 tokens apart) and near the end of
+the prompt. A divergence anywhere before the first user message therefore reprocesses the
+whole prompt, not just the tail.
+
+Tool order was already deterministic (`ollama_tool_catalog` and the prompt's tool section sort
+by name, WI-357). An interactive turn offered every advertised tool (103 MCP + natives). The
+system prompt's `## Available Tools` section also listed every tool with its description.
+
+### Decision
+
+1. **The system message is the base system prompt alone.** When an akh has one,
+   `to_openai_messages` sends it byte for byte. Every in-conversation `system` message becomes
+   `user`-role context in place, merged into the user turn it precedes. Strict templates still
+   never see a later system role. Without a base prompt, the old coalescing stays. Only the
+   OpenAI-compatible backing changes: Ollama passes system messages in place, and Candle renders
+   them in place.
+2. **Interactive tool budget.** A new per-model field `max_tools_per_turn` caps the tools offered
+   to an interactive (ACP / T3 / chat) turn, with the same tiers as the rest of the profile:
+   per-akh `[model_profile] max_tools_per_turn`, then the catalog row, else no cap. The catalog
+   sets it only for the slow-prefill local rows: `gemma-4-12b` 16, `qwen3.8` 20. The cloud rows
+   leave it unset, so the Romans' turns are unchanged. The offered set is
+   `scope_turn_catalog`:
+   - first the akh's **pinned core**, the new top-level `akh.toml` array `pinned_tools`, sorted
+     by name. Pins are always offered, even past the cap. Missing names are logged as
+     `unavailable`.
+   - then relevance picks (`organ::retrieve_scoped`) to fill the cap, also sorted by name.
+
+   When the core fills the cap, the tool block is identical on every turn. A scoped turn's system
+   prompt lists only the offered tools, so the prompt shrinks with the catalog and never names a
+   tool the model has no schema for. Un-offered registered tools stay callable, and `tool_query`
+   lists them. Env overrides (`AKH_AGENT_TOOL_RETRIEVAL`, `AKH_AGENT_MAX_TOOLS`) and reactor
+   wakes keep their existing precedence.
+3. **The role's skill supplies the core.** `skills/chief-of-staff/skill.json` gains
+   `pinned_tools` (16 names: Anima work-item, thread and plan reads plus `post_message`, board
+   inbox and post, Seshat search, `kg_query`, `memory_recall`, `memory_write`, `tool_query`,
+   `user_interact`). The Roman renderer (`full_akh.skill_pinned_tools`) writes that list as
+   Lilith's `pinned_tools`, which fills her 16-tool cap exactly.
+
+### Measured (Lilith's live rendered prompt, tokenized by her llama-server)
+
+The measurement is a reconstruction (`measure_lilith_request_before_and_after_scoping`,
+`--ignored`): Lilith's live `system_prompt`, Anima and Seshat `tools/list` payloads captured
+with the operator's credentials (80 + 6 tools), 17 Djehuty stand-ins with Anima-median schemas,
+and the natives an `exec = none` akh registers. The bodies were tokenized with
+`/apply-template` + `/tokenize`:
+
+| Request | Tools | Prompt tokens | System + tools head |
+|---|---:|---:|---:|
+| Before (reconstruction; live log: 28,167) | 140 | 38,586 | 38,571 |
+| After (`max_tools_per_turn` 16, CoS core) | 16 | 7,686 | 7,671 |
+
+The reconstruction's natives and Anima tools are a superset of Lilith's live set, so it
+over-counts the "before" row. The live figure is the one to quote. Expected turn time at about
+190 tok/s prefill:
+
+- First turn after a server start or a pinned-core change: about 40 s of prefill (7.7k tokens),
+  down from about 150 s.
+- Every later turn, in the same session or a new one: the head comes from the checkpoint at the
+  first user message, so only the conversation part is prefilled: the user turn with its
+  KG/recall context plus the history since the checkpoint, typically 0.3k to 2k tokens, about 2
+  to 10 s. Decode (36 tok/s, thinking included) comes on top.
+
+### llama-server settings (no change needed)
+
+- `--cache-reuse` stays off. KV shifting is unsupported with a sliding-window cache, and
+  llama-server disables it with a warning.
+- `--swa-full` stays off. It would keep all 48 layers at full context, about 336 KiB per token in
+  f16, which is 43 GiB for 2 × 65,536 slots or 16 GiB for a single 49,152-token slot, next to a
+  12.5 GB q8_0 model on a 24 GB gfx1100.
+- Checkpoints: the defaults (32 per slot, `--checkpoint-min-step` 8192) already cover this layout:
+  one checkpoint at the first user message, right after the stable head. A smaller min step
+  (for example `-cms 2048` in `LILITH_LLAMA_EXTRA_ARGS`) would add checkpoints deeper into
+  long sessions. That helps when history trimming changes early turns, but each checkpoint
+  holds the sliding-window state, about 320 MiB of host RAM. Measure the host's RAM before
+  lowering it.
+- `-np 2` and `--slot-prompt-similarity` 0.1 (the default) are fine. The stable head is most of
+  every prompt, so a chat turn and a board wake each land on the slot that already holds their
+  prefix. `--cache-ram 4096` MiB holds an evicted 7.7k-token slot (about 0.5 GiB with its
+  checkpoint).
+
+### Consequences
+
+- The OpenAI-compatible path now carries the context manager's blocks as user-role context.
+  Their headers ("Relevant knowledge from your memory:", "Session so far:", ...) still mark
+  them.
+- Relevance picks still change the tool block when the core does not fill the cap. On a
+  sliding-window server, any change there costs the whole (now small) prompt. Set the pinned
+  core to the cap for interactive-latency-critical akhs.
+- The live Lilith needs the redeploy from `origin/main` and a re-render
+  (`configure_core.py`) before any of this takes effect.
+
+### Follow-ups
+
+- Log `prompt_tokens_details.cached_tokens` in `llm request metrics`, so cache hits are visible
+  without server access.
+- Session-sticky relevance picks (choose once per session) would keep a non-filling core
+  cacheable across a session's turns.
+- Reactor wakes still order their relevance picks by score and list every advertised tool in the
+  system prompt.
+

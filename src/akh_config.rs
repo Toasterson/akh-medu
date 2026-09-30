@@ -1297,6 +1297,19 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "ToolSurface::is_full")]
     pub tool_surface: ToolSurface,
 
+    /// Tools every interactive turn offers first, name-sorted, whatever the
+    /// prompt (ADR 123 amendment 2026-09-30): the pinned core of the model
+    /// profile's `max_tools_per_turn`. Keeping the core fixed keeps the
+    /// request prefix byte-stable, so a model server's prefix cache survives
+    /// from turn to turn. Names this akh does not have are skipped and
+    /// logged. A top-level array, kept above the tables.
+    ///
+    /// ```toml
+    /// pinned_tools = ["kg_query", "mcp__anima__get_work_item"]
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_tools: Vec<String>,
+
     // ── tables (must be serialized after all values for TOML) ───────────────
     /// Where the pinned model runs (local Ollama or cloud).
     #[serde(default)]
@@ -1443,6 +1456,7 @@ impl Default for AkhConfig {
             capture_transcripts: true,
             context_strategy: None,
             tool_surface: ToolSurface::Full,
+            pinned_tools: Vec::new(),
             ollama_endpoint: OllamaEndpoint::default(),
             openai_endpoint: None,
             agent_runtime: None,
@@ -1663,6 +1677,7 @@ impl AkhConfig {
             "capture_transcripts",
             "context_strategy",
             "tool_surface",
+            "pinned_tools",
         ]
     }
 

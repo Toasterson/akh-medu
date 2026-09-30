@@ -1411,10 +1411,25 @@ class LilithRenderTests(RenderFixture):
         top_level = [k for k, v in ws.items() if not isinstance(v, dict)
                      and not (isinstance(v, list) and v and all(isinstance(i, dict) for i in v))]
         self.assertEqual(set(top_level), {"name", "model", "backend", "capture_transcripts", "system_prompt",
-                                          "seed_packs"})
+                                          "pinned_tools", "seed_packs"})
         for key in top_level:
             self.assertLess(text.index(f"\n{key} = "), first_table, key)
         self.assertLess(text.index("\n[openai_endpoint]"), text.index("\n[chief_of_staff]"))
+
+    def test_pinned_tools_come_from_the_skill_sorted_and_before_any_table(self):
+        lilith_fixture(self.root)
+        self.render()
+        text = self.text(self.WS)
+        ws = tomllib.loads(text)
+        manifest = json.loads((SOURCE.parents[1] / "skills/chief-of-staff/skill.json").read_text())
+        self.assertTrue(manifest["pinned_tools"])
+        self.assertEqual(ws["pinned_tools"], sorted(set(manifest["pinned_tools"])))
+        self.assertLess(text.index("\npinned_tools = "), text.index("\n["), "a top-level key after a table nests")
+        self.assertLess(text.index("\nsystem_prompt = "), text.index("\npinned_tools = "))
+        # Only Lilith pins tools: the Romans' workspaces carry no such key.
+        for role in ROLES:
+            self.assertNotIn("pinned_tools", self.toml(f"core-config/akh-medu/workspaces/{role}.toml"))
+        self.assertIn("Per interactive turn: 16 tools", text)
 
     def test_prompt_is_her_role_and_the_skill_pack(self):
         lilith_fixture(self.root)
@@ -2098,7 +2113,19 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(low["max_rounds"], 16)
         self.assertEqual(low["max_tokens_per_day"], 1_500_000, "unset effort fields keep the row")
         for entry in catalog["models"]:
-            self.assertEqual(set(entry["profile"]), set(fa.PROFILE_FIELDS), entry["id"])
+            fields = set(entry["profile"])
+            self.assertLessEqual(set(fa.PROFILE_FIELDS) - set(fa.OPTIONAL_PROFILE_FIELDS), fields, entry["id"])
+            self.assertLessEqual(fields, set(fa.PROFILE_FIELDS), entry["id"])
+        self.assertEqual(fa.catalog_profile("lilith", catalog=catalog)[1]["max_tools_per_turn"], 16)
+        self.assertEqual(fa.catalog_profile("qwen3.8:27b", catalog=catalog)[1]["max_tools_per_turn"], 20)
+        self.assertNotIn("max_tools_per_turn", fa.catalog_profile("glm-5.3", catalog=catalog)[1])
+
+    def test_profile_comment_names_the_interactive_tool_budget_only_when_set(self):
+        catalog = fa.load_model_catalog()
+        gemma = fa.profile_comment("lilith", catalog=catalog)
+        self.assertIn("Per interactive turn: 16 tools, the pinned core (`pinned_tools`) first, "
+                      "then relevance-scoped picks.", gemma)
+        self.assertNotIn("Per interactive turn", fa.profile_comment("glm-5.3", catalog=catalog))
 
     def test_renderer_owned_model_without_a_row_fails_closed(self):
         with self.assertRaisesRegex(fa.RenderError, "no row for model"):
@@ -2116,6 +2143,44 @@ class ModelCatalogTests(unittest.TestCase):
                 fa.load_model_catalog(path)
             with self.assertRaisesRegex(fa.RenderError, "missing"):
                 fa.load_model_catalog(Path(temp) / "absent.toml")
+
+
+class PinnedToolsTests(unittest.TestCase):
+    def skill(self, temp, manifest):
+        directory = Path(temp)
+        (directory / "skill.json").write_text(json.dumps(manifest) if not isinstance(manifest, str) else manifest)
+        return directory
+
+    def test_skill_pinned_tools_reads_the_list_and_defaults_to_none(self):
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertEqual(fa.skill_pinned_tools(self.skill(temp, {"id": "x", "pinned_tools": ["b", "a"]})),
+                             ["b", "a"])
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertEqual(fa.skill_pinned_tools(self.skill(temp, {"id": "x"})), [])
+
+    def test_skill_pinned_tools_rejects_a_bad_shape(self):
+        for bad in ("a", {"a": 1}, ["a", 3], ["a", ""], None):
+            with tempfile.TemporaryDirectory() as temp:
+                with self.assertRaisesRegex(fa.RenderError, "pinned_tools"):
+                    fa.skill_pinned_tools(self.skill(temp, {"id": "x", "pinned_tools": bad}))
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(fa.RenderError, "not valid JSON"):
+                fa.skill_pinned_tools(self.skill(temp, "{"))
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(fa.RenderError, "no skill.json"):
+                fa.skill_pinned_tools(Path(temp))
+
+    def test_render_workspace_sorts_dedupes_places_after_the_prompt_and_drops_stale(self):
+        args = ("lilith", "prompt", [], {"url": "u"})
+        doc = fa.render_workspace(None, *args, pinned_tools=["b", "a", "b"])
+        self.assertEqual(doc["pinned_tools"], ["a", "b"])
+        keys = list(doc)
+        self.assertEqual(keys[keys.index("system_prompt") + 1], "pinned_tools")
+        text = fa.dump_toml(doc)
+        self.assertLess(text.index("pinned_tools = "), text.index("\n["))
+        self.assertEqual(tomllib.loads(text)["pinned_tools"], ["a", "b"])
+        for none in (None, []):
+            self.assertNotIn("pinned_tools", fa.render_workspace(doc, *args, pinned_tools=none))
 
 
 class TomlWriterTests(unittest.TestCase):

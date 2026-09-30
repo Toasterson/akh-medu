@@ -29,6 +29,12 @@
 #   context_window       working context window; never above what the model reports
 #   max_tools_per_wake   relevance-scoped tool count offered to a reactor wake; tools the wake's
 #                        route or prompt names are always kept on top of it
+#   max_tools_per_turn   tools offered to an interactive (ACP / T3 / chat) turn, the akh's
+#                        `pinned_tools` core included (always offered, first, name-sorted), the
+#                        rest relevance-scoped picks; absent = the whole catalog. Set it for
+#                        slow-prefill local servers only: the tool schemas dominate the prompt
+#                        and a prefix cache only helps while the offered set is unchanged
+#                        (ADR 123 amendment 2026-09-30)
 #
 # `[models.effort.<low|medium|high|max>]` overrides the row for that `reasoning_effort`; the
 # row itself describes the model at its default effort (what an akh without `reasoning_effort`
@@ -228,6 +234,7 @@ http_timeout_secs = 600
 max_output_tokens = 8_192
 context_window = 49_152
 max_tools_per_wake = 16
+max_tools_per_turn = 16
 
 # Qwen 3.8 is not on Ollama Cloud (2026-09-30); a local qwen3.8:27b (256K context, about 43 tok/s)
 # is the nearest documented basis.
@@ -246,3 +253,4 @@ http_timeout_secs = 600
 max_output_tokens = 16_384
 context_window = 131_072
 max_tools_per_wake = 20
+max_tools_per_turn = 20

@@ -307,6 +307,10 @@ pub struct Agent {
     /// agentic loop. `None` (tests, embedded use) keeps the loop's global
     /// defaults and env overrides.
     pub(crate) model_profile: Option<super::model_profile::ResolvedModelProfile>,
+    /// Tools every interactive turn offers first (`akh.toml` `pinned_tools`,
+    /// ADR 123 amendment 2026-09-30): the fixed core of the profile's
+    /// `max_tools_per_turn`, kept name-sorted so the request prefix is stable.
+    pub(crate) pinned_tools: Vec<String>,
     /// Working-context assembly strategy (Phase 44a, ADR 065). `None` ⇒ the
     /// byte-identical pass-through manager (current behaviour). When set,
     /// `run_agentic_turn` builds each prompt through it.
@@ -1157,6 +1161,7 @@ impl Agent {
             chat_backend: None,
             agent_runtime: None,
             model_profile: None,
+            pinned_tools: Vec::new(),
             context_manager: std::sync::Mutex::new(None),
             note_catalog: std::sync::Mutex::new(None),
             last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -2568,6 +2573,16 @@ impl Agent {
     /// it from `akh.toml` at load and again on an ACP `model/set`.
     pub fn set_model_profile(&mut self, profile: super::model_profile::ResolvedModelProfile) {
         self.model_profile = Some(profile);
+    }
+
+    /// Set the tools every interactive turn offers first (`akh.toml`
+    /// `pinned_tools`, ADR 123 amendment 2026-09-30). Stored name-sorted and
+    /// deduplicated, so the pinned core renders identically on every turn.
+    pub fn set_pinned_tools(&mut self, names: impl IntoIterator<Item = String>) {
+        let mut names: Vec<String> = names.into_iter().filter(|n| !n.trim().is_empty()).collect();
+        names.sort();
+        names.dedup();
+        self.pinned_tools = names;
     }
 
     /// The akh's resolved per-model profile, if one was set.
@@ -4737,6 +4752,7 @@ impl Agent {
             chat_backend: None,
             agent_runtime: None,
             model_profile: None,
+            pinned_tools: Vec::new(),
             context_manager: std::sync::Mutex::new(None),
             note_catalog: std::sync::Mutex::new(None),
             last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),

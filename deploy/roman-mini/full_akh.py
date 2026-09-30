@@ -535,7 +535,10 @@ def rename_tools(text: str, renames: dict[str, str]) -> str:
 
 PROFILE_FIELDS = ("max_tokens_per_day", "max_turns_per_day", "max_tokens_per_wake", "turn_deadline_secs",
                   "max_rounds", "http_timeout_secs", "max_output_tokens", "context_window",
-                  "max_tools_per_wake")
+                  "max_tools_per_wake", "max_tools_per_turn")
+
+# Fields a catalog row may omit: akhomed then keeps its own default (ADR 123 amendment).
+OPTIONAL_PROFILE_FIELDS = ("max_tools_per_turn",)
 
 
 def load_model_catalog(path: Path = MODEL_CATALOG) -> dict:
@@ -596,6 +599,9 @@ def profile_comment(model: str, effort: str | None = None, catalog: dict | None 
         lines.append("plus the tools its route names (reactor seeds `required_tools`).")
     lines.append(f"Per turn: {p['turn_deadline_secs']} s, {p['max_rounds']} rounds, {p['max_output_tokens']} output "
                  f"tokens per request, {p['http_timeout_secs']} s HTTP, a {p['context_window']}-token window.")
+    if "max_tools_per_turn" in p:
+        lines.append(f"Per interactive turn: {p['max_tools_per_turn']} tools, the pinned core (`pinned_tools`) first, "
+                     "then relevance-scoped picks.")
     lines.append("Override per akh in [model_profile]; this renderer writes none.")
     return "\n".join(lines)
 
@@ -819,6 +825,27 @@ def skill_procedures(skill_dir: Path) -> str:
     if not text.strip():
         raise RenderError(f"{path} is empty")
     return text
+
+
+def skill_pinned_tools(skill_dir: Path) -> list[str]:
+    """A skillpack's `pinned_tools` from its `skill.json` (missing key: none).
+
+    The tools an interactive turn always offers first (ADR 123 amendment). Must be a list
+    of non-empty strings; anything else is a `RenderError` naming the manifest.
+    """
+    manifest_path = skill_dir / "skill.json"
+    if not manifest_path.exists():
+        raise RenderError(f"skillpack {skill_dir} has no skill.json")
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as error:
+        raise RenderError(f"{manifest_path} is not valid JSON ({error}); fix or restore it") from error
+    if not isinstance(manifest, dict):
+        raise RenderError(f"{manifest_path} must be a JSON object")
+    tools = manifest.get("pinned_tools", [])
+    if not isinstance(tools, list) or not all(isinstance(t, str) and t.strip() for t in tools):
+        raise RenderError(f"{manifest_path}: `pinned_tools` must be a list of non-empty tool-name strings")
+    return list(tools)
 
 
 def board_identity(events: dict, role: str) -> dict:
@@ -1121,20 +1148,27 @@ def render_workspace(existing: dict | None, role: str, prompt: str, servers: lis
                      board: dict, delegation: dict | None = None,
                      monitoring: dict | None = None, exec_table: dict | None = None,
                      inference: Inference = ROMAN_INFERENCE,
-                     chief_of_staff: dict | None = None) -> dict:
+                     chief_of_staff: dict | None = None,
+                     pinned_tools: list[str] | None = None) -> dict:
     """The full-akh workspace document, preserving unrelated existing keys.
 
     `inference` selects the backing and its endpoint table (the Romans:
     GLM on Ollama Cloud; Lilith: her vLLM over `[openai_endpoint]`); the
     other endpoint table is dropped so a stale one cannot linger.
     `chief_of_staff` is the ADR 116 `[chief_of_staff]` table (Lilith only).
+    `pinned_tools` is the top-level `pinned_tools` array (ADR 123 amendment): the tools every
+    interactive turn offers first, in this (sorted, deduplicated) order, so the model server's
+    prompt-prefix cache stays stable. `None` or empty removes a stale key. It is a scalar array,
+    so `dump_toml` writes it with the top-level keys, before any table header.
     """
     doc = dict(existing or {})
     doc["name"] = role
-    for key in ("model", "backend", "capture_transcripts", "system_prompt"):
+    for key in ("model", "backend", "capture_transcripts", "system_prompt", "pinned_tools"):
         doc.pop(key, None)
     doc.update(model=inference.model, backend=inference.backend, capture_transcripts=True,
                system_prompt=prompt)
+    if pinned_tools:
+        doc["pinned_tools"] = sorted(set(pinned_tools))
     for table in ENDPOINT_TABLES:
         if table != inference.endpoint_table:
             doc.pop(table, None)

@@ -252,6 +252,12 @@ fn lilith_workspace_resolves_the_local_gemma_profile() {
     let profile = cfg.resolve_model_profile().expect("resolves");
     assert_eq!(profile.catalog_entry.as_deref(), Some("gemma-4-12b"));
     assert_eq!(profile.max_tools_per_wake.map(|s| s.value), Some(16));
+    // ADR 123 amendment: her interactive turns offer 16 tools, all of them the
+    // Chief-of-Staff pinned core, so the tool block never changes.
+    assert_eq!(profile.max_tools_per_turn.map(|s| s.value), Some(16));
+    assert_eq!(cfg.pinned_tools.len(), 16, "{:?}", cfg.pinned_tools);
+    assert!(cfg.pinned_tools.is_sorted(), "{:?}", cfg.pinned_tools);
+    assert!(cfg.pinned_tools.iter().any(|t| t == "mcp__anima__get_work_item"));
     let openai = cfg.to_openai_config().unwrap().unwrap();
     assert_eq!(openai.context_window, Some(49_152));
     assert_eq!(openai.timeout_secs, 600);

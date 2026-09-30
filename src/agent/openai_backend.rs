@@ -243,9 +243,20 @@ fn tool_call_id(round: usize, idx: usize) -> String {
 ///    order [`agentic_chat`](super::agentic_chat) appends them in.
 /// 3. **Assistant turns that only called tools** get their empty `content`
 ///    dropped rather than sent as `""`, which some strict servers reject.
-/// 4. **System messages** are coalesced into one leading message. Some strict
-///    chat templates (including Qwen) reject a system role anywhere else in
-///    the conversation.
+/// 4. **System messages never follow the first message.** Some strict chat
+///    templates (including Qwen) reject a system role anywhere else in the
+///    conversation. When the akh has a base system prompt, the leading system
+///    message is **exactly that prompt** and every system message inside the
+///    conversation (the context manager's session seed, schema digest, note
+///    frontmatter, KG context and recalled episodes; the host's VSA context,
+///    completion contract and image evidence) becomes `user`-role context in
+///    place, merged into the user turn it precedes. Prompt-prefix stability
+///    (ADR 123 amendment 2026-09-30, ADR 121): Gemma 4's and Qwen's templates
+///    render the system text *before* the tool declarations, so per-turn text
+///    hoisted into the system message changed the request in front of the
+///    ~25k-token tool block and made llama-server re-prefill all of it on
+///    every turn. Without a base prompt the conversation's system messages
+///    are still coalesced into one leading message, as before.
 /// 5. **Tool content is always a string.** Gemma 4's pinned template calls
 ///    `.get()` on a tool message's `content` while resolving the response
 ///    block; a non-string `content` (an object or array, which nothing in
@@ -268,21 +279,24 @@ fn tool_call_id(round: usize, idx: usize) -> String {
 pub fn to_openai_messages(system_prompt: &str, conversation: &[Value]) -> Vec<Value> {
     let mut out = Vec::with_capacity(conversation.len() + 1);
 
-    let mut system_sections = Vec::new();
-    if !system_prompt.trim().is_empty() {
-        system_sections.push(system_prompt.to_owned());
-    }
-    for msg in conversation {
-        if msg.get("role").and_then(Value::as_str) == Some("system") {
-            if let Some(content) = msg.get("content").and_then(Value::as_str) {
-                if !content.trim().is_empty() {
-                    system_sections.push(content.to_owned());
-                }
-            }
+    // Fix 4: with a base prompt, the system message is that prompt alone and
+    // conversation system messages travel as user-role context (below);
+    // without one, they are coalesced into the leading system message.
+    let fold_system_into_user = !system_prompt.trim().is_empty();
+    let system_text = |msg: &Value| -> Option<String> {
+        (msg.get("role").and_then(Value::as_str) == Some("system"))
+            .then(|| msg.get("content").and_then(Value::as_str))
+            .flatten()
+            .filter(|content| !content.trim().is_empty())
+            .map(str::to_owned)
+    };
+    if fold_system_into_user {
+        out.push(json!({"role": "system", "content": system_prompt}));
+    } else {
+        let sections: Vec<String> = conversation.iter().filter_map(system_text).collect();
+        if !sections.is_empty() {
+            out.push(json!({"role": "system", "content": sections.join("\n\n")}));
         }
-    }
-    if !system_sections.is_empty() {
-        out.push(json!({"role": "system", "content": system_sections.join("\n\n")}));
     }
 
     // Ids minted by the most recent assistant turn, consumed in order by the
@@ -293,9 +307,15 @@ pub fn to_openai_messages(system_prompt: &str, conversation: &[Value]) -> Vec<Va
     for msg in conversation {
         let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
         match role {
-            // Already coalesced above.  Never let a later system role reach a
-            // strict chat template.
-            "system" => {}
+            // Never let a later system role reach a strict chat template:
+            // either coalesced above (no base prompt) or carried as user-role
+            // context that `merge_adjacent_same_role` joins with the user
+            // turn next to it (fix 4).
+            "system" => {
+                if fold_system_into_user && let Some(content) = system_text(msg) {
+                    out.push(json!({"role": "user", "content": content}));
+                }
+            }
             "assistant" => {
                 let calls = msg.get("tool_calls").and_then(Value::as_array);
                 let mut translated = json!({"role": "assistant"});
@@ -1559,9 +1579,14 @@ mod tests {
         assert_eq!(to_openai_messages("", &conv).len(), 1);
     }
 
+    /// Fix 4 (ADR 123 amendment 2026-09-30): with a base prompt the system
+    /// message is that prompt alone, byte for byte, and in-conversation
+    /// system messages ride as user-role context merged into the adjacent
+    /// user turn, so per-turn context never lands in front of the tools.
     #[test]
-    fn conversation_system_messages_are_coalesced_at_the_front() {
+    fn conversation_system_messages_become_user_context_behind_a_stable_system_prompt() {
         let conv = vec![
+            json!({"role": "system", "content": "Session so far: seed"}),
             json!({"role": "user", "content": "first"}),
             json!({"role": "system", "content": "context update"}),
             json!({"role": "assistant", "content": "noted"}),
@@ -1571,16 +1596,22 @@ mod tests {
 
         let out = to_openai_messages("base instructions", &conv);
 
-        assert_eq!(out.len(), 4);
-        assert_eq!(out[0]["role"], "system");
         assert_eq!(
-            out[0]["content"],
-            "base instructions\n\ncontext update\n\nmemory update"
+            out,
+            vec![
+                json!({"role": "system", "content": "base instructions"}),
+                json!({"role": "user", "content": "Session so far: seed\n\nfirst\n\ncontext update"}),
+                json!({"role": "assistant", "content": "noted"}),
+                json!({"role": "user", "content": "memory update\n\ncontinue"}),
+            ]
         );
-        assert_eq!(out[1]["content"], "first");
-        assert_eq!(out[2]["content"], "noted");
-        assert_eq!(out[3]["content"], "continue");
-        assert_eq!(out.iter().filter(|msg| msg["role"] == "system").count(), 1);
+
+        // A different per-turn context leaves the system message untouched.
+        let other = vec![
+            json!({"role": "system", "content": "other context"}),
+            json!({"role": "user", "content": "next"}),
+        ];
+        assert_eq!(to_openai_messages("base instructions", &other)[0], out[0]);
     }
 
     #[test]

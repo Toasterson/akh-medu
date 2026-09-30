@@ -7,7 +7,10 @@
 > acceptance. Preserves ADR 113 full-Akh ownership and ADR 114 structural live /
 > learned shadow decisions. This is a planned capability, not a runtime release.
 
-> Last updated: 2026-09-30 (**Per-model profiles** — budgets, turn deadline,
+> Last updated: 2026-09-30 (**Stable prompt prefix** — OpenAI path keeps the
+> system message to the base prompt, per-model `max_tools_per_turn` with a
+> pinned `pinned_tools` core for interactive turns (ADR 123 amendment);
+> **Per-model profiles** — budgets, turn deadline,
 > round cap, HTTP timeout, output cap, working window and wake tool count
 > resolved per akh from the compiled model catalog
 > `data/model-profiles/catalog.toml` (`src/agent/model_profile.rs`,
@@ -431,7 +434,15 @@ control commands), discovered via the PID record's ACP socket/TCP endpoints.
   (`scope_wake_catalog`: route `required_tools` + tools named in the trusted
   prompt first, then top-K by `organ::retrieve_scoped`), stopped at
   `max_tokens_per_wake` (`TurnStop::TokenBudget`, forced synthesis, settled as
-  done) and never runs past its reactor lease.
+  done) and never runs past its reactor lease. An interactive turn is capped
+  at `max_tools_per_turn` (catalog: `gemma-4-12b` 16, `qwen3.8` 20; unset =
+  whole catalog) by `scope_turn_catalog`: the akh's `pinned_tools` core
+  (name-sorted, always offered) then name-sorted relevance picks, and its
+  system prompt lists only the offered tools. The OpenAI-compatible backing
+  sends the base system prompt alone as the system message and carries every
+  in-conversation system block as user-role context, so the system + tools
+  prefix is byte-stable across turns and sessions for llama-server's prefix
+  cache (ADR 123 amendment 2026-09-30; `src/agent/prefix_stability_tests.rs`).
 - **Model-family prompt guidance** (`src/agent/prompt_guidance.rs`, ADR-122):
   opt-in `prompt_guidance = "off|auto|generic|glm|kimi"` in `akh.toml` adds a
   machine-owned *Execution Discipline* section (+ GLM/Kimi addendum, family from
