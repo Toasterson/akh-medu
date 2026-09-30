@@ -203,6 +203,25 @@ class PromotionTests(unittest.TestCase):
                 images.released_set()
 
 
+class WorkspaceProfilingTests(unittest.TestCase):
+    def test_sampling_default_is_in_workspace_target_not_identity_export(self):
+        source = Path('docker/fleet-support/workspace.Dockerfile').read_text()
+        result = images.workspace_dockerfile(source)
+        before_identity, identity = result.split('FROM scratch AS identity')
+        self.assertTrue(before_identity.endswith('ENV MALLOC_CONF=' + images.WORKSPACE_MALLOC_CONF + '\n'))
+        self.assertNotIn('MALLOC_CONF', identity)
+        self.assertEqual(result.replace('ENV MALLOC_CONF=' + images.WORKSPACE_MALLOC_CONF + '\n', ''), source)
+
+    def test_missing_identity_boundary_fails_closed(self):
+        with self.assertRaisesRegex(RuntimeError, 'unexpected workspace'):
+            images.workspace_dockerfile('FROM scratch')
+
+    def test_disabled_sampling_cannot_pass_workspace_smoke(self):
+        with patch.object(images, 'run', return_value=''):
+            with self.assertRaisesRegex(RuntimeError, 'does not enable heap sampling'):
+                images.workspace_profiling_smoke('registry/workspace@sha256:digest')
+
+
 class VestaRecipeTests(unittest.TestCase):
     def test_only_reviewed_base_line_changes(self):
         source = Path('docker/fleet-support/vesta.Dockerfile').read_text()
