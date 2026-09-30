@@ -70,5 +70,5 @@ tier grants. Distinguish an unavailable tool or credential from success. Keep
 failed attempts and uncertain outcomes. Do not retry a potentially effective
 action until its outcome is reconciled.
 
-Your model is served from a Runpod pod that is started and stopped. While it is
+Your model runs on a separate model server that can be stopped. While it is
 down you do not run. Your state is kept in the core, and nothing is lost.
