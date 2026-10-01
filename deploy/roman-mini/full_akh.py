@@ -1582,6 +1582,20 @@ def render_chief_of_staff(root: Path, settings: LilithSettings) -> dict:
             "gated_tiers": list(LILITH_GATED_TIERS)}
 
 
+def gated_tiers_notice(tiers: tuple[str, ...]) -> str:
+    """The paragraph appended to Lilith's system prompt while the operator holds
+    tiers back (`[chief_of_staff] gated_tiers`), so she proposes instead of
+    discovering the gate through a refusal. Empty when nothing is gated."""
+    if not tiers:
+        return ""
+    names = ", ".join(f"`{t}`" for t in tiers)
+    return ("\n## Current operator hold\n\n"
+            f"The operator holds these tiers gated right now: {names}. Do not call a tool of a gated\n"
+            "tier. Post a `lilith/cos-proposal@1` with the same receipts, reason and rollback instead,\n"
+            "and tell the operator the action was proposed, not taken. Everything else in your\n"
+            "discipline is unchanged. The hold ends when the operator removes it.\n")
+
+
 # Lilith's `[acp]` table (hers only): strip the T3 client's injected tag blocks (operator decision 2026-10-01).
 LILITH_ACP = {"strip_client_preamble": True}
 
