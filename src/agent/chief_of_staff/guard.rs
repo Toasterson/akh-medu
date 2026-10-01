@@ -169,7 +169,14 @@ impl CosGuard {
     /// ancestry with git in `repository`.
     pub fn from_config(config: &ChiefOfStaffConfig, write_roots: &[PathBuf]) -> CosResult<Self> {
         config.check_log_outside(write_roots)?;
-        let profile = CosPermissionProfile::load(&config.profile)?;
+        let mut profile = CosPermissionProfile::load(&config.profile)?;
+        let held_back = profile.apply_gate_override(&config.gated_tiers);
+        if !held_back.is_empty() {
+            tracing::warn!(
+                gated_by_override = ?held_back,
+                "Chief-of-Staff tiers gated by the operator's [chief_of_staff] gated_tiers override"
+            );
+        }
         let (log, records) = JsonlLog::open(&config.announcements)?;
         let ledger = SpendLedger::replay(config.budget.clone(), &records);
         Ok(Self::new(

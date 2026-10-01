@@ -3822,6 +3822,7 @@ impl ServerState {
                 GuardInstall::Active(guard) => tracing::info!(
                     workspace = %name,
                     profile = %cos.profile.display(),
+                    gated_by_override = ?cos.gated_tiers,
                     remaining_budget = guard.remaining_budget(),
                     "Chief-of-Staff guard installed"
                 ),
@@ -4174,6 +4175,10 @@ impl ServerState {
         // (`agentic_chat::Agent::transcript_capture_enabled`), not here — this
         // only wires the config-file default.
         agent.set_capture_transcripts(akh_config.capture_transcripts);
+        agent.set_strip_client_preamble(akh_config.acp.strip_client_preamble);
+        if akh_config.acp.strip_client_preamble {
+            tracing::info!(workspace = %name, "ACP client-preamble stripping enabled");
+        }
 
         // Extract the snapshot and tool-registry Arcs before moving agent into
         // the RwLock so they can be registered without ever re-acquiring the

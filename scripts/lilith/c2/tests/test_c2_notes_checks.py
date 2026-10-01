@@ -116,6 +116,16 @@ def test_page_length_comes_from_page_size_when_the_receipt_is_cut():
     assert notes.check_page_as_total(no_total) == []
 
 
+def test_a_head_and_tail_capture_is_a_cut_receipt_but_keeps_the_trailing_total():
+    capture = '{"work_items": [{"id": "x", "code": "WI-1"}...[24000 bytes elided]...], "total": 179}'
+    whole = session_of([row(1, 0, "q", "none", [call(LIST, output='{"work_items": [], "total": 0}')])])
+    assert not notes._truncated(whole["turns"][0]["tool_calls"][0])
+    session = session_of([row(1, 0, "q", "I pulled 10 items", [call(LIST, args='{"page_size":10}', output=capture)])])
+    assert notes._truncated(session["turns"][0]["tool_calls"][0])
+    found = notes.check_page_as_total(session)
+    assert found and found[0]["page_length"] == 10 and found[0]["total"] == 179
+
+
 def test_numbers_inside_ids_and_codes_are_not_counted_as_page_lengths():
     page = listing([(f"WI-{n}", P_ILLUMOS) for n in range(10)], total=179)
     session = session_of([row(1, 0, "q", f"WI-10 at {P_ILLUMOS} is next", [call(LIST, args='{"page_size":10}', output=page)])])

@@ -217,6 +217,9 @@ COS_SKILL = "chief-of-staff"
 # The dedicated clone her ancestry check (`git merge-base --is-ancestor <sha>
 # origin/main`) runs in, and her Chief-of-Staff log (announcements + the
 # write-ahead spend ledger), which must lie outside every root she can write.
+# Operator decision 2026-10-01: T3 operator-class actions stay gated (proposals only) until C2 round 2
+# shows no fabrication and no unreported refusals. Delete the tier here to restore the ADR 116 grant.
+LILITH_GATED_TIERS = ("t3-operator-class",)
 LILITH_REPOSITORY = "lilith/ancestry/akh-medu.git"
 LILITH_ANNOUNCEMENTS = "state/lilith/cos-announcements.jsonl"
 CURRENCY = re.compile(r"^[A-Z]{3}$")
@@ -1149,13 +1152,15 @@ def render_workspace(existing: dict | None, role: str, prompt: str, servers: lis
                      monitoring: dict | None = None, exec_table: dict | None = None,
                      inference: Inference = ROMAN_INFERENCE,
                      chief_of_staff: dict | None = None,
-                     pinned_tools: list[str] | None = None) -> dict:
+                     pinned_tools: list[str] | None = None,
+                     acp: dict | None = None) -> dict:
     """The full-akh workspace document, preserving unrelated existing keys.
 
     `inference` selects the backing and its endpoint table (the Romans:
     GLM on Ollama Cloud; Lilith: her vLLM over `[openai_endpoint]`); the
     other endpoint table is dropped so a stale one cannot linger.
     `chief_of_staff` is the ADR 116 `[chief_of_staff]` table (Lilith only).
+    `acp` is the `[acp]` intake table (Lilith only; `None` removes a stale one).
     `pinned_tools` is the top-level `pinned_tools` array (ADR 123 amendment): the tools every
     interactive turn offers first, in this (sorted, deduplicated) order, so the model server's
     prompt-prefix cache stays stable. `None` or empty removes a stale key. It is a scalar array,
@@ -1188,11 +1193,14 @@ def render_workspace(existing: dict | None, role: str, prompt: str, servers: lis
     doc.pop("chief_of_staff", None)
     if chief_of_staff is not None:
         doc["chief_of_staff"] = dict(chief_of_staff)
+    doc.pop("acp", None)
+    if acp is not None:
+        doc["acp"] = dict(acp)
     mcp = {k: v for k, v in (doc.get("mcp") or {}).items() if k != "servers"}
     mcp.setdefault("require_pushed_mcp", False)
     mcp["servers"] = servers
     doc["mcp"] = mcp
-    managed = [inference.endpoint_table, "autonomy", "exec", "board", "monitoring", "chief_of_staff", "mcp"]
+    managed = [inference.endpoint_table, "autonomy", "exec", "board", "monitoring", "chief_of_staff", "acp", "mcp"]
     if delegation is not None:
         doc["delegation"] = delegation
         managed.append("delegation")
@@ -1228,6 +1236,14 @@ WORKSPACE_COMMENTS = {
 # Lilith's servers are her own identities, not a mirror of akhsessd grants.
 LILITH_WORKSPACE_COMMENTS = {
     **WORKSPACE_COMMENTS,
+    "chief_of_staff": "ADR 116: the CosGuard around every tool call. The log lies outside every root she\n"
+                      "can write; the repository is her dedicated clone for the origin/main ancestry check.\n"
+                      "gated_tiers: operator decision 2026-10-01 (C2 round 1): she stays read-only (T3 -> a\n"
+                      "lilith/cos-proposal@1 instead of the action) until C2 round 2 shows no fabrication and\n"
+                      "no unreported refusals. Delete the gated_tiers line to restore the ADR 116 grant.",
+    "acp": "Operator decision 2026-10-01: the T3 app appends <runtime_info>/<pull_request_linking> blocks to\n"
+           "every prompt. The core strips that trailing run before the turn; the transcript keeps the raw\n"
+           "prompt and the stripped block names and size.",
     "exec": "Side effects stay disabled until an execd sandbox profile exists (ADR 113 53c),\n"
             "as for the Romans.",
     "mcp.servers": "Phase 53i: tools register as mcp__<server>__<tool>. Her own identities (anima-lilith\n"
@@ -1546,7 +1562,7 @@ def _inside(path: Path, root: Path) -> bool:
 
 def render_chief_of_staff(root: Path, settings: LilithSettings) -> dict:
     """Lilith's `[chief_of_staff]` table (ADR 116; `deny_unknown_fields`:
-    exactly profile, repository, announcements, budget).
+    exactly profile, repository, announcements, budget, gated_tiers).
 
     Refuses (RenderError) when the announcements log would lie inside one of
     her write roots: the akh would refuse it at load and run read-only
@@ -1560,7 +1576,14 @@ def render_chief_of_staff(root: Path, settings: LilithSettings) -> dict:
     return {"profile": str(workspace_skill_dir(root, LILITH, COS_SKILL) / "permission-profile.json"),
             "repository": str(root / LILITH_REPOSITORY),
             "announcements": str(announcements),
-            "budget": Inline(minor_units=settings.budget["minor_units"], currency=settings.budget["currency"])}
+            "budget": Inline(minor_units=settings.budget["minor_units"], currency=settings.budget["currency"]),
+            # Operator decision 2026-10-01 (C2 round 1): read-only until C2 round 2 passes.
+            # Remove this line to restore the ADR 116 T3 grant.
+            "gated_tiers": list(LILITH_GATED_TIERS)}
+
+
+# Lilith's `[acp]` table (hers only): strip the T3 client's injected tag blocks (operator decision 2026-10-01).
+LILITH_ACP = {"strip_client_preamble": True}
 
 
 def lilith_mcp_servers(session: dict) -> list[dict]:

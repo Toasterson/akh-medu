@@ -263,6 +263,33 @@ pub struct McpConfig {
     pub servers: Vec<crate::agent::tools::mcp_config::McpServerSpec>,
 }
 
+/// Per-akh ACP intake policy (`[acp]`).
+///
+/// ```toml
+/// [acp]
+/// strip_client_preamble = true   # default false
+/// ```
+///
+/// `strip_client_preamble` removes the trailing run of client-injected
+/// `<lower_snake_case>...</same>` blocks (the T3 app's `runtime_info` and
+/// `pull_request_linking`) from the operator's prompt before the turn. The
+/// captured transcript keeps the raw prompt and records the stripped block
+/// names and byte count as client metadata
+/// ([`crate::agent::client_preamble`]).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AcpConfig {
+    /// Strip the client-injected preamble from ACP turns. Off by default.
+    #[serde(default)]
+    pub strip_client_preamble: bool,
+}
+
+impl AcpConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Per-akh memory hygiene (`[memory]`, Phase 53j, ADR 113).
 ///
 /// ```toml
@@ -1382,6 +1409,11 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
     pub memory: MemoryConfig,
 
+    /// ACP intake policy (`[acp]`): opt-in stripping of the client-injected
+    /// prompt preamble.
+    #[serde(default, skip_serializing_if = "AcpConfig::is_default")]
+    pub acp: AcpConfig,
+
     /// Provider-failure handling for the akh's own model turns (Phase 53g
     /// PR 4): the cooldown ladder and the exact structured error codes that
     /// name authentication, quota and rate-limit failures. Defaults: ladder
@@ -1466,6 +1498,7 @@ impl Default for AkhConfig {
             board: None,
             monitoring: None,
             memory: MemoryConfig::default(),
+            acp: AcpConfig::default(),
             provider: crate::agent::provider_failure::ProviderConfig::default(),
             delegation: None,
             exec: None,
@@ -1778,8 +1811,15 @@ impl AkhConfig {
             ),
             (
                 "chief_of_staff",
-                &["profile", "repository", "announcements", "budget"],
+                &[
+                    "profile",
+                    "repository",
+                    "announcements",
+                    "budget",
+                    "gated_tiers",
+                ],
             ),
+            ("acp", &["strip_client_preamble"]),
         ]
     }
 
@@ -2768,6 +2808,25 @@ mod tests {
         // Round-trips through serialization.
         let back: AkhConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.autonomy, cfg.autonomy);
+    }
+
+    #[test]
+    fn acp_table_opts_an_akh_into_stripping_the_client_preamble() {
+        let off: AkhConfig = toml::from_str(r#"name = "vesta""#).unwrap();
+        assert!(!off.acp.strip_client_preamble, "default is off");
+        assert!(!toml::to_string(&off).unwrap().contains("[acp]"));
+
+        let on: AkhConfig =
+            toml::from_str("name = \"lilith\"\n[acp]\nstrip_client_preamble = true\n").unwrap();
+        assert!(on.acp.strip_client_preamble);
+        let back: AkhConfig = toml::from_str(&toml::to_string(&on).unwrap()).unwrap();
+        assert!(back.acp.strip_client_preamble);
+
+        // A typo inside [acp] is refused, not silently ignored.
+        assert!(
+            toml::from_str::<AkhConfig>("name = \"x\"\n[acp]\nstrip_client_preambel = true\n")
+                .is_err()
+        );
     }
 
     #[test]

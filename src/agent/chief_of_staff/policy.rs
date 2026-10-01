@@ -78,6 +78,25 @@ impl AutonomyTier {
     ];
 }
 
+impl AutonomyTier {
+    /// The kebab-case name used in profiles and `gated_tiers`.
+    pub const fn config_name(self) -> &'static str {
+        match self {
+            Self::Read => "t0-read",
+            Self::OwnState => "t1-own-state",
+            Self::Coordination => "t2-coordination",
+            Self::OperatorClass => "t3-operator-class",
+        }
+    }
+
+    /// The tier named by `name` (exact, as [`Self::config_name`] spells it).
+    pub fn from_config_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|tier| tier.config_name() == name)
+    }
+}
+
 impl std::fmt::Display for AutonomyTier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -266,6 +285,27 @@ impl CosPermissionProfile {
         Ok(())
     }
 
+    /// Apply the operator-held `[chief_of_staff] gated_tiers` override: every
+    /// listed tier becomes [`TierGrant::Gated`]. The override can only gate;
+    /// it never turns a gated tier autonomous, whatever the profile says.
+    ///
+    /// Returns the tiers the override actually changed (those the profile had
+    /// granted), in tier order, so the caller can log what the operator took
+    /// back.
+    pub fn apply_gate_override(&mut self, gated: &[AutonomyTier]) -> Vec<AutonomyTier> {
+        let mut changed: Vec<AutonomyTier> = gated
+            .iter()
+            .copied()
+            .filter(|tier| self.grant(*tier) != TierGrant::Gated)
+            .collect();
+        changed.sort();
+        changed.dedup();
+        for tier in gated {
+            self.grants.insert(*tier, TierGrant::Gated);
+        }
+        changed
+    }
+
     /// The grant for `tier` (missing ⇒ gated).
     pub fn grant(&self, tier: AutonomyTier) -> TierGrant {
         self.grants.get(&tier).copied().unwrap_or(TierGrant::Gated)
@@ -328,7 +368,13 @@ fn collect_strings(value: &Value, out: &mut Vec<String>) {
 /// repository = "/srv/akh-medu"
 /// announcements = "/var/lib/akh/lilith/cos-announcements.jsonl"
 /// budget = { minor_units = 6673, currency = "USD" }
+/// gated_tiers = ["t3-operator-class"]   # optional operator override
 /// ```
+///
+/// `gated_tiers` is the operator's hold on the akh: the listed tiers are
+/// gated whatever the profile grants (a gated tier refuses with the
+/// `lilith/cos-proposal@1` option). It can only gate, never ungate; remove
+/// the line to hand the profile's grants back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChiefOfStaffConfig {
@@ -341,6 +387,37 @@ pub struct ChiefOfStaffConfig {
     pub announcements: PathBuf,
     /// The spend ceiling she is given.
     pub budget: Money,
+    /// Tiers the operator holds back regardless of the profile. An unknown
+    /// tier name is a config error that lists the valid names.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_gated_tiers"
+    )]
+    pub gated_tiers: Vec<AutonomyTier>,
+}
+
+/// Parse `gated_tiers`, naming the valid tier values when one is unknown.
+fn deserialize_gated_tiers<'de, D>(deserializer: D) -> Result<Vec<AutonomyTier>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let names = Vec::<String>::deserialize(deserializer)?;
+    names
+        .iter()
+        .map(|name| {
+            AutonomyTier::from_config_name(name).ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "[chief_of_staff] gated_tiers: unknown tier `{name}`; valid tiers are {}",
+                    AutonomyTier::ALL
+                        .iter()
+                        .map(|tier| format!("`{}`", tier.config_name()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })
+        })
+        .collect()
 }
 
 impl ChiefOfStaffConfig {
