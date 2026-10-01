@@ -79,7 +79,7 @@ from dojo.model_profile import (
     CATALOG_RELATIVE, PROFILE_AUTO, ResolvedSampling, ResolvedTimeout, SamplingSource, load_catalog, resolve_http_timeout,
     resolve_sampling, resolve_turn_timeout,
 )
-from dojo.snapshot import SnapshotStore, canonical_json, sha256_hex
+from dojo.snapshot import NO_CUTOFF, SnapshotStore, canonical_json, sha256_hex
 from dojo.splits import Split, SplitConfig, assign_splits
 
 SUMMARY_SCHEMA = "lilith/dojo-baseline@1"
@@ -170,7 +170,7 @@ def snapshot_root_sha256(store: SnapshotStore) -> str:
 # its `declared` hash covers the whole rendered TOML (comments, rendered budgets), and `agent_info` and
 # `memory` are what the running core reported at probe time, so all three move with a redeploy
 # without changing what the teacher is. See `run_identity`.
-IDENTITY_KEYS = ("runner", "dojo", "git_sha", "snapshot_root_sha256", "floors_sha256", "prompt_sha256",
+IDENTITY_KEYS = ("runner", "dojo", "git_sha", "snapshot_until", "snapshot_root_sha256", "floors_sha256", "prompt_sha256",
                  "system_prompt_sha256", "tools_sha256", "model_kind", "model_id", "endpoint_host", "temperature",
                  "max_tokens", "sampling.repeat_penalty", "max_rounds", "episode_token_cap", "context_window", "seed", "split",
                  "families", "limit")
@@ -207,6 +207,9 @@ def run_identity(provenance: Mapping[str, Any]) -> dict[str, Any]:
         # A run recorded before sampling was provenance sent no repeat_penalty: compare it as None, so
         # resuming it with the catalog's penalty is refused instead of mixing two samplings in one run.
         provenance = {**provenance, "sampling": {"repeat_penalty": None}}
+    if provenance.get("snapshot_until") is None:
+        # A run recorded before the cutoff existed (or without one) saw the whole root: compare it as "none".
+        provenance = {**provenance, "snapshot_until": NO_CUTOFF}
     keys = [*IDENTITY_KEYS]
     if isinstance(provenance.get("teacher"), Mapping):
         keys += [f"teacher.{k}" for k in TEACHER_IDENTITY_KEYS]
@@ -532,7 +535,15 @@ def paired_bootstrap(diffs: Sequence[float], seed: str):
     return PairedDifference(n, delta, lo, hi, None)
 
 
-def compare_arms(arms: Sequence[Arm]) -> dict:
+def arm_cutoff(arm: Arm) -> str:
+    """The arm's recorded snapshot cutoff; a run without one saw the whole root (`none`)."""
+    return str(arm.summary["provenance"].get("snapshot_until") or NO_CUTOFF)
+
+
+def compare_arms(arms: Sequence[Arm], strict: bool = False) -> dict:
+    """Paired comparison over the episode ids every arm scored `ok`. Arms started hours apart over a growing
+    snapshot root build different episode sets; the table says which cutoffs and sets were compared. `strict`
+    refuses differing cutoffs or episode-id sets instead of warning."""
     if len(arms) < 2:
         raise CompareError("compare needs at least two summaries")
     ok_ids = [{i for i, e in a.summary["per_episode"].items() if e["status"] == "ok"} for a in arms]
@@ -540,13 +551,33 @@ def compare_arms(arms: Sequence[Arm]) -> dict:
     shared = set.intersection(*ok_ids)
     families = sorted({arms[0].summary["per_episode"][i]["family"] for i in shared})
     roots = {a.summary["provenance"].get("snapshot_root_sha256") for a in arms}
+    cutoffs = {a.label: arm_cutoff(a) for a in arms}
+    common_built = set.intersection(*all_ids)
     result: dict[str, Any] = {
         "arms": [a.label for a in arms],
         "warnings": [],
         "episodes_in_common": len(shared),
         "dropped_for_errors_or_absence": len(set.union(*all_ids)) - len(shared),
+        "snapshot_until": cutoffs,
+        "episodes_per_arm": {a.label: len(ids) for a, ids in zip(arms, all_ids)},
+        "intersection": {"episode_ids_in_every_arm": len(common_built), "scored_ok_in_every_arm": len(shared),
+                         "union_of_episode_ids": len(set.union(*all_ids))},
         "rows": [],
     }
+    different_cutoffs = len(set(cutoffs.values())) > 1
+    different_sets = any(ids != all_ids[0] for ids in all_ids[1:])
+    if strict and (different_cutoffs or different_sets):
+        raise CompareError(
+            "the arms differ in snapshot cutoff or episode-id set: "
+            f"cutoffs {cutoffs}, episodes per arm {result['episodes_per_arm']}, in every arm {len(common_built)}",
+            help="start every arm with the same --snapshot-until, or compare without --strict to pair only the shared episodes")
+    if different_cutoffs:
+        result["warnings"].append(f"the arms used different snapshot cutoffs {cutoffs}; only the {len(shared)} "
+                                  f"episodes scored in every arm are compared")
+    if different_sets:
+        result["warnings"].append(f"the arms built different episode-id sets {result['episodes_per_arm']}; the comparison "
+                                  f"is over the {len(common_built)} ids present in every arm "
+                                  f"({len(shared)} scored ok in all)")
     if len(roots) > 1:
         result["warnings"].append("the arms ran over different snapshot roots; only shared episode ids are paired")
     if len({a.summary["provenance"].get("system_prompt_sha256") for a in arms}) > 1:
@@ -588,6 +619,8 @@ def render_compare(result: Mapping[str, Any]) -> str:
     lines = [f"Paired comparison over {result['episodes_in_common']} shared episodes "
              f"({result['dropped_for_errors_or_absence']} dropped: absent in an arm or endpoint error)"]
     lines += [f"WARNING: {w}" for w in result["warnings"]]
+    lines.append("snapshot cutoffs: " + ", ".join(f"{k}={v}" for k, v in result["snapshot_until"].items())
+                 + "; episodes per arm: " + ", ".join(f"{k}={v}" for k, v in result["episodes_per_arm"].items()))
     lines += ["", "Mean cos-v1 weight [95% bootstrap CI]; fab = episodes with fabrication, rule = rule-break/unannounced", ""]
     width = max(22, *(len(label) for label in labels))
     lines.append(f"{'family':<20} {'n':>4}  " + "  ".join(f"{label:<{width + 22}}" for label in labels))
@@ -656,8 +689,18 @@ def build_adapter(args: argparse.Namespace) -> ModelAdapter:
                             max_tokens=args.max_tokens, policy=policy)
 
 
+def add_snapshot_until(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--snapshot-until", default=None, metavar="CUTOFF",
+                   help="only snapshots taken at or before CUTOFF (a snapshot id such as 20261001T171956Z, or an ISO "
+                        "timestamp) exist for spec building, hindsight labels and replay; the recorder keeps adding "
+                        "snapshots, so without a cutoff two arms started hours apart score different episode sets. "
+                        "`auto` = the newest snapshot now, recorded as the id it resolved to. Part of the run "
+                        "identity (a resume with another cutoff is refused); default: the whole root")
+
+
 def _add_run_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--root", type=Path, default=None, help="snapshot root (default: $LILITH_SNAPSHOT_ROOT)")
+    add_snapshot_until(p)
     p.add_argument("--repo", type=Path, default=REPO_ROOT, help="local akh-medu clone: ancestry oracle and provenance")
     p.add_argument("--illumos-pack", type=Path, default=None)
     p.add_argument("--corrections", type=Path, default=None,
@@ -826,6 +869,7 @@ def _base_provenance(args: argparse.Namespace, store: SnapshotStore, system: Sys
         "runner": RUNNER_VERSION,
         "dojo": DOJO_VERSION,
         **git_provenance(args.repo, args.allow_dirty),
+        "snapshot_until": store.cutoff,  # None = the whole root; `auto` is recorded as the id it resolved to
         "snapshot_root_sha256": snapshot_root_sha256(store),
         "snapshots": len(store.ids),
         "floors_sha256": floors_mod.FLOORS_V1_SHA256,
@@ -847,7 +891,7 @@ def _base_provenance(args: argparse.Namespace, store: SnapshotStore, system: Sys
 
 def cmd_run(args: argparse.Namespace) -> int:
     root = args.root or Path(os.environ.get("LILITH_SNAPSHOT_ROOT", RECORDER_DEFAULT_ROOT))
-    store = SnapshotStore(root)
+    store = SnapshotStore.open(root, args.snapshot_until)
     oracle = GitAncestryOracle(args.repo)
     pack = load_illumos_pack(args.illumos_pack) if args.illumos_pack else ()
     corrections = load_corrections(args.corrections, args.correction_annotations) if args.corrections else ()
@@ -906,6 +950,8 @@ def dry_run_report(store: SnapshotStore, chosen: Sequence[Chosen], selection: Ma
             names = [s.name for s in specs]
     return {
         "episodes": len(chosen),
+        "snapshot_until": store.cutoff,
+        "snapshots": len(store.ids),
         "selection": dict(selection),
         "system_prompt_sha256": system.sha256,
         "prompt_sha256": prompt_bundle_sha256(system),
@@ -948,13 +994,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     cmp = sub.add_parser("compare", help="paired per-family table over baseline summaries")
     cmp.add_argument("summaries", nargs="+", type=Path, help="baseline-summary.json (or its directory), reference first")
     cmp.add_argument("--json", action="store_true")
+    cmp.add_argument("--strict", action="store_true",
+                     help="refuse arms with different snapshot cutoffs or episode-id sets instead of warning")
     args = parser.parse_args(argv)
     try:
         if args.command == "run":
             return cmd_run(args)
         if args.command == "reverify":
             return reverify.cmd_reverify(args)
-        result = compare_arms([load_arm(p) for p in args.summaries])
+        result = compare_arms([load_arm(p) for p in args.summaries], strict=args.strict)
         print(json.dumps(result, indent=2, sort_keys=True) if args.json else render_compare(result))
         return 0
     except DojoError as error:

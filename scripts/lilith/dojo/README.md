@@ -92,6 +92,18 @@ python3 scripts/lilith/dojo/runner.py run \
 python3 scripts/lilith/dojo/runner.py compare runs/c4/parent-sealed runs/c4/teacher-sealed
 ```
 
+- **Fix the snapshot window with `--snapshot-until CUTOFF`.** The recorder adds a snapshot every 2 h and episode
+  selection is built from whatever the root holds at run start, so two arms started hours apart score different
+  episode sets (and ids keyed on the newest snapshot shift). `CUTOFF` is a snapshot id (`20261001T171956Z`) or an
+  ISO timestamp; only snapshots at or before it exist for spec building, hindsight labels, replay lookups
+  (project metadata) and memory-epistemics' "newest" / "first at or after". It is recorded in `provenance.json`
+  (`snapshot_until`; absent = `none`) and is part of the run identity: a resume with another cutoff (or with none)
+  is refused. `--snapshot-until auto` takes the newest snapshot at start and records the id it resolved to (resume
+  with that id, not `auto`). Default, with no flag: the whole root (unchanged). The same flag exists on `reverify`
+  (no flag = the run's own recorded cutoff; an explicit one is recorded as `snapshot_until` with the run's as
+  `reverify.source_snapshot_until`), `--dry-run`, `dojo_report.py` and `replay_server.py serve`. `compare` prints
+  each arm's cutoff and episode count, warns when cutoffs or episode-id sets differ, reports the intersection it
+  pairs on (`intersection` in `--json`), and `compare --strict` refuses such arms.
 - Add `--dry-run` first: it selects the episodes, prints the prompt and tool-list size and the prompt
   sha256, and calls no model. Add `--limit 3` for a smoke run.
 - The key is read from the env var or a 0600 file; it is never an argument, never logged, and is scrubbed
