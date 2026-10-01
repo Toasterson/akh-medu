@@ -74,6 +74,7 @@ class WI:
     parked_revisits: int = 0  # forensics `phase_revisit_counts.parked`
     failed_dispatches: int = 0  # forensics `dispatch_attempt` events that failed
     ci_runs: tuple[bool, ...] = ()  # `get_work_item_detail.ci_runs` successes, oldest first, pinned to the head
+    source: str | None = None  # `get_work_item_detail.work_item.source`; `None` = the tracker holds no value
 
     @property
     def live(self) -> bool:
@@ -108,7 +109,7 @@ class World:
             put("get_work_item_detail", {"id": w.id}, {
                 "work_item": {"id": w.id, "current_phase": w.phase, "status": w.status, "plan_id": w.plan,
                               "parked_reason": w.parked_reason, "executor": w.executor, "updated_at": updated,
-                              "depends_on_ids": list(w.pending_deps),
+                              "source": w.source, "depends_on_ids": list(w.pending_deps),
                               "dependency_edges": [{"depends_on_id": d, "state": "pending", "work_item_id": w.id}
                                                    for d in w.pending_deps]},
                 "prs": [{"change_id": c, "head_sha": h, "lifecycle_state": "open", "integration_decision": "pending"}

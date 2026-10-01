@@ -1076,6 +1076,7 @@ def build_briefing(store: SnapshotStore, sid: str, ctx: BuildContext) -> BuildRe
     spec = _spec(Family.BRIEFING, snap, store.later(sid), [sid], situation,
                  {"buckets": body["buckets"], "counts": body["counts"], "exceptions": body["exceptions"],
                   "list_cap": body["list_cap"], "unsupported_signals": body["unsupported_signals"],
+                  "exclusions": body["exclusions"], "source_unrecorded": body["source_unrecorded"],
                   "stale": stale_ids}, prov, ctx, FEATURE_VOICE["briefing"],
                  plans=[wi.plan_id for wi in snap.work_items.values() if wi.is_live])
     return BuildResult([spec], excluded)

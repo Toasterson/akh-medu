@@ -126,6 +126,70 @@ def test_label_requires_the_exceptions_and_counts_the_rest(stuck_world):
     assert body["provenance"]["objects"]
 
 
+def architect_world(world):
+    """Two snapshots four days apart; each architect-session item trips a stuck signal, as its tracker twin does."""
+    t1, t2 = T0, T0 + hours(96)
+    young, old = t2 - timedelta(hours=20), t2 - timedelta(days=4)
+    arch = H.ARCHITECT_SESSION_SOURCE
+
+    def items(phase):
+        return [
+            WI("a_nosess", "working", sessions=("failed",), entered_at=young, source=arch),
+            WI("t_nosess", "working", sessions=("failed",), entered_at=young, source="human"),
+            WI("a_old", "working", sessions=("running",), entered_at=old, source=arch),
+            WI("a_ci", "testing", entered_at=young, ci_green=False, source=arch),
+            WI("a_retry", "ready", entered_at=young, retry_count=3, source=arch),
+            WI("a_quiet", "working", sessions=("running",), entered_at=young, source=arch),
+            WI("a_parked", "parked", parked_reason="retry-budget", source=arch),
+            WI("a_dep", "ready", blockers=(("x", "working"),), entered_at=young, source=arch),
+            WI("a_moved", phase, sessions=("running",), entered_at=young, source=arch),
+            WI("a_draft", "draft", source=arch),
+            WI("unrec_nosess", "working", sessions=("failed",), entered_at=young),  # `source` not recorded
+        ]
+
+    world.snapshot(t1, items("working"), tools=ALL_TOOLS)
+    return world, world.snapshot(t2, items("testing"), tools=ALL_TOOLS)
+
+
+def test_architect_session_items_are_never_stuck_but_stay_exceptions_for_other_reasons(world):
+    world, sid = architect_world(world)
+    kinds, found = kinds_of(world, sid)
+    assert kinds["t_nosess"] == {"no-live-session"}  # another source is judged as before
+    assert kinds["unrec_nosess"] == {"no-live-session"}  # an unrecorded source counts as not architect-session
+    for wid in ("a_nosess", "a_old", "a_ci", "a_retry", "a_quiet", "a_draft"):
+        assert wid not in kinds, wid
+    assert kinds["a_parked"] == {"parked"}  # parked, blocked and changed still apply
+    assert kinds["a_dep"] == {"blocked"}
+    assert kinds["a_moved"] == {"changed-since-previous"}
+    stuck_values = {k.value for k in H.STUCK_KINDS}
+    assert all(not (ks & stuck_values) for w, ks in kinds.items() if w.startswith("a_"))
+    # every architect-session item in a stuck phase is listed with the signals that were dropped
+    excl = {w: (e.reason.value, sorted(k.value for k in e.suppressed)) for w, e in found.exclusions.items()}
+    assert excl == {
+        "a_nosess": ("architect-session", ["no-live-session"]),
+        "a_old": ("architect-session", ["long-in-phase"]),
+        "a_ci": ("architect-session", ["ci-red"]),
+        "a_retry": ("architect-session", ["repeated-parks-or-retries"]),
+        "a_quiet": ("architect-session", []),
+        "a_dep": ("architect-session", []),
+        "a_moved": ("architect-session", []),
+    }
+    assert found.source_unrecorded == {"unrec_nosess"}  # a recorded non-architect source is not "unrecorded"
+
+
+def test_label_carries_the_exclusions_and_the_unrecorded_source_count(world):
+    world, sid = architect_world(world)
+    label = H.exception_briefing_label(world.store(), sid)
+    body = label.to_dict()
+    assert {e["work_item_id"] for e in body["exclusions"]} == {"a_nosess", "a_old", "a_ci", "a_retry", "a_quiet", "a_dep", "a_moved"}
+    assert body["exclusions"][0] == {"work_item_id": "a_ci", "reason": "architect-session", "suppressed": ["ci-red"]}
+    assert body["source_unrecorded"] == 1
+    required = set().union(*(set(r) for r in label.required.values()))
+    assert required == {"t_nosess", "unrec_nosess", "a_parked", "a_dep", "a_moved"}
+    spec = F.build_briefing(world.store(), sid, BuildContext()).specs[0]
+    assert spec.label["exclusions"] == body["exclusions"] and spec.label["source_unrecorded"] == 1
+
+
 def test_phase_age_comes_from_forensics_else_from_consecutive_snapshots(world):
     s1 = world.snapshot(T0, [WI("stay", "working"), WI("flip", "working")])
     world.snapshot(T0 + hours(48), [WI("stay", "working"), WI("flip", "testing")])

@@ -185,6 +185,30 @@ class ExceptionKind(enum.StrEnum):
     REPEATED = "repeated-parks-or-retries"
 
 
+# Operator decision 2026-10-01: work driven by the operator's architect sessions is not stuck (the operator
+# handles it when he has time). The tracker records the origin of a work item in `get_work_item_detail`
+# `work_item.source` (the listing does not carry it); this is the typed value an architect session writes.
+ARCHITECT_SESSION_SOURCE = "architect-session"
+
+
+class ExclusionReason(enum.StrEnum):
+    ARCHITECT_SESSION = "architect-session"
+
+
+@dataclasses.dataclass(frozen=True)
+class StuckExclusion:
+    """A live item the stuck rules never flag, and why. `suppressed` = the stuck signals that fired for it
+    and were dropped (empty when none fired); parked, blocked and changed-since-previous still apply."""
+
+    work_item_id: str
+    reason: ExclusionReason
+    suppressed: frozenset[ExceptionKind]
+
+    def to_dict(self) -> dict:
+        return {"work_item_id": self.work_item_id, "reason": self.reason.value,
+                "suppressed": sorted(k.value for k in self.suppressed)}
+
+
 STUCK_KINDS = frozenset({ExceptionKind.NO_LIVE_SESSION, ExceptionKind.LONG_IN_PHASE, ExceptionKind.CI_RED,
                          ExceptionKind.CI_OVERDUE, ExceptionKind.REPEATED})
 
@@ -297,11 +321,17 @@ class ExceptionSet:
     kinds: Mapping[str, frozenset[ExceptionKind]]  # work item id -> why it is an exception
     unsupported: frozenset[ExceptionKind]  # stuck signals the snapshot holds no evidence for at all
     provenance: Provenance
+    exclusions: Mapping[str, StuckExclusion] = dataclasses.field(default_factory=dict)  # never stuck, with the reason
+    # Items the stuck rules looked at whose `source` is not recorded (no detail read, or no value): treated as
+    # not architect-session, so they can be stuck. Counted so the gap is visible.
+    source_unrecorded: frozenset[str] = frozenset()
 
 
 def briefing_exceptions(store: SnapshotStore, snap: Snapshot, previous: Snapshot | None) -> ExceptionSet:
     """Every live work item of the snapshot's primary project that is an exception, and why."""
     kinds: dict[str, set[ExceptionKind]] = {}
+    exclusions: dict[str, StuckExclusion] = {}
+    source_unrecorded: set[str] = set()
     evidence: list[Provenance] = []
     seen_signal: set[ExceptionKind] = set()
     overdue, overdue_prov = _overdue_ci_ids(snap)
@@ -326,6 +356,7 @@ def briefing_exceptions(store: SnapshotStore, snap: Snapshot, previous: Snapshot
                 flag(wid, ExceptionKind.CHANGED, wi.provenance.merge(before.provenance if before else Provenance()))
         if wi.phase not in STUCK_PHASES:
             continue
+        stuck: list[tuple[ExceptionKind, Provenance]] = []  # stuck signals that fired for this item
         if wi.phase == PHASE_WORKING:
             sessions = snap.sessions(wid)
             if sessions is not None:
@@ -334,16 +365,16 @@ def briefing_exceptions(store: SnapshotStore, snap: Snapshot, previous: Snapshot
                 live = [s for s in payload.get("sessions") or []
                         if isinstance(s, dict) and s.get("status") not in TERMINAL_SESSION_STATUSES]
                 if not live:
-                    flag(wid, ExceptionKind.NO_LIVE_SESSION, Provenance.of(ref))
+                    stuck.append((ExceptionKind.NO_LIVE_SESSION, Provenance.of(ref)))
         entry = phase_entry(store, snap, wi)
         if entry is not None and snap.taken_at - entry.entered_at >= STUCK_AFTER:
-            flag(wid, ExceptionKind.LONG_IN_PHASE, entry.provenance)
+            stuck.append((ExceptionKind.LONG_IN_PHASE, entry.provenance))
         if loop is not None:
             seen_signal.add(ExceptionKind.CI_RED)
             if loop.ci_green_for_head is False:
-                flag(wid, ExceptionKind.CI_RED, Provenance.of(loop.ref))
+                stuck.append((ExceptionKind.CI_RED, Provenance.of(loop.ref)))
         if overdue is not None and wid in overdue:
-            flag(wid, ExceptionKind.CI_OVERDUE, overdue_prov)
+            stuck.append((ExceptionKind.CI_OVERDUE, overdue_prov))
         detail = snap.detail(wid)
         if detail is not None:
             runs = [r for r in detail[0].get("ci_runs") or [] if isinstance(r, dict) and r.get("pinned_to_current")]
@@ -351,22 +382,31 @@ def briefing_exceptions(store: SnapshotStore, snap: Snapshot, previous: Snapshot
                 seen_signal.add(ExceptionKind.CI_RED)
                 newest = max(runs, key=lambda r: str(r.get("created_at") or ""))
                 if newest.get("success") is False:
-                    flag(wid, ExceptionKind.CI_RED, Provenance.of(detail[1]))
+                    stuck.append((ExceptionKind.CI_RED, Provenance.of(detail[1])))
         sched = snap.scheduling(wid)
         forensics = snap.forensics(wid)
         if sched is not None or forensics is not None:
             seen_signal.add(ExceptionKind.REPEATED)
         if sched is not None and int(sched[0].get("retry_count") or 0) >= RETRY_REPEAT_MIN:
-            flag(wid, ExceptionKind.REPEATED, Provenance.of(sched[1]))
+            stuck.append((ExceptionKind.REPEATED, Provenance.of(sched[1])))
         if forensics is not None:
             payload, ref = forensics
             revisits = int((payload.get("phase_revisit_counts") or {}).get(PHASE_PARKED) or 0)
             failed = sum(1 for e in payload.get("events") or []
                          if isinstance(e, dict) and e.get("type") == "dispatch_attempt" and e.get("session_status") == "failed")
             if revisits >= PARK_REVISIT_MIN or failed >= FAILED_DISPATCH_MIN:
-                flag(wid, ExceptionKind.REPEATED, Provenance.of(ref))
+                stuck.append((ExceptionKind.REPEATED, Provenance.of(ref)))
+        if wi.source == ARCHITECT_SESSION_SOURCE:
+            exclusions[wid] = StuckExclusion(wid, ExclusionReason.ARCHITECT_SESSION, frozenset(k for k, _ in stuck))
+            evidence.append(wi.provenance)
+            continue
+        if wi.source is None:
+            source_unrecorded.add(wid)
+        for kind, why in stuck:
+            flag(wid, kind, why)
     unsupported = frozenset(k for k in SIGNAL_NEEDS if k not in seen_signal)
-    return ExceptionSet({w: frozenset(k) for w, k in kinds.items()}, unsupported, Provenance().merge(*evidence))
+    return ExceptionSet({w: frozenset(k) for w, k in kinds.items()}, unsupported, Provenance().merge(*evidence),
+                        exclusions, frozenset(source_unrecorded))
 
 
 # Counts the briefing may state per bucket, besides the label's exact membership: the totals a receipt shows
@@ -395,6 +435,8 @@ class ExceptionBriefingLabel:
     cap: int
     unsupported: frozenset[ExceptionKind]
     provenance: Provenance
+    exclusions: tuple[StuckExclusion, ...] = ()  # items the stuck rules skip, with the reason
+    source_unrecorded: int = 0  # stuck-rule items whose `source` is not recorded (treated as not architect-session)
 
     def to_dict(self) -> dict:
         return {
@@ -406,6 +448,8 @@ class ExceptionBriefingLabel:
             "exceptions": {w: sorted(k.value for k in ks) for w, ks in sorted(self.exceptions.items())},
             "list_cap": self.cap,
             "unsupported_signals": sorted(k.value for k in self.unsupported),
+            "exclusions": [e.to_dict() for e in self.exclusions],
+            "source_unrecorded": self.source_unrecorded,
             "provenance": self.provenance.to_dict(),
         }
 
@@ -436,7 +480,9 @@ def exception_briefing_label(store: SnapshotStore, snapshot_id: str, cap: int = 
     exceptions = {w: k for w, k in found.kinds.items() if w in wanted}
     return ExceptionBriefingLabel(snapshot_id, base.previous_snapshot_id, required,
                                   {b: l.allowed for b, l in base.buckets.items()}, counts, exceptions, cap,
-                                  found.unsupported, base.provenance.merge(found.provenance))
+                                  found.unsupported, base.provenance.merge(found.provenance),
+                                  tuple(found.exclusions[w] for w in sorted(found.exclusions)),
+                                  len(found.source_unrecorded))
 
 
 # --- stale items ----------------------------------------------------------------------------
