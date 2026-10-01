@@ -319,12 +319,23 @@ Every check below reads ids, enums, counters and structure; none matches prose.
   - `ci-overdue`: the item is named in `overdue_ci_dispatches` (`dispatches` / `churn`);
   - `repeated-parks-or-retries`: scheduling `retry_count` >= 3, forensics `phase_revisit_counts.parked` >= 2, or >= 3
     failed `dispatch_attempt` events.
+  - **Never stuck: architect-session items** (operator decision 2026-10-01: the operator handles work driven by his
+    architect sessions when he has time). The origin is `get_work_item_detail` `work_item.source`; the
+    `list_work_items` entries do not carry it, so `WorkItemState.source` is read from the detail. An item whose
+    source is `architect-session` (`hindsight.ARCHITECT_SESSION_SOURCE`) is skipped by all five signals above; it is
+    still an exception when parked, blocked or changed since the previous snapshot. Where the source is not
+    recorded (no detail read, or the tracker holds no value) the item is treated as *not* architect-session and the
+    label counts it in `source_unrecorded`. On the real root (42 snapshots to 2026-10-01T17:19Z) 21 items carry the
+    source, all `draft`, and none is `working`, `testing` or `ready`, so the rule changes no real label yet: the 76
+    live stuck-phase items all record `source: null`.
 - Label (`spec.label`): `buckets.<bucket>.required` = the exceptions of that bucket (the whole of `blocked`, plus
   items that moved to `done` since the previous snapshot), `buckets.<bucket>.allowed` = everything that may be
   named there; `counts.<bucket>` = the numbers a stated count may take (the exact membership, then the per-phase
   total a `list_work_items` receipt shows: `done` = the done total, `in_flight` = working + testing, `blocked` =
   parked, `next` = ready or ready + draft); `exceptions` = work item id -> why; `list_cap` = 10;
-  `unsupported_signals`; `stale` (unchanged).
+  `unsupported_signals`; `exclusions` = the live stuck-phase items the stuck rules skip, each `{work_item_id, reason:
+  "architect-session", suppressed: [stuck signals that would have fired]}`; `source_unrecorded` = how many items the
+  stuck rules looked at with no recorded source (count only); `stale` (unchanged).
 - Verifier: recall is measured against the exception set with the cap as the denominator limit
   (`min(|required|, 10)`): a list full of required items is complete and the rest is "N more on request"; going over
   the cap is a soft `brevity` penalty (`10 / listed`). Effect = 0.30 `blocked_recall` + 0.25 `recall` + 0.15
@@ -342,7 +353,7 @@ Every check below reads ids, enums, counters and structure; none matches prose.
   scope is the primary project. The scheduling `deadline` and `backoff_until` fields are not used. On the real
   2026-10-01T15:09Z snapshot the rules fire on 62 of 66 `working` items (`no-live-session`) and 77 items
   (`long-in-phase`): the exception set is as large as the old required set (96); the cap, not the set, is what
-  makes recall measurable. Tighten the rules (for example exclude session-driven items) if that is not intended.
+  makes recall measurable. The architect-session exclusion (above) is the first tightening; it does not shrink the real set because no live `working`/`testing`/`ready` item records that source.
 
 **Scope (decision 2): family `scope`.** The prompt names a project by exact name (`situation.project_name`, taken
 from the `list_projects` answer the replay serves; one episode per name at the first snapshot of each day, so the

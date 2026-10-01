@@ -149,6 +149,9 @@ class WorkItemState:
     updated_at: datetime | None = None
     depends_on: tuple[str, ...] = ()
     pending_dependencies: tuple[str, ...] = ()
+    # `get_work_item_detail` `work_item.source` (what created or drives the item, e.g. `architect-session`).
+    # `None` = not recorded: no detail read, or the tracker holds no value. The listing does not carry it.
+    source: str | None = None
 
     @property
     def is_live(self) -> bool:
@@ -390,6 +393,7 @@ class Snapshot:
             updated_at=parse_iso(wi.get("updated_at")),
             depends_on=tuple(str(x) for x in wi.get("depends_on_ids") or []),
             pending_dependencies=pending,
+            source=wi.get("source") or None,
         )
 
     def change_heads(self, wid: str) -> list[ChangeHead]:

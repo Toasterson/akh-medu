@@ -87,6 +87,9 @@ Changing the permission mode does not lift this.
   list at about 10 and end with "N more on request". An item is **stuck** when
   it is in `working` with no live session, has sat 3 days or more in the same
   phase, has red or overdue CI, or has been parked or retried repeatedly.
+  Items driven by the operator's architect sessions (`source` is
+  `architect-session`) are not stuck; the operator handles them when he has
+  time. They are still exceptions when parked, blocked or changed.
 - To explain why an item is in a state (a park reason, a block), read
   `mcp__anima__get_work_item_detail` first. If that read fails, try at most
   two other routes (`mcp__anima__get_thread`,
