@@ -7761,6 +7761,46 @@ mod control_plane_tests {
         assert!(tools.manifest("memory_write").is_some());
     }
 
+    /// Central context must remain available when this host cannot execute the
+    /// workspace locally, without making its local tools available by fallback.
+    #[cfg(feature = "core-api")]
+    #[tokio::test]
+    async fn core_api_engine_does_not_require_a_host_local_executor() {
+        use akh_medu::core_service::CoreBackend;
+        let (_tmp, state) = temp_state();
+        state
+            .dispatch(
+                "_akh/workspace/create",
+                &json!({ "name": "central-context" }),
+            )
+            .await
+            .unwrap();
+        state.config.write().await.exec = Some(
+            serde_json::from_value(json!({
+                "kind": "local-drop",
+                "user": "akh-test-nonexistent-exec-user"
+            }))
+            .unwrap(),
+        );
+
+        let engine = CoreBackend::engine(&state, "central-context")
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &engine,
+            &state.get_engine("central-context").await.unwrap()
+        ));
+        assert!(!state.agents.read().await.contains_key("central-context"));
+        assert!(CoreBackend::tools(&state, "central-context").await.is_err());
+        assert!(!state.agents.read().await.contains_key("central-context"));
+        assert!(Arc::ptr_eq(
+            &engine,
+            &CoreBackend::engine(&state, "central-context")
+                .await
+                .unwrap()
+        ));
+    }
+
     /// Phase 53 review: `/v1` tool resolution and grant minting must not wait
     /// on the Agent's std lock, which an OODA cycle or turn can hold for long.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8492,10 +8532,11 @@ mod control_plane_tests {
 impl akh_medu::core_service::CoreBackend for ServerState {
     fn engine<'a>(&'a self, akh: &'a str) -> akh_medu::core_service::CoreFuture<'a, Arc<Engine>> {
         Box::pin(async move {
-            // Materialize the Agent first: it is the one owner of the akh's
-            // runtime (snapshots capture Agent state), and the engine returned
-            // is the same cached Arc the Agent holds.
-            self.get_agent(akh).await?;
+            // Central sessions need cognitive state before their remote runtime
+            // starts. Loading it must not instantiate a second, host-local
+            // executor from a migrated workspace's execution configuration.
+            // get_agent uses this same single-flight engine cache when a local
+            // agent is actually requested; tools still go through agent_tools.
             self.get_engine(akh).await
         })
     }
