@@ -316,11 +316,16 @@ def smoke_binary(image, arch, binary):
     run('docker', 'run', '--rm', '--platform', 'linux/' + arch,
         '--entrypoint', '/bin/sh', image, '-ec',
         f'test -s /usr/local/bin/{binary} && test -x /usr/local/bin/{binary}')
+    # Full akhomed has no top-level help parser: it starts the daemon and
+    # reads AKH_CORE_CONFIG. Its offline store CLI handles help before config,
+    # telemetry or store access. Keep a real successful invocation mandatory.
+    help_args = ['store', '--help'] if binary == 'akhomed' else ['--help']
     result = subprocess.run(['docker', 'run', '--rm', '--platform', 'linux/' + arch,
-                             '--entrypoint', binary, image, '--help'],
+                             '--entrypoint', binary, image, *help_args],
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if result.returncode != 0 or not result.stdout.strip():
-        raise RuntimeError(f'{image} {arch} {binary}: --help failed or silent')
+        raise RuntimeError(f'{image} {arch} {binary}: {" ".join(help_args)} failed or silent '
+                           f'(exit {result.returncode}): {result.stdout[-2000:]}')
 
 
 def smoke_heap(image, arch, binary):
