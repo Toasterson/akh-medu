@@ -366,7 +366,7 @@ def render_configs(root, provenance, source, acp_port=fa.ACP_TCP_PORT, live=Fals
             # Lilith: her own identities, no akhsessd grants, no reactor seeds
             # yet (her wakes are a later slice), exec as the Romans use.
             servers = fa.lilith_mcp_servers(session)
-            prompt = fa.system_prompt(source / "roles", role, servers, cos_source, files=spec.prompt_files)
+            prompt = fa.system_prompt(source / "roles", role, servers, cos_source, files=spec.prompt_files) + fa.gated_tiers_notice(fa.LILITH_GATED_TIERS)
             agent_id, id_warnings = fa.board_agent_id(root, role)
             warnings.extend(id_warnings)
             board = fa.with_board_agent_id(fa.board_identity(events, role), agent_id)
