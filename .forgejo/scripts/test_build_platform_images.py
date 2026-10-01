@@ -27,6 +27,23 @@ class BuildLogTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0][0], 'docker')
 
 
+class BinarySmokeTests(unittest.TestCase):
+    def test_akhomed_uses_offline_store_help_before_daemon_configuration(self):
+        def invoke(args, **kwargs):
+            ok = args[-2:] == ['store', '--help']
+            return images.subprocess.CompletedProcess(args, 0 if ok else 1,
+                'Usage: store <COMMAND>' if ok else 'invalid core API config')
+        with patch.object(images, 'run'), patch.object(images.subprocess, 'run', side_effect=invoke):
+            images.smoke_binary('registry/core@sha256:fixture', 'amd64', 'akhomed')
+
+    def test_help_errors_and_silent_executables_are_rejected(self):
+        for code, output in [(127, 'missing shared library'), (0, '')]:
+            with self.subTest(code=code), patch.object(images, 'run'), \
+                 patch.object(images.subprocess, 'run', return_value=images.subprocess.CompletedProcess([], code, output)):
+                with self.assertRaisesRegex(RuntimeError, 'help failed or silent'):
+                    images.smoke_binary('registry/core@sha256:fixture', 'amd64', 'akhomed')
+
+
 class ProfileTests(unittest.TestCase):
     def test_counts_samples_without_counting_string_table(self):
         self.assertEqual(images.sample_count(b'\x12\x02\x08\x01\x32\x02ok\x12\x02\x08\x02'), 2)
