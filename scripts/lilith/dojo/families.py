@@ -56,6 +56,7 @@ from dojo.episode import (
 )
 from dojo.errors import DojoError
 from dojo.language import check_reply_language
+from dojo.replay_memory import memory_tool_entries
 from dojo.replay_server import GIT_TOOLS, AncestryOracle
 from dojo.snapshot import (
     IN_FLIGHT_PHASES,
@@ -71,6 +72,13 @@ from dojo.snapshot import (
     SnapshotStore,
     canonical_json,
 )
+
+def _memory():
+    """The memory-epistemics module, imported on first use: it builds on this one, so it cannot be imported at the top."""
+    from dojo import memory_epistemics
+
+    return memory_epistemics
+
 
 # --- verdict types ---------------------------------------------------------------------
 
@@ -443,7 +451,7 @@ def verify_context(snapshot: Snapshot, oracle: AncestryOracle | None, *, budget_
     anima = {t["name"]: t for t in (contract[0] if contract else [])}
     main = snapshot.main_sha()
     return VerifyContext(
-        tools={"anima": anima, "git": {t["name"]: t for t in GIT_TOOLS}},
+        tools={"anima": anima, "git": {t["name"]: t for t in GIT_TOOLS}, "akh": memory_tool_entries()},
         profile=PermissionProfile.load(),
         rules=RuleContext(oracle, main[0] if main else None, budget_minor_units, budget_currency, dict(known_digests or {})),
     )
@@ -485,7 +493,8 @@ def _base_pass(spec: EpisodeSpec, episode: Episode, ctx: VerifyContext) -> tuple
                 errors.append("reply not in the operator's language")
             acc.validity = 0.0 if errors else 1.0
             acc.notes.extend(errors)
-            claims = check_document_claims(doc, ev)
+            claims = (_memory().check_memory_claims(doc, accs, ev, spec.label) if action.contract == C.MEMORY_ANSWER
+                      else check_document_claims(doc, ev))
             acc.provenance = claims.score
             if claims.fabricated:
                 acc.hard.add(HardConstraint.FABRICATION)
@@ -961,6 +970,7 @@ FAMILY_VERIFIERS: Mapping[Family, Callable[[EpisodeSpec, list[_Acc], Evidence], 
     Family.CORRECTION: _verify_correction,
     Family.SCOPE: _verify_scope,
     Family.READ_FAILURE: _verify_read_failure,
+    Family.MEMORY_EPISTEMICS: lambda spec, accs, ev: _memory().verify_memory_epistemics(spec, accs, ev),
 }
 
 
@@ -1037,6 +1047,8 @@ class BuildContext:
     commitment_horizon: timedelta = timedelta(days=7)
     illumos_pack: tuple[IllumosPackEntry, ...] = ()
     corrections: tuple[CorrectionRecord, ...] = ()
+    # `memory_epistemics.MemoryWorld`: the annotations and the harvested C2 sessions behind the memory-epistemics family.
+    memory: Any = None
 
 
 @dataclasses.dataclass
@@ -1453,6 +1465,7 @@ FAMILY_BUILDERS: Mapping[Family, Callable[[SnapshotStore, str, BuildContext], Bu
     Family.CORRECTION: build_correction,
     Family.SCOPE: build_scope,
     Family.READ_FAILURE: build_read_failure,
+    Family.MEMORY_EPISTEMICS: lambda store, sid, ctx: _memory().build_memory_epistemics(store, sid, ctx),
 }
 
 

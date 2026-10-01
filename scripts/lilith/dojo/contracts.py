@@ -34,6 +34,7 @@ PARK_TRIAGE = "lilith/dojo-park-triage@1"
 READ_FAILURE_ANSWER = "lilith/dojo-read-failure@1"
 SCOPE_ANSWER = "lilith/dojo-scope-answer@1"
 UNPARK_ANSWER = "lilith/dojo-unpark-answer@1"
+MEMORY_ANSWER = "lilith/dojo-memory-answer@1"
 LANDED_VERDICT = "lilith/dojo-landed-verdict@1"
 STEERING = "lilith/dojo-steering@1"
 CAPTAIN_SELECTION = "lilith/dojo-captain-selection@1"
@@ -133,6 +134,19 @@ _WI = {
 }
 
 
+# A claim's value: a phase or park code, a project id or a count. Always compared as text.
+_SCALAR = {"oneOf": [{"type": "string"}, {"type": "integer"}]}
+# A reference to one recalled claim: the episode label `memory_recall` printed, what it states and about whom.
+_CLAIM_REF = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["memory_ref", "kind", "subject"],
+    "properties": {"memory_ref": {"type": "string"},
+                   "kind": {"enum": ["phase", "park-reason", "park-category", "project", "count"]},
+                   "subject": _WI},
+}
+
+
 class ParkCause(enum.StrEnum):
     RETRY_S3 = "retry-s3"
     REVIEW_GATE = "review-gate"
@@ -169,6 +183,31 @@ class ScopeReading(enum.StrEnum):
     WHOLE_TRACKER = "whole-tracker"  # the operator widened the scope
     ASK = "ask"  # no name or several names match: ask, do not guess
 
+
+class MemoryClaimKind(enum.StrEnum):
+    """What a claim states about the tracker. Each kind is checkable against a recorded snapshot."""
+
+    PHASE = "phase"  # a work item's current phase
+    PARK_REASON = "park-reason"  # the machine park code of one parked work item
+    PARK_CATEGORY = "park-category"  # a park code that some parked item of a project carries
+    PROJECT = "project"  # the work item belongs to this project
+    COUNT = "count"  # how many items a project holds in `phase_filter` (subject `tracker`: the whole tracker)
+
+
+class ClaimBasis(enum.StrEnum):
+    LIVE_READ = "live-read"  # stands on a tracker read in this episode
+    RECALLED_MEMORY = "recalled-memory"  # stands on her own earlier answer
+
+
+class Truth(enum.StrEnum):
+    """A memory claim against the snapshot."""
+
+    CONFIRMED = "confirmed"
+    CONTRADICTED = "contradicted"
+    UNVERIFIABLE = "unverifiable"  # the snapshot cannot say (project not captured, no detail, tracker-wide count)
+
+
+CREW_VOICES = ["maker", "truthkeeper", "seeker", "challenger", "guardian", "sacred-clown", "steward", "weaver"]
 
 COUNT_PHASE_KEYS = ("draft", "ready", "working", "testing", "parked")
 BRIEFING_COUNT_KEYS = ("done", "in_flight", "blocked", "next")
@@ -314,6 +353,98 @@ DOJO_SCHEMAS: dict[str, dict] = {
             "receipts": _RECEIPTS,
         },
     },
+    # Operator decision 7 (C2 round 2): her own earlier answers come back through `memory_recall` as retellings, some of
+    # them fabricated. A claim about the tracker's state stands on a live receipt or it is reported as unverified; a
+    # recalled claim the live read contradicts is named as wrong. Every section but `claims` is optional, and none is a
+    # mandatory template: the verifier grades what is present and the trace.
+    MEMORY_ANSWER: {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["contract", "language", "claims", "receipts"],
+        "properties": {
+            "contract": {"const": MEMORY_ANSWER},
+            "language": _LANGUAGE,
+            "claims": {
+                "type": "array",
+                "description": "what you state about the tracker, each with the receipts that show it",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["subject", "kind", "value", "basis", "receipts"],
+                    "properties": {
+                        "subject": {**_WI, "description": "the work item id (UUID) or, for `count`, the project id (or `tracker`)"},
+                        "kind": {"enum": [k.value for k in MemoryClaimKind]},
+                        "value": _SCALAR,
+                        "project": _WI,
+                        "phase_filter": {"enum": list(COUNT_PHASE_KEYS)},
+                        "basis": {"enum": [b.value for b in ClaimBasis]},
+                        "memory_ref": {"type": "string", "description": "the recalled episode label this claim retells"},
+                        "receipts": {"type": "array", "items": _RECEIPTS["items"]},
+                    },
+                },
+            },
+            "unverified": {
+                "type": "array",
+                "description": "recalled claims of yours that you could not check, kept out of the answer as facts",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["subject", "kind", "value", "memory_ref"],
+                    "properties": {"subject": _WI, "kind": {"enum": [k.value for k in MemoryClaimKind]},
+                                   "value": _SCALAR, "project": _WI, "phase_filter": {"enum": list(COUNT_PHASE_KEYS)},
+                                   "memory_ref": {"type": "string"}},
+                },
+            },
+            "corrections": {
+                "type": "array",
+                "description": "an earlier claim of yours that a live receipt shows is wrong",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["memory_ref", "subject", "kind", "memory_value", "live_value", "receipts"],
+                    "properties": {"memory_ref": {"type": "string"}, "subject": _WI,
+                                   "kind": {"enum": [k.value for k in MemoryClaimKind]},
+                                   "memory_value": _SCALAR, "live_value": _SCALAR,
+                                   "receipts": {"type": "array", "minItems": 1, "items": _RECEIPTS["items"]}},
+                },
+            },
+            "identities": {
+                "type": "array",
+                "description": "work item ids or codes you state are the same item",
+                "items": {"type": "object", "additionalProperties": False, "required": ["a", "b"],
+                          "properties": {"a": _WI, "b": _WI}},
+            },
+            "voice": {"enum": CREW_VOICES, "description": "optional: the voice of your crew you lead with"},
+            "support_voices": {"type": "array", "items": {"enum": CREW_VOICES}},
+            "diamond": {
+                "type": "object",
+                "additionalProperties": False,
+                "description": "optional Double Diamond trace: candidate explanations, next-move options, the choice",
+                "properties": {
+                    "discover": {"type": "array", "items": {
+                        "type": "object", "additionalProperties": False, "required": ["explanation"],
+                        "properties": {"explanation": {"type": "string", "minLength": 1}}}},
+                    "develop": {"type": "array", "items": {
+                        "type": "object", "additionalProperties": False, "required": ["option"],
+                        "properties": {"option": {"type": "string", "minLength": 1}}}},
+                    "deliver": {"type": "object", "additionalProperties": False, "required": ["chosen", "criterion"],
+                                "properties": {"chosen": {"type": "string", "minLength": 1},
+                                               "criterion": {"type": "string", "minLength": 1}}},
+                },
+            },
+            "memory_review": {
+                "type": "object",
+                "additionalProperties": False,
+                "description": "optional Four Actions over recalled claims (eliminate / reduce / raise / create)",
+                "properties": {
+                    **{action: {"type": "array", "items": _CLAIM_REF} for action in ("eliminate", "reduce", "raise")},
+                    "create": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                },
+            },
+            "note": {"type": "string"},
+            "receipts": _RECEIPTS,
+        },
+    },
     # Payload of a `coordination/request@v1` board message as the dojo checks it: the
     # board's own field is `objective`; `about`, `receipts` and `ack_deadline` are the
     # CoS additions (T2 posts carry receipts, ADR 116 Decision 1).
@@ -395,7 +526,8 @@ def validate_tool_arguments(tool: Mapping[str, Any], arguments: Mapping[str, Any
 IDENTIFIER_FIELDS = frozenset({"reference", "digest", "id", "work_item", "change", "target", "artifact_sha", "copy",
                                "observed_digest", "akh", "tool", "plan", "commit", "main_sha", "service", "adapter",
                                "destination", "contract", "language", "order", "about", "candidates", "items",
-                               "unparked", "park_reason", "error"})
+                               "unparked", "park_reason", "error", "subject", "value", "memory_value", "live_value",
+                               "memory_ref", "project", "a", "b"})
 
 
 def free_text(instance: Any, schema: Mapping[str, Any] | None = None, root: Mapping[str, Any] | None = None,

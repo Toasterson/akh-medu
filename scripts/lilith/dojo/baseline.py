@@ -63,7 +63,8 @@ from dojo.model_adapters import (
     OpenAIChatAdapter,
     load_secret,
 )
-from dojo.replay_server import DojoLedger, GitAncestryOracle, episode_servers
+from dojo import memory_epistemics as ME
+from dojo.replay_server import DojoLedger, GitAncestryOracle, servers_for_spec
 from dojo.reward import COS_V1, reduce_episode
 from dojo.context_budget import DEFAULT_CONTEXT_WINDOW
 from dojo.runner import (
@@ -112,11 +113,11 @@ def parse_families(value: str) -> tuple[Family, ...]:
 
 
 def select_episodes(store: SnapshotStore, oracle, families: Sequence[Family], split: str, limit: int | None,
-                    seed: int, illumos_pack=(), corrections=()) -> tuple[list[Chosen], dict]:
+                    seed: int, illumos_pack=(), corrections=(), memory=None) -> tuple[list[Chosen], dict]:
     """Deterministic for a given snapshot root, family, split, limit and seed: every model in an
     exam gets the same episodes."""
     results = build_all(store, BuildContext(oracle=oracle, illumos_pack=tuple(illumos_pack),
-                                                  corrections=tuple(corrections)))
+                                                  corrections=tuple(corrections), memory=memory))
     all_specs = [s for res in results.values() for s in res.specs]
     manifest = assign_splits(all_specs, SplitConfig())
     wanted = {Split(split)} if split != "all" else set(Split)
@@ -455,8 +456,7 @@ def run_batch(store: SnapshotStore, chosen: Sequence[Chosen], adapter: ModelAdap
         snapshot = store.get(spec.snapshot_id)
         ledger_path = out / "ledgers" / f"{sha256_hex(spec.episode_id.encode())[:16]}.jsonl"
         ledger_path.unlink(missing_ok=True)  # a retry is a fresh tenancy
-        servers, _ = episode_servers(snapshot, DojoLedger(ledger_path, forbidden_roots=(store.root,)), oracle,
-                                     spec.replay_faults)
+        servers, _ = servers_for_spec(spec, snapshot, DojoLedger(ledger_path, forbidden_roots=(store.root,)), oracle)
         result = runner.run_traced(spec, servers)
         return _episode_record(item, result, run_id), _verification_record(item, result, snapshot, oracle)
 
@@ -665,6 +665,12 @@ def _add_run_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--correction-annotations", type=Path, default=DEFAULT_CORRECTION_ANNOTATIONS,
                    help="what each correction asked for (expected_tool / expected_arguments); default: "
                         "correction-annotations.jsonl next to the dojo")
+    p.add_argument("--memory-sessions", type=Path, default=None,
+                   help="memory-epistemics: the harvested C2 sessions (c2/sessions) whose turns are the seeded memories "
+                        "(default: $LILITH_C2_SESSIONS, else the NFS share; without them the family builds no episodes)")
+    p.add_argument("--memory-annotations", type=Path, default=ME.ANNOTATIONS_FILE,
+                   help="memory-epistemics: which turns are seeded, what they claim and what the operator asks "
+                        "(default: memory-annotations.jsonl next to the dojo)")
     p.add_argument("--family", default="all", help="'all' or a comma list of family names")
     p.add_argument("--split", required=True, choices=["sealed", "dev", "train", "all"])
     p.add_argument("--limit", type=int, default=None, help="episodes per family")
@@ -809,7 +815,7 @@ def tools_sha256_of(store: SnapshotStore, chosen: Sequence[Chosen], oracle) -> s
 
     with tempfile.TemporaryDirectory() as tmp:
         snapshot = store.get(chosen[0].spec.snapshot_id)
-        servers, _ = episode_servers(snapshot, DojoLedger(Path(tmp) / "l.jsonl", forbidden_roots=(store.root,)), oracle)
+        servers, _ = servers_for_spec(chosen[0].spec, snapshot, DojoLedger(Path(tmp) / "l.jsonl", forbidden_roots=(store.root,)), oracle)
         return Broker(servers).tools_sha256
 
 
@@ -846,7 +852,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     pack = load_illumos_pack(args.illumos_pack) if args.illumos_pack else ()
     corrections = load_corrections(args.corrections, args.correction_annotations) if args.corrections else ()
     families = parse_families(args.family)
-    chosen, selection = select_episodes(store, oracle, families, args.split, args.limit, args.seed, pack, corrections)
+    memory = ME.memory_world(args.memory_sessions, args.memory_annotations)
+    chosen, selection = select_episodes(store, oracle, families, args.split, args.limit, args.seed, pack, corrections, memory)
     system = compose_system_prompt(args.repo)
     floors_mod.load_floors()  # refuses floors that no longer hash to their pin
     if args.dry_run:
@@ -892,7 +899,7 @@ def dry_run_report(store: SnapshotStore, chosen: Sequence[Chosen], selection: Ma
 
         with tempfile.TemporaryDirectory() as tmp:
             snapshot = store.get(chosen[0].spec.snapshot_id)
-            servers, _ = episode_servers(snapshot, DojoLedger(Path(tmp) / "l.jsonl", forbidden_roots=(store.root,)), oracle)
+            servers, _ = servers_for_spec(chosen[0].spec, snapshot, DojoLedger(Path(tmp) / "l.jsonl", forbidden_roots=(store.root,)), oracle)
             broker = Broker(servers)
             specs = broker.tool_specs()
             tools_chars = sum(len(json.dumps([s.name, s.description, dict(s.input_schema)])) for s in specs)
