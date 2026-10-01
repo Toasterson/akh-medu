@@ -29,6 +29,14 @@ class NativeBuilderTests(unittest.TestCase):
             self.assertEqual(config.count('IdentityAgent none'), 2)
             self.assertNotIn('fixture-', config)
 
+    def test_workflow_uses_solstice_direct_secret_delivery(self):
+        workflow = (native.SCRIPTS.parent / 'workflows' / 'ci.yml').read_text()
+        # Solstice injects task secrets directly, then overlays literal step env.
+        # An Actions expression here would overwrite the valid delivered key.
+        for _, _, variable in native.BUILDERS.values():
+            self.assertNotIn(variable + ':', workflow)
+        self.assertEqual(workflow.count('scripts/run-platform-build.py '), 5)
+
     def test_missing_credentials_fail_without_emulated_build_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(RuntimeError, 'Missing native builder credential'):
