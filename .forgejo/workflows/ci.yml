@@ -56,6 +56,7 @@ jobs:
           sh .forgejo/scripts/install-ci-python.sh
           "$HOME/.local/bin/akh-ci-python" .forgejo/scripts/test_build_platform_images.py
           "$HOME/.local/bin/akh-ci-python" .forgejo/scripts/test_run_logged.py
+          "$HOME/.local/bin/akh-ci-python" .forgejo/scripts/test_native_builders.py
       - name: Verify independent daemon profiles and platform contracts
         run: |
           test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
@@ -661,63 +662,58 @@ jobs:
     runs-on: rust
     needs: [test-session-platform, check-akh-medu, test-akh-medu, test-sokar, check-seshat]
     steps:
-      - name: Install Python and bounded group builder
-        run: |
-          sh .forgejo/scripts/install-ci-python.sh
-          if [ "$(sh .forgejo/scripts/resolve-branch.sh)" = main ]; then
-            sh .forgejo/scripts/setup-platform-buildx.sh
-          fi
+      - name: Install Python
+        run: sh .forgejo/scripts/install-ci-python.sh
       - name: Build or collect verified home images
-        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/build-platform-images.py home
+        env:
+          AKH_BUILDKIT_AMD64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_AMD64_SSH_KEY }}
+          AKH_BUILDKIT_ARM64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_ARM64_SSH_KEY }}
+        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/run-platform-build.py home
 
   platform-images-core:
     runs-on: rust
     needs: [test-session-platform, check-akh-medu, test-akh-medu, test-sokar, check-seshat]
     steps:
-      - name: Install Python and bounded group builder
-        run: |
-          sh .forgejo/scripts/install-ci-python.sh
-          if [ "$(sh .forgejo/scripts/resolve-branch.sh)" = main ]; then
-            sh .forgejo/scripts/setup-platform-buildx.sh
-          fi
+      - name: Install Python
+        run: sh .forgejo/scripts/install-ci-python.sh
       - name: Build or collect verified core images
-        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/build-platform-images.py core
+        env:
+          AKH_BUILDKIT_AMD64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_AMD64_SSH_KEY }}
+          AKH_BUILDKIT_ARM64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_ARM64_SSH_KEY }}
+        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/run-platform-build.py core
 
   platform-images-daemons:
     runs-on: rust
     needs: [test-session-platform, check-akh-medu, test-akh-medu, test-sokar, check-seshat]
     steps:
-      - name: Install Python and bounded group builder
-        run: |
-          sh .forgejo/scripts/install-ci-python.sh
-          if [ "$(sh .forgejo/scripts/resolve-branch.sh)" = main ]; then
-            sh .forgejo/scripts/setup-platform-buildx.sh
-          fi
+      - name: Install Python
+        run: sh .forgejo/scripts/install-ci-python.sh
       - name: Build or collect verified daemons images
-        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/build-platform-images.py daemons
+        env:
+          AKH_BUILDKIT_AMD64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_AMD64_SSH_KEY }}
+          AKH_BUILDKIT_ARM64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_ARM64_SSH_KEY }}
+        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/run-platform-build.py daemons
 
   platform-images-fleet:
     runs-on: rust
     needs: [platform-images-daemons, docker-seshd, docker-sokard, docker-akh-transcripts]
     steps:
-      - name: Install Python and bounded group builder
-        run: |
-          sh .forgejo/scripts/install-ci-python.sh
-          if [ "$(sh .forgejo/scripts/resolve-branch.sh)" = main ]; then
-            sh .forgejo/scripts/setup-platform-buildx.sh
-          fi
+      - name: Install Python
+        run: sh .forgejo/scripts/install-ci-python.sh
       - name: Build or collect verified fleet images
-        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/build-platform-images.py fleet
+        env:
+          AKH_BUILDKIT_AMD64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_AMD64_SSH_KEY }}
+          AKH_BUILDKIT_ARM64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_ARM64_SSH_KEY }}
+        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/run-platform-build.py fleet
 
   platform-images-collect:
     runs-on: rust
     needs: [platform-images-home, platform-images-core, platform-images-daemons, platform-images-fleet]
     steps:
-      - name: Install Python and bounded group builder
-        run: |
-          sh .forgejo/scripts/install-ci-python.sh
-          if [ "$(sh .forgejo/scripts/resolve-branch.sh)" = main ]; then
-            sh .forgejo/scripts/setup-platform-buildx.sh
-          fi
+      - name: Install Python
+        run: sh .forgejo/scripts/install-ci-python.sh
       - name: Build or collect verified collect images
-        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/build-platform-images.py collect
+        env:
+          AKH_BUILDKIT_AMD64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_AMD64_SSH_KEY }}
+          AKH_BUILDKIT_ARM64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_ARM64_SSH_KEY }}
+        run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/run-platform-build.py collect
