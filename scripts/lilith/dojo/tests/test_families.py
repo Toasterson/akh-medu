@@ -58,6 +58,73 @@ def test_briefing_pass(briefing_world, tmp_path):
     assert not v.hard_constraints
 
 
+def _blocked_thread_world(world, thread_payload):
+    """`w` is `working` with no blocker in the tracker; its thread (or detail) holds messages."""
+    world.snapshot(T0, [WI("a", "working")])
+    extra = ((("get_thread", {"work_item_id": "w"}, thread_payload, {})),) if thread_payload is not None else ()
+    sid = world.snapshot(T0 + hours(2), [WI("a", "done"), WI("w", "working"), WI("p", "parked", parked_reason="retry-budget")],
+                         extra=extra)
+    return only(F.build_briefing(world.store(), sid, BuildContext()), "briefing")
+
+
+def test_blocked_claim_backed_by_a_thread_receipt_is_unbacked_not_fabricated(world, tmp_path):
+    spec = _blocked_thread_world(world, "Thread ID: t1\n[2026-09-28 10:00:00] someone: first message\n"
+                                        "[2026-09-28 11:00:00] someone: a newer message")
+    d = Driver(spec, world.store(), tmp_path / "l.jsonl")
+    _, r1 = d.call("list_work_items", {"project_id": PROJECT})
+    _, r2 = d.call("get_wi_loop_state", {"work_item_id": "w"})
+    _, r3 = d.call("get_thread", {"work_item_id": "w"})
+    d.emit(briefing_doc(d, rc(d, r1, r2, r3), {"blocked": ["w"]}))
+    v = run_verify(world, spec, d)
+    assert HardConstraint.FABRICATION not in v.steps[-1].hard and v.metrics["fabrications"] == 0.0
+    assert any(n.startswith("unbacked:") and "blocked:w" in n and "thread text" in n for n in v.steps[-1].notes)
+    assert v.steps[-1].vector.provenance < 1.0
+
+
+def test_blocked_claim_with_a_detail_holding_no_thread_messages_stays_fabrication(world, tmp_path):
+    world.snapshot(T0, [WI("a", "working")])
+    sid = world.snapshot(T0 + hours(2), [WI("a", "done"), WI("w", "working")])
+    spec = only(F.build_briefing(world.store(), sid, BuildContext()), "briefing")
+    d = Driver(spec, world.store(), tmp_path / "l.jsonl")
+    _, r1 = d.call("list_work_items", {"project_id": PROJECT})
+    detail, r2 = d.call("get_work_item_detail", {"id": "w"})
+    d.emit(briefing_doc(d, rc(d, r1, r2), {"blocked": ["w"]}))
+    ev = F.Evidence(d.episode())
+    assert not ev.thread_backed("w")  # the fixture detail holds no thread messages
+    v = run_verify(world, spec, d)
+    assert HardConstraint.FABRICATION in v.steps[-1].hard
+
+
+def test_thread_backed_reads_detail_messages_and_ignores_empty_threads(world, tmp_path):
+    spec = _blocked_thread_world(world, {"thread": None, "thread_state": "none"})
+    d = Driver(spec, world.store(), tmp_path / "l.jsonl")
+    d.call("get_thread", {"work_item_id": "w"})
+    assert not F.Evidence(d.episode()).thread_backed("w")
+    assert not F.Evidence(d.episode()).thread_backed("")
+
+
+def test_blocked_claim_without_any_thread_receipt_stays_fabrication(world, tmp_path):
+    spec = _blocked_thread_world(world, "Thread ID: t1\n[2026-09-28 10:00:00] someone: a message")
+    d = Driver(spec, world.store(), tmp_path / "l.jsonl")
+    _, r1 = d.call("list_work_items", {"project_id": PROJECT})
+    _, r2 = d.call("get_wi_loop_state", {"work_item_id": "w"})  # the thread was never read in this episode
+    d.emit(briefing_doc(d, rc(d, r1, r2), {"blocked": ["w"]}))
+    v = run_verify(world, spec, d)
+    assert HardConstraint.FABRICATION in v.steps[-1].hard
+    assert any("fabricated: blocked:w" in n for n in v.steps[-1].notes)
+
+
+def test_blocked_claim_backed_by_the_tracker_needs_no_thread(world, tmp_path):
+    spec = _blocked_thread_world(world, None)
+    d = Driver(spec, world.store(), tmp_path / "l.jsonl")
+    _, r1 = d.call("list_work_items", {"project_id": PROJECT})
+    _, r2 = d.call("get_wi_loop_state", {"work_item_id": "p"})
+    d.emit(briefing_doc(d, rc(d, r1, r2), {"blocked": ["p"]}))
+    v = run_verify(world, spec, d)
+    assert not v.hard_constraints
+    assert not any("thread text" in n for n in v.steps[-1].notes)
+
+
 def test_briefing_fabrication_wrong_phase_unread_id_and_fake_receipt(briefing_world, tmp_path):
     world, spec = briefing_world
     d = Driver(spec, world.store(), tmp_path / "l.jsonl")

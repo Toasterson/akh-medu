@@ -210,6 +210,31 @@ class Evidence:
                     return True
         return False
 
+    def thread_backed(self, wid: str) -> bool:
+        """An answered read receipt that carries this work item's thread messages: a `get_work_item_detail` for it
+        with a non-empty `thread_messages` list, or a `get_thread` for it that answered a thread (a string with
+        message lines after the header, or a structure with messages; `{"thread": null}` is no thread). Structural
+        only: nothing about the messages' content is read."""
+        if not wid:
+            return False
+        for r in self.reads:
+            if r.is_error:
+                continue
+            resp = r.response
+            if r.tool == "get_work_item_detail":
+                about = r.arguments.get("id") == wid or any(
+                    isinstance(d.get("work_item"), dict) and d["work_item"].get("id") == wid for d in _dicts(resp))
+                if about and any(isinstance(d.get("thread_messages"), list) and d["thread_messages"]
+                                 for d in _dicts(resp)):
+                    return True
+            elif r.tool == "get_thread" and r.arguments.get("work_item_id") == wid:
+                if isinstance(resp, str):
+                    if len([ln for ln in resp.splitlines() if ln.strip()]) > 1:
+                        return True
+                elif any(isinstance(d.get(k), list) and d[k] for d in _dicts(resp) for k in ("messages", "thread_messages")):
+                    return True
+        return False
+
     def ancestry(self, commit: str) -> bool | None:
         for r in self.reads:
             if r.tool == "git_is_ancestor" and r.source is ReceiptSource.ORACLE:
@@ -312,6 +337,13 @@ def check_document_claims(doc: Mapping[str, Any], ev: Evidence) -> ClaimCheck:
                 wid = str(entity.get("id"))
                 if bucket is H.Bucket.BLOCKED:
                     ok = ev.blocked(wid)
+                    if not ok and ev.thread_backed(wid):
+                        # The blocker may be declared in the thread (later superseded) rather than in tracker
+                        # state: a thread receipt for this id was read, so the claim is unbacked, not invented.
+                        check.add_unbacked(f"{bucket.value}:{wid}: blocked per thread text, not tracker state "
+                                           "(stale if newer thread activity followed the blocker message)")
+                        check.add_citations(ev.citations((item or {}).get("receipts")), wid)
+                        continue
                 else:
                     ok = bool(ev.phases(wid) & BUCKET_PHASES[bucket])
                 check.add_status(ok, [wid], f"{bucket.value}:{wid}", ev)
