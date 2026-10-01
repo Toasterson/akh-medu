@@ -99,9 +99,9 @@ On-policy rounds draw episodes from the dojo and from supervised C2 sessions, wi
 
 **Lifting the T3 gate:** a C2 round (operator or supervisor) with zero fabrication, zero unreported refusals and the briefing shape right. The supervisor proposes; the operator removes the `gated_tiers` line.
 
-## 7. Open, for the operator
+## 7. Operator decisions on the open questions (2026-10-01)
 
-- Sealed-window policy once more weeks exist: newest week sealed, or a fixed hold-out per family?
-- Round-1 GPU budget on the Runpod credit, and whether local hardware (C6b) arrives first.
-- Whether supervisor-driven C2 sessions count as operator data (they are labelled `supervisor` in the corpus manifest either way).
-- A second teacher arm (Kimi K3) for sibling diversity, or GLM-5.3 only.
+- **Sealed hold-out:** the newest 7-day window stays sealed, rolling. Older windows feed train/dev. Rounds are compared on their shared episodes.
+- **Round-1 hardware:** a Runpod H100 within the account credit (about 6–10 H100-hours, $21–35), with spend reported. Earliest start is C3's exit (about 2026-10-12). Local GPUs (C6b) take over later rounds once they qualify.
+- **Supervisor-driven C2 sessions:** admitted with `source: supervisor` and a lower weight (0.7). Their failures still become corrected siblings at full weight, because each correction is verified against the tracker. The operator's sessions stay the reference.
+- **Teachers:** GLM-5.3 only for round 1. Kimi K3 is added later only for families where GLM's siblings score low, judged from the pinned teacher baseline.
