@@ -51,8 +51,9 @@ from dojo.episode import (
     ToolCall,
     Voice,
 )
+from dojo import memory_epistemics as ME
 from dojo.families import BuildContext, build_all, load_illumos_pack
-from dojo.replay_server import DojoLedger, GitAncestryOracle, episode_servers
+from dojo.replay_server import DojoLedger, GitAncestryOracle, servers_for_spec
 from dojo.runner import Broker, _snapshot_now, compose_system_prompt, expected_contracts, prompt_bundle_sha256, user_prompt
 from dojo.snapshot import SnapshotStore, sha256_hex
 
@@ -151,7 +152,7 @@ def reverify_episode(source: Mapping[str, Any], old: Mapping[str, Any], spec: Ep
     snapshot = store.get(spec.snapshot_id)
     ledger = ledger_dir / f"{sha256_hex(eid.encode())[:16]}.jsonl"
     ledger.unlink(missing_ok=True)
-    servers, log = episode_servers(snapshot, DojoLedger(ledger, forbidden_roots=(store.root,)), oracle, spec.replay_faults)
+    servers, log = servers_for_spec(spec, snapshot, DojoLedger(ledger, forbidden_roots=(store.root,)), oracle)
     broker = Broker(servers)
     if source.get("tools_sha256") and source["tools_sha256"] != broker.tools_sha256:
         return skip(SkipReason.TOOLS_CHANGED)
@@ -263,7 +264,8 @@ def render_table(rows: Sequence[Mapping[str, Any]], overall: Mapping[str, Any]) 
 
 
 def run_reverify(run: Path, root: Path, repo: Path, out: Path | None, illumos_pack: Path | None = None,
-                 allow_prompt_drift: bool = False, allow_dirty: bool = False, progress=lambda line: None) -> dict:
+                 allow_prompt_drift: bool = False, allow_dirty: bool = False, progress=lambda line: None,
+                 memory_sessions: Path | None = None, memory_annotations: Path | None = ME.ANNOTATIONS_FILE) -> dict:
     run = Path(run)
     for name in (B.PROVENANCE_FILE, B.EPISODES_FILE, B.VERIFICATION_FILE, B.SUMMARY_FILE):
         if not (run / name).is_file():
@@ -283,7 +285,8 @@ def run_reverify(run: Path, root: Path, repo: Path, out: Path | None, illumos_pa
     oracle = GitAncestryOracle(repo)
     families = [Family(f) for f in source_prov.get("families") or [f.value for f in Family]]
     pack = load_illumos_pack(illumos_pack) if illumos_pack else ()
-    built = build_all(store, BuildContext(oracle=oracle, illumos_pack=tuple(pack)), families)
+    memory = ME.memory_world(memory_sessions, memory_annotations)
+    built = build_all(store, BuildContext(oracle=oracle, illumos_pack=tuple(pack), memory=memory), families)
     current = {spec.episode_id: spec for res in built.values() for spec in res.specs}
     ledger_dir = out / "ledgers"
     ledger_dir.mkdir()
@@ -362,7 +365,8 @@ def cmd_reverify(args: argparse.Namespace) -> int:
     if root is None:
         raise DojoError("--root is required", help="the snapshot root the run was made from (it may hold newer snapshots)")
     done = run_reverify(args.run, root, args.repo, args.out, args.illumos_pack, args.allow_prompt_drift,
-                        args.allow_dirty, progress=lambda line: print(line, file=sys.stderr, flush=True))
+                        args.allow_dirty, progress=lambda line: print(line, file=sys.stderr, flush=True),
+                        memory_sessions=args.memory_sessions, memory_annotations=args.memory_annotations)
     print(render_table(done["table"], done["overall"]))
     print(f"\nreverified {done['reverified']}, skipped {done['skipped']} {done['skip_reasons']}\nwritten to {done['out']}")
     return 0
@@ -374,6 +378,8 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--repo", type=Path, default=B.REPO_ROOT, help="local akh-medu clone: ancestry oracle and provenance")
     p.add_argument("--out", type=Path, default=None, help="new output directory (default <run>-reverify-<short sha>)")
     p.add_argument("--illumos-pack", type=Path, default=None)
+    p.add_argument("--memory-sessions", type=Path, default=None, help="the harvested C2 sessions (memory-epistemics seeds)")
+    p.add_argument("--memory-annotations", type=Path, default=ME.ANNOTATIONS_FILE)
     p.add_argument("--allow-prompt-drift", action="store_true",
                    help="also re-score episodes whose prompt changed since the run (recorded as prompt_drift: a "
                         "what-if, the model never read the new instruction)")

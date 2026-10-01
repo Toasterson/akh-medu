@@ -24,6 +24,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dojo import DOJO_VERSION
+from dojo import memory_epistemics as ME
 from dojo.episode import Family
 from dojo.errors import DojoError
 from dojo.families import (
@@ -52,23 +53,26 @@ LABEL_KEY = {
     Family.CHASE: "recipient_class",
     Family.SCOPE: "scope",
     Family.READ_FAILURE: "cause",
+    Family.MEMORY_EPISTEMICS: "variant",
 }
 
 NEEDS = {
     Family.CORRECTION: "needs operator corrections from C2 sessions; none are recorded yet",
     Family.ILLUMOS_GUIDANCE: "needs an illumos pack (--illumos-pack) and settled later outcomes",
     Family.LANDED_CLAIM: "needs --repo for the ancestry oracle",
+    Family.MEMORY_EPISTEMICS: "needs the harvested C2 sessions (--memory-sessions) and memory-annotations.jsonl",
 }
 
 
 def build_report(root: Path, repo: Path | None, pack: Path | None, corrections: Path | None = None,
-                 annotations: Path | None = DEFAULT_CORRECTION_ANNOTATIONS) -> dict:
+                 annotations: Path | None = DEFAULT_CORRECTION_ANNOTATIONS, memory_sessions: Path | None = None) -> dict:
     store = SnapshotStore(root)
     recorded = load_corrections(corrections, annotations) if corrections else ()
     ctx = BuildContext(
         oracle=GitAncestryOracle(repo) if repo else None,
         illumos_pack=load_illumos_pack(pack) if pack else (),
         corrections=recorded,
+        memory=ME.memory_world(memory_sessions),
     )
     snaps = store.snapshots()
     report: dict = {"dojo": DOJO_VERSION, "root": str(root), "snapshots": len(snaps)}
@@ -88,6 +92,8 @@ def build_report(root: Path, repo: Path | None, pack: Path | None, corrections: 
         labels = collections.Counter(str(s.label.get(key)) for s in res.specs) if key else {}
         note = NEEDS.get(family, "")
         if family is Family.LANDED_CLAIM and repo:
+            note = ""
+        if family is Family.MEMORY_EPISTEMICS and ctx.memory is not None and ctx.memory.sessions is not None and ctx.memory.notes:
             note = ""
         if family is Family.CORRECTION and corrections:
             orphaned = sum(1 for c in recorded if c.snapshot_id not in store.ids)
@@ -138,6 +144,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=None)
     parser.add_argument("--repo", type=Path, default=None, help="local akh-medu clone for ancestry checks")
     parser.add_argument("--illumos-pack", type=Path, default=None)
+    parser.add_argument("--memory-sessions", type=Path, default=None,
+                        help="harvested C2 sessions (c2/sessions): the memory-epistemics seeds")
     parser.add_argument("--corrections", type=Path, default=None,
                         help="C2 corrections.jsonl from c2/harvest_sessions.py")
     parser.add_argument("--correction-annotations", type=Path, default=DEFAULT_CORRECTION_ANNOTATIONS,
@@ -147,7 +155,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = args.root or Path(os.environ.get("LILITH_SNAPSHOT_ROOT", RECORDER_DEFAULT_ROOT))
     try:
-        report = build_report(root, args.repo, args.illumos_pack, args.corrections, args.correction_annotations)
+        report = build_report(root, args.repo, args.illumos_pack, args.corrections, args.correction_annotations,
+                              args.memory_sessions)
     except DojoError as error:
         print(error.render(), file=sys.stderr)
         return 2

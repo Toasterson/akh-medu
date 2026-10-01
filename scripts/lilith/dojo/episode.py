@@ -30,6 +30,7 @@ class Family(enum.StrEnum):
     CORRECTION = "correction"
     SCOPE = "scope"  # the prompt names a project; resolve it to its id (C2 round 1, decision 2)
     READ_FAILURE = "read-failure"  # a park triage whose detail read is unavailable (decision 4)
+    MEMORY_EPISTEMICS = "memory-epistemics"  # her own recalled answers are beliefs to re-verify (operator decision 7)
 
 
 class Voice(enum.StrEnum):
@@ -54,6 +55,7 @@ class ReceiptSource(enum.StrEnum):
     LEDGER = "ledger"  # a write, recorded in the dojo tenancy ledger
     ORACLE = "oracle"  # computed deterministically (ancestry check against recorded refs)
     ERROR = "error"  # the server answered with an error (unknown tool, unrecorded read)
+    MEMORY = "memory"  # her own episodic memory answered: a retelling, never evidence of the tracker's state
 
 
 class RecipientClass(enum.StrEnum):
@@ -207,6 +209,27 @@ class StepRecord:
 
 
 @dataclasses.dataclass(frozen=True)
+class RecalledMemory:
+    """One episodic memory the dojo's `memory_recall` replay can return: what her akh stored, verbatim.
+
+    `text` is her own earlier answer (private; never serialised into the spec, only its digest is)."""
+
+    label: str  # e.g. `episode:turn:5347`, as `memory_recall` prints it
+    text: str  # the stored summary
+    tags: tuple[str, ...] = ()
+    facts: tuple[str, ...] = ()
+    order: int = 0  # recency: larger = newer
+
+    @property
+    def text_sha256(self) -> str:
+        return sha256_hex(self.text.encode("utf-8"))
+
+    def to_dict(self) -> dict:
+        return {"label": self.label, "sha256": self.text_sha256, "tags": list(self.tags), "facts": list(self.facts),
+                "order": self.order}
+
+
+@dataclasses.dataclass(frozen=True)
 class EpisodeSpec:
     """One situation. `snapshot_id` is served; `label_snapshot_ids` are never served,
     they only feed hindsight labels."""
@@ -225,6 +248,8 @@ class EpisodeSpec:
     # Tools the replay answers with an error although the snapshot holds their data: the episode is a
     # failed-read drill. Never shown to the model; the receipt says the tool is unavailable.
     replay_faults: tuple[str, ...] = ()
+    # Episodic memories the replay's `memory_recall` serves (memory-epistemics). Empty = the `akh` server is not offered.
+    memories: tuple[RecalledMemory, ...] = ()
 
     @property
     def episode_id(self) -> str:
@@ -250,6 +275,7 @@ class EpisodeSpec:
             "caps": dataclasses.asdict(self.caps),
             "provenance": self.provenance.to_dict(),
             **({"replay_faults": list(self.replay_faults)} if self.replay_faults else {}),
+            **({"memories": [m.to_dict() for m in self.memories]} if self.memories else {}),
         }
 
     @property

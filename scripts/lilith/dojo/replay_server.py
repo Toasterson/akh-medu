@@ -445,12 +445,26 @@ class DojoGitServer(_McpServer):
 
 
 def episode_servers(snapshot: Snapshot, ledger: DojoLedger, oracle: AncestryOracle | None,
-                    unavailable: frozenset[str] | tuple[str, ...] = ()) -> tuple[dict[str, _McpServer], ReceiptLog]:
+                    unavailable: frozenset[str] | tuple[str, ...] = (),
+                    memories: tuple = ()) -> tuple[dict[str, _McpServer], ReceiptLog]:
     """The server set one episode sees, sharing one receipt log. `unavailable` names Anima tools the replay
-    answers with an error (the spec's `replay_faults`)."""
+    answers with an error (the spec's `replay_faults`). `memories` (the spec's `RecalledMemory` seeds) adds the
+    `akh` server with her `memory_recall` / `memory_write`; without seeds the server is not offered, so every
+    other family's tool list is unchanged."""
     log = ReceiptLog()
-    return {"anima": ReplayServer(snapshot, ledger, log, unavailable=frozenset(unavailable)),
-            "git": DojoGitServer(snapshot, oracle, log)}, log
+    servers: dict[str, _McpServer] = {"anima": ReplayServer(snapshot, ledger, log, unavailable=frozenset(unavailable)),
+                                      "git": DojoGitServer(snapshot, oracle, log)}
+    if memories:
+        from dojo.replay_memory import MEMORY_SERVER, MemoryReplayServer
+
+        servers[MEMORY_SERVER] = MemoryReplayServer(snapshot, memories, ledger, log)
+    return servers, log
+
+
+def servers_for_spec(spec, snapshot: Snapshot, ledger: DojoLedger,
+                     oracle: AncestryOracle | None) -> tuple[dict[str, _McpServer], ReceiptLog]:
+    """`episode_servers` with what the spec asks for (its replay faults and seeded memories)."""
+    return episode_servers(snapshot, ledger, oracle, spec.replay_faults, spec.memories)
 
 
 # --- CLI -------------------------------------------------------------------------------

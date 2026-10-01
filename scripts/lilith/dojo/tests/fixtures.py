@@ -21,7 +21,7 @@ from dojo.episode import (
     ToolCall,
     Voice,
 )
-from dojo.replay_server import DojoLedger, StaticAncestryOracle, episode_servers
+from dojo.replay_server import DojoLedger, StaticAncestryOracle, servers_for_spec
 from dojo.snapshot import SnapshotStore
 
 PROJECT = "proj-0001"
@@ -107,7 +107,7 @@ class World:
                 continue
             updated = (w.updated_at or when).isoformat()
             put("get_work_item_detail", {"id": w.id}, {
-                "work_item": {"id": w.id, "current_phase": w.phase, "status": w.status, "plan_id": w.plan,
+                "work_item": {"id": w.id, "code": f"WI-{items.index(w)}", "project_id": PROJECT, "current_phase": w.phase, "status": w.status, "plan_id": w.plan,
                               "parked_reason": w.parked_reason, "executor": w.executor, "updated_at": updated,
                               "source": w.source, "depends_on_ids": list(w.pending_deps),
                               "dependency_edges": [{"depends_on_id": d, "state": "pending", "work_item_id": w.id}
@@ -179,8 +179,8 @@ class Driver:
     def __init__(self, spec: EpisodeSpec, store: SnapshotStore, ledger_path: Path, oracle=None):
         self.spec = spec
         self.snapshot = store.get(spec.snapshot_id)
-        self.servers, self.log = episode_servers(self.snapshot, DojoLedger(ledger_path), oracle or StaticAncestryOracle({}),
-                                                spec.replay_faults)
+        self.servers, self.log = servers_for_spec(spec, self.snapshot, DojoLedger(ledger_path),
+                                                  oracle or StaticAncestryOracle({}))
         self.steps: list[StepRecord] = []
         self._rpc = 0
 
