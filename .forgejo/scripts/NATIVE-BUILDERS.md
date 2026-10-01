@@ -7,7 +7,9 @@ proofs before promoting `main-ready`; an unavailable builder fails the job.
 PRs retain the existing non-publishing validation path.
 
 The two `AKH_BUILDKIT_*_SSH_KEY` Actions secrets are delivery copies of dedicated
-OpenBao keys. The wrapper writes private temporary SSH files, verifies pinned host
+OpenBao keys. Solstice injects these task secrets directly into the step environment.
+Do not repeat them as `${{ secrets.… }}` step values: this runner preserves those
+values literally and they would overwrite the delivered secrets. The wrapper writes private temporary SSH files, verifies pinned host
 keys, and removes key variables from subprocess environments. Server-side forced
 commands allow only BuildKit stdio. Keys, operator credentials and host agents are
 never forwarded into compilation containers. Client registrations and temporary

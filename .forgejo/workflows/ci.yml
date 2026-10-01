@@ -665,9 +665,6 @@ jobs:
       - name: Install Python
         run: sh .forgejo/scripts/install-ci-python.sh
       - name: Build or collect verified home images
-        env:
-          AKH_BUILDKIT_AMD64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_AMD64_SSH_KEY }}
-          AKH_BUILDKIT_ARM64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_ARM64_SSH_KEY }}
         run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/run-platform-build.py home
 
   platform-images-core:
@@ -677,9 +674,6 @@ jobs:
       - name: Install Python
         run: sh .forgejo/scripts/install-ci-python.sh
       - name: Build or collect verified core images
-        env:
-          AKH_BUILDKIT_AMD64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_AMD64_SSH_KEY }}
-          AKH_BUILDKIT_ARM64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_ARM64_SSH_KEY }}
         run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/run-platform-build.py core
 
   platform-images-daemons:
@@ -689,9 +683,6 @@ jobs:
       - name: Install Python
         run: sh .forgejo/scripts/install-ci-python.sh
       - name: Build or collect verified daemons images
-        env:
-          AKH_BUILDKIT_AMD64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_AMD64_SSH_KEY }}
-          AKH_BUILDKIT_ARM64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_ARM64_SSH_KEY }}
         run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/run-platform-build.py daemons
 
   platform-images-fleet:
@@ -701,9 +692,6 @@ jobs:
       - name: Install Python
         run: sh .forgejo/scripts/install-ci-python.sh
       - name: Build or collect verified fleet images
-        env:
-          AKH_BUILDKIT_AMD64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_AMD64_SSH_KEY }}
-          AKH_BUILDKIT_ARM64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_ARM64_SSH_KEY }}
         run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/run-platform-build.py fleet
 
   platform-images-collect:
@@ -713,7 +701,4 @@ jobs:
       - name: Install Python
         run: sh .forgejo/scripts/install-ci-python.sh
       - name: Build or collect verified collect images
-        env:
-          AKH_BUILDKIT_AMD64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_AMD64_SSH_KEY }}
-          AKH_BUILDKIT_ARM64_SSH_KEY: ${{ secrets.AKH_BUILDKIT_ARM64_SSH_KEY }}
         run: $HOME/.local/bin/akh-ci-python .forgejo/scripts/run-platform-build.py collect
