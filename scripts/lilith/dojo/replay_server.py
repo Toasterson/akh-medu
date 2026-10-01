@@ -491,12 +491,14 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("serve")
     s.add_argument("--root", type=Path, required=True)
     s.add_argument("--snapshot", required=True)
+    s.add_argument("--snapshot-until", default=None, metavar="CUTOFF",
+                   help="only snapshots at or before CUTOFF exist for this server (snapshot id or ISO timestamp)")
     s.add_argument("--ledger", type=Path, required=True)
     s.add_argument("--server", choices=["anima", "git"], default="anima")
     s.add_argument("--repo", type=Path, default=None, help="local clone for git_is_ancestor")
     args = parser.parse_args(argv)
     try:
-        store = SnapshotStore(args.root)
+        store = SnapshotStore.open(args.root, args.snapshot_until)
         snapshot = store.get(args.snapshot)
         if args.server == "anima":
             server: _McpServer = ReplayServer(snapshot, DojoLedger(args.ledger, forbidden_roots=(args.root,)))

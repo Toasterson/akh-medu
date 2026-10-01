@@ -265,7 +265,8 @@ def render_table(rows: Sequence[Mapping[str, Any]], overall: Mapping[str, Any]) 
 
 def run_reverify(run: Path, root: Path, repo: Path, out: Path | None, illumos_pack: Path | None = None,
                  allow_prompt_drift: bool = False, allow_dirty: bool = False, progress=lambda line: None,
-                 memory_sessions: Path | None = None, memory_annotations: Path | None = ME.ANNOTATIONS_FILE) -> dict:
+                 memory_sessions: Path | None = None, memory_annotations: Path | None = ME.ANNOTATIONS_FILE,
+                 snapshot_until: str | None = None) -> dict:
     run = Path(run)
     for name in (B.PROVENANCE_FILE, B.EPISODES_FILE, B.VERIFICATION_FILE, B.SUMMARY_FILE):
         if not (run / name).is_file():
@@ -281,7 +282,9 @@ def run_reverify(run: Path, root: Path, repo: Path, out: Path | None, illumos_pa
     source_summary = json.loads((run / B.SUMMARY_FILE).read_text())
     episodes = B.read_jsonl_latest(run / B.EPISODES_FILE)
     verifications = B.read_jsonl_latest(run / B.VERIFICATION_FILE)
-    store = SnapshotStore(root)
+    # No flag: the run's own cutoff, so the episode set is the one the run was scored over. An explicit cutoff
+    # (including one that differs from the run's: e.g. the parent started with the whole root) is recorded as such.
+    store = SnapshotStore.open(root, snapshot_until if snapshot_until is not None else source_prov.get("snapshot_until"))
     oracle = GitAncestryOracle(repo)
     families = [Family(f) for f in source_prov.get("families") or [f.value for f in Family]]
     pack = load_illumos_pack(illumos_pack) if illumos_pack else ()
@@ -321,6 +324,7 @@ def run_reverify(run: Path, root: Path, repo: Path, out: Path | None, illumos_pa
     reasons = collections.Counter(s.reason for s in skipped)
     provenance = {
         **source_prov,
+        "snapshot_until": store.cutoff,
         "reverify": {
             "schema": REVERIFY_SCHEMA,
             "dojo": DOJO_VERSION,
@@ -328,6 +332,7 @@ def run_reverify(run: Path, root: Path, repo: Path, out: Path | None, illumos_pa
             "source_label": source_summary.get("label"),
             "source_git_sha": source_prov.get("git_sha"),
             "source_snapshot_root_sha256": source_prov.get("snapshot_root_sha256"),
+            "source_snapshot_until": source_prov.get("snapshot_until"),
             "source_prompt_sha256": source_prov.get("prompt_sha256"),
             "git_sha": git["git_sha"], "git_dirty": git["git_dirty"], "on_origin_main": git["on_origin_main"],
             "snapshot_root_sha256": B.snapshot_root_sha256(store),
@@ -366,7 +371,7 @@ def cmd_reverify(args: argparse.Namespace) -> int:
         raise DojoError("--root is required", help="the snapshot root the run was made from (it may hold newer snapshots)")
     done = run_reverify(args.run, root, args.repo, args.out, args.illumos_pack, args.allow_prompt_drift,
                         args.allow_dirty, progress=lambda line: print(line, file=sys.stderr, flush=True),
-                        memory_sessions=args.memory_sessions, memory_annotations=args.memory_annotations)
+                        memory_sessions=args.memory_sessions, memory_annotations=args.memory_annotations, snapshot_until=args.snapshot_until)
     print(render_table(done["table"], done["overall"]))
     print(f"\nreverified {done['reverified']}, skipped {done['skipped']} {done['skip_reasons']}\nwritten to {done['out']}")
     return 0
@@ -375,6 +380,7 @@ def cmd_reverify(args: argparse.Namespace) -> int:
 def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--run", type=Path, required=True, help="a finished run directory (read-only source)")
     p.add_argument("--root", type=Path, default=None, help="snapshot root")
+    B.add_snapshot_until(p)
     p.add_argument("--repo", type=Path, default=B.REPO_ROOT, help="local akh-medu clone: ancestry oracle and provenance")
     p.add_argument("--out", type=Path, default=None, help="new output directory (default <run>-reverify-<short sha>)")
     p.add_argument("--illumos-pack", type=Path, default=None)
