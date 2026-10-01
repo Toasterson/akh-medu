@@ -26,7 +26,14 @@ if __package__ in (None, ""):
 from dojo import DOJO_VERSION
 from dojo.episode import Family
 from dojo.errors import DojoError
-from dojo.families import BuildContext, BuildResult, build_all, load_corrections, load_illumos_pack
+from dojo.families import (
+    DEFAULT_CORRECTION_ANNOTATIONS,
+    BuildContext,
+    BuildResult,
+    build_all,
+    load_corrections,
+    load_illumos_pack,
+)
 from dojo.hindsight import hours_between, phase_changes_in_window
 from dojo.replay_server import GitAncestryOracle
 from dojo.snapshot import SnapshotStore
@@ -43,6 +50,8 @@ LABEL_KEY = {
     Family.CAPTAIN_SELECTION: "voice",
     Family.ILLUMOS_GUIDANCE: "outcome",
     Family.CHASE: "recipient_class",
+    Family.SCOPE: "scope",
+    Family.READ_FAILURE: "cause",
 }
 
 NEEDS = {
@@ -52,9 +61,10 @@ NEEDS = {
 }
 
 
-def build_report(root: Path, repo: Path | None, pack: Path | None, corrections: Path | None = None) -> dict:
+def build_report(root: Path, repo: Path | None, pack: Path | None, corrections: Path | None = None,
+                 annotations: Path | None = DEFAULT_CORRECTION_ANNOTATIONS) -> dict:
     store = SnapshotStore(root)
-    recorded = load_corrections(corrections) if corrections else ()
+    recorded = load_corrections(corrections, annotations) if corrections else ()
     ctx = BuildContext(
         oracle=GitAncestryOracle(repo) if repo else None,
         illumos_pack=load_illumos_pack(pack) if pack else (),
@@ -130,11 +140,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--illumos-pack", type=Path, default=None)
     parser.add_argument("--corrections", type=Path, default=None,
                         help="C2 corrections.jsonl from c2/harvest_sessions.py")
+    parser.add_argument("--correction-annotations", type=Path, default=DEFAULT_CORRECTION_ANNOTATIONS,
+                        help="what each correction asked for (expected_tool / expected_arguments), default: "
+                             "correction-annotations.jsonl next to the dojo")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     root = args.root or Path(os.environ.get("LILITH_SNAPSHOT_ROOT", RECORDER_DEFAULT_ROOT))
     try:
-        report = build_report(root, args.repo, args.illumos_pack, args.corrections)
+        report = build_report(root, args.repo, args.illumos_pack, args.corrections, args.correction_annotations)
     except DojoError as error:
         print(error.render(), file=sys.stderr)
         return 2

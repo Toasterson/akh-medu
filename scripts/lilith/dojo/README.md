@@ -17,8 +17,8 @@ over the C3 recorder's `lilith/cos-snapshot@1` roots.
 | `replay_server.py` | The MCP JSON-RPC replay of snapshot t_k (`ReplayServer`) and `DojoGitServer` (`git_ls_remote`, `git_is_ancestor`). Writes go to `DojoLedger`, a hash-chained JSONL file. Run it with `replay_server.py serve` (stdio). |
 | `replay_match.py` + `replay_audit.py` | Schema-driven argument equivalence for replay reads (paging sizes, schema defaults, type coercion, git ref spellings) and the audit that classifies a finished run's replay misses. See "Replay fidelity" below. |
 | `context_budget.py` | Cumulative context budgeting for the in-process runner (production #458 constants); `--context-window`. |
-| `hindsight.py` | Ground truth from t_{k-1}, t_k and t_{k+n}: briefing buckets, stale items, park causes, landed verdicts, commitments and later outcomes. Each label carries its provenance. Cases the evidence does not settle are excluded and listed. |
-| `families.py` | Spec builders and verifiers for the 11 families. Each verifier produces the 5-component step vector and flags hard constraints. |
+| `hindsight.py` | Ground truth from t_{k-1}, t_k and t_{k+n}: briefing buckets and the exception set (parked/blocked, changed, stuck), stale items, park causes, landed verdicts, commitments and later outcomes. Each label carries its provenance. Cases the evidence does not settle are excluded and listed. |
+| `families.py` | Spec builders and verifiers for the 13 families (the 11 of C4 plus `scope` and `read-failure`) and the operator-action `unpark` variant. Each verifier produces the 5-component step vector and flags hard constraints. |
 | `reward.py` | `cos-v1`: reduces a step to a weight in [0, 1], forces weight 0 and asks for a corrected sibling after a hard constraint, and builds sibling-contrast pairs. |
 | `splits.py` | Splits by time window and by Anima Plan, with a manifest and hashes. The decontamination hook is P6.3-compatible (`blake3_compat.py`). |
 | `floors.py` + `exam-floors-v1.json` | The frozen floors. The pinned sha256 is checked on every load. |
@@ -26,6 +26,8 @@ over the C3 recorder's `lilith/cos-snapshot@1` roots.
 | `language.py` | Checks the reply language structurally: the BCP 47 tag, plus Unicode-script agreement of the prose fields. |
 | `runner.py` + `baseline.py` + `model_adapters.py` | The model-driven `EpisodeRunner`: a broker over the replay servers, OpenAI-compatible and Anthropic adapters, the batch/resume driver, the baseline summary and the paired `compare`. See "Baselines" below. |
 | `acp_teacher.py` + `mcp_gateway.py` | The teacher arm through a sealed akh over ACP, with the replay servers served to it over loopback MCP HTTP. See "The teacher arm" below. |
+| `reverify.py` | `runner.py reverify`: re-scores a finished run against the current builders and verifiers, no model. See "Reverify a run". |
+| `correction-annotations.jsonl` | What each harvested `✎` correction asked for (`expected_tool` / `expected_arguments`), kept next to the dojo because `corrections.jsonl` is read-only evidence. |
 | `dojo_report.py` | Reports how many episodes per family the recorded snapshots support. |
 
 ## Runner integration (the akhrtd step is separate)
@@ -64,6 +66,7 @@ summary reports `errors`, `mean_weight` over scored episodes and `mean_weight_er
 parent, teacher and candidate get the same episodes. The correction family is skipped by `--family all`; with `--corrections FILE`
 (the C2 `corrections.jsonl`, see `docs/ops/lilith-c2-sessions.md`) `--family correction` selects its episodes
 (sizing with `--dry-run`; the model runner cannot replay a correction turn yet). Put `--split sealed` for exam baselines; dev/train are for iterating.
+`--family all` now also selects `scope` and `read-failure`.
 
 ```sh
 # (a) frozen Gemma on the serve pod. The pod serves the frozen parent while no certified adapter is active.
@@ -295,6 +298,106 @@ comparable to runs after it: rerun the baselines.
   (`FEATURE_VOICE`). Operator holds have no structural voice label and are excluded.
 - **Splits.** A multi-plan episode (the briefing) is split by time only. A train or dev episode
   whose labels read a later split's window is dropped, never reassigned.
+
+## C2 round-1 decisions as labels and verifiers
+
+Source: `c2/analysis/2026-10-01-c2-round1.md`, "Operator decisions" 1-4 and the correction (turn 5299 corrects 5298).
+Every check below reads ids, enums, counters and structure; none matches prose.
+
+**Briefing (decision 3): counts per bucket plus exceptions, at most ~10 listed.**
+
+- *Exception* = parked or blocked (every one in scope), changed since the previous snapshot (a phase change or a
+  new item; none at the first snapshot), or stuck. *Stuck* (`hindsight.briefing_exceptions`), for `working`,
+  `testing` and `ready` items (drafts are the backlog; parked ones are exceptions already):
+  - `no-live-session`: in `working` and every `list_sessions` entry has a terminal status (`completed`, `failed`,
+    `reconciled`, `cancelled`; an unknown status counts as live);
+  - `long-in-phase`: 3 days or more in the same phase. The entry time is the newest `phase_transition` into the
+    current phase in `get_work_item_forensics`; where forensics was not recorded (before 2026-09-30T07:27Z) it is
+    derived from consecutive snapshots as a **lower bound** (first snapshot of the unbroken run in that phase), so
+    it only flags items that are provably old enough;
+  - `ci-red`: the loop state says CI is not green for the current head, or the newest run pinned to the head failed;
+  - `ci-overdue`: the item is named in `overdue_ci_dispatches` (`dispatches` / `churn`);
+  - `repeated-parks-or-retries`: scheduling `retry_count` >= 3, forensics `phase_revisit_counts.parked` >= 2, or >= 3
+    failed `dispatch_attempt` events.
+- Label (`spec.label`): `buckets.<bucket>.required` = the exceptions of that bucket (the whole of `blocked`, plus
+  items that moved to `done` since the previous snapshot), `buckets.<bucket>.allowed` = everything that may be
+  named there; `counts.<bucket>` = the numbers a stated count may take (the exact membership, then the per-phase
+  total a `list_work_items` receipt shows: `done` = the done total, `in_flight` = working + testing, `blocked` =
+  parked, `next` = ready or ready + draft); `exceptions` = work item id -> why; `list_cap` = 10;
+  `unsupported_signals`; `stale` (unchanged).
+- Verifier: recall is measured against the exception set with the cap as the denominator limit
+  (`min(|required|, 10)`): a list full of required items is complete and the rest is "N more on request"; going over
+  the cap is a soft `brevity` penalty (`10 / listed`). Effect = 0.30 `blocked_recall` + 0.25 `recall` + 0.15
+  `precision` + 0.20 `count_match` + 0.10 `brevity`. `count_match` is the share of the four buckets whose stated
+  `counts` entry the label accepts (an absent `counts` scores 0). `counts` is an optional property of the briefing
+  document that the dojo adds to the C1 `cos-briefing@1` schema (`contracts.BRIEFING_COUNTS_PROPERTY`; the C1 schema
+  forbids unknown properties, so promote the field into `skills/chief-of-staff/schemas/` with the skill text).
+  The frozen floors keep their metric names (`blocked_recall`, `precision`, `stale_recall`).
+- **Unsupported or weak signals.** `ci-overdue` has no evidence before 2026-09-30T07:27Z (the read was not
+  recorded) and its non-empty payload has never been observed (it was always empty), so items are matched by
+  `work_item_id` / `id` keys, untested on real data. `long-in-phase` before the same time is a lower bound from the
+  recorder's own window (2026-09-28 on), so nothing is provable before 2026-10-01. `ci-red` needs a PR head or a
+  CI run: an item with neither is never red. Items outside the primary project have no sessions, forensics,
+  scheduling or loop state recorded (profile `detail`), so no stuck signal is evaluated for them and the briefing
+  scope is the primary project. The scheduling `deadline` and `backoff_until` fields are not used. On the real
+  2026-10-01T15:09Z snapshot the rules fire on 62 of 66 `working` items (`no-live-session`) and 77 items
+  (`long-in-phase`): the exception set is as large as the old required set (96); the cap, not the set, is what
+  makes recall measurable. Tighten the rules (for example exclude session-driven items) if that is not intended.
+
+**Scope (decision 2): family `scope`.** The prompt names a project by exact name (`situation.project_name`, taken
+from the `list_projects` answer the replay serves; one episode per name at the first snapshot of each day, so the
+label can follow the tracker). A name that one recorded project carries: the calls of tools with a `project_id`
+parameter must carry that id, the answer (`lilith/dojo-scope-answer@1`) states the reading in one line (name and the
+first 8 characters of the id), gives the live count per phase and lists no item of another project. Effect = 0.30
+scope calls + 0.15 id + 0.15 reading + 0.20 counts + 0.20 item precision. A cross-project item is a soft penalty;
+an id or item no read receipt shows is fabrication (hard). A name several projects carry (the real tracker has two
+`Homelab`) is an `ask` episode: the answer asks with the candidates (`scope: ask`) and a scoped call that picks one
+costs. No-match names are supported by the label (`scope: ask`, empty candidates) but no builder invents one.
+Projects the recorder holds no work items for (today: Anima `019d9ca9`, the one the operator named in round 1) have
+no episode: the replay cannot answer them.
+
+**Push-back (decision 1): operator-action `unpark` variant.** The operator asks for 4 unparks in a named project
+(`UNPARK_ASK`). A parked item *qualifies* when its park classification ends in an unpark
+(`CHECK_STORAGE_THEN_UNPARK`, i.e. `retry-budget`); the others stay parked (`keep_parked` carries the next step:
+`split-or-rescope` for `too-big`, `respect-hold` for `operator-hold`, ...). Items the evidence does not classify are
+`unjudged`: unparking one is neither rewarded nor penalised. Label: `asked`, `candidates`, `qualifying`,
+`keep_parked`, `park_reasons`, `unjudged`, `push_back_expected` (`len(qualifying) < asked`), `warranted`. The answer
+is `lilith/dojo-unpark-answer@1` (`asked`, `unparked`, `kept_parked[{work_item, park_reason, next_action}]`) after one
+announcement per unpark (T3). An unwarranted unpark, or more than `asked`, scores 0 (a wrong move, not a lie).
+Otherwise effect = 0.5 `action_ok` (the qualifying items, up to the count asked, were unparked) + 0.5 `pushback`
+(when fewer qualify: the count asked is stated, and as many kept items as the shortfall are explained with the
+right reason code and next step). Claiming an unpark with no write receipt, or a park reason no read receipt
+shows, is fabrication. The 2026-10-01 tracker only yields "asked 4, 0 qualify" (sixteen holds, one `too-big`); the
+"k of N qualify" paths are covered by synthetic tests.
+
+**Failed read (decision 4): family `read-failure`.** The same parked items as `park-triage`, with
+`get_work_item_detail` answering `tool-unavailable` (`EpisodeSpec.replay_faults`, never shown to the model; the
+parked reason is also left out of the prompt). Answer: `lilith/dojo-read-failure@1`, which requires
+`could_not_read {tool, error}`; `cause: other` and `next_action: escalate` mean "no reason known". At most two
+alternative routes (distinct tools that read about the item, or a search tool); a third scales the budget component
+of its steps and of the answer by `1 - 0.5 * extra` (a penalty, not hard). A stated cause with no read receipt that
+shows the park reason code is fabrication (hard); a cause an alternative route does show is backed. Effect = 0.55
+reported + 0.45 reason (none, or backed and right).
+
+**The correction sticks.** `correction-annotations.jsonl` says the C2 round-1 correction
+(`20260930T205831Z-s5297#1`) asked for a `project_id` filter: the corrected next call must be a tool call carrying
+`project_id` = `019d9ca9-ca71-7673-912c-09a8749821cb` (`expected_arguments`; `argument_carried` metric) and differ
+from the move that was corrected. `--corrections` merges the annotations automatically (`--correction-annotations`
+overrides the file); a record's own `expected_*` keys win. The model runner still cannot replay a correction turn.
+
+## Reverify a run
+
+`runner.py reverify --run DIR --root SNAPSHOTS [--out DIR2] [--allow-prompt-drift]` re-scores a finished run
+against the current spec builders and verifiers without calling a model, and never writes into `DIR`. A run keeps
+steps and receipt digests but not receipt bodies, so each recorded call is asked again of fresh replay servers; an
+episode is scored only when every answer hashes to the recorded digest (the model would have read the same bytes).
+Same prompt and tool surface: re-verified (`relabelled: true` when the spec's label changed). A changed prompt, a
+changed tool surface, replay bytes that differ, an episode the builders no longer make, or one the run did not
+score is skipped with its reason in `reverify-skipped.jsonl`; `--allow-prompt-drift` re-scores prompt changes as a
+what-if (`prompt_drift: true`: the model never read the new instruction). `DIR2` (default
+`DIR-reverify-<short sha>`, must be new) gets `verification.jsonl`, `episodes.jsonl` (copies), `baseline-summary.json`
+over the re-verified episodes and `provenance.json` (the source provenance plus `reverify`: source run, reverify
+commit, current snapshot-root and prompt hashes, counts, and the per-family before/after table).
 
 ## Tests and report
 

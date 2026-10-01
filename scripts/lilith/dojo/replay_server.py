@@ -87,6 +87,8 @@ NOT_REPLAYABLE_ANIMA_TOOLS: frozenset[str] = frozenset({
     "search_library",
 })
 NOT_REPLAYABLE_REASON = "not-replayable"
+# A tool the dojo made unavailable for one episode (a failed-read drill, `EpisodeSpec.replay_faults`).
+UNAVAILABLE_REASON = "tool-unavailable"
 
 JSONRPC_METHOD_NOT_FOUND = -32601
 JSONRPC_INVALID_PARAMS = -32602
@@ -301,7 +303,8 @@ class ReplayServer(_McpServer):
     """Anima replay: recorded reads from snapshot t_k, writes into the dojo ledger."""
 
     def __init__(self, snapshot: Snapshot, ledger: DojoLedger, receipts: ReceiptLog | None = None,
-                 collector: str = "anima", profile: PermissionProfile | None = None):
+                 collector: str = "anima", profile: PermissionProfile | None = None,
+                 unavailable: frozenset[str] = frozenset()):
         contract = snapshot.tool_contract(collector)
         if contract is None:
             raise DojoError(f"snapshot {snapshot.id} recorded no {collector} tool contract",
@@ -312,6 +315,7 @@ class ReplayServer(_McpServer):
         self.ledger = ledger
         self.receipts = receipts or ReceiptLog()
         self.profile = profile or PermissionProfile.load()
+        self.unavailable = frozenset(unavailable)
 
     def tools(self) -> list[dict]:
         return self._tools
@@ -326,6 +330,14 @@ class ReplayServer(_McpServer):
         return name in ANIMA_READ_TOOLS or self.profile.server_tier(self.name, name) is Tier.T0_READ
 
     def call(self, name: str, arguments: Mapping[str, Any]) -> tuple[ToolReceipt, Any, bool]:
+        if name in self.unavailable:
+            # Stays listed (the recorded contract is served verbatim) and answers like a failing upstream:
+            # the model has to notice and report it, as it must when a live read fails.
+            payload = {"error": f"{name} failed: the tracker could not serve this read", "reason": UNAVAILABLE_REASON,
+                       "tool": name, "arguments": dict(arguments)}
+            receipt = self._issue(name, arguments, payload, sha256_hex(canonical_json(payload)), ReceiptSource.ERROR,
+                                  error_reason=UNAVAILABLE_REASON)
+            return receipt, payload, True
         if name in NOT_REPLAYABLE_ANIMA_TOOLS:
             payload = {"error": "not replayable in the dojo", "reason": NOT_REPLAYABLE_REASON, "tool": name,
                        "arguments": dict(arguments), "snapshot": self.snapshot.id,
@@ -432,10 +444,13 @@ class DojoGitServer(_McpServer):
                                    match=match, error_reason=error_reason)
 
 
-def episode_servers(snapshot: Snapshot, ledger: DojoLedger, oracle: AncestryOracle | None) -> tuple[dict[str, _McpServer], ReceiptLog]:
-    """The server set one episode sees, sharing one receipt log."""
+def episode_servers(snapshot: Snapshot, ledger: DojoLedger, oracle: AncestryOracle | None,
+                    unavailable: frozenset[str] | tuple[str, ...] = ()) -> tuple[dict[str, _McpServer], ReceiptLog]:
+    """The server set one episode sees, sharing one receipt log. `unavailable` names Anima tools the replay
+    answers with an error (the spec's `replay_faults`)."""
     log = ReceiptLog()
-    return {"anima": ReplayServer(snapshot, ledger, log), "git": DojoGitServer(snapshot, oracle, log)}, log
+    return {"anima": ReplayServer(snapshot, ledger, log, unavailable=frozenset(unavailable)),
+            "git": DojoGitServer(snapshot, oracle, log)}, log
 
 
 # --- CLI -------------------------------------------------------------------------------

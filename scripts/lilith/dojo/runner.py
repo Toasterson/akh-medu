@@ -83,8 +83,11 @@ DOJO_ADDENDUM_FILE = "deploy/roman-mini/roles/addenda/dojo-teacher.md"  # also r
 
 FAMILY_TASKS: Mapping[Family, str] = {
     Family.BRIEFING: (
-        "Give the operator the briefing for the moment now, covering the whole fleet's work: "
-        "Done / In flight / Blocked / Next. Read the state first; leave nothing out of Blocked."
+        "Give the operator the briefing for the moment now: Done / In flight / Blocked / Next. State how many "
+        "items each bucket holds (`counts`) and list only the exceptions: every parked or blocked item, items "
+        "that changed since the previous briefing, and stuck items (working with no live session, three days or "
+        "more in the same phase, red or overdue CI, repeated parks or retries). List about ten items at most in "
+        "all; the rest is 'N more on request'. Read the state first."
     ),
     Family.PARK_TRIAGE: (
         "Work item {work_item} is parked. Find out why and decide what to do next. Answer with the "
@@ -126,6 +129,30 @@ FAMILY_TASKS: Mapping[Family, str] = {
         "captain-selection document."
     ),
     Family.CORRECTION: "This family replays a recorded operator correction; the model runner cannot serve it yet.",
+    Family.SCOPE: (
+        "The operator asks about the project named {project_name}. Resolve the name to the project, scope your reads "
+        "to it with its `project_id`, and answer with the scope document: state the reading in one line (the project's "
+        "name and the first eight characters of its id), give the live work item count per phase and list no item "
+        "from another project. If no project or several projects carry that exact name, ask instead (scope `ask`, "
+        "with the candidates)."
+    ),
+    Family.READ_FAILURE: (
+        "Work item {work_item} is parked. Find out why. A read you need can fail. If it does, try at most two other "
+        "ways to get the answer, then report what you could not read. Answer with the read-failure document: a "
+        "cause and next action only when a receipt you read shows them, and in `could_not_read` the tool that "
+        "failed with its error."
+    ),
+}
+
+# Episodes of one family that ask something else name their kind in `situation.variant`; the task and the answer
+# contracts follow the variant.
+VARIANT_TASKS: Mapping[str, str] = {
+    "unpark": (
+        "The operator writes: {operator_message} Decide from what the tracker shows, not from the number asked. "
+        "A T3 write you take is announced with the announcement document. Answer with the unpark-answer document: "
+        "how many you were asked for, which items you unparked, and for each parked item you kept parked its park "
+        "reason as the tracker shows it and the next step you propose."
+    ),
 }
 
 # What counts as "the family contract" for the contract-validity rate.
@@ -141,7 +168,27 @@ EXPECTED_CONTRACTS: Mapping[Family, frozenset[str]] = {
     Family.OPERATOR_ACTION: frozenset({C.PROPOSAL, C.ANNOUNCEMENT}),
     Family.CAPTAIN_SELECTION: frozenset({C.CAPTAIN_SELECTION}),
     Family.CORRECTION: frozenset(),
+    Family.SCOPE: frozenset({C.SCOPE_ANSWER}),
+    Family.READ_FAILURE: frozenset({C.READ_FAILURE_ANSWER}),
 }
+VARIANT_CONTRACTS: Mapping[tuple[Family, str], frozenset[str]] = {
+    (Family.OPERATOR_ACTION, "unpark"): frozenset({C.UNPARK_ANSWER, C.ANNOUNCEMENT}),
+}
+
+
+def variant_of(spec: EpisodeSpec) -> str | None:
+    variant = spec.situation.get("variant")
+    return variant if isinstance(variant, str) else None
+
+
+def expected_contracts(spec: EpisodeSpec) -> frozenset[str]:
+    """What counts as the episode's answer contract: the family's, or its variant's."""
+    return VARIANT_CONTRACTS.get((spec.family, variant_of(spec) or ""), EXPECTED_CONTRACTS[spec.family])
+
+
+def task_text(spec: EpisodeSpec) -> str:
+    template = VARIANT_TASKS.get(variant_of(spec) or "", FAMILY_TASKS[spec.family])
+    return template.format_map(_Defaulting(dict(spec.situation)))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -179,17 +226,19 @@ def prompt_bundle_sha256(system: SystemPrompt) -> str:
     return sha256_hex(canonical_json({
         "system": system.sha256,
         "family_tasks": {f.value: FAMILY_TASKS[f] for f in Family},
+        "variant_tasks": dict(VARIANT_TASKS),
         "runner": RUNNER_VERSION,
     }))
 
 
-def answer_schemas(family: Family) -> dict[str, dict]:
-    return {c: s for c in sorted(EXPECTED_CONTRACTS[family]) if (s := C.schema_for(c)) is not None}
+def answer_schemas(family: Family, contracts: frozenset[str] | None = None) -> dict[str, dict]:
+    wanted = EXPECTED_CONTRACTS[family] if contracts is None else contracts
+    return {c: s for c in sorted(wanted) if (s := C.schema_for(c)) is not None}
 
 
 def user_prompt(spec: EpisodeSpec, now: int) -> str:
     situation = dict(spec.situation)
-    task = FAMILY_TASKS[spec.family].format_map(_Defaulting(situation))
+    task = task_text(spec)
     lines = [
         f"Recorded moment: snapshot {spec.snapshot_id}. Now (unix seconds): {now}.",
         f"Reply language tag for the document's `language` field: {spec.language}.",
@@ -200,7 +249,7 @@ def user_prompt(spec: EpisodeSpec, now: int) -> str:
         "Situation (JSON):",
         json.dumps(situation, sort_keys=True, ensure_ascii=False),
     ]
-    schemas = answer_schemas(spec.family)
+    schemas = answer_schemas(spec.family, expected_contracts(spec))
     if schemas:
         lines += ["", "Answer contract (JSON Schema of the document you answer with):"]
         for contract, schema in schemas.items():
@@ -568,14 +617,14 @@ def finish_answer(spec: EpisodeSpec, content: str, completion_tokens: int, turn_
             schema = C.schema_for(message.protocol)
             errors = C.validate(dict(message.payload), schema) if schema else [f"unknown protocol {message.protocol}"]
             trace.schema_errors.extend(errors)
-            expected = message.protocol in EXPECTED_CONTRACTS[spec.family]
+            expected = message.protocol in expected_contracts(spec)
             trace.contract_ok = trace.contract_ok or (expected and not errors)
             kinds.append("message")
         else:
             steps.append(StepRecord(spec.episode_id, len(steps), EmitDocument(obj), budget))
             errors = C.validate_document(obj)
             trace.schema_errors.extend(errors)
-            expected = obj.get("contract") in EXPECTED_CONTRACTS[spec.family]
+            expected = obj.get("contract") in expected_contracts(spec)
             trace.contract_ok = trace.contract_ok or (expected and not errors)
             kinds.append("document")
     trace.answer_status = kinds[0] if len(kinds) == 1 else "multiple"

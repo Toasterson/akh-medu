@@ -48,10 +48,11 @@ def test_briefing_pass(briefing_world, tmp_path):
     d = Driver(spec, world.store(), tmp_path / "l.jsonl")
     _, r1 = d.call("list_work_items", {"project_id": PROJECT})
     _, r2 = d.call("get_wi_loop_state", {"work_item_id": "p"})
-    d.emit(briefing_doc(d, rc(d, r1, r2), {"done": ["a"], "in_flight": ["w"], "blocked": ["p"], "next": ["r"]}),
-           voice=Voice.TRUTHKEEPER)
+    doc = briefing_doc(d, rc(d, r1, r2), {"done": ["a"], "in_flight": ["w"], "blocked": ["p"], "next": ["r"]})
+    doc["counts"] = {"done": 1, "in_flight": 1, "blocked": 1, "next": 1}  # decision 3: counts next to the exceptions
+    d.emit(doc, voice=Voice.TRUTHKEEPER)
     v = run_verify(world, spec, d)
-    assert v.metrics["blocked_recall"] == 1.0 and v.metrics["precision"] == 1.0
+    assert v.metrics["blocked_recall"] == 1.0 and v.metrics["precision"] == 1.0 and v.metrics["count_match"] == 1.0
     assert v.steps[-1].vector.effect == 1.0 and v.steps[-1].vector.provenance == 1.0
     assert v.steps[-1].vector.disposition == 1.0
     assert not v.hard_constraints
