@@ -344,6 +344,10 @@ pub struct Agent {
     /// / the `AKH_TRANSCRIPT_CAPTURE` env override (see
     /// `agentic_chat::Agent::transcript_capture_enabled`).
     pub(crate) capture_transcripts: bool,
+    /// Whether the ACP turn cuts the client-injected trailing tag blocks off
+    /// the operator's prompt (`[acp] strip_client_preamble`, default off; see
+    /// [`super::client_preamble`]).
+    pub(crate) strip_client_preamble: bool,
 }
 
 /// How an agent's executor-facing tools (`shell_exec`/`file_io`/`edit`/`glob`/
@@ -1169,6 +1173,7 @@ impl Agent {
             #[cfg(feature = "delegation")]
             delegation_manager,
             capture_transcripts: true,
+            strip_client_preamble: false,
         };
 
         // Initialize interlocutor predicates.
@@ -2622,6 +2627,17 @@ impl Agent {
     /// `agentic_chat::Agent::transcript_capture_enabled`).
     pub fn set_capture_transcripts(&mut self, enabled: bool) {
         self.capture_transcripts = enabled;
+    }
+
+    /// Opt this akh's ACP turns into stripping the client-injected preamble
+    /// (`[acp] strip_client_preamble`). Off by default.
+    pub fn set_strip_client_preamble(&mut self, enabled: bool) {
+        self.strip_client_preamble = enabled;
+    }
+
+    /// Whether ACP turns strip the client-injected preamble.
+    pub fn strip_client_preamble(&self) -> bool {
+        self.strip_client_preamble
     }
 
     /// Register this agent with its attached model manager using the current
@@ -4760,6 +4776,7 @@ impl Agent {
             #[cfg(feature = "delegation")]
             delegation_manager,
             capture_transcripts: true,
+            strip_client_preamble: false,
         };
 
         // Initialize interlocutor predicates.

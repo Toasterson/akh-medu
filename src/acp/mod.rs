@@ -1444,6 +1444,16 @@ impl AkhAcpAgent {
             // the agentic path covers the common case).
             // ──
             let agent_r = agent.read().unwrap_or_else(|e| e.into_inner());
+            // Opt-in per akh (`[acp] strip_client_preamble`): the model gets
+            // the operator's own words without the client's trailing tag
+            // blocks, while the transcript capture on this thread keeps the
+            // raw prompt and records the block names and size. Held for the
+            // whole turn.
+            let (text, _preamble_guard) =
+                crate::agent::client_preamble::apply_client_preamble_policy(
+                    agent_r.strip_client_preamble(),
+                    text,
+                );
             // Session cwd: validate the client's candidate cwd (recorded at
             // `session/new`, unvalidated until now — this is the first point
             // with the resolved workspace's `Agent`/`Backend` in hand) and

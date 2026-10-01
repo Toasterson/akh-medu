@@ -26,6 +26,7 @@ pub mod chat_backend;
 pub mod chief_of_staff;
 pub mod chunking;
 pub mod cli_tool;
+pub mod client_preamble;
 pub mod communicative;
 pub mod compaction;
 pub mod completion_controller;
@@ -81,8 +82,6 @@ pub mod openai_backend;
 pub mod openclaw;
 pub mod operator_channel;
 pub mod organ;
-#[cfg(test)]
-mod prefix_stability_tests;
 pub mod output;
 #[cfg(feature = "oxifed")]
 pub mod oxifed;
@@ -91,6 +90,8 @@ pub mod pim;
 pub mod plan;
 pub mod plan_monitor;
 pub mod preference;
+#[cfg(test)]
+mod prefix_stability_tests;
 pub mod priority_reasoning;
 pub mod project;
 pub mod promotion;

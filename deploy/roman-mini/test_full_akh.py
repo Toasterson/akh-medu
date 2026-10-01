@@ -1353,7 +1353,10 @@ class LilithRenderTests(RenderFixture):
                                        "auth": {"token_env": "ROMAN_BOARD_LILITH"}})
         cos = ws["chief_of_staff"]
         # deny_unknown_fields on ChiefOfStaffConfig and Money.
-        self.assertEqual(set(cos), {"profile", "repository", "announcements", "budget"})
+        self.assertEqual(set(cos), {"profile", "repository", "announcements", "budget", "gated_tiers"})
+        # Operator decision 2026-10-01: read-only (T3 gated) until C2 round 2; only Lilith, only T3.
+        self.assertEqual(cos["gated_tiers"], ["t3-operator-class"])
+        self.assertEqual(ws["acp"], {"strip_client_preamble": True})
         self.assertEqual(cos["budget"], {"minor_units": 6673, "currency": "USD"})
         self.assertEqual(cos["repository"], str(self.root / "lilith/ancestry/akh-medu.git"))
         profile = Path(cos["profile"])
@@ -1637,7 +1640,7 @@ class DojoTeacherRenderTests(RenderFixture):
         self.assertEqual(ws["autonomy"], {"enabled": False, "tasks": {}})
         self.assertEqual(ws["exec"], {"kind": "none"})
         self.assertEqual(ws["mcp"], {"require_pushed_mcp": True, "servers": []})
-        for absent in ("board", "monitoring", "delegation", "chief_of_staff", "agent_runtime",
+        for absent in ("board", "monitoring", "delegation", "chief_of_staff", "acp", "agent_runtime",
                        "related_workspaces", "shared_partitions", "openclaw_import", "extra_read_roots"):
             self.assertNotIn(absent, ws)
         # prompt parity: the dojo prompt the in-process arm sends as its system message

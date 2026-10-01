@@ -1220,6 +1220,7 @@ fn config_in(dir: &Path, profile: PathBuf, log: PathBuf) -> ChiefOfStaffConfig {
         repository: dir.to_path_buf(),
         announcements: log,
         budget: usd(1_000),
+        gated_tiers: Vec::new(),
     }
 }
 
@@ -1360,6 +1361,102 @@ fn a_gated_tier_refuses_with_the_proposal_option() {
         .unwrap_err();
     assert!(matches!(err, CosError::TierGated { .. }));
     assert!(err.help().unwrap().to_string().contains("cos-proposal@1"));
+}
+
+// ── Operator gate override (`[chief_of_staff] gated_tiers`) ─────────────────
+
+const COS_TABLE_HEAD: &str = r#"
+profile = "/p.json"
+repository = "/r"
+announcements = "/a.jsonl"
+budget = { minor_units = 10, currency = "USD" }
+"#;
+
+#[test]
+fn gated_tiers_parse_by_name_and_default_to_none() {
+    let none: ChiefOfStaffConfig = toml::from_str(COS_TABLE_HEAD).unwrap();
+    assert!(none.gated_tiers.is_empty());
+    let gated: ChiefOfStaffConfig = toml::from_str(&format!(
+        "{COS_TABLE_HEAD}gated_tiers = [\"t3-operator-class\", \"t2-coordination\"]\n"
+    ))
+    .unwrap();
+    assert_eq!(
+        gated.gated_tiers,
+        vec![AutonomyTier::OperatorClass, AutonomyTier::Coordination]
+    );
+}
+
+#[test]
+fn an_unknown_gated_tier_is_refused_and_the_valid_names_are_listed() {
+    let err = toml::from_str::<ChiefOfStaffConfig>(&format!(
+        "{COS_TABLE_HEAD}gated_tiers = [\"t9-everything\"]\n"
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("unknown tier `t9-everything`"), "{err}");
+    for tier in AutonomyTier::ALL {
+        assert!(err.contains(tier.config_name()), "{err}");
+    }
+}
+
+#[test]
+fn the_gate_override_gates_the_listed_tier_and_reports_what_it_changed() {
+    let mut profile = shipped_profile();
+    let changed = profile.apply_gate_override(&[AutonomyTier::OperatorClass]);
+    assert_eq!(changed, vec![AutonomyTier::OperatorClass]);
+    assert_eq!(profile.grant(AutonomyTier::OperatorClass), TierGrant::Gated);
+    assert_eq!(
+        profile.grant(AutonomyTier::Coordination),
+        TierGrant::Autonomous
+    );
+    let (guard, _) = guard_with(profile, 1_000);
+    let err = guard
+        .admit(
+            &manifest("shell_exec", ToolEffect::Mutating),
+            declared(deploy_declaration(MAIN_SHA)),
+            &no_args(),
+        )
+        .unwrap_err();
+    assert!(matches!(err, CosError::TierGated { .. }));
+}
+
+#[test]
+fn the_gate_override_can_only_gate_never_ungate() {
+    let mut profile = shipped_profile();
+    profile
+        .grants
+        .insert(AutonomyTier::Coordination, TierGrant::Gated);
+    // Listing an already gated tier changes nothing; an empty override is inert.
+    assert!(
+        profile
+            .apply_gate_override(&[AutonomyTier::Coordination])
+            .is_empty()
+    );
+    assert!(profile.apply_gate_override(&[]).is_empty());
+    assert_eq!(profile.grant(AutonomyTier::Coordination), TierGrant::Gated);
+    for tier in [AutonomyTier::Read, AutonomyTier::OwnState] {
+        assert_eq!(profile.grant(tier), TierGrant::Autonomous, "{tier}");
+    }
+}
+
+#[test]
+fn the_guard_applies_the_override_from_its_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config_in(
+        dir.path(),
+        skill_dir().join("permission-profile.json"),
+        dir.path().join("cos.jsonl"),
+    );
+    config.gated_tiers = vec![AutonomyTier::OperatorClass];
+    let guard = CosGuard::from_config(&config, &[]).unwrap();
+    assert_eq!(
+        guard.profile().grant(AutonomyTier::OperatorClass),
+        TierGrant::Gated
+    );
+    assert_eq!(
+        guard.profile().grant(AutonomyTier::Coordination),
+        TierGrant::Autonomous
+    );
 }
 
 #[test]

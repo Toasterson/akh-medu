@@ -75,8 +75,14 @@ def _receipt_text(call: Mapping[str, Any]) -> list[Any]:
     return [call.get("args"), call.get("output")]
 
 
+# The core captures a long receipt as its head and tail around this marker (the tail keeps a list's
+# trailing `total`/`next_page_token`); a receipt cut before that change just ends with "...".
+_ELIDED = re.compile(r"\.\.\.\[\d+ bytes elided\]\.\.\.")
+
+
 def _truncated(call: Mapping[str, Any]) -> bool:
-    return not call.get("receipt_captured") or str(call.get("output") or "").endswith("...")
+    output = str(call.get("output") or "")
+    return not call.get("receipt_captured") or output.endswith("...") or _ELIDED.search(output) is not None
 
 
 def check_fabrications(session: Mapping[str, Any]) -> list[dict]:

@@ -379,7 +379,34 @@ fn backend_repository_witness(
 
 /// Byte caps for the receipt fields a turn's tool trace carries (ADR 116 C2).
 const TRACE_ARGS_MAX_BYTES: usize = 1000;
-const TRACE_OUTPUT_MAX_BYTES: usize = 4000;
+/// Captured receipt output: the first `TRACE_OUTPUT_HEAD_BYTES` plus the last
+/// `TRACE_OUTPUT_TAIL_BYTES`, so a list response keeps its trailing `total` /
+/// `next_page_token`. Capture only: the model sees the full result.
+const TRACE_OUTPUT_HEAD_BYTES: usize = 3500;
+const TRACE_OUTPUT_TAIL_BYTES: usize = 512;
+
+/// `s` capped for the captured trace: unchanged when it fits, otherwise its
+/// head and tail joined by `...[N bytes elided]...` (cuts land on char
+/// boundaries). Readers detect a cut by that marker, not by a trailing `...`.
+fn capture_head_and_tail(s: &str, head: usize, tail: usize) -> String {
+    if s.len() <= head + tail {
+        return s.to_string();
+    }
+    let mut head_end = head;
+    while head_end > 0 && !s.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = s.len() - tail;
+    while tail_start < s.len() && !s.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!(
+        "{}...[{} bytes elided]...{}",
+        &s[..head_end],
+        tail_start - head_end,
+        &s[tail_start..]
+    )
+}
 
 fn verified_write(tool: &str, args: &Value, success: bool) -> bool {
     success
@@ -1926,7 +1953,7 @@ impl Agent {
             "ok": success,
             "wrote": verified_write(&exec_name, &exec_args, success),
             "args": crate::agent::tool::truncate_summary(&exec_args.to_string(), TRACE_ARGS_MAX_BYTES),
-            "output": crate::agent::tool::truncate_summary(&result, TRACE_OUTPUT_MAX_BYTES),
+            "output": capture_head_and_tail(&result, TRACE_OUTPUT_HEAD_BYTES, TRACE_OUTPUT_TAIL_BYTES),
             "duration_ms": call_duration_ms,
         });
         if let Some(verified) = study_note_evidence_verified {
@@ -2101,7 +2128,9 @@ impl Agent {
     /// parses it verbatim (ADR 091 / the transcript-capture plan):
     /// `{v, ts, workspace, model, user_prompt, agent_answer, tools: [{tool, ok}]}`.
     /// Additive since (readers ignore unknown keys): per-tool `wrote`, `args`,
-    /// `output`, `duration_ms`, and `dispatch: true` on autonomous turns (ADR 116 C2).
+    /// `output`, `duration_ms`, `dispatch: true` on autonomous turns, and
+    /// `client_preamble: {tags, bytes}` when the ACP intake stripped a
+    /// client-injected preamble (`user_prompt` is then the raw prompt) (ADR 116 C2).
     pub(crate) fn emit_turn_wal(
         &self,
         engine: &Engine,
@@ -2129,15 +2158,22 @@ impl Agent {
         if !self.transcript_capture_enabled() {
             return;
         }
+        // A turn whose client preamble was stripped (`[acp] strip_client_preamble`)
+        // captures the prompt as the client sent it; the block names and size
+        // ride along as additive client metadata (never the content).
+        let stripped = super::client_preamble::raw_prompt_for(user_prompt);
         let mut payload = json!({
             "v": 1,
             "ts": rfc3339_now(),
             "workspace": agent_id,
             "model": model,
-            "user_prompt": user_prompt,
+            "user_prompt": stripped.as_ref().map_or(user_prompt, |(raw, _)| raw.as_str()),
             "agent_answer": answer,
             "tools": tools,
         });
+        if let Some((_, meta)) = &stripped {
+            payload["client_preamble"] = json!({"tags": meta.tags, "bytes": meta.bytes});
+        }
         // ADR 116 C2: an autonomous dispatch turn is not an operator turn; the
         // session harvester keeps it out of operator sessions. Additive and
         // present only when true, so the locked ADR 091 shape is otherwise unchanged.
@@ -4476,6 +4512,30 @@ mod tests {
             );
         }
 
+        // --- 2c. A stripped client preamble: the capture keeps the raw prompt and
+        // adds the block names and size (never the content) as client metadata. ---
+        {
+            let raw = "What is parked? <runtime_info>secret words</runtime_info>";
+            let (turn_prompt, _guard) =
+                crate::agent::client_preamble::apply_client_preamble_policy(true, raw.to_string());
+            assert_eq!(turn_prompt, "What is parked?");
+            agent.emit_turn_wal(&engine, "tecton", &turn_prompt, "None.", &[]);
+            let records = sink.records.lock().unwrap();
+            let payload = &records[2].1;
+            assert_eq!(payload["user_prompt"], raw);
+            assert_eq!(payload["client_preamble"]["tags"], json!(["runtime_info"]));
+            assert_eq!(
+                payload["client_preamble"]["bytes"],
+                raw.len() - "What is parked?".len()
+            );
+            assert!(
+                !payload["client_preamble"]
+                    .to_string()
+                    .contains("secret words")
+            );
+        }
+        sink.records.lock().unwrap().truncate(2);
+
         // --- 3. Opt-out (env="0") writes nothing, even with the field on. ---
         unsafe {
             std::env::set_var("AKH_TRANSCRIPT_CAPTURE", "0");
@@ -4491,6 +4551,28 @@ mod tests {
         unsafe {
             std::env::remove_var("AKH_TRANSCRIPT_CAPTURE");
         }
+    }
+
+    #[test]
+    fn captured_receipts_keep_their_head_and_tail() {
+        // Fits: untouched, no marker.
+        assert_eq!(capture_head_and_tail("short", 10, 4), "short");
+        // A long list response keeps its trailing `total` and `next_page_token`.
+        let body = format!(
+            "{{\"items\":[{}],\"total\":137,\"next_page_token\":\"abc\"}}",
+            "1,".repeat(5000)
+        );
+        let captured =
+            capture_head_and_tail(&body, TRACE_OUTPUT_HEAD_BYTES, TRACE_OUTPUT_TAIL_BYTES);
+        assert!(captured.starts_with("{\"items\":[1,1,"));
+        assert!(captured.ends_with("\"total\":137,\"next_page_token\":\"abc\"}"));
+        assert!(captured.contains("...["), "{captured}");
+        assert!(captured.contains(" bytes elided]..."));
+        assert!(captured.len() < TRACE_OUTPUT_HEAD_BYTES + TRACE_OUTPUT_TAIL_BYTES + 40);
+        // Multibyte text cuts on char boundaries at both ends.
+        let wide = "é".repeat(5000);
+        let captured = capture_head_and_tail(&wide, 3501, 511);
+        assert!(captured.contains(" bytes elided]..."));
     }
 
     // --- ADR 089 task A: param-repair-and-retry ---

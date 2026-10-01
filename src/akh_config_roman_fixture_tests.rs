@@ -134,7 +134,7 @@ fn lilith_workspace_loads_with_every_intended_key() {
     assert_eq!(openai.context_window, Some(49152));
 
     // [chief_of_staff] (deny_unknown_fields: profile, repository,
-    // announcements, budget).
+    // announcements, budget, gated_tiers).
     let cos = cfg
         .chief_of_staff
         .as_ref()
@@ -150,6 +150,14 @@ fn lilith_workspace_loads_with_every_intended_key() {
         assert_eq!(cos.budget.minor_units, 6673, "the fixture's budget input");
     }
 
+    // Operator decision 2026-10-01: T3 is gated (read-only) until C2 round 2,
+    // and the ACP intake strips the T3 client's injected preamble.
+    assert_eq!(
+        cos.gated_tiers,
+        [crate::agent::chief_of_staff::AutonomyTier::OperatorClass]
+    );
+    assert!(cfg.acp.strip_client_preamble, "[acp] strip_client_preamble");
+
     // The guard akhomed installs from this table: the log is outside her
     // write root (the engine's <workspace>/kg/scratch) and the installed
     // profile loads, so she does not fall back to read-only.
@@ -158,6 +166,15 @@ fn lilith_workspace_loads_with_every_intended_key() {
     match GuardInstall::from_config(cos, &write_roots) {
         GuardInstall::Active(guard) => {
             assert_eq!(guard.remaining_budget(), cos.budget.minor_units);
+            use crate::agent::chief_of_staff::{AutonomyTier, TierGrant};
+            assert_eq!(
+                guard.profile().grant(AutonomyTier::OperatorClass),
+                TierGrant::Gated
+            );
+            assert_eq!(
+                guard.profile().grant(AutonomyTier::Coordination),
+                TierGrant::Autonomous
+            );
         }
         GuardInstall::FailClosed { error, .. } => panic!("CosGuard failed closed: {error:?}"),
     }
@@ -222,6 +239,7 @@ fn roman_workspaces_load_without_dropped_keys() {
         assert_eq!(cfg.name(), role);
         assert_eq!(cfg.backend, ChatBacking::Ollama);
         assert!(cfg.chief_of_staff.is_none());
+        assert!(!cfg.acp.strip_client_preamble, "{role}: no preamble strip");
         // ADR 123: no per-akh budget is rendered; the GLM-5.3 catalog row sets it.
         assert!(
             cfg.autonomy.budget.is_empty(),
@@ -257,9 +275,21 @@ fn lilith_workspace_resolves_the_local_gemma_profile() {
     assert_eq!(profile.max_tools_per_turn.map(|s| s.value), Some(16));
     assert_eq!(cfg.pinned_tools.len(), 16, "{:?}", cfg.pinned_tools);
     assert!(cfg.pinned_tools.is_sorted(), "{:?}", cfg.pinned_tools);
-    assert!(cfg.pinned_tools.iter().any(|t| t == "mcp__anima__get_work_item_detail"));
-    assert!(cfg.pinned_tools.iter().any(|t| t == "mcp__anima__list_projects"));
-    assert!(!cfg.pinned_tools.iter().any(|t| t == "mcp__anima__get_work_item"));
+    assert!(
+        cfg.pinned_tools
+            .iter()
+            .any(|t| t == "mcp__anima__get_work_item_detail")
+    );
+    assert!(
+        cfg.pinned_tools
+            .iter()
+            .any(|t| t == "mcp__anima__list_projects")
+    );
+    assert!(
+        !cfg.pinned_tools
+            .iter()
+            .any(|t| t == "mcp__anima__get_work_item")
+    );
     let openai = cfg.to_openai_config().unwrap().unwrap();
     assert_eq!(openai.context_window, Some(49_152));
     assert_eq!(openai.timeout_secs, 600);
@@ -286,6 +316,10 @@ fn dojo_teacher_workspace_loads_sealed() {
     assert!(cfg.mcp.servers.is_empty() && cfg.mcp.require_pushed_mcp);
     assert!(
         cfg.board.is_none() && cfg.chief_of_staff.is_none() && cfg.related_workspaces.is_empty()
+    );
+    assert!(
+        !cfg.acp.strip_client_preamble,
+        "the dojo teacher keeps its raw prompts and has no CoS gate"
     );
     // ADR 123: the teacher's turns run on the GLM-5.3 row; autonomy stays off.
     let profile = cfg.resolve_model_profile().expect("resolves");
