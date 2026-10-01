@@ -44,7 +44,16 @@ from dojo import DOJO_VERSION, floors as floors_mod
 from dojo.contracts import REPO_ROOT
 from dojo.episode import EmitDocument, Family, SendMessage
 from dojo.errors import CompareError, DojoError, RunProvenanceError
-from dojo.families import BuildContext, HardConstraint, build_all, load_corrections, load_illumos_pack, verify, verify_context
+from dojo.families import (
+    DEFAULT_CORRECTION_ANNOTATIONS,
+    BuildContext,
+    HardConstraint,
+    build_all,
+    load_corrections,
+    load_illumos_pack,
+    verify,
+    verify_context,
+)
 from dojo.model_adapters import (
     ANTHROPIC_BASE_URL,
     DEFAULT_ANTHROPIC_MODEL,
@@ -280,6 +289,12 @@ def _verification_record(chosen: Chosen, result, snapshot, oracle) -> dict:
             "weight_policy": f"{COS_V1.name}@{COS_V1.version}", "error": trace.error}
     if trace.status != "ok":
         return base | {"weight": None, "weight_basis": "not-scored", "hard": [], "metrics": {}, "step_weights": []}
+    return score_episode(base, spec, episode, snapshot, oracle)
+
+
+def score_episode(base: dict, spec, episode, snapshot, oracle) -> dict:
+    """The verification record of an answered episode: verdict, `cos-v1` weight, hard constraints. Shared by a
+    live run and by `reverify`, so both score an episode the same way."""
     try:
         verdict = verify(spec, episode, verify_context(snapshot, oracle))
     except Exception as error:  # model output the verifiers cannot read scores 0; it is counted, not hidden
@@ -432,7 +447,8 @@ def run_batch(store: SnapshotStore, chosen: Sequence[Chosen], adapter: ModelAdap
         snapshot = store.get(spec.snapshot_id)
         ledger_path = out / "ledgers" / f"{sha256_hex(spec.episode_id.encode())[:16]}.jsonl"
         ledger_path.unlink(missing_ok=True)  # a retry is a fresh tenancy
-        servers, _ = episode_servers(snapshot, DojoLedger(ledger_path, forbidden_roots=(store.root,)), oracle)
+        servers, _ = episode_servers(snapshot, DojoLedger(ledger_path, forbidden_roots=(store.root,)), oracle,
+                                     spec.replay_faults)
         result = runner.run_traced(spec, servers)
         return _episode_record(item, result, run_id), _verification_record(item, result, snapshot, oracle)
 
@@ -620,6 +636,9 @@ def _add_run_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--illumos-pack", type=Path, default=None)
     p.add_argument("--corrections", type=Path, default=None,
                    help="C2 corrections.jsonl (c2/harvest_sessions.py); select them with --family correction")
+    p.add_argument("--correction-annotations", type=Path, default=DEFAULT_CORRECTION_ANNOTATIONS,
+                   help="what each correction asked for (expected_tool / expected_arguments); default: "
+                        "correction-annotations.jsonl next to the dojo")
     p.add_argument("--family", default="all", help="'all' or a comma list of family names")
     p.add_argument("--split", required=True, choices=["sealed", "dev", "train", "all"])
     p.add_argument("--limit", type=int, default=None, help="episodes per family")
@@ -791,7 +810,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     store = SnapshotStore(root)
     oracle = GitAncestryOracle(args.repo)
     pack = load_illumos_pack(args.illumos_pack) if args.illumos_pack else ()
-    corrections = load_corrections(args.corrections) if args.corrections else ()
+    corrections = load_corrections(args.corrections, args.correction_annotations) if args.corrections else ()
     families = parse_families(args.family)
     chosen, selection = select_episodes(store, oracle, families, args.split, args.limit, args.seed, pack, corrections)
     system = compose_system_prompt(args.repo)
@@ -880,6 +899,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     run = sub.add_parser("run", help="run a model over dojo episodes and write a baseline")
     _add_run_arguments(run)
     run.add_argument("--out", type=Path, default=None, help="output directory (an existing one resumes)")
+    from dojo import reverify
+
+    rv = sub.add_parser("reverify", help="re-score a finished run against the current builders and verifiers (no model)")
+    reverify.add_arguments(rv)
     cmp = sub.add_parser("compare", help="paired per-family table over baseline summaries")
     cmp.add_argument("summaries", nargs="+", type=Path, help="baseline-summary.json (or its directory), reference first")
     cmp.add_argument("--json", action="store_true")
@@ -887,6 +910,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "run":
             return cmd_run(args)
+        if args.command == "reverify":
+            return reverify.cmd_reverify(args)
         result = compare_arms([load_arm(p) for p in args.summaries])
         print(json.dumps(result, indent=2, sort_keys=True) if args.json else render_compare(result))
         return 0

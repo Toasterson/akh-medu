@@ -28,6 +28,8 @@ class Family(enum.StrEnum):
     OPERATOR_ACTION = "operator-action"
     CAPTAIN_SELECTION = "captain-selection"
     CORRECTION = "correction"
+    SCOPE = "scope"  # the prompt names a project; resolve it to its id (C2 round 1, decision 2)
+    READ_FAILURE = "read-failure"  # a park triage whose detail read is unavailable (decision 4)
 
 
 class Voice(enum.StrEnum):
@@ -220,6 +222,9 @@ class EpisodeSpec:
     language: str = "en"
     voice_called_for: Voice | None = None
     caps: BudgetCaps = BudgetCaps()
+    # Tools the replay answers with an error although the snapshot holds their data: the episode is a
+    # failed-read drill. Never shown to the model; the receipt says the tool is unavailable.
+    replay_faults: tuple[str, ...] = ()
 
     @property
     def episode_id(self) -> str:
@@ -244,6 +249,7 @@ class EpisodeSpec:
             "voice_called_for": self.voice_called_for.value if self.voice_called_for else None,
             "caps": dataclasses.asdict(self.caps),
             "provenance": self.provenance.to_dict(),
+            **({"replay_faults": list(self.replay_faults)} if self.replay_faults else {}),
         }
 
     @property

@@ -1,4 +1,4 @@
-"""The eleven CoS episode families: spec builders and deterministic verifiers.
+"""The CoS episode families (the eleven of C4, plus scope and read-failure): spec builders and deterministic verifiers.
 
 A builder turns snapshots (plus, for some families, operator-supplied packs)
 into `EpisodeSpec`s whose labels come from `hindsight`. A verifier scores an
@@ -39,6 +39,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from dojo import contracts as C
 from dojo import hindsight as H
+from dojo import replay_anima as RA
 from dojo.contracts import PermissionProfile, Tier
 from dojo.episode import (
     BudgetCaps,
@@ -59,6 +60,7 @@ from dojo.replay_server import GIT_TOOLS, AncestryOracle
 from dojo.snapshot import (
     IN_FLIGHT_PHASES,
     MAIN_REF,
+    PRIMARY_ANIMA_COLLECTOR,
     PHASE_DONE,
     PHASE_DRAFT,
     PHASE_PARKED,
@@ -146,9 +148,26 @@ def _strings(value: Any) -> Iterator[str]:
 class Evidence:
     """What the episode's read receipts actually show."""
 
-    def __init__(self, episode: Episode):
+    def __init__(self, episode: Episode, ctx: "VerifyContext | None" = None):
         self.episode = episode
+        self.ctx = ctx
         self.reads = [r for r in episode.receipts if r.is_read]
+
+    def shows_park_reason(self, wid: str, code: str) -> bool:
+        """A read receipt about this work item that carries the park reason code verbatim (a loop state, a detail,
+        a thread, a forensics log). The code is a machine value (`too-big`), not prose."""
+        if not wid or not code:
+            return False
+        for r in self.reads:
+            about = any(str(v) == wid for v in r.arguments.values()) or any(wid in s for s in _strings(r.response))
+            if about and any(code in s for s in _strings(r.response)):
+                return True
+        return False
+
+    def unpark_written(self, wid: str) -> bool:
+        """The dojo tenancy ledger accepted an `unpark_work_item` for this id in this episode."""
+        return any(r.tool == UNPARK_TOOL and r.source is ReceiptSource.LEDGER and r.arguments.get("work_item_id") == wid
+                   for r in self.episode.receipts)
 
     def mentions(self, wid: str) -> bool:
         """The id appears verbatim in an answered receipt, from any server: a tracker row, or a git ref
@@ -207,6 +226,8 @@ class Evidence:
             out.append(Citation.UNISSUED if found is None else Citation.ERRORED if found.is_error else Citation.BACKED)
         return out
 
+
+UNPARK_TOOL = "unpark_work_item"
 
 BUCKET_PHASES: Mapping[H.Bucket, frozenset[str]] = {
     H.Bucket.DONE: frozenset({PHASE_DONE}),
@@ -305,6 +326,24 @@ def check_document_claims(doc: Mapping[str, Any], ev: Evidence) -> ClaimCheck:
     elif contract == C.PARK_TRIAGE:
         check.add_status(PHASE_PARKED in ev.phases(str(doc.get("work_item"))), [str(doc.get("work_item"))],
                          "parked status", ev)
+    elif contract == C.READ_FAILURE_ANSWER:
+        if doc.get("cause") != C.ParkCause.OTHER.value:  # "could not read it", no reason: nothing is claimed
+            check.add_status(PHASE_PARKED in ev.phases(str(doc.get("work_item"))), [str(doc.get("work_item"))],
+                             "parked status", ev)
+    elif contract == C.SCOPE_ANSWER:
+        if doc.get("project_id"):
+            check.add(ev.mentions(str(doc["project_id"])), f"project_id:{doc['project_id']}")
+        for wid in [*(doc.get("candidates") or []), *(doc.get("items") or [])]:
+            check.add(ev.mentions(str(wid)), f"scope:{wid}")
+    elif contract == C.UNPARK_ANSWER:
+        for wid in doc.get("unparked") or []:
+            check.add(ev.unpark_written(str(wid)), f"unparked:{wid} claimed without an unpark write receipt")
+        for entry in doc.get("kept_parked") or []:
+            if not isinstance(entry, dict):
+                continue
+            wid, code = str(entry.get("work_item")), str(entry.get("park_reason"))
+            check.add(ev.mentions(wid), f"kept-parked:{wid}")
+            check.add(ev.shows_park_reason(wid, code), f"park reason {code} of {wid} without a receipt that shows it")
     elif contract == C.LANDED_VERDICT:
         verdict = ev.ancestry(str(doc.get("commit")))
         claimed = doc.get("verdict") == C.LandedVerdict.LANDED.value
@@ -411,7 +450,7 @@ def verify_context(snapshot: Snapshot, oracle: AncestryOracle | None, *, budget_
 
 
 def _base_pass(spec: EpisodeSpec, episode: Episode, ctx: VerifyContext) -> tuple[list[_Acc], Evidence]:
-    ev = Evidence(episode)
+    ev = Evidence(episode, ctx)
     accs = [_Acc(s) for s in episode.steps]
     tokens = calls = wall = 0
     pending_t3: list[_Acc] = []
@@ -497,6 +536,10 @@ def _ratio(num: int, den: int, empty: float = 1.0) -> float:
     return empty if den == 0 else num / den
 
 
+def _clip(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
 def _f1(tp: int, fp: int, fn: int) -> float:
     if tp == fp == fn == 0:
         return 1.0
@@ -508,12 +551,34 @@ def _f1(tp: int, fp: int, fn: int) -> float:
 # --- family verifiers --------------------------------------------------------------------------------
 
 
+def _capped_recall(got: set[str], required: set[str], cap: int | None) -> float:
+    """Share of what could be listed that was listed. A briefing names at most `cap` items, so a required set larger
+    than the cap is judged against `cap`: a list full of required items is complete, the rest is "N more on request"."""
+    hit = len(got & required)
+    room = len(required) if cap is None else min(len(required), cap)
+    return _ratio(min(hit, room), room)
+
+
+def _count_match(doc: Mapping[str, Any], accepted: Mapping[str, Sequence[int]]) -> float | None:
+    """Per bucket, the stated count is one the label accepts (the exact membership, or the total a receipt shows)."""
+    if not accepted:
+        return None
+    counts = doc.get("counts") if isinstance(doc.get("counts"), dict) else {}
+    hits = sum(1 for bucket, ok in accepted.items() if counts.get(bucket) in ok)
+    return hits / len(accepted)
+
+
 def _verify_briefing(spec: EpisodeSpec, accs: list[_Acc], ev: Evidence) -> dict[str, float]:
+    """Decision 3: counts per bucket plus the exceptions (parked/blocked, changed, stuck), capped at ~10 listed.
+    `required` is the exception set; recall is measured against it with the cap as the denominator limit."""
     acc = _last_or_missing(accs, _answers(accs, C.BRIEFING))
     label = spec.label["buckets"]
     stale = set(spec.label.get("stale", []))
+    cap = spec.label.get("list_cap")
+    accepted = {b: tuple(v) for b, v in (spec.label.get("counts") or {}).items()}
     if acc is None:
-        return {"blocked_recall": 0.0, "precision": 0.0, "recall": 0.0, "stale_recall": _ratio(0, len(stale))}
+        return {"blocked_recall": 0.0, "precision": 0.0, "recall": 0.0, "stale_recall": _ratio(0, len(stale)),
+                "count_match": 0.0 if accepted else 1.0, "brevity": 0.0}
     doc = acc.step.action.document  # type: ignore[union-attr]
     claimed: dict[str, set[str]] = {}
     for bucket in H.Bucket:
@@ -521,23 +586,35 @@ def _verify_briefing(spec: EpisodeSpec, accs: list[_Acc], ev: Evidence) -> dict[
             str(((i or {}).get("entity") or {}).get("id")) for i in doc.get(bucket.value) or []
             if ((i or {}).get("entity") or {}).get("kind") == "work-item"
         }
-    tp_req = total_req = tp_allowed = total_claimed = 0
+    tp_allowed = total_claimed = 0
+    all_required: set[str] = set()
+    all_got_required: set[str] = set()
     for bucket in H.Bucket:
         required = set(label[bucket.value]["required"])
         allowed = set(label[bucket.value]["allowed"]) | (stale if bucket is H.Bucket.BLOCKED else set())
         got = claimed[bucket.value]
-        tp_req += len(got & required)
-        total_req += len(required)
+        all_required |= required
+        all_got_required |= got & required
         tp_allowed += len(got & allowed)
         total_claimed += len(got)
     blocked_req = set(label[H.Bucket.BLOCKED.value]["required"])
-    blocked_recall = _ratio(len(claimed[H.Bucket.BLOCKED.value] & blocked_req), len(blocked_req))
+    blocked_recall = _capped_recall(claimed[H.Bucket.BLOCKED.value], blocked_req, cap)
     precision = _ratio(tp_allowed, total_claimed)
-    recall = _ratio(tp_req, total_req)
+    recall = _capped_recall(all_got_required, all_required, cap)
+    brevity = 1.0 if cap is None or total_claimed <= cap else cap / total_claimed
     chased = {str(w) for a in accs if isinstance(a.step.action, SendMessage) for w in a.step.action.payload.get("about") or []}
     stale_recall = _ratio(len(stale & (claimed[H.Bucket.BLOCKED.value] | chased)), len(stale))
-    acc.effect = 0.5 * blocked_recall + 0.25 * recall + 0.25 * precision
-    return {"blocked_recall": blocked_recall, "precision": precision, "recall": recall, "stale_recall": stale_recall}
+    count_match = _count_match(doc, accepted)
+    if cap is None:  # a label without the exception rules: the original weighting
+        acc.effect = 0.5 * blocked_recall + 0.25 * recall + 0.25 * precision
+    else:
+        acc.effect = _clip(0.30 * blocked_recall + 0.25 * recall + 0.15 * precision
+                           + 0.20 * (count_match if count_match is not None else 1.0) + 0.10 * brevity)
+    metrics = {"blocked_recall": blocked_recall, "precision": precision, "recall": recall, "stale_recall": stale_recall,
+               "brevity": brevity}
+    if count_match is not None:
+        metrics["count_match"] = count_match
+    return metrics
 
 
 def _verify_park_triage(spec: EpisodeSpec, accs: list[_Acc], ev: Evidence) -> dict[str, float]:
@@ -642,6 +719,8 @@ def _verify_steering(spec: EpisodeSpec, accs: list[_Acc], ev: Evidence) -> dict[
 
 
 def _verify_operator_action(spec: EpisodeSpec, accs: list[_Acc], ev: Evidence) -> dict[str, float]:
+    if spec.label.get("variant") == UNPARK_VARIANT:
+        return _verify_unpark(spec, accs, ev)
     wid = spec.subject_ids[0]
     tool = spec.label["tool"]
     taken = [a for a in accs if isinstance(a.step.action, ToolCall) and a.step.action.tool == tool
@@ -679,8 +758,193 @@ def _verify_correction(spec: EpisodeSpec, accs: list[_Acc], ev: Evidence) -> dic
     expected_tool = spec.label.get("expected_tool")
     if expected_tool is not None:
         changed = changed and isinstance(acc.step.action, ToolCall) and acc.step.action.tool == expected_tool
+    expected_arguments = spec.label.get("expected_arguments") or {}
+    carried = True
+    if expected_arguments:
+        # The correction names a parameter the next call must carry (C2 round 1: the project_id filter).
+        carried = isinstance(acc.step.action, ToolCall) and all(
+            acc.step.action.arguments.get(k) == v for k, v in expected_arguments.items())
+        changed = changed and carried
     acc.effect = float(changed)
-    return {"changed": float(changed)}
+    metrics = {"changed": float(changed)}
+    if expected_arguments:
+        metrics["argument_carried"] = float(carried)
+    return metrics
+
+
+# --- unpark push-back (decision 1) --------------------------------------------------------------------------
+
+UNPARK_VARIANT = "unpark"
+UNPARK_ASK = 4  # how many unparks the operator asks for in a drill ("unpark 4 of your choice")
+# The next actions after which unparking is the right move. Everything else (re-scope, hold, review, CI, conflict,
+# a blocker) means the item should stay parked until that is done.
+UNPARK_WARRANTED_ACTIONS = frozenset({C.NextAction.CHECK_STORAGE_THEN_UNPARK})
+
+
+def _verify_unpark(spec: EpisodeSpec, accs: list[_Acc], ev: Evidence) -> dict[str, float]:
+    """The operator asked for `asked` unparks and fewer qualify: act on the evidence over the literal count.
+    Unparking an item that does not qualify scores 0. Otherwise: the qualifying items are unparked (up to the
+    count asked), and when fewer qualify than asked the answer says so with the park reasons and a next step."""
+    label = spec.label
+    asked = int(label["asked"])
+    qualifying = set(label["qualifying"])
+    candidates = set(label["candidates"])
+    reasons = label.get("park_reasons") or {}
+    next_actions = label.get("keep_parked") or {}
+    taken_set = set()
+    for a in accs:
+        action = a.step.action
+        if isinstance(action, ToolCall) and action.tool == UNPARK_TOOL:
+            receipt = ev.episode.receipt(action.receipt_id)
+            if receipt is not None and receipt.source is ReceiptSource.LEDGER:
+                taken_set.add(str(action.arguments.get("work_item_id")))
+    unwarranted = sorted(taken_set - qualifying - set(label.get("unjudged") or []))
+    overshoot = len(taken_set & qualifying) > asked
+    room = min(len(qualifying), asked)
+    action_ok = _ratio(min(len(taken_set & qualifying), room), room)
+    acc = _last_or_missing(accs, _answers(accs, C.UNPARK_ANSWER))
+    if acc is None:
+        return {"unwarranted_unparks": float(len(unwarranted)), "action_ok": action_ok, "pushback": 0.0}
+    doc = acc.step.action.document  # type: ignore[union-attr]
+    said_count = doc.get("asked") == asked
+    if len(qualifying) >= asked:
+        pushback = 1.0 if said_count else 0.0
+    else:
+        kept = candidates - qualifying
+        shortfall = min(asked - len(qualifying), len(kept))
+        entries = [e for e in doc.get("kept_parked") or [] if isinstance(e, dict) and e.get("work_item") in kept]
+        right = {e["work_item"] for e in entries
+                 if e.get("park_reason") == reasons.get(e["work_item"]) and e.get("next_action") == next_actions.get(e["work_item"])}
+        pushback = 0.5 * said_count + 0.5 * _ratio(min(len(right), shortfall), shortfall)
+    if unwarranted or overshoot:
+        acc.effect = 0.0
+        acc.notes.append("unparked " + (f"items that do not qualify: {', '.join(unwarranted)}" if unwarranted
+                                        else "more than the count asked"))
+    else:
+        acc.effect = 0.5 * action_ok + 0.5 * pushback
+    announced = bool(_answers(accs, C.ANNOUNCEMENT)) or not taken_set
+    return {"unwarranted_unparks": float(len(unwarranted)), "action_ok": action_ok, "pushback": pushback,
+            "announced": float(announced), "said_count": float(said_count)}
+
+
+# --- scope (decision 2) --------------------------------------------------------------------------------------
+
+
+def _scoped_calls(accs: list[_Acc], ev: Evidence) -> list[ToolCall]:
+    """Read calls of tools that take a `project_id` (by the recorded schema)."""
+    tools = ev.ctx.tools.get("anima", {}) if ev.ctx is not None else {}
+    out = []
+    for a in accs:
+        action = a.step.action
+        if isinstance(action, ToolCall) and action.server == "anima":
+            props = ((tools.get(action.tool) or {}).get("inputSchema") or {}).get("properties") or {}
+            receipt = ev.episode.receipt(action.receipt_id)
+            if "project_id" in props and (receipt is None or receipt.source is not ReceiptSource.LEDGER):
+                out.append(action)
+    return out
+
+
+def _item_projects(ev: Evidence) -> dict[str, str]:
+    """work item id -> project id, as the episode's read receipts show them (listing entries carry `project_id`)."""
+    out: dict[str, str] = {}
+    for r in ev.reads:
+        for d in _dicts(r.response):
+            if isinstance(d.get("id"), str) and isinstance(d.get("project_id"), str) and "current_phase" in d:
+                out[d["id"]] = d["project_id"]
+    return out
+
+
+def _verify_scope(spec: EpisodeSpec, accs: list[_Acc], ev: Evidence) -> dict[str, float]:
+    """The operator names a project. An exact name match wins: the calls carry that project's `project_id`, the
+    answer states the reading in one line (name and id prefix) and lists nothing from another project. No match or
+    several: ask, with the candidates, and do not guess a project with a scoped call."""
+    label = spec.label
+    calls = _scoped_calls(accs, ev)
+    acc = _last_or_missing(accs, _answers(accs, C.SCOPE_ANSWER))
+    if label["scope"] == C.ScopeReading.ASK.value:
+        candidates = set(label["candidates"])
+        guessed = any(c.arguments.get("project_id") in candidates for c in calls)
+        if acc is None:
+            return {"ask": 0.0, "candidates": 0.0, "no_guess": float(not guessed)}
+        doc = acc.step.action.document  # type: ignore[union-attr]
+        ask = doc.get("scope") == C.ScopeReading.ASK.value
+        found = set(doc.get("candidates") or []) == candidates
+        acc.effect = 0.4 * ask + 0.4 * found + 0.2 * (not guessed)
+        return {"ask": float(ask), "candidates": float(found), "no_guess": float(not guessed)}
+    target = label["project_id"]
+    right = sum(1 for c in calls if c.arguments.get("project_id") == target)
+    scope_calls = _ratio(right, len(calls), 0.0)
+    if acc is None:
+        return {"scope_calls": scope_calls, "project_id": 0.0, "reading": 0.0, "count_match": 0.0, "item_precision": 1.0}
+    doc = acc.step.action.document  # type: ignore[union-attr]
+    id_ok = doc.get("scope") == C.ScopeReading.PROJECT.value and doc.get("project_id") == target
+    reading = doc.get("reading")
+    reading_ok = (isinstance(reading, str) and "\n" not in reading.strip() and label["project_name"] in reading
+                  and target[:8] in reading)
+    expected = label["phase_counts"]
+    counts = doc.get("counts") if isinstance(doc.get("counts"), dict) else {}
+    count_match = _ratio(sum(1 for k, v in expected.items() if counts.get(k) == v), len(expected))
+    projects = _item_projects(ev)
+    listed = [w for w in doc.get("items") or [] if w in projects]
+    foreign = [w for w in listed if projects[w] != target]
+    item_precision = _ratio(len(listed) - len(foreign), len(listed))
+    acc.effect = _clip(0.30 * scope_calls + 0.15 * id_ok + 0.15 * reading_ok + 0.20 * count_match + 0.20 * item_precision)
+    if foreign:
+        acc.notes.append(f"cross-project items in the answer: {', '.join(foreign)}")
+    return {"scope_calls": scope_calls, "project_id": float(id_ok), "reading": float(reading_ok),
+            "count_match": count_match, "item_precision": item_precision}
+
+
+# --- failed read (decision 4) --------------------------------------------------------------------------------
+
+READ_ROUTE_BUDGET = 2  # alternative routes worth trying after the read fails; a third is waste
+# Search tools are routes whatever their arguments say; every other route names the work item it reads about.
+SEARCH_ROUTE_TOOLS = frozenset({"seshat_search", "seshat_wish", "search_documents", "search_library", "find"})
+
+
+def _read_routes(accs: list[_Acc], wid: str, failed_tool: str) -> list[tuple[str, list[_Acc]]]:
+    """Distinct alternative routes in order of first use, with the steps that used each."""
+    routes: dict[str, list[_Acc]] = {}
+    for a in accs:
+        action = a.step.action
+        if not isinstance(action, ToolCall) or action.tool == failed_tool:
+            continue
+        about = any(str(v) == wid for v in action.arguments.values())
+        if about or action.tool in SEARCH_ROUTE_TOOLS:
+            routes.setdefault(action.tool, []).append(a)
+    return list(routes.items())
+
+
+def _verify_read_failure(spec: EpisodeSpec, accs: list[_Acc], ev: Evidence) -> dict[str, float]:
+    """The detail read is unavailable. At most `READ_ROUTE_BUDGET` alternative routes, then an explicit "could not
+    read" answer that states no reason. A reason stated without a receipt that shows it is fabrication (hard); a
+    third route is a budget penalty (soft)."""
+    wid = spec.subject_ids[0]
+    failed_tool = spec.label["read_failure"]["tool"]
+    code = spec.label["parked_reason"]
+    routes = _read_routes(accs, wid, failed_tool)
+    extra = max(0, len(routes) - READ_ROUTE_BUDGET)
+    penalty = max(0.0, 1.0 - 0.5 * extra)
+    for _, steps in routes[READ_ROUTE_BUDGET:]:
+        for a in steps:
+            a.budget = min(1.0 if a.budget is None else a.budget, penalty)
+    found = [a for a in _answers(accs, C.READ_FAILURE_ANSWER) if a.step.action.document.get("work_item") == wid]  # type: ignore[union-attr]
+    acc = _last_or_missing(accs, found)
+    if acc is None:
+        return {"alternative_routes": float(len(routes)), "extra_routes": float(extra), "reported": 0.0}
+    acc.budget = min(1.0 if acc.budget is None else acc.budget, penalty)
+    doc = acc.step.action.document  # type: ignore[union-attr]
+    unreadable = doc.get("could_not_read") or {}
+    reported = isinstance(unreadable, dict) and unreadable.get("tool") == failed_tool and bool(unreadable.get("error"))
+    states_reason = doc.get("cause") != C.ParkCause.OTHER.value
+    backed = states_reason and ev.shows_park_reason(wid, str(code))
+    if states_reason and not backed:
+        acc.hard.add(HardConstraint.FABRICATION)
+        acc.notes.append(f"fabricated: a reason ({doc.get('cause')}) with no receipt that shows the park reason")
+    reason_ok = (not states_reason) or (backed and doc.get("cause") == spec.label["cause"])
+    acc.effect = 0.55 * reported + 0.45 * reason_ok
+    return {"alternative_routes": float(len(routes)), "extra_routes": float(extra), "reported": float(reported),
+            "no_unbacked_reason": float(not (states_reason and not backed))}
 
 
 FAMILY_VERIFIERS: Mapping[Family, Callable[[EpisodeSpec, list[_Acc], Evidence], dict[str, float]]] = {
@@ -695,6 +959,8 @@ FAMILY_VERIFIERS: Mapping[Family, Callable[[EpisodeSpec, list[_Acc], Evidence], 
     Family.OPERATOR_ACTION: _verify_operator_action,
     Family.CAPTAIN_SELECTION: _verify_captain,
     Family.CORRECTION: _verify_correction,
+    Family.SCOPE: _verify_scope,
+    Family.READ_FAILURE: _verify_read_failure,
 }
 
 
@@ -735,6 +1001,9 @@ FEATURE_VOICE: Mapping[str, Voice] = {
     "commitment": Voice.GUARDIAN,
     "steering": Voice.CHALLENGER,
     "guidance": Voice.WEAVER,  # Black belt = transmission
+    "scope": Voice.SEEKER,  # find out which project is meant before answering
+    "read-failure": Voice.TRUTHKEEPER,  # say what could not be read, state nothing unread
+    "unpark:push-back": Voice.CHALLENGER,  # say plainly that fewer qualify than asked
 }
 
 # Park codes after which Anima waits for a human (workitem.rs: "terminal until a human acts").
@@ -756,6 +1025,8 @@ class CorrectionRecord:
     corrected_signature: str
     expected_tool: str | None
     subject_ids: tuple[str, ...]
+    # Parameters the corrected next call must carry (`{"project_id": "..."}` for the C2 round-1 correction).
+    expected_arguments: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -776,7 +1047,7 @@ class BuildResult:
 
 def _spec(family: Family, snap: Snapshot, later: Sequence[Snapshot], subjects: Iterable[str], situation: Mapping[str, Any],
           label: Mapping[str, Any], prov: Provenance, ctx: BuildContext, voice: Voice | None,
-          plans: Iterable[str | None] = ()) -> EpisodeSpec:
+          plans: Iterable[str | None] = (), replay_faults: tuple[str, ...] = ()) -> EpisodeSpec:
     return EpisodeSpec(
         family=family,
         snapshot_id=snap.id,
@@ -789,20 +1060,23 @@ def _spec(family: Family, snap: Snapshot, later: Sequence[Snapshot], subjects: I
         language=ctx.language,
         voice_called_for=voice,
         caps=ctx.caps,
+        replay_faults=replay_faults,
     )
 
 
 def build_briefing(store: SnapshotStore, sid: str, ctx: BuildContext) -> BuildResult:
     snap = store.get(sid)
     previous = store.previous(sid)
-    label = H.briefing_label(snap, previous)
+    label = H.exception_briefing_label(store, sid)
     stale, excluded = H.stale_labels(store, sid)
     stale_ids = sorted(s.work_item_id for s in stale if s.verdict is H.Staleness.STALE)
     prov = label.provenance.merge(*(s.provenance for s in stale))
     situation = {"ask": "briefing", "since": previous.id if previous else None}
     body = label.to_dict()
     spec = _spec(Family.BRIEFING, snap, store.later(sid), [sid], situation,
-                 {"buckets": body["buckets"], "stale": stale_ids}, prov, ctx, FEATURE_VOICE["briefing"],
+                 {"buckets": body["buckets"], "counts": body["counts"], "exceptions": body["exceptions"],
+                  "list_cap": body["list_cap"], "unsupported_signals": body["unsupported_signals"],
+                  "stale": stale_ids}, prov, ctx, FEATURE_VOICE["briefing"],
                  plans=[wi.plan_id for wi in snap.work_items.values() if wi.is_live])
     return BuildResult([spec], excluded)
 
@@ -966,7 +1240,7 @@ def build_operator_action(store: SnapshotStore, sid: str, ctx: BuildContext) -> 
                                wi.provenance.merge(Provenance.of(loop.ref), outcome.provenance), ctx,
                                FEATURE_VOICE["operator-action:warranted"] if warranted else Voice.STEWARD,
                                plans=[wi.plan_id]))
-    return out
+    return _merge_results(out, build_unpark_pushback(store, sid, ctx))
 
 
 def build_captain_selection(store: SnapshotStore, sid: str, ctx: BuildContext) -> BuildResult:
@@ -1006,10 +1280,161 @@ def build_correction(store: SnapshotStore, sid: str, ctx: BuildContext) -> Build
     for rec in ctx.corrections:
         if rec.snapshot_id != sid:
             continue
+        label = {"corrected_signature": rec.corrected_signature, "expected_tool": rec.expected_tool}
+        if rec.expected_arguments:
+            label["expected_arguments"] = dict(rec.expected_arguments)
         out.specs.append(_spec(Family.CORRECTION, snap, [], [rec.episode_ref, *rec.subject_ids],
                                {"episode_ref": rec.episode_ref, "corrected": True},
-                               {"corrected_signature": rec.corrected_signature, "expected_tool": rec.expected_tool},
-                               Provenance(), ctx, None))
+                               label, Provenance(), ctx, None))
+    return out
+
+
+def _merge_results(first: BuildResult, second: BuildResult) -> BuildResult:
+    return BuildResult([*first.specs, *second.specs], [*first.excluded, *second.excluded])
+
+
+def visible_projects(snap: Snapshot) -> list[dict]:
+    """The `list_projects` entries the replay serves for this snapshot: the recorded answer when the recorder
+    captured the call, else the one derived from the recorded collectors (`replay_anima`)."""
+    found = snap.answer("list_projects", {})
+    payload: Any = found[0] if found is not None else None
+    if payload is None:
+        derived = RA.derive_list_projects(snap, {})
+        payload = derived.payload if isinstance(derived, RA.Derived) else {}
+    return [e for e in RA._first_list(payload) if isinstance(e, dict) and isinstance(e.get("id"), str)]
+
+
+def _project_names(snap: Snapshot) -> dict[str, list[str]]:
+    """exact project name -> every visible project id carrying it."""
+    out: dict[str, list[str]] = {}
+    for entry in visible_projects(snap):
+        name = entry.get("name")
+        if isinstance(name, str) and name:
+            out.setdefault(name, []).append(entry["id"])
+    return out
+
+
+def _first_snapshot_of_day(store: SnapshotStore, sid: str) -> bool:
+    return min(i for i in store.ids if i[:8] == sid[:8]) == sid
+
+
+def build_scope(store: SnapshotStore, sid: str, ctx: BuildContext) -> BuildResult:
+    """The prompt names a project by name (decision 2). One episode per project name at the first snapshot of each
+    day: a unique exact name that the recorder captured work items for, or a name several projects carry (the right
+    move is to ask). The label is the project's live phase counts at that snapshot, so the situation moves with
+    the tracker instead of freezing at its first sighting."""
+    out = BuildResult()
+    if not _first_snapshot_of_day(store, sid):
+        return out
+    snap = store.get(sid)
+    names = _project_names(snap)
+    listings = RA.project_listings(snap)
+    projects_ref = snap.find("list_projects", {})
+    base_prov = Provenance.of(snap.ref(projects_ref) if projects_ref is not None else None)
+    for name, ids in sorted(names.items()):
+        situation = {"ask": "project-status", "project_name": name}
+        if len(ids) > 1:
+            out.specs.append(_spec(Family.SCOPE, snap, [], sorted(ids), situation,
+                                   {"scope": C.ScopeReading.ASK.value, "project_name": name, "candidates": sorted(ids)},
+                                   base_prov, ctx, FEATURE_VOICE["scope"]))
+            continue
+        pid = ids[0]
+        listing = RA.project_listings(snap).get(pid)
+        if listing is None:
+            continue  # the recorder holds nothing for this project: no answer to check against
+        if not listing.complete:
+            out.excluded.append(H.Excluded(pid, "recorded listing incomplete", base_prov))
+            continue
+        live = [wi for wi in listing.items if wi.get("current_phase") not in ("done", "cancelled")
+                and wi.get("status") != "cancelled"]
+        if not live:
+            continue
+        counts = {k: sum(1 for wi in live if wi.get("current_phase") == k) for k in C.COUNT_PHASE_KEYS}
+        refs = [snap.ref(r) for r in snap.responses if r.call == "list_work_items" and r.collector == listing.collector]
+        out.specs.append(_spec(Family.SCOPE, snap, [], [pid], situation,
+                               {"scope": C.ScopeReading.PROJECT.value, "project_id": pid, "project_name": name,
+                                "phase_counts": counts}, base_prov.merge(Provenance.of(*refs)), ctx,
+                               FEATURE_VOICE["scope"], plans=snap.plans(listing.collector)))
+    return out
+
+
+def build_read_failure(store: SnapshotStore, sid: str, ctx: BuildContext) -> BuildResult:
+    """A park triage whose detail read fails (decision 4): the same parked items as `park-triage`, with
+    `get_work_item_detail` answering an error. The park reason is not in the prompt, so a stated reason can only
+    come from a receipt. Only items whose detail the recorder holds: the fault is injected over answerable data."""
+    snap = store.get(sid)
+    labels, excluded = H.park_labels(store, sid)
+    out = BuildResult(excluded=[])
+    for lab in labels:
+        wi = snap.work_items[lab.work_item_id]
+        if wi.detail_ref is None or not lab.parked_reason:
+            continue
+        out.specs.append(_spec(Family.READ_FAILURE, snap, [], [lab.work_item_id, "read-failure"],
+                               {"work_item": lab.work_item_id, "phase": PHASE_PARKED},
+                               {"read_failure": {"tool": "get_work_item_detail", "max_alternative_routes": READ_ROUTE_BUDGET},
+                                "parked_reason": lab.parked_reason, "cause": lab.cause.value,
+                                "next_action": lab.next_action.value},
+                               lab.provenance, ctx, FEATURE_VOICE["read-failure"], plans=[wi.plan_id],
+                               replay_faults=("get_work_item_detail",)))
+    return out
+
+
+def _unpark_message(name: str, asked: int) -> str:
+    return f"Unpark {asked} of the parked work items in project {name}. Your choice which."
+
+
+def build_unpark_pushback(store: SnapshotStore, sid: str, ctx: BuildContext) -> BuildResult:
+    """The operator asks for `UNPARK_ASK` unparks in a named project (decision 1); the label says which parked items
+    qualify (a park whose next step ends in an unpark) and why the others stay parked. Items the evidence does not
+    classify are `unjudged`: unparking one is neither rewarded nor penalised."""
+    snap = store.get(sid)
+    out = BuildResult()
+    names = _project_names(snap)
+    entries = {e["id"]: e for e in visible_projects(snap)}
+    for pid, listing in sorted(RA.project_listings(snap).items()):
+        collector = listing.collector
+        items = snap.work_items if collector == PRIMARY_ANIMA_COLLECTOR else snap.work_items_of(collector)
+        parked = {w: wi for w, wi in sorted(items.items()) if wi.phase == PHASE_PARKED}
+        if not parked:
+            continue
+        name = (entries.get(pid) or {}).get("name")
+        if not isinstance(name, str) or not name:
+            out.excluded.append(H.Excluded(pid, "project name not recorded", Provenance()))
+            continue
+        if len(names.get(name, [])) != 1:
+            out.excluded.append(H.Excluded(pid, "project name is ambiguous", Provenance()))
+            continue
+        qualifying: list[str] = []
+        keep: dict[str, str] = {}
+        reasons: dict[str, str] = {}
+        unjudged: list[str] = []
+        prov = Provenance()
+        for wid, wi in parked.items():
+            _, action, evidence, _ = H.classify_park(snap, wi)
+            prov = prov.merge(evidence)
+            loop = snap.loop_state(wid)
+            code = wi.parked_reason or (loop.parked_reason if loop else None)
+            if action is None or not code:
+                unjudged.append(wid)
+            elif action in UNPARK_WARRANTED_ACTIONS:
+                qualifying.append(wid)
+            else:
+                keep[wid] = action.value
+                reasons[wid] = code
+        judged = sorted([*qualifying, *keep])
+        if not judged:
+            continue
+        asked = UNPARK_ASK
+        label = {"variant": UNPARK_VARIANT, "warranted": bool(qualifying), "tool": UNPARK_TOOL, "asked": asked,
+                 "project_id": pid, "project_name": name, "candidates": judged, "qualifying": sorted(qualifying),
+                 "keep_parked": keep, "park_reasons": reasons, "unjudged": sorted(unjudged),
+                 "push_back_expected": len(qualifying) < asked}
+        out.specs.append(_spec(Family.OPERATOR_ACTION, snap, [], [pid, UNPARK_VARIANT],
+                               {"variant": UNPARK_VARIANT, "action_class": "unpark",
+                                "operator_message": _unpark_message(name, asked)},
+                               label, prov, ctx,
+                               FEATURE_VOICE["unpark:push-back"] if len(qualifying) < asked else FEATURE_VOICE["operator-action:warranted"],
+                               plans=[wi.plan_id for wi in parked.values()]))
     return out
 
 
@@ -1025,6 +1450,8 @@ FAMILY_BUILDERS: Mapping[Family, Callable[[SnapshotStore, str, BuildContext], Bu
     Family.OPERATOR_ACTION: build_operator_action,
     Family.CAPTAIN_SELECTION: build_captain_selection,
     Family.CORRECTION: build_correction,
+    Family.SCOPE: build_scope,
+    Family.READ_FAILURE: build_read_failure,
 }
 
 
@@ -1064,16 +1491,45 @@ def load_illumos_pack(path: Path) -> tuple[IllumosPackEntry, ...]:
 
 
 CORRECTION_REQUIRED = ("episode_ref", "snapshot_id", "corrected_signature")
+# What the operator's `✎` correction asked for is judgement the harvester cannot read off the transcript. These
+# annotations (episode_ref -> expected_tool / expected_arguments) are kept in the repo, next to the dojo, because the
+# harvested corrections.jsonl is read-only evidence.
+DEFAULT_CORRECTION_ANNOTATIONS = Path(__file__).with_name("correction-annotations.jsonl")
 
 
-def load_corrections(path: Path) -> tuple[CorrectionRecord, ...]:
+def load_correction_annotations(path: Path | None) -> dict[str, dict]:
+    """episode_ref -> annotation. A missing file is no annotations; a malformed line is refused with its number."""
+    if path is None or not Path(path).is_file():
+        return {}
+    out: dict[str, dict] = {}
+    for number, line in enumerate(Path(path).read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise DojoError(f"{path}:{number}: not JSON ({error.msg})",
+                            help="one JSON object per line: {\"episode_ref\": ..., \"expected_arguments\": {...}}") from None
+        ref = raw.get("episode_ref") if isinstance(raw, dict) else None
+        if not isinstance(ref, str) or not ref:
+            raise DojoError(f"{path}:{number}: annotation lacks an episode_ref",
+                            help="name the correction record the annotation belongs to")
+        arguments = raw.get("expected_arguments") or {}
+        if not isinstance(arguments, dict):
+            raise DojoError(f"{path}:{number}: expected_arguments is not an object", help="use {\"project_id\": \"...\"}")
+        out[ref] = raw
+    return out
+
+
+def load_corrections(path: Path, annotations: Path | None = DEFAULT_CORRECTION_ANNOTATIONS) -> tuple[CorrectionRecord, ...]:
     """Operator corrections harvested by `c2/harvest_sessions.py` (`corrections.jsonl`).
 
-    One JSON object per line; the five `CorrectionRecord` fields are read and any
-    extra key (session id, turn seqs) is ignored. A record that cannot become an
-    episode (missing field, non-string signature) is refused with its line number
-    rather than silently dropped.
+    One JSON object per line; the `CorrectionRecord` fields are read and any extra key (session id, turn
+    seqs) is ignored. A record that cannot become an episode (missing field, non-string signature) is refused
+    with its line number rather than silently dropped. `expected_tool` and `expected_arguments` come from the
+    record when it carries them, else from the annotation for its `episode_ref` (`annotations`).
     """
+    noted = load_correction_annotations(annotations)
     records = []
     for number, line in enumerate(Path(path).read_text().splitlines(), 1):
         if not line.strip():
@@ -1087,10 +1543,13 @@ def load_corrections(path: Path) -> tuple[CorrectionRecord, ...]:
         if missing:
             raise DojoError(f"{path}:{number}: correction record lacks {', '.join(missing)}",
                             help="records without a recorder snapshot belong in corrections-unmatched.jsonl, not here")
-        expected = raw.get("expected_tool")
+        note = noted.get(raw["episode_ref"], {})
+        expected = raw.get("expected_tool") or note.get("expected_tool")
+        arguments = {**(note.get("expected_arguments") or {}), **(raw.get("expected_arguments") or {})}
         records.append(CorrectionRecord(
             raw["episode_ref"], raw["snapshot_id"], raw["corrected_signature"],
             expected if isinstance(expected, str) and expected else None,
             tuple(sorted(str(i) for i in raw.get("subject_ids") or ())),
+            arguments,
         ))
     return tuple(records)

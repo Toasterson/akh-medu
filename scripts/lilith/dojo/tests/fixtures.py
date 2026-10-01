@@ -67,6 +67,13 @@ class WI:
     human_accepted: bool | None = None
     prs: tuple[tuple[str, str], ...] = ()  # (change_id, head_sha)
     revisions: int = 0
+    # Optional recorded reads; `None` / default means the snapshot does not hold the read at all.
+    sessions: tuple[str, ...] | None = None  # session statuses recorded by `list_sessions`
+    retry_count: int = 0  # `get_scheduling_state`
+    entered_at: datetime | None = None  # forensics: the newest transition into the current phase
+    parked_revisits: int = 0  # forensics `phase_revisit_counts.parked`
+    failed_dispatches: int = 0  # forensics `dispatch_attempt` events that failed
+    ci_runs: tuple[bool, ...] = ()  # `get_work_item_detail.ci_runs` successes, oldest first, pinned to the head
 
     @property
     def live(self) -> bool:
@@ -107,6 +114,8 @@ class World:
                 "prs": [{"change_id": c, "head_sha": h, "lifecycle_state": "open", "integration_decision": "pending"}
                         for c, h in w.prs],
                 "change_history": [{"id": f"ch-{n}"} for n in range(w.revisions)],
+                "ci_runs": [{"pinned_to_current": True, "success": ok, "created_at": f"2026-09-2{n}T00:00:00Z"}
+                            for n, ok in enumerate(w.ci_runs)],
             })
             put("get_wi_loop_state", {"work_item_id": w.id}, {
                 "work_item_id": w.id, "current_phase": w.phase, "parked_reason": w.parked_reason,
@@ -117,7 +126,18 @@ class World:
                                    "review": {"required": w.review_required,
                                               "approved_for_current_head": w.review_approved}},
             })
-            put("get_scheduling_state", {"work_item_id": w.id}, {"work_item_id": w.id, "retry_count": 0})
+            put("get_scheduling_state", {"work_item_id": w.id}, {"work_item_id": w.id, "retry_count": w.retry_count})
+            if w.sessions is not None:
+                put("list_sessions", {"work_item_id": w.id}, {"work_item_id": w.id, "sessions": [
+                    {"session_id": f"s{n}", "status": status, "kind": "implementation"}
+                    for n, status in enumerate(w.sessions)]})
+            if w.entered_at is not None:
+                put("get_work_item_forensics", {"work_item_id": w.id}, {"work_item_id": w.id, "events_truncated": False,
+                    "phase_revisit_counts": {"parked": w.parked_revisits},
+                    "events": [{"type": "phase_transition", "from_phase": "ready", "to_phase": w.phase,
+                                "occurred_at": w.entered_at.isoformat()}]
+                    + [{"type": "dispatch_attempt", "attempt_no": n, "session_status": "failed"}
+                       for n in range(w.failed_dispatches)]})
         put("get_project_ci_status", {"project_id": PROJECT}, {"resolvable": True})
         for call, args, payload, fields in extra:
             put(call, args, payload)
@@ -158,7 +178,8 @@ class Driver:
     def __init__(self, spec: EpisodeSpec, store: SnapshotStore, ledger_path: Path, oracle=None):
         self.spec = spec
         self.snapshot = store.get(spec.snapshot_id)
-        self.servers, self.log = episode_servers(self.snapshot, DojoLedger(ledger_path), oracle or StaticAncestryOracle({}))
+        self.servers, self.log = episode_servers(self.snapshot, DojoLedger(ledger_path), oracle or StaticAncestryOracle({}),
+                                                spec.replay_faults)
         self.steps: list[StepRecord] = []
         self._rpc = 0
 

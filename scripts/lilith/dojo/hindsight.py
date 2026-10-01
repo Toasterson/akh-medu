@@ -10,10 +10,12 @@ loop state; these are machine enum values, not natural language.
 """
 from __future__ import annotations
 
+import collections
 import dataclasses
 import enum
+import weakref
 from datetime import datetime, timedelta
-from typing import Iterable, Mapping
+from typing import Iterable, Iterator, Mapping
 
 from dojo.contracts import LandedVerdict, NextAction, ParkCause
 from dojo.replay_server import AncestryOracle
@@ -24,10 +26,12 @@ from dojo.snapshot import (
     PHASE_DRAFT,
     PHASE_PARKED,
     PHASE_READY,
+    PHASE_WORKING,
     Provenance,
     Snapshot,
     SnapshotStore,
     WorkItemState,
+    parse_iso,
 )
 
 
@@ -149,6 +153,290 @@ def briefing_label(snap: Snapshot, previous: Snapshot | None) -> BriefingLabel:
         Bucket.NEXT: BucketLabel(frozenset(next_req), frozenset(next_req | next_ok)),
     }
     return BriefingLabel(snap.id, previous.id if previous else None, buckets, prov)
+
+
+# --- exception briefing (operator decision 3, C2 round 1) ----------------------------------------------
+#
+# The briefing is counts per bucket plus exceptions only, capped at ~10 listed items with "N more on
+# request". An item is an *exception* when it is parked or blocked, changed since the previous snapshot,
+# or stuck. Stuck is any of: in `working` with no live session; >= 3 days in the same phase; red or
+# overdue CI; repeated parks or retries. Everything below reads structure the recorder captured (typed
+# phases, session statuses, event types, counters), never prose.
+
+BRIEFING_LIST_CAP = 10  # items a briefing may list in total before "N more on request"
+STUCK_AFTER = timedelta(days=3)  # same phase for at least this long
+RETRY_REPEAT_MIN = 3  # scheduling `retry_count` at or above this is a repeated retry
+PARK_REVISIT_MIN = 2  # forensics `phase_revisit_counts.parked` at or above this is a repeated park
+FAILED_DISPATCH_MIN = 3  # failed `dispatch_attempt` events at or above this is a repeated retry
+# `list_sessions` statuses that end a session (Anima session state machine). Any other status, and any
+# status this table has not seen, counts as live: an unknown status never flags an item as stuck.
+TERMINAL_SESSION_STATUSES = frozenset({"completed", "failed", "reconciled", "cancelled"})
+STUCK_PHASES = IN_FLIGHT_PHASES | {PHASE_READY}  # drafts are the backlog by design; parked items are exceptions already
+
+
+class ExceptionKind(enum.StrEnum):
+    PARKED = "parked"
+    BLOCKED = "blocked"
+    CHANGED = "changed-since-previous"
+    NO_LIVE_SESSION = "no-live-session"
+    LONG_IN_PHASE = "long-in-phase"
+    CI_RED = "ci-red"
+    CI_OVERDUE = "ci-overdue"
+    REPEATED = "repeated-parks-or-retries"
+
+
+STUCK_KINDS = frozenset({ExceptionKind.NO_LIVE_SESSION, ExceptionKind.LONG_IN_PHASE, ExceptionKind.CI_RED,
+                         ExceptionKind.CI_OVERDUE, ExceptionKind.REPEATED})
+
+# The recorded read each stuck signal needs. A snapshot holding none of them cannot evidence the signal at
+# all; the label lists it under `unsupported_signals` instead of silently treating the item as not stuck.
+SIGNAL_NEEDS: Mapping[ExceptionKind, str] = {
+    ExceptionKind.NO_LIVE_SESSION: "list_sessions",
+    ExceptionKind.CI_OVERDUE: "overdue_ci_dispatches",
+    ExceptionKind.CI_RED: "get_wi_loop_state or get_work_item_detail",
+    ExceptionKind.REPEATED: "get_scheduling_state or get_work_item_forensics",
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class PhaseEntry:
+    entered_at: datetime
+    source: str  # "forensics" | "consecutive-snapshots"
+    lower_bound: bool  # the item may have been in the phase longer than this
+    provenance: Provenance
+
+
+def _forensics_entry(snap: Snapshot, wi: WorkItemState) -> PhaseEntry | None:
+    """The newest recorded transition into the item's current phase (`get_work_item_forensics`)."""
+    found = snap.forensics(wi.id)
+    if found is None:
+        return None
+    payload, ref = found
+    moves = [(at, e) for e in payload.get("events") or []
+             if isinstance(e, dict) and e.get("type") == "phase_transition" and (at := parse_iso(e.get("occurred_at")))]
+    if not moves:
+        return None
+    at, last = max(moves, key=lambda m: m[0])
+    if last.get("to_phase") != wi.phase:
+        return None  # the log disagrees with the listing: do not guess, fall back to the snapshots
+    return PhaseEntry(at, "forensics", False, Provenance.of(ref))
+
+
+class PhaseRuns:
+    """For each snapshot and work item: the first snapshot of the unbroken run of snapshots in which the
+    item held its current phase. The recorder started on 2026-09-28, so this is a *lower bound* on the time in
+    phase (an item already in a phase at the first snapshot may have been there much longer)."""
+
+    def __init__(self, store: SnapshotStore):
+        self._start: dict[str, dict[str, str]] = {}
+        previous: dict[str, str] = {}
+        previous_phases: dict[str, str] = {}
+        for snap in store.snapshots():
+            phases = {wid: wi.phase for wid, wi in snap.work_items.items()}
+            start = {wid: previous[wid] if previous_phases.get(wid) == phase else snap.id
+                     for wid, phase in phases.items()}
+            self._start[snap.id] = start
+            previous, previous_phases = start, phases
+
+    def first_snapshot(self, snapshot_id: str, wid: str) -> str | None:
+        return self._start.get(snapshot_id, {}).get(wid)
+
+
+_RUNS: "weakref.WeakKeyDictionary[SnapshotStore, PhaseRuns]" = weakref.WeakKeyDictionary()
+
+
+def phase_runs(store: SnapshotStore) -> PhaseRuns:
+    runs = _RUNS.get(store)
+    if runs is None:
+        runs = PhaseRuns(store)
+        _RUNS[store] = runs
+    return runs
+
+
+def phase_entry(store: SnapshotStore, snap: Snapshot, wi: WorkItemState) -> PhaseEntry | None:
+    """When the item entered its current phase: from the forensics event log when recorded, else derived
+    from consecutive snapshots (a lower bound: it only ever flags an item that is provably old enough)."""
+    recorded = _forensics_entry(snap, wi)
+    if recorded is not None:
+        return recorded
+    first = phase_runs(store).first_snapshot(snap.id, wi.id)
+    if first is None:
+        return None
+    start = store.get(first)
+    began = start.work_items.get(wi.id)
+    prov = wi.provenance.merge(began.provenance if began is not None else Provenance())
+    return PhaseEntry(start.taken_at, "consecutive-snapshots", True, prov)
+
+
+def _dict_ids(value: object) -> Iterator[str]:
+    """Work item ids named by `work_item_id` / `id` keys anywhere inside a recorded payload."""
+    if isinstance(value, dict):
+        for key in ("work_item_id", "id"):
+            if isinstance(value.get(key), str):
+                yield value[key]
+        for v in value.values():
+            yield from _dict_ids(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _dict_ids(v)
+
+
+def _overdue_ci_ids(snap: Snapshot) -> tuple[frozenset[str] | None, Provenance]:
+    found = snap.overdue_ci()
+    if found is None:
+        return None, Provenance()
+    payload, ref = found
+    ids: set[str] = set()
+    for key in ("dispatches", "churn"):
+        ids.update(_dict_ids(payload.get(key)))
+    return frozenset(ids), Provenance.of(ref)
+
+
+@dataclasses.dataclass(frozen=True)
+class ExceptionSet:
+    kinds: Mapping[str, frozenset[ExceptionKind]]  # work item id -> why it is an exception
+    unsupported: frozenset[ExceptionKind]  # stuck signals the snapshot holds no evidence for at all
+    provenance: Provenance
+
+
+def briefing_exceptions(store: SnapshotStore, snap: Snapshot, previous: Snapshot | None) -> ExceptionSet:
+    """Every live work item of the snapshot's primary project that is an exception, and why."""
+    kinds: dict[str, set[ExceptionKind]] = {}
+    evidence: list[Provenance] = []
+    seen_signal: set[ExceptionKind] = set()
+    overdue, overdue_prov = _overdue_ci_ids(snap)
+    if overdue is not None:
+        seen_signal.add(ExceptionKind.CI_OVERDUE)
+
+    def flag(wid: str, kind: ExceptionKind, why: Provenance) -> None:
+        kinds.setdefault(wid, set()).add(kind)
+        evidence.append(why)
+
+    for wid, wi in sorted(snap.work_items.items()):
+        if wi.is_terminal:
+            continue
+        loop = snap.loop_state(wid)
+        if wi.phase == PHASE_PARKED:
+            flag(wid, ExceptionKind.PARKED, wi.provenance)
+        elif _is_blocked(wi, snap):
+            flag(wid, ExceptionKind.BLOCKED, wi.provenance.merge(Provenance.of(loop.ref if loop else None)))
+        if previous is not None:
+            before = previous.work_items.get(wid)
+            if before is None or before.phase != wi.phase:
+                flag(wid, ExceptionKind.CHANGED, wi.provenance.merge(before.provenance if before else Provenance()))
+        if wi.phase not in STUCK_PHASES:
+            continue
+        if wi.phase == PHASE_WORKING:
+            sessions = snap.sessions(wid)
+            if sessions is not None:
+                seen_signal.add(ExceptionKind.NO_LIVE_SESSION)
+                payload, ref = sessions
+                live = [s for s in payload.get("sessions") or []
+                        if isinstance(s, dict) and s.get("status") not in TERMINAL_SESSION_STATUSES]
+                if not live:
+                    flag(wid, ExceptionKind.NO_LIVE_SESSION, Provenance.of(ref))
+        entry = phase_entry(store, snap, wi)
+        if entry is not None and snap.taken_at - entry.entered_at >= STUCK_AFTER:
+            flag(wid, ExceptionKind.LONG_IN_PHASE, entry.provenance)
+        if loop is not None:
+            seen_signal.add(ExceptionKind.CI_RED)
+            if loop.ci_green_for_head is False:
+                flag(wid, ExceptionKind.CI_RED, Provenance.of(loop.ref))
+        if overdue is not None and wid in overdue:
+            flag(wid, ExceptionKind.CI_OVERDUE, overdue_prov)
+        detail = snap.detail(wid)
+        if detail is not None:
+            runs = [r for r in detail[0].get("ci_runs") or [] if isinstance(r, dict) and r.get("pinned_to_current")]
+            if runs:
+                seen_signal.add(ExceptionKind.CI_RED)
+                newest = max(runs, key=lambda r: str(r.get("created_at") or ""))
+                if newest.get("success") is False:
+                    flag(wid, ExceptionKind.CI_RED, Provenance.of(detail[1]))
+        sched = snap.scheduling(wid)
+        forensics = snap.forensics(wid)
+        if sched is not None or forensics is not None:
+            seen_signal.add(ExceptionKind.REPEATED)
+        if sched is not None and int(sched[0].get("retry_count") or 0) >= RETRY_REPEAT_MIN:
+            flag(wid, ExceptionKind.REPEATED, Provenance.of(sched[1]))
+        if forensics is not None:
+            payload, ref = forensics
+            revisits = int((payload.get("phase_revisit_counts") or {}).get(PHASE_PARKED) or 0)
+            failed = sum(1 for e in payload.get("events") or []
+                         if isinstance(e, dict) and e.get("type") == "dispatch_attempt" and e.get("session_status") == "failed")
+            if revisits >= PARK_REVISIT_MIN or failed >= FAILED_DISPATCH_MIN:
+                flag(wid, ExceptionKind.REPEATED, Provenance.of(ref))
+    unsupported = frozenset(k for k in SIGNAL_NEEDS if k not in seen_signal)
+    return ExceptionSet({w: frozenset(k) for w, k in kinds.items()}, unsupported, Provenance().merge(*evidence))
+
+
+# Counts the briefing may state per bucket, besides the label's exact membership: the totals a receipt shows
+# (`list_work_items` with a phase filter reports `total`). A model cannot read per-item dependency state for
+# every item, so the per-phase total is an accepted answer next to the exact one.
+COUNT_PHASES: Mapping[Bucket, tuple[frozenset[str], ...]] = {
+    Bucket.DONE: (frozenset({PHASE_DONE}),),
+    Bucket.IN_FLIGHT: (IN_FLIGHT_PHASES,),
+    Bucket.BLOCKED: (frozenset({PHASE_PARKED}),),
+    Bucket.NEXT: (frozenset({PHASE_READY}), frozenset({PHASE_READY, PHASE_DRAFT})),
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class ExceptionBriefingLabel:
+    """The label of a briefing under decision 3. `required` = the exceptions per bucket (recall is measured
+    against these, capped at `cap` listed); `allowed` = every item that may be named in the bucket;
+    `counts` = the numbers a bucket's count may state (the exact one first)."""
+
+    snapshot_id: str
+    previous_snapshot_id: str | None
+    required: Mapping[Bucket, frozenset[str]]
+    allowed: Mapping[Bucket, frozenset[str]]
+    counts: Mapping[Bucket, tuple[int, ...]]
+    exceptions: Mapping[str, frozenset[ExceptionKind]]
+    cap: int
+    unsupported: frozenset[ExceptionKind]
+    provenance: Provenance
+
+    def to_dict(self) -> dict:
+        return {
+            "snapshot": self.snapshot_id,
+            "previous": self.previous_snapshot_id,
+            "buckets": {b.value: {"required": sorted(self.required[b]), "allowed": sorted(self.allowed[b])}
+                        for b in Bucket},
+            "counts": {b.value: list(self.counts[b]) for b in Bucket},
+            "exceptions": {w: sorted(k.value for k in ks) for w, ks in sorted(self.exceptions.items())},
+            "list_cap": self.cap,
+            "unsupported_signals": sorted(k.value for k in self.unsupported),
+            "provenance": self.provenance.to_dict(),
+        }
+
+
+def exception_briefing_label(store: SnapshotStore, snapshot_id: str, cap: int = BRIEFING_LIST_CAP) -> ExceptionBriefingLabel:
+    snap = store.get(snapshot_id)
+    previous = store.previous(snapshot_id)
+    base = briefing_label(snap, previous)
+    found = briefing_exceptions(store, snap, previous)
+    required: dict[Bucket, frozenset[str]] = {}
+    for bucket, label in base.buckets.items():
+        if bucket is Bucket.DONE:
+            required[bucket] = label.required  # moved to done since the previous brief: that is the change
+        elif bucket is Bucket.BLOCKED:  # every parked or blocked item in scope, plus a changed draft that waits
+            required[bucket] = label.required | frozenset(w for w in label.allowed if w in found.kinds)
+        else:
+            required[bucket] = frozenset(w for w in label.allowed if w in found.kinds)
+    phase_total = collections.Counter(wi.phase for wi in snap.work_items.values())
+    counts: dict[Bucket, tuple[int, ...]] = {}
+    for bucket, label in base.buckets.items():
+        accepted = [len(label.required)]
+        for phases in COUNT_PHASES[bucket]:
+            total = sum(phase_total[p] for p in phases)
+            if total not in accepted:
+                accepted.append(total)
+        counts[bucket] = tuple(accepted)
+    wanted = set().union(*required.values())
+    exceptions = {w: k for w, k in found.kinds.items() if w in wanted}
+    return ExceptionBriefingLabel(snapshot_id, base.previous_snapshot_id, required,
+                                  {b: l.allowed for b, l in base.buckets.items()}, counts, exceptions, cap,
+                                  found.unsupported, base.provenance.merge(found.provenance))
 
 
 # --- stale items ----------------------------------------------------------------------------

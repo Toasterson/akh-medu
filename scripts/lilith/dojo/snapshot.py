@@ -308,6 +308,18 @@ class Snapshot:
     def scheduling(self, wid: str) -> tuple[dict, ObjectRef] | None:
         return self.answer("get_scheduling_state", {"work_item_id": wid})
 
+    def sessions(self, wid: str) -> tuple[dict, ObjectRef] | None:
+        """`list_sessions` for one work item (recorded for live items of the primary project only)."""
+        return self.answer("list_sessions", {"work_item_id": wid})
+
+    def forensics(self, wid: str) -> tuple[dict, ObjectRef] | None:
+        """`get_work_item_forensics`: the phase-transition and dispatch-attempt event log."""
+        return self.answer("get_work_item_forensics", {"work_item_id": wid})
+
+    def overdue_ci(self) -> tuple[dict, ObjectRef] | None:
+        """The global `overdue_ci_dispatches` read, when the snapshot recorded it."""
+        return self.answer("overdue_ci_dispatches", {})
+
     def loop_state(self, wid: str) -> LoopState | None:
         found = self.answer("get_wi_loop_state", {"work_item_id": wid})
         if found is None:
