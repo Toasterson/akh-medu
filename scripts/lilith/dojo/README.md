@@ -391,7 +391,7 @@ overrides the file); a record's own `expected_*` keys win. The model runner stil
 against the current spec builders and verifiers without calling a model, and never writes into `DIR`. A run keeps
 steps and receipt digests but not receipt bodies, so each recorded call is asked again of fresh replay servers; an
 episode is scored only when every answer hashes to the recorded digest (the model would have read the same bytes).
-Same prompt and tool surface: re-verified (`relabelled: true` when the spec's label changed). A changed prompt, a
+Same prompt and tool surface: re-verified (`relabelled: true` when the spec differs from the one the run was scored against: its label, its label window or its provenance; a growing snapshot window alone sets it). A changed prompt, a
 changed tool surface, replay bytes that differ, an episode the builders no longer make, or one the run did not
 score is skipped with its reason in `reverify-skipped.jsonl`; `--allow-prompt-drift` re-scores prompt changes as a
 what-if (`prompt_drift: true`: the model never read the new instruction). `DIR2` (default

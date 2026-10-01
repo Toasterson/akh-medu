@@ -114,7 +114,10 @@ def test_a_changed_label_is_rescored_and_marked_relabelled(parked, tmp_path):
     assert new["relabelled"] is True and new["weight"] > 0.5 and new["previous_weight"] == 0.0
     assert new["previous_spec_sha256"] == old.spec_sha256 and new["spec_sha256"] == spec.spec_sha256
     assert done["table"][0]["relabelled"] == 1
-    assert done["table"][0]["before_same_episodes"] == 0.0 and done["table"][0]["after"] > 0.5
+    row = done["table"][0]
+    assert row["before_same_episodes"] == 0.0 and row["after"] > 0.5
+    assert row["effect_before"] == 0.0 and row["effect_after"] == 1.0  # the answer step's effect, before any hard flag
+    assert row["metrics"]["accuracy"] == {"before": 0.0, "after": 1.0}
 
 
 def test_a_changed_prompt_is_skipped_unless_drift_is_allowed(parked, tmp_path):

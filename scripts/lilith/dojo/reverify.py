@@ -196,6 +196,26 @@ def _mean(values: Sequence[float]) -> float | None:
     return statistics.fmean(values) if values else None
 
 
+def answer_effect(record: Mapping[str, Any]) -> float | None:
+    """The family effect of the answer step, before any hard constraint zeroes the episode weight: it shows what a
+    label or verifier change did to the answers even when a fabrication still holds the weight at 0."""
+    steps = (record.get("verdict") or {}).get("steps") or []
+    return next((s["vector"]["effect"] for s in reversed(steps) if s["vector"].get("effect") is not None), None)
+
+
+def metric_means(old: Sequence[Mapping[str, Any]], new: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, float]]:
+    """Mean of each family metric the old and the new records both carry, over the same episodes."""
+    out: dict[str, dict[str, float]] = {}
+    keys = sorted(set().union(*(r.get("metrics", {}).keys() for r in new)) & set().union(*(r.get("metrics", {}).keys() for r in old))
+                  if new and old else [])
+    for key in keys:
+        pairs = [(o["metrics"][key], n["metrics"][key]) for o, n in zip(old, new)
+                 if key in o.get("metrics", {}) and key in n.get("metrics", {})]
+        if pairs:
+            out[key] = {"before": statistics.fmean(p[0] for p in pairs), "after": statistics.fmean(p[1] for p in pairs)}
+    return out
+
+
 def family_table(source_summary: Mapping[str, Any], old: Mapping[str, Mapping[str, Any]],
                  new: Mapping[str, Mapping[str, Any]], skipped: Sequence[Skipped]) -> list[dict]:
     """Per family: the source run's mean over all its episodes, the same episodes' mean before, and after."""
@@ -205,8 +225,13 @@ def family_table(source_summary: Mapping[str, Any], old: Mapping[str, Mapping[st
     for family in families:
         done = [e for e, r in new.items() if r["family"] == family]
         was = source_summary.get("families", {}).get(family, {})
+        old_done = [old[e] for e in done]
+        new_done = [new[e] for e in done]
         rows.append({
             "family": family,
+            "effect_before": _mean([x for x in map(answer_effect, old_done) if x is not None]),
+            "effect_after": _mean([x for x in map(answer_effect, new_done) if x is not None]),
+            "metrics": metric_means(old_done, new_done),
             "source_n": was.get("n"), "source_mean": was.get("mean_weight"),
             "reverified_n": len(done),
             "before_same_episodes": _mean([float(old[e]["weight"]) for e in done if old[e].get("weight") is not None]),
@@ -224,11 +249,12 @@ def render_table(rows: Sequence[Mapping[str, Any]], overall: Mapping[str, Any]) 
     def fmt(value: Any) -> str:
         return "-" if value is None else f"{value:.3f}"
 
-    lines = [f"{'family':<20} {'src n':>5} {'src mean':>8} {'n':>4} {'before':>7} {'after':>7} {'fab b>a':>8} "
-             f"{'relab':>5} {'drift':>5} {'skip':>4}"]
+    lines = [f"{'family':<20} {'src n':>5} {'src mean':>8} {'n':>4} {'before':>7} {'after':>7} {'eff b':>6} {'eff a':>6} "
+             f"{'fab b>a':>8} {'relab':>5} {'drift':>5} {'skip':>4}"]
     for r in rows:
         lines.append(f"{r['family']:<20} {r['source_n'] if r['source_n'] is not None else '-':>5} {fmt(r['source_mean']):>8} "
                      f"{r['reverified_n']:>4} {fmt(r['before_same_episodes']):>7} {fmt(r['after']):>7} "
+                     f"{fmt(r['effect_before']):>6} {fmt(r['effect_after']):>6} "
                      f"{str(r['fabrication_before']) + '>' + str(r['fabrication_after']):>8} {r['relabelled']:>5} "
                      f"{r['prompt_drift']:>5} {r['skipped']:>4}")
     lines.append(f"{'OVERALL':<20} {overall['source_n']:>5} {fmt(overall['source_mean']):>8} {overall['reverified_n']:>4} "
