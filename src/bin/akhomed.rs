@@ -7769,7 +7769,10 @@ mod control_plane_tests {
         use akh_medu::core_service::CoreBackend;
         let (_tmp, state) = temp_state();
         state
-            .dispatch("_akh/workspace/create", &json!({ "name": "central-context" }))
+            .dispatch(
+                "_akh/workspace/create",
+                &json!({ "name": "central-context" }),
+            )
             .await
             .unwrap();
         state.config.write().await.exec = Some(
@@ -7780,7 +7783,9 @@ mod control_plane_tests {
             .unwrap(),
         );
 
-        let engine = CoreBackend::engine(&state, "central-context").await.unwrap();
+        let engine = CoreBackend::engine(&state, "central-context")
+            .await
+            .unwrap();
         assert!(Arc::ptr_eq(
             &engine,
             &state.get_engine("central-context").await.unwrap()
@@ -7790,7 +7795,9 @@ mod control_plane_tests {
         assert!(!state.agents.read().await.contains_key("central-context"));
         assert!(Arc::ptr_eq(
             &engine,
-            &CoreBackend::engine(&state, "central-context").await.unwrap()
+            &CoreBackend::engine(&state, "central-context")
+                .await
+                .unwrap()
         ));
     }
 
