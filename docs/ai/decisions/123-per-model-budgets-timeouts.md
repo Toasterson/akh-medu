@@ -169,7 +169,7 @@ but a subscription pays for every prompt token, so the working window is capped 
 | `deepseek-v4-pro` (prefix `deepseek-v4`) | 1,500,000 | 96 | 250,000 | 1,500 s | 32 | 300 s | 32,768 | 262,144 | 24 |
 | ↳ effort `max` | | | | 2,400 s | 40 | 420 s | 65,536 | | |
 | `deepseek-v4.1-flash` (`deepseek-v4-flash`) | 5,000,000 | 192 | 400,000 | 900 s | 40 | 240 s | 32,768 | 262,144 | 24 |
-| `gemma-4-12b` (`lilith`, `gemma4:12b`, prefix `gemma4`) | 3,000,000 | 96 | 150,000 | 1,200 s | 20 | 600 s | 8,192 | 49,152 | 16 |
+| `gemma-4-12b` (`lilith`, `gemma4:12b`, prefix `gemma4`) | 3,000,000 | 96 | 150,000 | 1,200 s | 20 | 600 s | 4,096 (was 8,192, amendment 2026-10-01) | 49,152 | 16 |
 | `qwen3.8` (prefix `qwen3`) | 3,000,000 | 96 | 250,000 | 1,800 s | 30 | 600 s | 16,384 | 131,072 | 20 |
 
 Daily budgets follow price: at about the same price as GLM-5.3 a row gets 1.5M tokens; the cheap
@@ -364,3 +364,66 @@ over-counts the "before" row. The live figure is the one to quote. Expected turn
 - Reactor wakes still order their relevance picks by score and list every advertised tool in the
   system prompt.
 
+
+## Amendment 2026-10-01 — per-model sampling (`repeat_penalty`) and the degenerate-output guard
+
+### Problem
+
+Lilith (Gemma 4 12B on llama.cpp, the OpenAI-compatible backing) sometimes, right after a tool
+result, loops on empty thought blocks (`<|channel>thought\n<channel|>`) until `max_tokens`. The
+stream shows two chunks, no content, reasoning or tool-call delta, and `finish_reason=length`
+after about 236 s at 8,192 tokens; the turn then runs into `iteration_budget`. Measured on the
+live server (scratch evidence `/tmp/lrep/`, 10 runs per setting, same post-tool-result prompt):
+
+| Sampling | Loops |
+|---|---|
+| default | 5 of 10 |
+| `repeat_penalty` 1.05 / 1.1 / 1.15 | 0 of 10 each; UUID copying intact |
+| DRY 0.8 | 1 of 10 |
+
+### Decision
+
+1. **Sampling joins the catalog.** `ModelProfile` gains an optional `repeat_penalty` (range
+   `1.0..=2.0`; NaN, infinity and out-of-range values are refused with
+   `akh::model_profile::sampling_out_of_range`, at catalog parse and at per-akh resolve). It
+   resolves with the existing order, field by field: per-akh `[model_profile]` > catalog row (and
+   its effort override) > unset. The OpenAI backing sends `repeat_penalty` in
+   `/v1/chat/completions` **only when it resolved to a value**. The `gemma-4-12b` row sets
+   `repeat_penalty = 1.1`; the GLM, Kimi, DeepSeek and Qwen rows set nothing, because cloud APIs
+   may reject an unknown parameter (a test pins that no non-local row sets it). 1.1 is the middle
+   of the measured clean band.
+2. **Output cap.** `gemma-4-12b` `max_output_tokens` goes 8,192 → 4,096. A decode loop emits
+   nothing, so its price is wall clock: about 236 s at 8,192 tokens, about 118 s at 4,096. A real
+   Lilith reply or tool call is a few hundred tokens. The context budget's reserved output is a
+   separate constant (1,024), so the prompt room does not move. The Roman renderer reads the same
+   row, so `lilith.toml`'s golden changes (the documented cap).
+3. **Degenerate-output guard** (`OpenAiClient::chat_stream`). A streamed request that ends at its
+   output cap (`finish_reason == "length"`, or `completion_tokens >= max_tokens`) with no content,
+   no reasoning and no tool-call delta is a decode loop. It is logged at WARN (target
+   `akh::openai`: request seq, finish reason, completion tokens, penalties) and retried **once**
+   with `repeat_penalty = min(max(current, 1.0) + 0.05, 1.2)`. A second empty result is logged and
+   returned (never a third attempt), and the returned turn carries both attempts' token counts.
+   A long answer that hit the cap has content and is not retried.
+4. **Dojo parity.** The dojo's `--model-kind openai` arm sends the same sampling: `--model-profile`
+   (default `auto`: the catalog row for `--model`; `none`; or a row id such as `gemma-4-12b`) and
+   `--repeat-penalty` (explicit override). The resolved sampling is recorded in
+   `provenance.json` as `sampling`, is part of the run identity (`sampling.repeat_penalty`; a run
+   recorded before this counts as "no penalty", so resuming it with the catalog's 1.1 is refused),
+   and `compare` warns when arms sampled differently. Baselines taken before 2026-10-01 sampled
+   without the penalty and are not like-for-like with the deployed akh. The dojo does not apply
+   the row's `max_output_tokens`; it records it next to its own `--max-tokens` (default 4,096).
+
+### Consequences
+
+- `ModelProfile`, `CatalogEntry`, `ModelCatalog`, `AkhOverrides`, `ResolvedModelProfile` and
+  `ModelProfileError` lose `Eq` (an `f32` field); `PartialEq` stays.
+- The live Lilith needs the redeploy from `origin/main` and a re-render (`configure_core.py`)
+  before the penalty, the 4,096 cap and the guard take effect.
+- Per-akh `[model_profile] repeat_penalty = ...` tunes or, with 1.0, neutralises the row.
+
+### Follow-ups
+
+- Re-measure the loop rate on the deployed build (the guard's WARN is the signal; zero WARNs at
+  1.1 confirms the fix, any WARN means the first attempt still loops).
+- Other llama.cpp sampling knobs (DRY, `min_p`, top-k) can join `ModelProfile` the same way if a
+  future measurement warrants them.

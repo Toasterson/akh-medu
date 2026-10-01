@@ -74,7 +74,10 @@ from dojo.runner import (
     compose_system_prompt,
     prompt_bundle_sha256,
 )
-from dojo.model_profile import CATALOG_RELATIVE, ResolvedTimeout, load_catalog, resolve_http_timeout, resolve_turn_timeout
+from dojo.model_profile import (
+    CATALOG_RELATIVE, PROFILE_AUTO, ResolvedSampling, ResolvedTimeout, SamplingSource, load_catalog, resolve_http_timeout,
+    resolve_sampling, resolve_turn_timeout,
+)
 from dojo.snapshot import SnapshotStore, canonical_json, sha256_hex
 from dojo.splits import Split, SplitConfig, assign_splits
 
@@ -168,7 +171,8 @@ def snapshot_root_sha256(store: SnapshotStore) -> str:
 # without changing what the teacher is. See `run_identity`.
 IDENTITY_KEYS = ("runner", "dojo", "git_sha", "snapshot_root_sha256", "floors_sha256", "prompt_sha256",
                  "system_prompt_sha256", "tools_sha256", "model_kind", "model_id", "endpoint_host", "temperature",
-                 "max_tokens", "max_rounds", "episode_token_cap", "context_window", "seed", "split", "families", "limit")
+                 "max_tokens", "sampling.repeat_penalty", "max_rounds", "episode_token_cap", "context_window", "seed", "split",
+                 "families", "limit")
 # The teacher's identity: the akh, the model and effort that answer, the prompt it holds, and the
 # isolation invariants (no own tools, session-only surface, no transcript capture, how the prompt
 # and the replay tools arrive).
@@ -198,6 +202,10 @@ def _flat(provenance: Mapping[str, Any], keys: Sequence[str]) -> dict[str, Any]:
 
 
 def run_identity(provenance: Mapping[str, Any]) -> dict[str, Any]:
+    if "sampling" not in provenance and "model_kind" in provenance:
+        # A run recorded before sampling was provenance sent no repeat_penalty: compare it as None, so
+        # resuming it with the catalog's penalty is refused instead of mixing two samplings in one run.
+        provenance = {**provenance, "sampling": {"repeat_penalty": None}}
     keys = [*IDENTITY_KEYS]
     if isinstance(provenance.get("teacher"), Mapping):
         keys += [f"teacher.{k}" for k in TEACHER_IDENTITY_KEYS]
@@ -543,6 +551,10 @@ def compare_arms(arms: Sequence[Arm]) -> dict:
         result["warnings"].append("the arms ran over different snapshot roots; only shared episode ids are paired")
     if len({a.summary["provenance"].get("system_prompt_sha256") for a in arms}) > 1:
         result["warnings"].append("the arms used different system prompts; they were not run through the same broker")
+    penalties = {(a.summary["provenance"].get("sampling") or {}).get("repeat_penalty") for a in arms}
+    if len(penalties) > 1:
+        result["warnings"].append("the arms sampled with different repeat_penalty values "
+                                  f"({sorted(map(str, penalties))}); they are not a like-for-like comparison")
     for family in [*families, None]:
         ids = sorted(i for i in shared if family is None or arms[0].summary["per_episode"][i]["family"] == family)
         row: dict[str, Any] = {"family": family or "ALL", "n": len(ids), "arms": {}, "pairs": []}
@@ -613,6 +625,19 @@ def http_timeout(args: argparse.Namespace) -> ResolvedTimeout:
     return resolve_http_timeout(model, model_catalog(args), flag=args.timeout)
 
 
+def sampling_of(args: argparse.Namespace) -> ResolvedSampling:
+    """The openai arm's sampling (ADR 123 amendment 2026-10-01): `--repeat-penalty` > the catalog row
+    (`--model-profile`, default: the row for `--model`) > none. Only the openai arm samples through
+    llama.cpp parameters; the anthropic arm refuses an explicit penalty, the acp arm's akh samples itself."""
+    if args.model_kind != "openai":
+        if args.repeat_penalty is not None:
+            raise DojoError(f"--repeat-penalty applies to --model-kind openai only, not {args.model_kind}",
+                            help="the anthropic API has no repeat_penalty; the acp teacher samples as its akh is configured")
+        return ResolvedSampling(None, SamplingSource.AKH if args.model_kind == "acp" else SamplingSource.NONE)
+    return resolve_sampling(args.model, model_catalog(args), profile=args.model_profile,
+                            repeat_penalty=args.repeat_penalty)
+
+
 def build_adapter(args: argparse.Namespace) -> ModelAdapter:
     secret = load_secret(env=args.key_env, file=args.key_file)
     policy = HttpPolicy(timeout_s=http_timeout(args).seconds, max_attempts=args.attempts, backoff_s=args.backoff)
@@ -624,7 +649,8 @@ def build_adapter(args: argparse.Namespace) -> ModelAdapter:
                             help="the serve pod URL is in ~/Library/Application Support/roman-akhs/secrets/lilith-base-url")
         if not args.model:
             raise DojoError("the openai adapter needs --model", help="the Lilith serve pod serves the model name `lilith`")
-        return OpenAIChatAdapter(base, args.model, secret, temperature=temperature, max_tokens=args.max_tokens, policy=policy)
+        return OpenAIChatAdapter(base, args.model, secret, temperature=temperature, max_tokens=args.max_tokens, policy=policy,
+                                 repeat_penalty=sampling_of(args).repeat_penalty)
     base = args.base_url or (args.base_url_file.read_text().strip() if args.base_url_file else ANTHROPIC_BASE_URL)
     return AnthropicAdapter(args.model or DEFAULT_ANTHROPIC_MODEL, secret, base_url=base, temperature=temperature,
                             max_tokens=args.max_tokens, policy=policy)
@@ -669,6 +695,13 @@ def _add_run_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--omit-temperature", action="store_true", help="do not send `temperature` (some models reject it)")
     p.add_argument("--max-tokens", type=int, default=4096, help="completion tokens per model call")
+    p.add_argument("--model-profile", default=PROFILE_AUTO, metavar="ROW",
+                   help="openai: the data/model-profiles/catalog.toml row whose sampling this arm sends, so a baseline "
+                        "samples like the deployed akh (Lilith: `gemma-4-12b`, repeat_penalty 1.1). `auto` (default) "
+                        "resolves the row for --model; `none` sends no catalog sampling. Recorded in provenance "
+                        "(sampling.*); two arms are comparable only with equal sampling")
+    p.add_argument("--repeat-penalty", type=float, default=None,
+                   help="openai: llama.cpp repeat_penalty (1.0..=2.0), overriding the catalog row. Recorded in provenance")
     p.add_argument("--max-rounds", type=int, default=20, help="model turns per episode")
     p.add_argument("--episode-token-cap", type=int, default=64_000, help="completion tokens per episode")
     p.add_argument("--context-window", type=int, default=DEFAULT_CONTEXT_WINDOW,
@@ -736,6 +769,7 @@ def _acp_run(args: argparse.Namespace, store: SnapshotStore, chosen, system: Sys
             "endpoint_host": runner.endpoint_host,
             "temperature": None,
             "max_tokens": None,
+            "sampling": sampling_of(args).to_dict(),
             "teacher": {**probe, "declared": declared},
             # Deployment settings, not identity: the prompt timeout follows the akh's deadline.
             "timeouts": {"turn": turn.to_dict(), "outage_budget_s": args.outage_budget},
@@ -828,6 +862,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     adapter = build_adapter(args)
     provenance = {
         **_base_provenance(args, store, system, families, selection, tools_sha256_of(store, chosen, oracle)),
+        "sampling": sampling_of(args).to_dict(),
         "timeouts": {"http": http_timeout(args).to_dict()},
         "model_kind": adapter.kind,
         "model_id": adapter.model_id,

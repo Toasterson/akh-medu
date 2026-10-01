@@ -492,3 +492,96 @@ def test_cli_run_and_compare(park_world, tmp_path, capsys):
     assert B.main(["compare", str(out), str(out)]) == 0
     assert "Paired comparison" in capsys.readouterr().out
     assert B.main(["compare", str(tmp_path / "nope")]) == 2
+
+
+# --- sampling parity with the deployed akh (ADR 123 amendment 2026-10-01) ---------------------------------------------------------
+
+
+def test_openai_adapter_sends_repeat_penalty_only_when_set():
+    with FakeLLM("openai", lambda b, i: Say("ok")) as fake:
+        OpenAIChatAdapter(fake.base_url, "lilith", KEY, policy=FAST).chat([ChatMessage("user", "u")], [])
+        OpenAIChatAdapter(fake.base_url, "lilith", KEY, policy=FAST, repeat_penalty=1.1).chat([ChatMessage("user", "u")], [])
+    assert "repeat_penalty" not in fake.requests[0]["body"]
+    assert fake.requests[1]["body"]["repeat_penalty"] == 1.1
+
+
+def test_the_repo_catalog_gives_lilith_the_measured_penalty():
+    from dojo import model_profile as MP
+
+    catalog = MP.load_catalog(Path(R.REPO_ROOT) / MP.CATALOG_RELATIVE)
+    for model_arg in ("lilith", "gemma-4-12b", "gemma4:12b"):
+        sampling = MP.resolve_sampling(model_arg, catalog)
+        assert sampling.repeat_penalty == 1.1 and sampling.source is MP.SamplingSource.CATALOG
+        assert sampling.catalog_row == "gemma-4-12b" and sampling.catalog_max_output_tokens == 4096
+    named = MP.resolve_sampling("some-served-name", catalog, profile="gemma-4-12b")
+    assert named.repeat_penalty == 1.1 and named.catalog_row == "gemma-4-12b"
+    # A cloud row sets none, so the arm sends nothing (cloud APIs may reject the parameter).
+    cloud = MP.resolve_sampling("glm-5.3", catalog)
+    assert cloud.repeat_penalty is None and cloud.source is MP.SamplingSource.NONE and cloud.catalog_row == "glm-5.3"
+    assert MP.resolve_sampling("lilith", catalog, profile="none").repeat_penalty is None
+    assert MP.resolve_sampling("lilith", None).repeat_penalty is None  # auto with no catalog: nothing, recorded as none
+
+
+def test_resolve_sampling_flag_wins_and_bad_input_is_refused():
+    from dojo import model_profile as MP
+
+    catalog = MP.load_catalog(Path(R.REPO_ROOT) / MP.CATALOG_RELATIVE)
+    flagged = MP.resolve_sampling("lilith", catalog, repeat_penalty=1.15)
+    assert flagged.repeat_penalty == 1.15 and flagged.source is MP.SamplingSource.FLAG
+    for bad in (0.9, 2.5, float("nan")):
+        with pytest.raises(DojoError, match="repeat-penalty"):
+            MP.resolve_sampling("lilith", catalog, repeat_penalty=bad)
+    with pytest.raises(DojoError, match="matches no row"):
+        MP.resolve_sampling("lilith", catalog, profile="no-such-row")
+    with pytest.raises(DojoError, match="missing or unreadable"):
+        MP.resolve_sampling("lilith", None, profile="gemma-4-12b")
+
+
+def test_cli_openai_arm_samples_like_the_deployed_akh_and_records_it(park_world, tmp_path, capsys):
+    key = tmp_path / "key"
+    key.write_text("sk-test-not-a-real-key")
+    key.chmod(0o600)
+    base = ["run", "--root", str(park_world.root), "--repo", str(Path(R.REPO_ROOT)), "--family", "park-triage", "--split", "all",
+            "--model-kind", "openai", "--model", "lilith", "--key-file", str(key), "--allow-dirty", "--attempts", "1"]
+    with FakeLLM("openai", park_script("openai")) as fake:
+        out = tmp_path / "auto"
+        assert B.main([*base, "--base-url", fake.base_url, "--out", str(out), "--label", "auto"]) == 0
+        assert fake.requests and all(r["body"]["repeat_penalty"] == 1.1 for r in fake.requests)
+        prov = json.loads((out / "provenance.json").read_text())
+        assert prov["sampling"] == {"repeat_penalty": 1.1, "source": "catalog", "catalog_row": "gemma-4-12b",
+                                    "catalog_max_output_tokens": 4096}
+        fake.requests.clear()
+        flagged = tmp_path / "flagged"
+        assert B.main([*base, "--base-url", fake.base_url, "--out", str(flagged), "--repeat-penalty", "1.15"]) == 0
+        assert all(r["body"]["repeat_penalty"] == 1.15 for r in fake.requests)
+        assert json.loads((flagged / "provenance.json").read_text())["sampling"]["source"] == "flag"
+        fake.requests.clear()
+        bare = tmp_path / "bare"
+        assert B.main([*base, "--base-url", fake.base_url, "--out", str(bare), "--model-profile", "none",
+                       "--label", "bare"]) == 0
+        assert all("repeat_penalty" not in r["body"] for r in fake.requests)
+        assert json.loads((bare / "provenance.json").read_text())["sampling"]["repeat_penalty"] is None
+        # Different sampling is a different measurement: a resume is refused, a compare is flagged.
+        capsys.readouterr()
+        assert B.main([*base, "--base-url", fake.base_url, "--out", str(bare)]) == 2
+        assert "different sampling.repeat_penalty" in capsys.readouterr().err
+    assert B.main(["compare", str(out), str(bare)]) == 0
+    assert "different repeat_penalty" in capsys.readouterr().out
+
+
+def test_a_run_recorded_before_sampling_existed_counts_as_no_penalty():
+    old = provenance()
+    assert "sampling" not in old
+    assert B.run_identity(old)["sampling.repeat_penalty"] is None
+    assert B.run_identity(provenance(sampling={"repeat_penalty": 1.1}))["sampling.repeat_penalty"] == 1.1
+
+
+def test_repeat_penalty_is_refused_for_the_anthropic_arm(park_world, tmp_path, capsys):
+    key = tmp_path / "key"
+    key.write_text("sk-test-not-a-real-key")
+    key.chmod(0o600)
+    code = B.main(["run", "--root", str(park_world.root), "--repo", str(Path(R.REPO_ROOT)), "--family", "park-triage",
+                   "--split", "all", "--model-kind", "anthropic", "--key-file", str(key), "--allow-dirty",
+                   "--out", str(tmp_path / "x"), "--repeat-penalty", "1.1"])
+    assert code == 2
+    assert "openai only" in capsys.readouterr().err

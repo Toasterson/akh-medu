@@ -36,8 +36,9 @@ context_window = 49152
 # Model profile (ADR 123): data/model-profiles/catalog.toml row `gemma-4-12b`.
 # Per UTC day: 3000000 tokens, 96 turns. Per wake: 150000 tokens, 16 relevance-scoped tools
 # plus the tools its route names (reactor seeds `required_tools`).
-# Per turn: 1200 s, 20 rounds, 8192 output tokens per request, 600 s HTTP, a 49152-token window.
+# Per turn: 1200 s, 20 rounds, 4096 output tokens per request, 600 s HTTP, a 49152-token window.
 # Per interactive turn: 16 tools, the pinned core (`pinned_tools`) first, then relevance-scoped picks.
+# Sampling: repeat_penalty 1.1 on OpenAI-compatible requests.
 # Override per akh in [model_profile]; this renderer writes none.
 [autonomy]
 enabled = true

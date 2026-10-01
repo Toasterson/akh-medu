@@ -110,6 +110,23 @@ python3 scripts/lilith/dojo/runner.py compare runs/c4/parent-sealed runs/c4/teac
   and bootstrap 95% CI, fabrication / rule-break / unannounced counts, contract-validity rate, language-check
   rate, tokens, latency) and `ledgers/` (the per-episode dojo tenancy ledgers).
 
+Sampling parity (ADR 123 amendment 2026-10-01): the deployed Lilith sends `repeat_penalty` from the
+`gemma-4-12b` catalog row (1.1; without it Gemma 4 12B loops on empty thought blocks in about 5 of 10
+post-tool-result requests). The `openai` arm samples the same way so baselines are like-for-like:
+
+- `--model-profile ROW` (default `auto`) reads the sampling from `data/model-profiles/catalog.toml` via
+  `tomllib`: `auto` resolves the row for `--model` (`lilith`, `gemma-4-12b` and `gemma4:12b` all hit it),
+  `gemma-4-12b` names the row explicitly (use it when the served model name is something else), `none`
+  sends no catalog sampling. Cloud rows set no `repeat_penalty`, so nothing extra is sent to them.
+- `--repeat-penalty X` (1.0..=2.0) overrides the row. The anthropic arm refuses it; the acp arm's akh
+  samples as configured.
+- `provenance.json` records `sampling` (`repeat_penalty`, `source` = `catalog` / `flag` / `none` / `akh`,
+  `catalog_row`, `catalog_max_output_tokens`). `sampling.repeat_penalty` is part of the run identity, so a
+  resume with different sampling is refused (a run recorded before this counts as "no penalty": resume it
+  with `--model-profile none`), and `compare` warns when arms sampled differently. Baselines taken before
+  2026-10-01 did not send the penalty. The row's `max_output_tokens` (4,096 for Lilith) is recorded, not
+  applied: `--max-tokens` keeps its own default, also 4,096.
+
 Cost and time (estimates from the prompt size, not measured runs; `--dry-run` prints the inputs, and the
 first `--limit 3` run gives real numbers in the summary's `tokens` and `latency_ms`):
 

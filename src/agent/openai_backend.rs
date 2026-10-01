@@ -68,6 +68,12 @@ pub struct OpenAiConfig {
     pub max_tokens: Option<u32>,
     /// Sampling temperature. `None` ⇒ the server's default.
     pub temperature: Option<f32>,
+    /// `repeat_penalty` sampling parameter (llama.cpp and compatible servers).
+    /// Sent only when `Some`, because strict cloud APIs may reject unknown
+    /// parameters. Comes from the ADR 123 model profile; a streaming request
+    /// that degenerates (see [`StreamRead::is_degenerate`]) is retried once
+    /// with a raised value regardless.
+    pub repeat_penalty: Option<f32>,
     /// Reasoning-effort hint (`"low" | "medium" | "high"`), sent as
     /// `reasoning_effort`. Ignored by servers that don't implement it.
     pub reasoning_effort: Option<String>,
@@ -83,6 +89,7 @@ impl Default for OpenAiConfig {
             context_window: None,
             max_tokens: None,
             temperature: None,
+            repeat_penalty: None,
             reasoning_effort: None,
         }
     }
@@ -665,6 +672,12 @@ impl OpenAiClient {
     /// inline with the answer. Tool-call deltas arrive fragmented (the arguments
     /// string is split across chunks), so they are **accumulated by index** and
     /// only parsed once the stream closes.
+    ///
+    /// **Degenerate-output guard (ADR 123 amendment 2026-10-01).** A request
+    /// that ends at the output cap with no content, no reasoning and no tool
+    /// call is a decode loop (Gemma 4 12B repeating empty thought blocks after
+    /// a tool result). It is logged at WARN and retried once with a raised
+    /// `repeat_penalty` ([`escalated_repeat_penalty`]) instead of returned empty.
     pub fn chat_stream(
         &self,
         system_prompt: &str,
@@ -673,8 +686,68 @@ impl OpenAiClient {
         request_seq: usize,
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> OpenAiResult<AssistantTurn> {
-        use std::io::BufRead;
+        let first = self.stream_attempt(
+            system_prompt,
+            conversation,
+            tools,
+            request_seq,
+            self.config.repeat_penalty,
+            on_event,
+        )?;
+        if !first.is_degenerate(self.config.max_tokens) {
+            return Ok(first.into_turn());
+        }
 
+        let raised = escalated_repeat_penalty(self.config.repeat_penalty);
+        tracing::warn!(
+            target: "akh::openai",
+            request_seq,
+            model = %self.config.model,
+            finish_reason = first.finish_reason.as_deref().unwrap_or("none"),
+            completion_tokens = first.completion_tokens,
+            max_tokens = ?self.config.max_tokens,
+            repeat_penalty = ?self.config.repeat_penalty,
+            retry_repeat_penalty = raised,
+            "degenerate stream: output cap reached with no content, reasoning or tool call; \
+             retrying once with a raised repeat_penalty"
+        );
+        let second = self.stream_attempt(
+            system_prompt,
+            conversation,
+            tools,
+            request_seq,
+            Some(raised),
+            on_event,
+        )?;
+        if second.is_degenerate(self.config.max_tokens) {
+            tracing::warn!(
+                target: "akh::openai",
+                request_seq,
+                model = %self.config.model,
+                completion_tokens = second.completion_tokens,
+                repeat_penalty = raised,
+                "degenerate stream persisted after the repeat_penalty retry; returning the empty turn"
+            );
+        }
+        // Report both attempts' token spend so budgets see the retry's cost.
+        let (first_prompt, first_completion) = (first.prompt_tokens, first.completion_tokens);
+        let mut turn = second.into_turn();
+        turn.prompt_tokens += first_prompt;
+        turn.completion_tokens += first_completion;
+        Ok(turn)
+    }
+
+    /// One streaming `/chat/completions` request with an explicit
+    /// `repeat_penalty`.
+    fn stream_attempt(
+        &self,
+        system_prompt: &str,
+        conversation: &[Value],
+        tools: &[Value],
+        request_seq: usize,
+        repeat_penalty: Option<f32>,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> OpenAiResult<StreamRead> {
         let url = self.config.url("chat/completions");
         let mut metrics = super::llm_metrics::LlmRequestMetrics::new(request_seq);
         let span =
@@ -682,7 +755,7 @@ impl OpenAiClient {
         metrics.attach_span(span.clone());
         let _request_guard = span.entered();
 
-        let body = self.build_body(system_prompt, conversation, tools, true);
+        let body = self.build_body_with(system_prompt, conversation, tools, true, repeat_penalty);
         let key = self
             .config
             .resolved_api_key()
@@ -705,112 +778,19 @@ impl OpenAiClient {
                 self.map_transport(e, &url)
             })?;
 
-        let mut content = String::new();
-        // Tool calls stream in fragments keyed by `index`; keep insertion order.
-        let mut acc: Vec<(String, String)> = Vec::new(); // (name, arguments-so-far)
-        let (mut prompt_tokens, mut completion_tokens) = (0u64, 0u64);
-
-        let reader = std::io::BufReader::new(resp.into_reader());
-        for line in reader.lines() {
-            let line = line.map_err(|e| {
-                metrics.log(&self.config.model, metrics.interrupted_outcome());
-                OpenAiError::Unreachable {
-                    url: url.clone(),
-                    reason: format!("stream read failed: {e}"),
-                }
-            })?;
-
-            let Some(payload) = line.strip_prefix("data:") else {
-                continue; // comments / blank separators
-            };
-            let payload = payload.trim();
-            if payload.is_empty() || payload == "[DONE]" {
-                continue;
-            }
-            let Ok(chunk) = serde_json::from_str::<Value>(payload) else {
-                continue; // a malformed frame must not abort a live turn
-            };
-
-            // Usage arrives on the final frame when stream_options asked for it.
-            let (p, c) = usage_of(&chunk);
-            if p > 0 || c > 0 {
-                prompt_tokens = p;
-                completion_tokens = c;
-            }
-
-            let delta = chunk
-                .get("choices")
-                .and_then(Value::as_array)
-                .and_then(|c| c.first())
-                .and_then(|c| c.get("delta"));
-            let Some(delta) = delta else {
-                on_event(StreamEvent::Keepalive);
-                continue;
-            };
-
-            let mut visible = false;
-            if let Some(text) = delta.get("content").and_then(Value::as_str) {
-                if !text.is_empty() {
-                    content.push_str(text);
-                    metrics.note_content_delta();
-                    on_event(StreamEvent::Content(text.to_string()));
-                    visible = true;
-                }
-            }
-            if let Some(text) = reasoning_text(delta) {
-                metrics.note_thinking_delta();
-                on_event(StreamEvent::Thinking(text.to_string()));
-                visible = true;
-            }
-            if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                for tc in calls {
-                    let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                    if acc.len() <= idx {
-                        acc.resize(idx + 1, (String::new(), String::new()));
-                    }
-                    if let Some(func) = tc.get("function") {
-                        if let Some(name) = func.get("name").and_then(Value::as_str) {
-                            if !name.is_empty() {
-                                acc[idx].0 = name.to_string();
-                            }
-                        }
-                        if let Some(args) = func.get("arguments").and_then(Value::as_str) {
-                            acc[idx].1.push_str(args);
-                        }
-                    }
-                }
-                metrics.note_tool_call_chunk();
-                visible = true;
-            }
-            metrics.note_chunk(payload.len());
-            if !visible {
-                on_event(StreamEvent::Keepalive);
-            }
-        }
-
-        let tool_calls: Vec<ToolCall> = acc
-            .into_iter()
-            .filter(|(name, _)| !name.is_empty())
-            .map(|(name, args)| ToolCall {
-                name,
-                arguments: serde_json::from_str(&args).unwrap_or_else(|_| json!({})),
-            })
-            .collect();
-
-        metrics.set_tokens(prompt_tokens, completion_tokens);
+        let read = read_sse(
+            std::io::BufReader::new(resp.into_reader()),
+            &url,
+            &self.config.model,
+            &mut metrics,
+            on_event,
+        )?;
+        metrics.set_tokens(read.prompt_tokens, read.completion_tokens);
         metrics.log(
             &self.config.model,
             super::llm_metrics::RequestOutcome::Completed,
         );
-
-        Ok(AssistantTurn {
-            content,
-            tool_calls,
-            prompt_tokens,
-            completion_tokens,
-            // Streaming thinking already went out as `StreamEvent::Thinking`.
-            reasoning: String::new(),
-        })
+        Ok(read)
     }
 
     /// Assemble the `/chat/completions` request body.
@@ -820,6 +800,24 @@ impl OpenAiClient {
         conversation: &[Value],
         tools: &[Value],
         stream: bool,
+    ) -> Value {
+        self.build_body_with(
+            system_prompt,
+            conversation,
+            tools,
+            stream,
+            self.config.repeat_penalty,
+        )
+    }
+
+    /// [`Self::build_body`] with an explicit `repeat_penalty` (the guard's retry).
+    fn build_body_with(
+        &self,
+        system_prompt: &str,
+        conversation: &[Value],
+        tools: &[Value],
+        stream: bool,
+        repeat_penalty: Option<f32>,
     ) -> Value {
         let mut body = json!({
             "model": self.config.model,
@@ -835,6 +833,9 @@ impl OpenAiClient {
         }
         if let Some(t) = self.config.temperature {
             body["temperature"] = json!(t);
+        }
+        if let Some(penalty) = repeat_penalty {
+            body["repeat_penalty"] = json!(penalty);
         }
         if let Some(effort) = &self.config.reasoning_effort {
             body["reasoning_effort"] = json!(effort);
@@ -869,6 +870,166 @@ impl OpenAiClient {
             },
         }
     }
+}
+
+/// Cap on the retry's `repeat_penalty`: above this answers degrade.
+const RETRY_REPEAT_PENALTY_CAP: f32 = 1.2;
+/// Step the degenerate-output guard adds to the penalty for its one retry.
+const RETRY_REPEAT_PENALTY_STEP: f32 = 0.05;
+
+/// The `repeat_penalty` for the degenerate-output guard's single retry:
+/// `max(current, 1.0) + 0.05`, capped at 1.2.
+fn escalated_repeat_penalty(current: Option<f32>) -> f32 {
+    (current.unwrap_or(1.0).max(1.0) + RETRY_REPEAT_PENALTY_STEP).min(RETRY_REPEAT_PENALTY_CAP)
+}
+
+/// Everything one streamed response produced, before it becomes a turn.
+#[derive(Debug, Default)]
+struct StreamRead {
+    content: String,
+    /// Any non-empty reasoning delta was seen.
+    saw_reasoning: bool,
+    /// Any tool-call delta was seen (named or not).
+    saw_tool_chunk: bool,
+    tool_calls: Vec<ToolCall>,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    /// `choices[0].finish_reason` of the last frame that carried one.
+    finish_reason: Option<String>,
+}
+
+impl StreamRead {
+    /// A decode loop: the request ended at the output cap (`finish_reason`
+    /// `length`, or `completion_tokens >= max_tokens`) yet produced no
+    /// content, no reasoning and no tool call. A long *legitimate* answer
+    /// that hit the cap has content and is not degenerate.
+    fn is_degenerate(&self, max_tokens: Option<u32>) -> bool {
+        let empty = self.content.is_empty()
+            && !self.saw_reasoning
+            && !self.saw_tool_chunk
+            && self.tool_calls.is_empty();
+        let capped = self.finish_reason.as_deref() == Some("length")
+            || max_tokens.is_some_and(|cap| cap > 0 && self.completion_tokens >= u64::from(cap));
+        empty && capped
+    }
+
+    fn into_turn(self) -> AssistantTurn {
+        AssistantTurn {
+            content: self.content,
+            tool_calls: self.tool_calls,
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+            // Streaming thinking already went out as `StreamEvent::Thinking`.
+            reasoning: String::new(),
+        }
+    }
+}
+
+/// Consume a server-sent-event body, emitting stream events and metrics.
+fn read_sse(
+    reader: impl std::io::BufRead,
+    url: &str,
+    model: &str,
+    metrics: &mut super::llm_metrics::LlmRequestMetrics,
+    on_event: &mut dyn FnMut(StreamEvent),
+) -> OpenAiResult<StreamRead> {
+    let mut read = StreamRead::default();
+    // Tool calls stream in fragments keyed by `index`; keep insertion order.
+    let mut acc: Vec<(String, String)> = Vec::new(); // (name, arguments-so-far)
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| {
+            metrics.log(model, metrics.interrupted_outcome());
+            OpenAiError::Unreachable {
+                url: url.to_string(),
+                reason: format!("stream read failed: {e}"),
+            }
+        })?;
+
+        let Some(payload) = line.strip_prefix("data:") else {
+            continue; // comments / blank separators
+        };
+        let payload = payload.trim();
+        if payload.is_empty() || payload == "[DONE]" {
+            continue;
+        }
+        let Ok(chunk) = serde_json::from_str::<Value>(payload) else {
+            continue; // a malformed frame must not abort a live turn
+        };
+
+        // Usage arrives on the final frame when stream_options asked for it.
+        let (p, c) = usage_of(&chunk);
+        if p > 0 || c > 0 {
+            read.prompt_tokens = p;
+            read.completion_tokens = c;
+        }
+
+        let choice = chunk
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|c| c.first());
+        if let Some(reason) = choice
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(Value::as_str)
+        {
+            read.finish_reason = Some(reason.to_string());
+        }
+        let Some(delta) = choice.and_then(|c| c.get("delta")) else {
+            on_event(StreamEvent::Keepalive);
+            continue;
+        };
+
+        let mut visible = false;
+        if let Some(text) = delta.get("content").and_then(Value::as_str) {
+            if !text.is_empty() {
+                read.content.push_str(text);
+                metrics.note_content_delta();
+                on_event(StreamEvent::Content(text.to_string()));
+                visible = true;
+            }
+        }
+        if let Some(text) = reasoning_text(delta) {
+            read.saw_reasoning = true;
+            metrics.note_thinking_delta();
+            on_event(StreamEvent::Thinking(text.to_string()));
+            visible = true;
+        }
+        if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            for tc in calls {
+                let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                if acc.len() <= idx {
+                    acc.resize(idx + 1, (String::new(), String::new()));
+                }
+                if let Some(func) = tc.get("function") {
+                    if let Some(name) = func.get("name").and_then(Value::as_str) {
+                        if !name.is_empty() {
+                            acc[idx].0 = name.to_string();
+                        }
+                    }
+                    if let Some(args) = func.get("arguments").and_then(Value::as_str) {
+                        acc[idx].1.push_str(args);
+                    }
+                }
+            }
+            read.saw_tool_chunk = true;
+            metrics.note_tool_call_chunk();
+            visible = true;
+        }
+        metrics.note_chunk(payload.len());
+        if !visible {
+            on_event(StreamEvent::Keepalive);
+        }
+    }
+
+    read.tool_calls = acc
+        .into_iter()
+        .filter(|(name, _)| !name.is_empty())
+        .map(|(name, args)| ToolCall {
+            name,
+            arguments: serde_json::from_str(&args).unwrap_or_else(|_| json!({})),
+        })
+        .collect();
+    Ok(read)
 }
 
 /// Maximum length (in `char`s) of the display message extracted from a
@@ -1729,5 +1890,191 @@ mod tests {
             usage_of(&json!({"usage": {"prompt_tokens": 12, "completion_tokens": 7}})),
             (12, 7)
         );
+    }
+
+    // -- repeat_penalty + degenerate-output guard (ADR 123 amendment 2026-10-01) --
+
+    #[test]
+    fn repeat_penalty_is_sent_only_when_set() {
+        let none = OpenAiClient::new(cfg());
+        let body = none.build_body("sys", &[], &[], true);
+        assert!(body.get("repeat_penalty").is_none(), "unset: nothing sent");
+
+        let some = OpenAiClient::new(OpenAiConfig {
+            repeat_penalty: Some(1.1),
+            ..cfg()
+        });
+        let body = some.build_body("sys", &[], &[], true);
+        assert_eq!(body["repeat_penalty"], json!(1.1_f32));
+        let body = some.build_body_with("sys", &[], &[], true, Some(1.15));
+        assert_eq!(body["repeat_penalty"], json!(1.15_f32), "override wins");
+    }
+
+    #[test]
+    fn escalated_penalty_steps_up_and_is_capped() {
+        assert_eq!(escalated_repeat_penalty(None), 1.05);
+        assert_eq!(escalated_repeat_penalty(Some(1.1)), 1.1 + 0.05);
+        assert_eq!(
+            escalated_repeat_penalty(Some(0.9)),
+            1.05,
+            "below 1.0 clamps first"
+        );
+        assert_eq!(escalated_repeat_penalty(Some(1.18)), 1.2, "capped");
+        assert_eq!(escalated_repeat_penalty(Some(1.5)), 1.2, "capped");
+    }
+
+    /// The Gemma loop as the stream shows it: two chunks, no deltas, `length`.
+    const LOOP_SSE: &str = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n\
+        data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":4096}}\n\n\
+        data: [DONE]\n\n";
+
+    const GOOD_SSE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n\
+        data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":3}}\n\n\
+        data: [DONE]\n\n";
+
+    fn read(sse: &str) -> StreamRead {
+        let mut metrics = crate::agent::llm_metrics::LlmRequestMetrics::new(1);
+        read_sse(
+            std::io::Cursor::new(sse.as_bytes()),
+            "http://mock/v1/chat/completions",
+            "m",
+            &mut metrics,
+            &mut |_| {},
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn empty_length_stream_is_degenerate() {
+        let r = read(LOOP_SSE);
+        assert_eq!(r.finish_reason.as_deref(), Some("length"));
+        assert!(r.is_degenerate(Some(4096)));
+        assert!(r.is_degenerate(None), "finish_reason alone is enough");
+    }
+
+    #[test]
+    fn empty_stream_at_the_token_cap_is_degenerate_without_a_finish_reason() {
+        let sse = "data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":512}}\n\n";
+        let r = read(sse);
+        assert!(r.finish_reason.is_none());
+        assert!(r.is_degenerate(Some(512)));
+        assert!(!r.is_degenerate(Some(8192)));
+        assert!(!r.is_degenerate(None));
+    }
+
+    #[test]
+    fn content_reasoning_or_tool_calls_are_never_degenerate() {
+        assert!(!read(GOOD_SSE).is_degenerate(Some(4096)));
+        let truncated_answer = "data: {\"choices\":[{\"delta\":{\"content\":\"long answer\"},\"finish_reason\":\"length\"}]}\n\n";
+        assert!(!read(truncated_answer).is_degenerate(Some(4096)));
+        let thinking = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"},\"finish_reason\":\"length\"}]}\n\n";
+        assert!(!read(thinking).is_degenerate(Some(4096)));
+        let call = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"t\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"length\"}]}\n\n";
+        let r = read(call);
+        assert_eq!(r.tool_calls.len(), 1);
+        assert!(!r.is_degenerate(Some(4096)));
+    }
+
+    /// Serve `responses` (one SSE body per accepted connection) and return the
+    /// base URL plus a handle yielding every request body received.
+    fn mock_sse_server(
+        responses: Vec<&'static str>,
+    ) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for sse in responses {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let (head_end, content_length) = loop {
+                    let n = sock.read(&mut chunk).unwrap();
+                    assert!(n > 0, "client closed before sending a full request");
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                        let len = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        break (pos + 4, len);
+                    }
+                };
+                while buf.len() < head_end + content_length {
+                    let n = sock.read(&mut chunk).unwrap();
+                    assert!(n > 0, "client closed mid-body");
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                bodies.push(
+                    serde_json::from_slice(&buf[head_end..head_end + content_length]).unwrap(),
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}",
+                    sse.len()
+                );
+                sock.write_all(resp.as_bytes()).unwrap();
+            }
+            bodies
+        });
+        (base, handle)
+    }
+
+    fn mock_client(base: String, repeat_penalty: Option<f32>) -> OpenAiClient {
+        OpenAiClient::new(OpenAiConfig {
+            base_url: base,
+            api_key: Some("test-key".into()),
+            model: "gemma-4-12b".into(),
+            timeout_secs: 10,
+            max_tokens: Some(4096),
+            repeat_penalty,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn degenerate_stream_is_retried_once_with_a_raised_penalty() {
+        let (base, server) = mock_sse_server(vec![LOOP_SSE, GOOD_SSE]);
+        let client = mock_client(base, Some(1.1));
+        let mut events = Vec::new();
+        let turn = client
+            .chat_stream("sys", &[], &[], 7, &mut |e| events.push(e))
+            .unwrap();
+        assert_eq!(turn.content, "hello");
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies.len(), 2, "exactly one retry");
+        assert_eq!(bodies[0]["repeat_penalty"], json!(1.1_f32));
+        assert_eq!(bodies[1]["repeat_penalty"], json!(1.1_f32 + 0.05));
+        assert_eq!(turn.completion_tokens, 4096 + 3, "retry spend is reported");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::Content(c) if c == "hello"))
+        );
+    }
+
+    #[test]
+    fn healthy_stream_is_not_retried() {
+        let (base, server) = mock_sse_server(vec![GOOD_SSE]);
+        let client = mock_client(base, None);
+        let turn = client.chat_stream("sys", &[], &[], 1, &mut |_| {}).unwrap();
+        assert_eq!(turn.content, "hello");
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].get("repeat_penalty").is_none());
+    }
+
+    #[test]
+    fn a_persistent_loop_stops_after_one_retry_and_returns_the_empty_turn() {
+        let (base, server) = mock_sse_server(vec![LOOP_SSE, LOOP_SSE]);
+        let client = mock_client(base, None);
+        let turn = client.chat_stream("sys", &[], &[], 1, &mut |_| {}).unwrap();
+        assert!(turn.content.is_empty() && turn.tool_calls.is_empty());
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies.len(), 2, "never a third attempt");
+        assert!(bodies[0].get("repeat_penalty").is_none());
+        assert_eq!(bodies[1]["repeat_penalty"], json!(1.05_f32));
     }
 }
