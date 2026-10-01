@@ -267,13 +267,14 @@ class OpenAIChatAdapter:
 
     def __init__(self, base_url: str, model: str, secret: Secret, *, temperature: float | None = 0.0,
                  max_tokens: int = 4096, policy: HttpPolicy = HttpPolicy(), transport: Transport = urllib_transport,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, repeat_penalty: float | None = None):
         self.base_url = base_url.rstrip("/")
         self.model_id = model
         self.endpoint_host = urlparse(self.base_url).hostname or self.base_url
         self._secret = secret
         self._temperature = temperature
         self._max_tokens = max_tokens
+        self.repeat_penalty = repeat_penalty  # llama.cpp `repeat_penalty`; sent only when set
         self._policy = policy
         self._transport = transport
         self._sleep = sleep
@@ -295,6 +296,8 @@ class OpenAIChatAdapter:
         body: dict[str, Any] = {"model": self.model_id, "messages": wire, "max_tokens": self._max_tokens}
         if self._temperature is not None:
             body["temperature"] = self._temperature
+        if self.repeat_penalty is not None:
+            body["repeat_penalty"] = self.repeat_penalty
         if tools:
             body["tools"] = [{"type": "function", "function": {"name": t.name, "description": t.description,
                                                                "parameters": t.schema()}} for t in tools]

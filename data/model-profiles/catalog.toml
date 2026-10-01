@@ -35,6 +35,9 @@
 #                        slow-prefill local servers only: the tool schemas dominate the prompt
 #                        and a prefix cache only helps while the offered set is unchanged
 #                        (ADR 123 amendment 2026-09-30)
+#   repeat_penalty       sampling `repeat_penalty` (1.0..=2.0) sent on OpenAI-compatible requests
+#                        only when set; local llama.cpp rows only, because cloud APIs may reject
+#                        unknown parameters (ADR 123 amendment 2026-10-01)
 #
 # `[models.effort.<low|medium|high|max>]` overrides the row for that `reasoning_effort`; the
 # row itself describes the model at its default effort (what an akh without `reasoning_effort`
@@ -219,6 +222,14 @@ max_output_tokens = 65_536
 # on hephaistos' 24 GB RX 7900 XTX, two 65,536-token slots. Decode is memory-bound: at most about
 # 75 tok/s on 960 GB/s, about 50 tok/s measured on a comparable 24 GB card. Tokens cost no credit,
 # so the daily cap only bounds GPU time. Small models degrade past about 14 offered tools (ADR 089).
+# repeat_penalty = 1.1 (measured 2026-10-01, ADR 123 amendment): after a tool result the model
+# sometimes loops on empty thought blocks `<|channel>thought\n<channel|>` until max_tokens
+# (5 of 10 runs at default sampling, finish=length, no content/reasoning/tool deltas); at 1.05,
+# 1.1 and 1.15 the loop appeared in 0 of 10 runs and UUID copying stayed intact (DRY 0.8: 1 of
+# 10). max_output_tokens = 4_096 (was 8_192): a loop emits nothing, so its cost is wall clock,
+# about 236 s at 8,192 tokens versus about 118 s at 4,096; the loop guard retries once, so the
+# worst case stays at the old single-loop cost. A legitimate Lilith reply or tool call is a few
+# hundred tokens.
 [[models]]
 id = "gemma-4-12b"
 ids = ["gemma4:12b", "gemma-4-12b", "lilith"]
@@ -231,10 +242,11 @@ max_tokens_per_wake = 150_000
 turn_deadline_secs = 1_200
 max_rounds = 20
 http_timeout_secs = 600
-max_output_tokens = 8_192
+max_output_tokens = 4_096
 context_window = 49_152
 max_tools_per_wake = 16
 max_tools_per_turn = 16
+repeat_penalty = 1.1
 
 # Qwen 3.8 is not on Ollama Cloud (2026-09-30); a local qwen3.8:27b (256K context, about 43 tok/s)
 # is the nearest documented basis.

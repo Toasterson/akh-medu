@@ -47,6 +47,8 @@ pub const DEFAULT_MAX_TURNS_PER_DAY: u32 =
     super::autonomy::AutonomyBudget::DEFAULT_MAX_TURNS_PER_DAY;
 /// Global default agentic turn deadline in seconds (the loop's historical 300 s).
 pub const DEFAULT_TURN_DEADLINE_SECS: u64 = 300;
+/// Accepted `repeat_penalty` range: 1.0 is off; above 2.0 degrades answers.
+pub const REPEAT_PENALTY_RANGE: std::ops::RangeInclusive<f32> = 1.0..=2.0;
 /// Global default Ollama read/idle timeout in seconds.
 pub const DEFAULT_OLLAMA_HTTP_TIMEOUT_SECS: u64 = 120;
 /// Global default OpenAI-compatible total request timeout in seconds.
@@ -60,7 +62,7 @@ pub const ENV_TURN_DEADLINE: &str = "AKH_AGENT_TURN_TIMEOUT_SECS";
 pub const ENV_OLLAMA_TIMEOUT: &str = "AKH_OLLAMA_TIMEOUT_SECS";
 
 /// Errors loading the catalog or resolving an akh's profile.
-#[derive(Debug, Clone, Error, Diagnostic, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, Diagnostic, PartialEq)]
 pub enum ModelProfileError {
     #[error("the model catalog does not parse: {message}")]
     #[diagnostic(
@@ -137,6 +139,26 @@ pub enum ModelProfileError {
         )
     )]
     UnknownEffort { akh: String, value: String },
+
+    #[error("`{field}` is {value} in {location}, outside the accepted range {min}..={max}")]
+    #[diagnostic(
+        code(akh::model_profile::sampling_out_of_range),
+        help(
+            "`repeat_penalty` multiplies the logit of every recently generated token: 1.0 is \
+             off, 1.05 to 1.15 is the useful band (the Gemma 4 12B loop guard uses 1.1), and \
+             anything above 2.0 degrades the answer. Options: set a value inside the range; \
+             or remove the key to inherit the catalog row (or send nothing when there is none). \
+             NaN and infinity are refused."
+        )
+    )]
+    SamplingOutOfRange {
+        field: &'static str,
+        /// The offending value as written (an f32 would break the error's `Eq`).
+        value: String,
+        location: String,
+        min: f32,
+        max: f32,
+    },
 }
 
 /// Result alias for this module.
@@ -202,7 +224,7 @@ pub enum Serving {
 /// max_tokens_per_day = 2000000
 /// max_tools_per_wake = 32
 /// ```
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelProfile {
     /// Prompt + completion tokens per UTC day for background work.
@@ -236,6 +258,13 @@ pub struct ModelProfile {
     /// pinned core included (ADR 123 amendment 2026-09-30).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tools_per_turn: Option<u32>,
+    /// Sampling `repeat_penalty`, sent to OpenAI-compatible local servers
+    /// (llama.cpp) only when resolved to `Some`; cloud rows leave it unset
+    /// because their APIs may reject unknown parameters. Range
+    /// [`REPEAT_PENALTY_RANGE`]. Gemma 4 12B needs 1.1 to avoid the
+    /// empty-thought-block loop (ADR 123 amendment 2026-10-01).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeat_penalty: Option<f32>,
 }
 
 impl ModelProfile {
@@ -251,6 +280,7 @@ impl ModelProfile {
         "context_window",
         "max_tools_per_wake",
         "max_tools_per_turn",
+        "repeat_penalty",
     ];
 
     /// Whether no field is set.
@@ -271,6 +301,7 @@ impl ModelProfile {
             context_window: self.context_window.or(lower.context_window),
             max_tools_per_wake: self.max_tools_per_wake.or(lower.max_tools_per_wake),
             max_tools_per_turn: self.max_tools_per_turn.or(lower.max_tools_per_turn),
+            repeat_penalty: self.repeat_penalty.or(lower.repeat_penalty),
         }
     }
 
@@ -292,15 +323,26 @@ impl ModelProfile {
             ("max_tools_per_wake", self.max_tools_per_wake == Some(0)),
             ("max_tools_per_turn", self.max_tools_per_turn == Some(0)),
         ];
-        match checks.into_iter().find(|(_, is_zero)| *is_zero) {
-            Some((field, _)) => Err(zero(field)),
-            None => Ok(()),
+        if let Some((field, _)) = checks.into_iter().find(|(_, is_zero)| *is_zero) {
+            return Err(zero(field));
         }
+        if let Some(penalty) = self.repeat_penalty
+            && !REPEAT_PENALTY_RANGE.contains(&penalty)
+        {
+            return Err(ModelProfileError::SamplingOutOfRange {
+                field: "repeat_penalty",
+                value: penalty.to_string(),
+                location: location.to_string(),
+                min: *REPEAT_PENALTY_RANGE.start(),
+                max: *REPEAT_PENALTY_RANGE.end(),
+            });
+        }
+        Ok(())
     }
 }
 
 /// One catalog row.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogEntry {
     /// Row name used in logs and docs (e.g. `glm-5.3`).
@@ -332,7 +374,7 @@ impl CatalogEntry {
 }
 
 /// The model catalog (`data/model-profiles/catalog.toml`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCatalog {
     /// Must equal [`CATALOG_SCHEMA_VERSION`].
@@ -515,7 +557,7 @@ impl GlobalDefaults {
 }
 
 /// One per-akh override, with the location to name in logs and errors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AkhOverrides {
     /// The akh's merged overrides.
     pub profile: ModelProfile,
@@ -561,7 +603,7 @@ pub struct ProfileRequest<'a> {
 }
 
 /// An akh's resolved per-model profile.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedModelProfile {
     /// The model id the profile was resolved for (empty: none pinned).
     pub model: String,
@@ -585,6 +627,8 @@ pub struct ResolvedModelProfile {
     pub max_tools_per_wake: Option<Setting<u32>>,
     /// `None`: an interactive turn sees the whole catalog.
     pub max_tools_per_turn: Option<Setting<u32>>,
+    /// `None`: no `repeat_penalty` is sent (the server's default).
+    pub repeat_penalty: Option<Setting<f32>>,
 }
 
 /// Parse a positive integer env var; blank, zero or garbage count as unset.
@@ -690,6 +734,7 @@ impl ResolvedModelProfile {
         let context_window = tiered!(context_window, locations.context_window);
         let max_tools_per_wake = tiered!(max_tools_per_wake, "model_profile");
         let max_tools_per_turn = tiered!(max_tools_per_turn, "model_profile");
+        let repeat_penalty = tiered!(repeat_penalty, "model_profile");
 
         Ok(Self {
             model: model.to_string(),
@@ -705,6 +750,7 @@ impl ResolvedModelProfile {
             context_window,
             max_tools_per_wake,
             max_tools_per_turn,
+            repeat_penalty,
         })
     }
 
@@ -753,6 +799,7 @@ impl ResolvedModelProfile {
             context_window = %opt(&self.context_window, "model-reported"),
             max_tools_per_wake = %opt(&self.max_tools_per_wake, "all"),
             max_tools_per_turn = %opt(&self.max_tools_per_turn, "all"),
+            repeat_penalty = %opt(&self.repeat_penalty, "not-sent"),
             "model profile resolved (ADR 123)"
         );
     }
@@ -1087,5 +1134,95 @@ mod tests {
             "a prose word (`stop`) never pins a tool"
         );
         assert!(WakeScope::default().pinned_names(&catalog).is_empty());
+    }
+
+    #[test]
+    fn gemma_row_carries_the_measured_repeat_penalty_and_cloud_rows_send_none() {
+        let catalog = ModelCatalog::builtin().unwrap();
+        for model in ["lilith", "gemma4:12b", "gemma-4-12b"] {
+            let resolved =
+                ResolvedModelProfile::resolve_with_env(catalog, &request(model, None), &no_env)
+                    .unwrap();
+            let penalty = resolved.repeat_penalty.expect("gemma row sets it");
+            assert_eq!(penalty.value, 1.1);
+            assert_eq!(
+                penalty.source,
+                ProfileSource::Catalog {
+                    entry: "gemma-4-12b".into(),
+                    effort: None
+                }
+            );
+            assert_eq!(resolved.max_output_tokens.unwrap().value, 4_096);
+        }
+        for entry in &catalog.models {
+            if entry.serving != Serving::Local {
+                assert!(
+                    entry.profile.repeat_penalty.is_none()
+                        && entry.effort.values().all(|e| e.repeat_penalty.is_none()),
+                    "cloud row {} must not send repeat_penalty",
+                    entry.id
+                );
+            }
+        }
+        let unknown =
+            ResolvedModelProfile::resolve_with_env(catalog, &request("gpt-6-astra", None), &no_env)
+                .unwrap();
+        assert_eq!(unknown.repeat_penalty, None);
+    }
+
+    #[test]
+    fn akh_repeat_penalty_overrides_the_catalog_row() {
+        let catalog = ModelCatalog::builtin().unwrap();
+        let mut req = request("lilith", None);
+        req.overrides.profile.repeat_penalty = Some(1.15);
+        let resolved = ResolvedModelProfile::resolve_with_env(catalog, &req, &no_env).unwrap();
+        let penalty = resolved.repeat_penalty.unwrap();
+        assert_eq!(penalty.value, 1.15);
+        assert_eq!(penalty.source, ProfileSource::AkhOverride("model_profile"));
+    }
+
+    #[test]
+    fn out_of_range_repeat_penalty_is_refused_with_a_diagnostic() {
+        use miette::Diagnostic;
+        let catalog = ModelCatalog::builtin().unwrap();
+        for bad in [0.5_f32, 2.5, f32::NAN, f32::INFINITY, -1.0] {
+            let mut req = request("lilith", None);
+            req.overrides.profile.repeat_penalty = Some(bad);
+            let error = ResolvedModelProfile::resolve_with_env(catalog, &req, &no_env).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    ModelProfileError::SamplingOutOfRange {
+                        field: "repeat_penalty",
+                        ..
+                    }
+                ),
+                "{bad} refused"
+            );
+            assert_eq!(
+                error.code().unwrap().to_string(),
+                "akh::model_profile::sampling_out_of_range"
+            );
+            assert!(error.help().is_some());
+        }
+        // The bounds themselves are fine.
+        for ok in [1.0_f32, 2.0] {
+            let mut req = request("lilith", None);
+            req.overrides.profile.repeat_penalty = Some(ok);
+            assert!(ResolvedModelProfile::resolve_with_env(catalog, &req, &no_env).is_ok());
+        }
+        let bad_row = r#"
+            schema_version = 1
+            [[models]]
+            id = "a"
+            ids = ["x"]
+            serving = "local"
+            [models.profile]
+            repeat_penalty = 3.0
+        "#;
+        assert!(matches!(
+            ModelCatalog::parse(bad_row),
+            Err(ModelProfileError::SamplingOutOfRange { .. })
+        ));
     }
 }

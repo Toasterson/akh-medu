@@ -145,3 +145,82 @@ def resolve_http_timeout(model: str, catalog: Mapping[str, Any] | None, *, flag:
             return ResolvedTimeout(seconds, TimeoutSource.CATALOG, seconds, 0.0, model, effort, row)
     return ResolvedTimeout(fallback_s, TimeoutSource.FALLBACK, None, 0.0, model, effort, None,
                            "the catalog has no http_timeout_secs for this model")
+
+
+# --- sampling (ADR 123 amendment 2026-10-01) ---------------------------------------------------------------
+
+
+REPEAT_PENALTY_MIN = 1.0
+REPEAT_PENALTY_MAX = 2.0
+# `--model-profile` values that mean "resolve from --model" and "send no catalog sampling".
+PROFILE_AUTO = "auto"
+PROFILE_NONE = "none"
+
+
+class SamplingSource(enum.StrEnum):
+    FLAG = "flag"        # --repeat-penalty: taken as given (range-checked)
+    CATALOG = "catalog"  # the catalog row's `repeat_penalty`
+    NONE = "none"        # nothing is sent: the server's default sampling
+    AKH = "akh"          # the akh samples (the acp arm); the dojo sends nothing
+
+
+@dataclasses.dataclass(frozen=True)
+class ResolvedSampling:
+    """What the openai arm samples with, and where each value came from. Recorded in provenance so
+    two baselines are comparable only when they sampled alike (the deployed Lilith sends
+    `repeat_penalty` from the same catalog row; a baseline without it measures a different model
+    behaviour: 5/10 empty-thought loops at default sampling, 0/10 at 1.1)."""
+    repeat_penalty: float | None
+    source: SamplingSource
+    catalog_row: str | None = None
+    # The row's per-request output cap, recorded for comparison with --max-tokens; not applied here.
+    catalog_max_output_tokens: int | None = None
+    note: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {k: (v.value if isinstance(v, enum.Enum) else v) for k, v in dataclasses.asdict(self).items()
+                if v is not None or k == "repeat_penalty"}
+
+
+def check_repeat_penalty(value: float) -> float:
+    """The value, or a DojoError naming the accepted range (same range as `ModelProfile::validate`)."""
+    from dojo.errors import DojoError
+
+    if not (REPEAT_PENALTY_MIN <= value <= REPEAT_PENALTY_MAX):  # also false for NaN
+        raise DojoError(f"--repeat-penalty {value} is outside {REPEAT_PENALTY_MIN}..={REPEAT_PENALTY_MAX}",
+                        help="1.0 is off, 1.05 to 1.15 is the useful band (the Gemma 4 12B loop guard uses 1.1); "
+                             "omit the flag to take the catalog row, or pass --model-profile none to send nothing")
+    return value
+
+
+def resolve_sampling(model: str | None, catalog: Mapping[str, Any] | None, *, profile: str = PROFILE_AUTO,
+                     repeat_penalty: float | None = None) -> ResolvedSampling:
+    """The openai arm's sampling: `--repeat-penalty` > the catalog row's `repeat_penalty` > none.
+
+    `profile` names the catalog row to read: `auto` (the default) looks up `model` the way the akh
+    resolves its own model id, `none` sends no catalog sampling, anything else is a row id or alias
+    (`gemma-4-12b`, `lilith`). A named row that the catalog lacks, or a missing catalog, is refused
+    rather than skipped: a silently unsampled baseline would not be comparable with the deployed akh."""
+    from dojo.errors import DojoError
+
+    row: str | None = None
+    found: dict = {}
+    if profile != PROFILE_NONE:
+        lookup = model if profile == PROFILE_AUTO else profile
+        if profile != PROFILE_AUTO and catalog is None:
+            raise DojoError("--model-profile needs data/model-profiles/catalog.toml, which is missing or unreadable",
+                            help="run from a full akh-medu checkout (--repo) or pass --repeat-penalty directly")
+        if lookup is not None and catalog is not None:
+            row, found = catalog_profile(lookup, None, catalog)
+            if row is None and profile != PROFILE_AUTO:
+                raise DojoError(f"--model-profile {profile!r} matches no row in the model catalog",
+                                help="use a row id or alias from data/model-profiles/catalog.toml "
+                                     "(for Lilith: gemma-4-12b or lilith), `auto`, or `none`")
+    cap = found.get("max_output_tokens")
+    if repeat_penalty is not None:
+        return ResolvedSampling(check_repeat_penalty(float(repeat_penalty)), SamplingSource.FLAG, row, cap)
+    penalty = found.get("repeat_penalty")
+    if isinstance(penalty, (int, float)) and not isinstance(penalty, bool):
+        return ResolvedSampling(float(penalty), SamplingSource.CATALOG, row, cap)
+    note = None if profile == PROFILE_NONE else "the catalog row sets no repeat_penalty"
+    return ResolvedSampling(None, SamplingSource.NONE, row, cap, note)

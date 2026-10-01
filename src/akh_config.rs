@@ -2046,6 +2046,7 @@ impl AkhConfig {
                 .map(|s| usize::try_from(s.value).unwrap_or(usize::MAX)),
             max_tokens: profile.max_output_tokens.map(|s| s.value),
             temperature: endpoint.temperature,
+            repeat_penalty: profile.repeat_penalty.map(|s| s.value),
             reasoning_effort: self.reasoning_effort.clone(),
         }))
     }
@@ -2746,6 +2747,83 @@ mod tests {
         assert_eq!(
             openai.timeout_secs, 600,
             "the catalog row for a local Gemma 4"
+        );
+    }
+
+    #[test]
+    fn repeat_penalty_flows_from_catalog_and_akh_override_into_the_openai_config() {
+        let (gemma, unknown) = load_src(
+            r#"
+            name = "lilith"
+            model = "lilith"
+            backend = "openai"
+            [openai_endpoint]
+            base_url = "http://10.0.0.5:8080/v1"
+        "#,
+        )
+        .expect("loads");
+        assert!(unknown.is_empty());
+        let openai = gemma.to_openai_config().unwrap().unwrap();
+        assert_eq!(openai.repeat_penalty, Some(1.1), "catalog row");
+        assert_eq!(openai.max_tokens, Some(4_096), "catalog output cap");
+
+        let (tuned, unknown) = load_src(
+            r#"
+            name = "lilith"
+            model = "lilith"
+            backend = "openai"
+            [openai_endpoint]
+            base_url = "http://10.0.0.5:8080/v1"
+            [model_profile]
+            repeat_penalty = 1.15
+        "#,
+        )
+        .expect("loads");
+        assert!(
+            unknown.is_empty(),
+            "repeat_penalty is a known key: {unknown:?}"
+        );
+        assert_eq!(
+            tuned.to_openai_config().unwrap().unwrap().repeat_penalty,
+            Some(1.15),
+            "the akh's [model_profile] wins"
+        );
+
+        let (cloud, _) = load_src(
+            r#"
+            name = "deepseek"
+            model = "DeepSeek-V4-Flash-0731"
+            backend = "openai"
+            [openai_endpoint]
+            base_url = "https://inference.hetzner.com/api/v1"
+        "#,
+        )
+        .expect("loads");
+        assert_eq!(
+            cloud.to_openai_config().unwrap().unwrap().repeat_penalty,
+            None,
+            "cloud rows send nothing"
+        );
+
+        let bad = load_src(
+            r#"
+            name = "lilith"
+            model = "lilith"
+            backend = "openai"
+            [openai_endpoint]
+            base_url = "http://10.0.0.5:8080/v1"
+            [model_profile]
+            repeat_penalty = 5.0
+        "#,
+        );
+        assert!(
+            matches!(
+                bad,
+                Err(AkhConfigError::ModelProfile(
+                    crate::agent::model_profile::ModelProfileError::SamplingOutOfRange { .. }
+                ))
+            ),
+            "an out-of-range value is refused at load"
         );
     }
 

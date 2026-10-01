@@ -538,10 +538,10 @@ def rename_tools(text: str, renames: dict[str, str]) -> str:
 
 PROFILE_FIELDS = ("max_tokens_per_day", "max_turns_per_day", "max_tokens_per_wake", "turn_deadline_secs",
                   "max_rounds", "http_timeout_secs", "max_output_tokens", "context_window",
-                  "max_tools_per_wake", "max_tools_per_turn")
+                  "max_tools_per_wake", "max_tools_per_turn", "repeat_penalty")
 
 # Fields a catalog row may omit: akhomed then keeps its own default (ADR 123 amendment).
-OPTIONAL_PROFILE_FIELDS = ("max_tools_per_turn",)
+OPTIONAL_PROFILE_FIELDS = ("max_tools_per_turn", "repeat_penalty")
 
 
 def load_model_catalog(path: Path = MODEL_CATALOG) -> dict:
@@ -605,6 +605,8 @@ def profile_comment(model: str, effort: str | None = None, catalog: dict | None 
     if "max_tools_per_turn" in p:
         lines.append(f"Per interactive turn: {p['max_tools_per_turn']} tools, the pinned core (`pinned_tools`) first, "
                      "then relevance-scoped picks.")
+    if "repeat_penalty" in p:
+        lines.append(f"Sampling: repeat_penalty {p['repeat_penalty']} on OpenAI-compatible requests.")
     lines.append("Override per akh in [model_profile]; this renderer writes none.")
     return "\n".join(lines)
 
