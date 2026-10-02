@@ -29,6 +29,8 @@ from typing import Any
 
 SCHEMA = 'lilith/source-manifest@1'
 PAYLOAD_FILES = (
+    'scripts/lilith/history/train.py',
+    'scripts/lilith/history/run_pod.py',
     'scripts/lilith/runpod/bootstrap.sh',
     'scripts/lilith/runpod/run_smoke.sh',
     'scripts/lilith/runpod/verify_payload.py',
