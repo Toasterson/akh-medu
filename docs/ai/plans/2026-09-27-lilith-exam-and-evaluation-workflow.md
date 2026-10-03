@@ -15,7 +15,7 @@
 
 ## Development training and release evaluation (2026-10-03)
 
-The [historical execution plan](2026-10-03-lilith-train-now-reconciliation.md) permits the next mixed CoS/eight-voice development SFT run before C3 reaches 14 days. The large sealed-release exam and full baseline are later evaluation milestones; they are not preconditions for that training run. Its checks reuse the completed receipt comparisons, finish the remaining cases in the same pod, add the four prepared behavior spots and one cold reload, then move to a supervised C2 interaction. Retrospective worlds admitted for training cannot be reported as untouched sealed evidence.
+The [historical execution plan](2026-10-03-lilith-train-now-reconciliation.md) brings the complete CoS/eight-voice guided curriculum forward without C3's 14-day training-start wait. Operator clarification: finish the declared White → Yellow → Green → Brown → Black training work, then run the existing final model acceptance evaluation. Per-episode verifiers remain part of guided reward/correction generation during learning. Receipt comparisons, behavior spots and the large baseline are not inter-stage start gates or separate evaluation-only jobs. Fresh holdout, retention, native guidance, operator C2 and belt certification are evaluated on the finished candidate; no belt or active-weight certification is claimed merely because its training stage ran. Retrospective worlds admitted for training cannot be reported as untouched sealed evidence.
 
 ## 1. Exam anatomy, carried over from BabyLLM
 

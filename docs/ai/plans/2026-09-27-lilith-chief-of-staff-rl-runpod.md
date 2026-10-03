@@ -14,7 +14,7 @@
 
 Follow [transcript acceleration and the next training run](2026-10-03-lilith-train-now-reconciliation.md) for C5/C7 development. The historical receipt pilot has completed, while the mixed CoS/eight-voice export and launch are still missing. Finish those artifacts and train on the historical curriculum without waiting for C3's fourteenth day. Fresh recorder evaluation and release/canary gates continue independently. The earlier C3/C4 dependency describes the recorder-derived fresh evaluation path, not a ban on historical development training.
 
-The next run is one bounded weighted-SFT stage. Include voice kata, real memory corrections and Double Diamond/ERRC behaviors; defer optional preference/KLPO arms until this stage gives feedback. Fold the remaining receipt comparisons into the training pod session. Hephaistos uptime is not a training prerequisite.
+Execute the full existing guided curriculum: White forms → Yellow variation → Green sparring → Brown captain selection → Black guidance/transmission. Weighted SFT opens the program; on-policy experience and corrected-sibling preference remain in its execution scope. Include real memory corrections and Double Diamond/ERRC behaviors. Finish the declared stages before the existing final acceptance tests; no evaluation-only stop is inserted after the first SFT pass. Resource windows checkpoint/resume the same program within account credit. KLPO remains optional. Hephaistos uptime is not a training prerequisite.
 
 ## Goal
 

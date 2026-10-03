@@ -80,13 +80,13 @@ The parent plan's floors stay as they are.
 
 ## 6. Round-1 training (C7, ADR 105 run)
 
-CoS curriculum order below; the dojo manual §5 remains canonical for character belts. For the immediate mixed SFT stage, the October 3 plan uses bounded end-of-run development checks; these full guided-RL belt exams remain later milestones:
+CoS lesson tracks below span the canonical White → Yellow → Green → Brown → Black character stages (dojo manual §5). The October 3 execution plan completes the full declared training program before final acceptance testing; weighted SFT is its opening stage, followed by guided on-policy corrections and sibling preference:
 
-1. **White: evidence discipline.** `read-failure`, `scope`, report refusals, read before explaining, act rather than announce.
-2. **Yellow: the CoS core.** `briefing` (counts + exceptions), `park-triage`, `chase` (role: flag and route, never "take ownership").
-3. **Orange: memory and the captain.** `memory-epistemics` with Double Diamond and ERRC; `captain-selection`.
-4. **Green: judgement.** `operator-action` push-back, `commitment` (recorded `cos-commitment@1`, closed on evidence), `pm-po-steering`.
-5. **Blue: Black-belt work.** `illumos-guidance`.
+1. **Evidence discipline.** `read-failure`, `scope`, report refusals, read before explaining, act rather than announce.
+2. **The CoS core.** `briefing` (counts + exceptions), `park-triage`, `chase` (role: flag and route, never "take ownership").
+3. **Memory and the captain.** `memory-epistemics` with Double Diamond and ERRC; `captain-selection`.
+4. **Judgement.** `operator-action` push-back, `commitment` (recorded `cos-commitment@1`, closed on evidence), `pm-po-steering`.
+5. **Guidance and transmission.** `illumos-guidance`.
 
 Method (unchanged from ADR 116):
 - weighted SFT on admitted trajectories;
@@ -102,6 +102,6 @@ On-policy rounds draw episodes from the dojo and from supervised C2 sessions, wi
 ## 7. Operator decisions on the open questions (2026-10-01)
 
 - **Sealed hold-out:** the newest 7-day window stays sealed, rolling. Older windows feed train/dev. Rounds are compared on their shared episodes.
-- **Round-1 hardware:** a Runpod H100 within the account credit (about 6–10 H100-hours, $21–35), with spend reported. The historical development stage can start once its mixed corpus and main-only launch are prepared; C3's elapsed-day exit is not its start gate. The October 3 plan bounds the next SFT run and folds in the remaining receipt comparisons. Local GPUs (C6b) take over later rounds once they qualify.
+- **Round-1 hardware:** a Runpod H100 within the account credit (about 6–10 H100-hours, $21–35), with spend reported. The historical development stage can start once its mixed corpus and main-only launch are prepared; C3's elapsed-day exit is not its start gate. The October 3 plan executes the full guided curriculum in checkpointed resource windows within prepaid credit, with acceptance testing after training completion. Local GPUs (C6b) take over later rounds once they qualify.
 - **Supervisor-driven C2 sessions:** admitted with `source: supervisor` and a lower weight (0.7). Their failures still become corrected siblings at full weight, because each correction is verified against the tracker. The operator's sessions stay the reference.
 - **Teachers:** GLM-5.3 only for round 1. Kimi K3 is added later only for families where GLM's siblings score low, judged from the pinned teacher baseline.
