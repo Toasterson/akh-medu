@@ -1400,6 +1400,22 @@ DOJO_TEACHER_SERVERS = ("anima", "git")  # the replay servers the dojo runner pu
 DOJO_TEACHER_ADDENDUM = "addenda/dojo-teacher.md"
 DOJO_TEACHER_PRINCIPAL = "dojo-teacher"
 DOJO_TEACHER_KEY_FILE = "secrets/dojo-teacher.key"
+# A sealed teacher answers one turn at a time ("workspace busy"), which serializes curriculum
+# generation. Identical replicas `dojo-teacher-2..N` (same model, prompt, surface and budgets; each
+# its own ACP principal and key) let the runner fan out. The first keeps its historical name.
+DOJO_TEACHER_REPLICAS = 3
+
+
+def dojo_teacher_names(replicas: int = DOJO_TEACHER_REPLICAS) -> tuple[str, ...]:
+    """The sealed teacher workspaces: `dojo-teacher`, then `dojo-teacher-2` .. `-<replicas>`."""
+    if replicas < 1:
+        raise RenderError(f"DOJO_TEACHER_REPLICAS must be at least 1, not {replicas}")
+    return (DOJO_TEACHER, *(f"{DOJO_TEACHER}-{n}" for n in range(2, replicas + 1)))
+
+
+def dojo_teacher_key_file(name: str) -> str:
+    """The ACP runner key file of one teacher workspace (`secrets/<name>.key`)."""
+    return f"secrets/{name}.key"
 REASONING_EFFORTS = ("low", "medium", "high", "max")
 _MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 # Engine sizing keys akhomed may have written into an existing workspace TOML;
@@ -1486,7 +1502,7 @@ def dojo_teacher_system_prompt(roles_dir: Path, skill_dir: Path) -> str:
 
 
 def render_dojo_teacher_workspace(existing: dict | None, settings: DojoTeacherSettings,
-                                  prompt: str | None = None) -> dict:
+                                  prompt: str | None = None, name: str = DOJO_TEACHER) -> dict:
     """The sealed teacher workspace. Rendered from scratch except for engine
     sizing keys; akhomed refuses the load if any channel beyond the session
     is configured (`AkhConfig::validate_tool_surface`).
@@ -1501,7 +1517,7 @@ def render_dojo_teacher_workspace(existing: dict | None, settings: DojoTeacherSe
                           "(configure_core.py does; a checkout with roles/ and skills/chief-of-staff is required)")
     doc = {key: existing[key] for key in DOJO_TEACHER_ENGINE_KEYS if existing and key in existing}
     inference = settings.inference()
-    doc.update(name=DOJO_TEACHER, model=inference.model)
+    doc.update(name=name, model=inference.model)
     if settings.reasoning_effort is not None:
         doc["reasoning_effort"] = settings.reasoning_effort
     if settings.prompt_guidance != "off":
@@ -1813,10 +1829,11 @@ def acp_principals(session: dict, root: Path, akhs: tuple[str, ...] = ROLES) -> 
     if LILITH in akhs and not any(p["id"] == LILITH_T3_PRINCIPAL for p in principals):
         principals.append(Inline(id=LILITH_T3_PRINCIPAL, token_file=str(root / LILITH_T3_KEY_FILE),
                                  akhs=[LILITH]))
-    if DOJO_TEACHER in akhs:
-        # The dojo runner's key (Lilith C4): the teacher akh only, no control plane.
-        principals.append(Inline(id=DOJO_TEACHER_PRINCIPAL, token_file=str(root / DOJO_TEACHER_KEY_FILE),
-                                 akhs=[DOJO_TEACHER]))
+    for teacher in dojo_teacher_names():
+        if teacher in akhs:
+            # The dojo runner's key (Lilith C4): that teacher akh only, no control plane.
+            principals.append(Inline(id=teacher, token_file=str(root / dojo_teacher_key_file(teacher)),
+                                     akhs=[teacher]))
     principals.append(Inline(id="operator", token_file=str(root / "secrets/operator.key"),
                              akhs=list(akhs), control=True))
     return principals
