@@ -235,6 +235,7 @@ class HostArgs:
     approval: Path
     dest: Path
     resume_window: bool = False
+    resume_trainer: bool = False   # resume the trainer on an already running pod (no pod start)
     hourly_usd: float | None = None
     poll_seconds: float = 300.0
     stall_seconds: float = 1800.0
@@ -484,7 +485,7 @@ class Supervisor:
                     self.sleep(30)
                     self.discover_endpoint()
             self.wait_ssh()
-            self.launch(resume=self.args.resume_window)
+            self.launch(resume=self.args.resume_window or self.args.resume_trainer)
             self.loop()
         except BaseException as error:   # noqa: BLE001 - every path ends in wind_down, which stops the pod
             self.report['error'] = f'{type(error).__name__}: {error}'
@@ -516,6 +517,7 @@ def parse_args(argv: Sequence[str] | None = None) -> HostArgs:
     p.add_argument('--approval', type=Path, required=True)
     p.add_argument('--dest', type=Path, required=True, help='new local evidence directory for this window')
     p.add_argument('--resume-window', action='store_true', help='start the stopped pod, then resume the trainer')
+    p.add_argument('--resume-trainer', action='store_true', help='resume the trainer on a pod that is already running (no pod start)')
     p.add_argument('--hourly-usd', type=float, default=None, help='pod price refreshed at launch, for the spend record')
     p.add_argument('--poll-seconds', type=float, default=300.0)
     p.add_argument('--stall-seconds', type=float, default=1800.0)
