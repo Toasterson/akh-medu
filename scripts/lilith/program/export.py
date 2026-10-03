@@ -78,6 +78,7 @@ class Config:
     skip_dojo: bool = False
     dojo_prompt: str = "compact"
     context_limit: int = S.CONTEXT_LIMIT
+    include_generated: bool = False
 
 
 # -- collection -----------------------------------------------------------------------------------------------
@@ -466,32 +467,74 @@ def export_corpus(cfg: Config, codec: ChatCodec | None, log: Callable[[str], Non
 # -- on-policy mode ---------------------------------------------------------------------------------------------
 
 
-def onpolicy_export(cfg: Config, codec: ChatCodec, run: Path, stage: str, log: Callable[[str], None] = lambda s: None) -> dict:
-    from program import dojo_sources as DS
+ONPOLICY_GENERATED_NOTE = ("Teacher-generated supplements delivered at this stage's on-policy point because generation outran "
+                           "the launch freeze. Each record keeps its own source; none is relabelled as onpolicy.")
 
+
+def launch_record_ids(out: Path) -> set[str]:
+    """Record ids already in the launch corpus: the stage records files (train/dev only), not on-policy deliveries."""
+    ids: set[str] = set()
+    for st in S.STAGES:
+        path = out / "records" / f"{st}.jsonl"
+        if path.is_file():
+            ids |= {r["record_id"] for r in SRC.read_jsonl(path) if r["split"] != "excluded"}
+    return ids
+
+
+def generated_supplements(cfg: Config, stage: str, launch_ids: set[str], exposure: SPL.Exposure,
+                          sentinels: set[str] | None) -> tuple[list[dict], dict]:
+    gdir = Path(cfg.generated_dir) if cfg.generated_dir else None
+    accepted, rejected = SRC.generated_records(gdir)
+    files = {p.name: SRC.file_sha(p) for p in sorted(gdir.glob("*.jsonl"))} if gdir and gdir.is_dir() else {}
+    of_stage = [r for r in accepted if r["stage"] == stage]
+    new = [r for r in of_stage if r["record_id"] not in launch_ids]
+    kept, rows = apply_boundary(new, exposure, sentinels)
+    return kept, {"dir": str(gdir) if gdir else None, "files_sha256": files, "records_accepted": len(accepted),
+                  "rejected_lines": len(rejected), "of_stage": len(of_stage), "already_in_launch_corpus": len(of_stage) - len(new),
+                  "boundary_exclusions": len(rows), "boundary_by_reason": dict(collections.Counter(r["reason"] for r in rows))}
+
+
+def onpolicy_export(cfg: Config, codec: ChatCodec, run: Path, stage: str, log: Callable[[str], None] = lambda s: None) -> dict:
     out = Path(cfg.out)
     manifest_path = out / "program-manifest.json"
     if not manifest_path.is_file():
         raise ProgramError("no program-manifest.json under --out", help="run the base export first")
     manifest = json.loads(manifest_path.read_text())
+    limit = check_context_limit(cfg.context_limit)
+    from program import dojo_sources as DS  # imports the dojo
+
+    episodes, _ = DS.read_run(Path(run))  # refuses a run without verification.jsonl; zero episodes is allowed
     col = collect(dataclasses.replace(cfg, skip_dojo=True), log)  # only the exposure index is needed here
-    world = DS.open_world(cfg.snapshot_root, cfg.repo, cfg.snapshot_until, cfg.memory_sessions or cfg.c2_sessions, cfg.illumos_pack)
-    recs, report = DS.onpolicy_records(world, Path(run), stage, DS.system_text(world, cfg.dojo_prompt))
-    kept, rows = apply_boundary(recs, col.exposure, SPL.load_sentinels(cfg.sentinel_exclusions) if cfg.sentinel_exclusions else None)
+    sentinels = SPL.load_sentinels(cfg.sentinel_exclusions) if cfg.sentinel_exclusions else None
+    recs: list[dict] = []
+    report: dict = {"episodes_in_run": len(episodes)}
+    boundary_rows: list[dict] = []
+    if episodes:
+        world = DS.open_world(cfg.snapshot_root, cfg.repo, cfg.snapshot_until, cfg.memory_sessions or cfg.c2_sessions, cfg.illumos_pack)
+        dojo_recs, report = DS.onpolicy_records(world, Path(run), stage, DS.system_text(world, cfg.dojo_prompt))
+        report["episodes_in_run"] = len(episodes)
+        recs, boundary_rows = apply_boundary(dojo_recs, col.exposure, sentinels)
+    gen_info = None
+    if cfg.include_generated:
+        gen, gen_info = generated_supplements(cfg, stage, launch_record_ids(out), col.exposure, sentinels)
+        have = {r["record_id"] for r in recs}
+        recs += [r for r in gen if r["record_id"] not in have]
     existing: dict[str, str] = {}
     for path in (out / "records").glob("*.jsonl"):
+        if path.name == f"onpolicy-{stage}.jsonl":
+            continue
         for r in SRC.read_jsonl(path):
             if r["split"] == "excluded":
                 continue
             for k in SPL.link_keys(r):
                 existing[k] = r["split"]
-    for r in kept:
+    for r in recs:
         keys = SPL.link_keys(r)
         splits = {existing[k] for k in keys if k in existing}
         r["component_id"] = "c-onpolicy-" + sha256_hex(sorted(keys) or [r["record_id"]])[:12]
         r["split"] = "dev" if splits == {"dev"} else "train"
-    toks, unfit, _ = tokenize_records(kept, codec, check_context_limit(cfg.context_limit))
-    rows_sorted = sorted((toks[r["record_id"]] for r in kept if r["record_id"] in toks), key=lambda t: order_key(t["record_id"]))
+    toks, unfit, _ = tokenize_records(recs, codec, limit)
+    rows_sorted = sorted((toks[r["record_id"]] for r in recs if r["record_id"] in toks), key=lambda t: order_key(t["record_id"]))
     for t in rows_sorted:
         problems = S.validate_tokens(t)
         if problems:
@@ -499,16 +542,29 @@ def onpolicy_export(cfg: Config, codec: ChatCodec, run: Path, stage: str, log: C
     name = f"onpolicy-{stage}.tokens.jsonl"
     text = jsonl(rows_sorted)
     write_private(out / name, text)
-    write_private(out / "records" / f"onpolicy-{stage}.jsonl", jsonl(sorted((_clean(r) for r in kept), key=lambda r: order_key(r["record_id"]))))
+    write_private(out / "records" / f"onpolicy-{stage}.jsonl", jsonl(sorted((_clean(r) for r in recs), key=lambda r: order_key(r["record_id"]))))
+    by_source = dict(sorted(collections.Counter(t["source"] for t in rows_sorted).items()))
     entry = {"stage": stage, "run": str(run), "archive": name, "archive_sha256": sha256_hex(text), "sha256": sha256_hex(text),
-             "records": len(rows_sorted), "by_kind": dict(collections.Counter(t["kind"] for t in rows_sorted)),
-             "unfit": len(unfit), "boundary_exclusions": len(rows), "report": report, "world_status": "retrospective_development"}
+             "records": len(rows_sorted), "by_kind": dict(collections.Counter(t["kind"] for t in rows_sorted)), "by_source": by_source,
+             "unfit": len(unfit), "boundary_exclusions": len(boundary_rows), "report": report, "context_limit": limit,
+             "world_status": "retrospective_development", "generated_included": bool(cfg.include_generated)}
+    manifest.setdefault("files_sha256", {})
+    if cfg.include_generated:
+        sidecar = {"schema": "lilith/program-onpolicy-manifest@1", "run_id": S.RUN_ID, "stage": stage, "archive": name,
+                   "archive_sha256": entry["archive_sha256"], "records": len(rows_sorted), "by_source": by_source,
+                   "by_kind": entry["by_kind"], "context_limit": limit, "unfit": len(unfit),
+                   "dojo_run": {"path": str(run), **report}, "generated": gen_info, "note": ONPOLICY_GENERATED_NOTE,
+                   "sentinels": None if sentinels is None else {"keys": len(sentinels), "path": str(cfg.sentinel_exclusions)}}
+        stext = json.dumps(sidecar, indent=2, sort_keys=True) + "\n"
+        write_private(out / f"onpolicy-{stage}.manifest.json", stext)
+        manifest["files_sha256"][f"onpolicy-{stage}.manifest.json"] = sha256_hex(stext)
+        entry["sidecar"] = f"onpolicy-{stage}.manifest.json"
     manifest["onpolicy_archives"] = [e for e in manifest.get("onpolicy_archives", []) if (e["stage"], e["run"]) != (stage, str(run))] + [entry]
     for s in manifest["stages"]:
         if s["name"] == stage and s["onpolicy"] is not None:
             s["onpolicy"]["archive"] = name
             s["onpolicy"]["archive_sha256"] = entry["archive_sha256"]
-    manifest.setdefault("files_sha256", {})[name] = entry["archive_sha256"]
+    manifest["files_sha256"][name] = entry["archive_sha256"]
     write_private(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     write_private(out / f"onpolicy-{stage}.unfit.jsonl", jsonl(sorted(unfit, key=lambda u: u["record_id"])))
     return entry
@@ -536,6 +592,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                    help="exam-freeze sentinel ids/hashes to exclude from every stage (null in the manifest when the file is absent)")
     p.add_argument("--context-limit", type=int, default=S.CONTEXT_LIMIT,
                    help=f"token limit per record (default {S.CONTEXT_LIMIT}, at most {MAX_CONTEXT_LIMIT}); longer records are listed in unfit.jsonl")
+    p.add_argument("--include-generated", action="store_true",
+                   help="with --onpolicy: also deliver the --generated-dir records of --stage that the launch corpus lacks, "
+                        "keeping their own source, plus an onpolicy-<stage>.manifest.json sidecar")
     p.add_argument("--skip-dojo", action="store_true")
     p.add_argument("--dojo-prompt", choices=("compact", "full"), default="compact",
                    help="system prompt of dojo-derived records: compact = role + dojo addendum, full = + chief-of-staff procedures")
@@ -554,7 +613,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                  cos_trajectories=a.cos_trajectories,
                  teacher_runs=tuple(a.teacher_run) if a.teacher_run else Config.teacher_runs, c2_sessions=a.c2_sessions,
                  memory_sessions=a.memory_sessions, generated_dir=gen, snapshot_root=a.snapshot_root,
-                 snapshot_until=a.snapshot_until, parent=a.parent, illumos_pack=illumos, sentinel_exclusions=a.sentinel_exclusions, skip_dojo=a.skip_dojo, dojo_prompt=a.dojo_prompt, context_limit=a.context_limit)
+                 snapshot_until=a.snapshot_until, parent=a.parent, illumos_pack=illumos, sentinel_exclusions=a.sentinel_exclusions, skip_dojo=a.skip_dojo, dojo_prompt=a.dojo_prompt, context_limit=a.context_limit, include_generated=a.include_generated)
     log = lambda s: print(f"[export] {s}", file=sys.stderr, flush=True)
     try:
         check_context_limit(cfg.context_limit)

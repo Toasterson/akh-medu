@@ -286,3 +286,83 @@ def test_context_limit_is_validated_and_recorded(world, codec, tmp_path):
     m = export_corpus(Config(**{**world.__dict__, "context_limit": 16384}), codec)
     assert m["context_limit"] == 16384 and m["unfit"]["limit"] == 16384 and m["parent"]["context_limit"] == 16384
     assert export_corpus(world, codec)["context_limit"] == 8192
+
+
+# -- on-policy delivery with generated supplements ----------------------------------------------------------------
+
+
+def _gen(source, stage, text, **kw):
+    return SRC.make_record(source=source, source_ref="gen", stage=stage, families=["silence"], language="fr",
+                           messages=[S.user(text), S.assistant("reply " + text)], **kw)
+
+
+def _empty_run(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "episodes.jsonl").write_text("")
+    (run / "verification.jsonl").write_text("")
+    return run
+
+
+def test_onpolicy_refuses_a_run_without_verification(world, codec, tmp_path):
+    from program.export import onpolicy_export
+
+    export_corpus(world, codec)
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "episodes.jsonl").write_text("")
+    with pytest.raises(S.ProgramError) as info:
+        onpolicy_export(world, codec, run, "yellow")
+    assert "verification.jsonl" in str(info.value) and info.value.help
+
+
+def test_generated_only_delivery_keeps_sources_and_skips_launch_records(world, codec, tmp_path):
+    from program.export import onpolicy_export
+
+    export_corpus(world, codec)
+    base_manifest = json.loads((world.out / "program-manifest.json").read_text())
+    new_variation = _gen("variation", "yellow", "fresh variation")
+    new_guidance = _gen("guidance", "yellow", "fresh guidance")
+    other_stage = _gen("sparring", "green", "not for yellow")
+    sentinel_hit = _gen("variation", "yellow", "held out variation")
+    in_launch = json.loads((world.generated_dir / "yellow.jsonl").read_text().splitlines()[0])
+    (world.generated_dir / "more.jsonl").write_text("".join(json.dumps(r) + "\n" for r in
+                                                           (new_variation, new_guidance, other_stage, sentinel_hit)))
+    sentinel = tmp_path / "sentinels.jsonl"
+    sentinel.write_text(json.dumps({"id": sentinel_hit["record_id"]}) + "\n")
+    cfg = Config(**{**world.__dict__, "include_generated": True, "sentinel_exclusions": sentinel, "context_limit": 4096})
+    entry = onpolicy_export(cfg, codec, _empty_run(tmp_path), "yellow")
+    rows = [json.loads(line) for line in (world.out / "onpolicy-yellow.tokens.jsonl").read_text().splitlines()]
+    ids = {r["record_id"] for r in rows}
+    assert ids == {new_variation["record_id"], new_guidance["record_id"]}
+    assert {r["source"] for r in rows} == {"variation", "guidance"}  # never relabelled as onpolicy
+    assert in_launch["record_id"] not in ids and other_stage["record_id"] not in ids and sentinel_hit["record_id"] not in ids
+    for r in rows:
+        assert S.validate_tokens(r) == [] and r["stage"] == "yellow"
+    side = json.loads((world.out / "onpolicy-yellow.manifest.json").read_text())
+    assert side["by_source"] == {"guidance": 1, "variation": 1} and side["context_limit"] == 4096
+    assert "outran the launch freeze" in side["note"]
+    assert side["generated"]["already_in_launch_corpus"] == 1 and side["generated"]["boundary_by_reason"] == {"sentinel": 1}
+    assert set(side["generated"]["files_sha256"]) == {"yellow.jsonl", "more.jsonl"}
+    assert side["archive_sha256"] == entry["archive_sha256"] == hashlib.sha256((world.out / "onpolicy-yellow.tokens.jsonl").read_bytes()).hexdigest()
+    m = json.loads((world.out / "program-manifest.json").read_text())
+    assert m["files_sha256"]["onpolicy-yellow.manifest.json"] == hashlib.sha256((world.out / "onpolicy-yellow.manifest.json").read_bytes()).hexdigest()
+    assert {k: v for k, v in m["stages"][1].items() if k != "onpolicy"} == {k: v for k, v in base_manifest["stages"][1].items() if k != "onpolicy"}
+    # idempotent
+    again = onpolicy_export(cfg, codec, tmp_path / "run", "yellow")
+    assert again["archive_sha256"] == entry["archive_sha256"]
+    assert len([e for e in json.loads((world.out / "program-manifest.json").read_text())["onpolicy_archives"]]) == 1
+
+
+def test_generated_supplements_are_off_by_default(world, codec, tmp_path):
+    from program.export import onpolicy_export
+
+    export_corpus(world, codec)
+    (world.generated_dir / "more.jsonl").write_text(json.dumps(_gen("variation", "yellow", "extra")) + "\n")
+    entry = onpolicy_export(world, codec, _empty_run(tmp_path), "yellow")
+    assert entry["records"] == 0 and not (world.out / "onpolicy-yellow.manifest.json").exists()
+
+
+def test_cli_include_generated_flag():
+    assert parse_args(["--out", "x"]).include_generated is False
+    assert parse_args(["--out", "x", "--onpolicy", "r", "--stage", "green", "--include-generated"]).include_generated is True

@@ -215,6 +215,12 @@ def _dojo_record(world: World, spec: EpisodeSpec, rendered: Rendered, rec: Mappi
 
 
 def read_run(run: Path) -> tuple[dict[str, dict], dict[str, dict]]:
+    run = Path(run)
+    for name in ("episodes.jsonl", "verification.jsonl"):
+        if not (run / name).is_file():
+            raise S.ProgramError(f"{run} has no {name}",
+                                 help="point --onpolicy at a dojo run directory; verification.jsonl is written as episodes are scored, "
+                                      "so wait for the first scored episode (an empty file is accepted for a generated-only delivery)")
     episodes, verifications = {}, {}
     for line in (run / "episodes.jsonl").read_text().splitlines():
         if line.strip():
