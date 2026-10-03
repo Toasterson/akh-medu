@@ -170,7 +170,7 @@ def snapshot_root_sha256(store: SnapshotStore) -> str:
 # its `declared` hash covers the whole rendered TOML (comments, rendered budgets), and `agent_info` and
 # `memory` are what the running core reported at probe time, so all three move with a redeploy
 # without changing what the teacher is. See `run_identity`.
-IDENTITY_KEYS = ("runner", "dojo", "git_sha", "snapshot_until", "snapshot_root_sha256", "floors_sha256", "prompt_sha256",
+IDENTITY_KEYS = ("runner", "dojo", "git_sha", "snapshot_since", "snapshot_until", "snapshot_root_sha256", "floors_sha256", "prompt_sha256",
                  "system_prompt_sha256", "tools_sha256", "model_kind", "model_id", "endpoint_host", "temperature",
                  "max_tokens", "sampling.repeat_penalty", "max_rounds", "episode_token_cap", "context_window", "seed", "split",
                  "families", "limit")
@@ -210,6 +210,9 @@ def run_identity(provenance: Mapping[str, Any]) -> dict[str, Any]:
     if provenance.get("snapshot_until") is None:
         # A run recorded before the cutoff existed (or without one) saw the whole root: compare it as "none".
         provenance = {**provenance, "snapshot_until": NO_CUTOFF}
+    if provenance.get("snapshot_since") is None:
+        # No lower bound (every run recorded before `--snapshot-since`): compare it as "none".
+        provenance = {**provenance, "snapshot_since": NO_CUTOFF}
     keys = [*IDENTITY_KEYS]
     if isinstance(provenance.get("teacher"), Mapping):
         keys += [f"teacher.{k}" for k in TEACHER_IDENTITY_KEYS]
@@ -689,6 +692,15 @@ def build_adapter(args: argparse.Namespace) -> ModelAdapter:
                             max_tokens=args.max_tokens, policy=policy)
 
 
+def add_snapshot_since(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--snapshot-since", default=None, metavar="FLOOR",
+                   help="only snapshots taken at or after FLOOR (a snapshot id such as 20261002T000000Z, or an ISO "
+                        "timestamp) exist for spec building, hindsight labels and replay: the sealed exam window "
+                        "(worlds recorded after the training cutoff; with --snapshot-until it is [FLOOR, CUTOFF]). "
+                        "Part of the run identity (a resume with another floor is refused); default: from the "
+                        "first snapshot")
+
+
 def add_snapshot_until(p: argparse.ArgumentParser) -> None:
     p.add_argument("--snapshot-until", default=None, metavar="CUTOFF",
                    help="only snapshots taken at or before CUTOFF (a snapshot id such as 20261001T171956Z, or an ISO "
@@ -701,6 +713,7 @@ def add_snapshot_until(p: argparse.ArgumentParser) -> None:
 def _add_run_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--root", type=Path, default=None, help="snapshot root (default: $LILITH_SNAPSHOT_ROOT)")
     add_snapshot_until(p)
+    add_snapshot_since(p)
     p.add_argument("--repo", type=Path, default=REPO_ROOT, help="local akh-medu clone: ancestry oracle and provenance")
     p.add_argument("--illumos-pack", type=Path, default=None)
     p.add_argument("--corrections", type=Path, default=None,
@@ -870,6 +883,7 @@ def _base_provenance(args: argparse.Namespace, store: SnapshotStore, system: Sys
         "dojo": DOJO_VERSION,
         **git_provenance(args.repo, args.allow_dirty),
         "snapshot_until": store.cutoff,  # None = the whole root; `auto` is recorded as the id it resolved to
+        "snapshot_since": store.floor,  # None = from the first snapshot
         "snapshot_root_sha256": snapshot_root_sha256(store),
         "snapshots": len(store.ids),
         "floors_sha256": floors_mod.FLOORS_V1_SHA256,
@@ -891,7 +905,7 @@ def _base_provenance(args: argparse.Namespace, store: SnapshotStore, system: Sys
 
 def cmd_run(args: argparse.Namespace) -> int:
     root = args.root or Path(os.environ.get("LILITH_SNAPSHOT_ROOT", RECORDER_DEFAULT_ROOT))
-    store = SnapshotStore.open(root, args.snapshot_until)
+    store = SnapshotStore.open(root, args.snapshot_until, args.snapshot_since)
     oracle = GitAncestryOracle(args.repo)
     pack = load_illumos_pack(args.illumos_pack) if args.illumos_pack else ()
     corrections = load_corrections(args.corrections, args.correction_annotations) if args.corrections else ()
@@ -951,6 +965,7 @@ def dry_run_report(store: SnapshotStore, chosen: Sequence[Chosen], selection: Ma
     return {
         "episodes": len(chosen),
         "snapshot_until": store.cutoff,
+        "snapshot_since": store.floor,
         "snapshots": len(store.ids),
         "selection": dict(selection),
         "system_prompt_sha256": system.sha256,

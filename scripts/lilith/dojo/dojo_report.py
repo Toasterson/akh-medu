@@ -65,8 +65,9 @@ NEEDS = {
 
 
 def build_report(root: Path, repo: Path | None, pack: Path | None, corrections: Path | None = None,
-                 annotations: Path | None = DEFAULT_CORRECTION_ANNOTATIONS, memory_sessions: Path | None = None, snapshot_until: str | None = None) -> dict:
-    store = SnapshotStore.open(root, snapshot_until)
+                 annotations: Path | None = DEFAULT_CORRECTION_ANNOTATIONS, memory_sessions: Path | None = None, snapshot_until: str | None = None,
+                 snapshot_since: str | None = None) -> dict:
+    store = SnapshotStore.open(root, snapshot_until, snapshot_since)
     recorded = load_corrections(corrections, annotations) if corrections else ()
     ctx = BuildContext(
         oracle=GitAncestryOracle(repo) if repo else None,
@@ -154,11 +155,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--snapshot-until", default=None, metavar="CUTOFF",
                         help="only snapshots at or before CUTOFF (snapshot id or ISO timestamp, or `auto`)")
+    parser.add_argument("--snapshot-since", default=None, metavar="FLOOR",
+                        help="only snapshots at or after FLOOR (snapshot id or ISO timestamp)")
     args = parser.parse_args(argv)
     root = args.root or Path(os.environ.get("LILITH_SNAPSHOT_ROOT", RECORDER_DEFAULT_ROOT))
     try:
         report = build_report(root, args.repo, args.illumos_pack, args.corrections, args.correction_annotations,
-                              args.memory_sessions, args.snapshot_until)
+                              args.memory_sessions, args.snapshot_until, args.snapshot_since)
     except DojoError as error:
         print(error.render(), file=sys.stderr)
         return 2
