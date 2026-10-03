@@ -173,7 +173,15 @@ class Ssh:
         if result.returncode:
             raise HostError('lilith::supervise::remote', f'remote command failed ({result.returncode}): {result.stderr.strip()[-300:]}',
                             'the pod may be unreachable or the payload missing')
-        return json.loads(result.stdout.strip().splitlines()[-1])
+        text = result.stdout.strip()
+        try:                       # whole-output JSON (pretty-printed files such as onpolicy-needed.json)
+            return json.loads(text)
+        except json.JSONDecodeError:
+            try:                   # a status line after other output: the last line is the JSON
+                return json.loads(text.splitlines()[-1])
+            except (json.JSONDecodeError, IndexError) as error:
+                raise HostError('lilith::supervise::remote', f'remote output is not JSON: {text[-200:]!r}',
+                                'the pod printed something other than the expected JSON document') from error
 
     def put(self, local: Path, remote: str, *, timeout: float = 900) -> None:
         # Plain flags only: macOS ships an old rsync/openrsync; scp is the fallback.
