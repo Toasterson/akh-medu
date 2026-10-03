@@ -3,6 +3,10 @@
 #
 #   bash scripts/lilith/runpod/make_payload.sh [output-dir]     # default <repo>/target/lilith-payload
 #
+# The file list is verify_payload.PAYLOAD_FILES: it includes the program trainer
+# (scripts/lilith/program/), the pilot's history/ guards, lilith_lora_trainer.py and the
+# session-platform lilith_adapter_mechanics/numerics modules, so one payload SHA covers a program run.
+#
 # Output: lilith-payload-main-<sha12>.tar.gz (exactly verify_payload.PAYLOAD_FILES at
 # their repo paths + source-manifest.json) and source-manifest-main-<sha12>.json.
 # Refuses a dirty tracked tree, a HEAD that is not on origin/main, or an existing output.

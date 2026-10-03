@@ -31,6 +31,15 @@ SCHEMA = 'lilith/source-manifest@1'
 PAYLOAD_FILES = (
     'scripts/lilith/history/train.py',
     'scripts/lilith/history/run_pod.py',
+    'scripts/lilith/history/supervise.py',
+    # Guided five-stage training program (docs/ai/plans/2026-10-03-lilith-train-now-reconciliation.md):
+    # trainer + checkpoint protocol + pod entrypoint + candidate serving; the Mac host guard rides along
+    # so its code SHA is on the same main commit as the trainer it supervises.
+    'scripts/lilith/program/train_program.py',
+    'scripts/lilith/program/checkpoint.py',
+    'scripts/lilith/program/run_program_pod.py',
+    'scripts/lilith/program/supervise_program.py',
+    'scripts/lilith/program/serve_candidate.sh',
     'scripts/lilith/runpod/bootstrap.sh',
     'scripts/lilith/runpod/run_smoke.sh',
     'scripts/lilith/runpod/verify_payload.py',
@@ -63,6 +72,8 @@ PAYLOAD_FILES = (
     'scripts/lilith/dojo/floors.py',
     'scripts/lilith/dojo/hindsight.py',
     'scripts/lilith/dojo/language.py',
+    'scripts/lilith/dojo/replay_anima.py',
+    'scripts/lilith/dojo/replay_memory.py',
     'scripts/lilith/dojo/replay_server.py',
     'scripts/lilith/dojo/replay_match.py',
     'scripts/lilith/dojo/reward.py',

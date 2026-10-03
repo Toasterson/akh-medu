@@ -14,8 +14,10 @@
 #                   half-built env, or a broken ninja is moved aside and rebuilt from the
 #                   payload's lock (bootstrap.sh install). Parent/driver failures are refusals.
 #   4. selection    serve_adapter.py: frozen parent by default; the LoRA adapter under
-#                   $ROOT/adapters/active/ only with a C4b-certified active.json
-#   5. vLLM         OpenAI server on :$LILITH_SERVE_PORT (8000), served model name `lilith`,
+#                   $ROOT/adapters/active/ only with a C4b-certified active.json. Exception for the
+#                   training program: LILITH_SERVE_CANDIDATE_SELECTION=<lilith/serve-candidate@1 json>
+#                   serves one sha256-pinned UNCERTIFIED stage adapter (serve_adapter.py candidate)
+#   5. vLLM        OpenAI server on :$LILITH_SERVE_PORT (8000), served model name `lilith`,
 #                   64K context, bf16, KV cache dtype LILITH_SERVE_KV_CACHE_DTYPE (auto), native
 #                   tool calling: --enable-auto-tool-choice --tool-call-parser <serve_tools.py
 #                   resolve: LILITH_SERVE_TOOL_PARSER, default auto = the registered gemma4 parser>
@@ -205,9 +207,17 @@ fi
 log "bootstrap: $BOOT_ACTION"
 
 # ------------------------------------------------------------------ 4. selection
-"$PY" "$SCRIPT_DIR/serve_adapter.py" select --registry "$ROOT/adapters/active" --mode "$ADAPTER_MODE" \
-  > "$SESSION_DIR/selection.json" 2> "$SESSION_DIR/selection.err" ||
-  die lilith::serve::adapter "$(head -n1 "$SESSION_DIR/selection.err")" "$(sed -n 's/^  help: //p' "$SESSION_DIR/selection.err" | head -n1)"
+if [[ -n "${LILITH_SERVE_CANDIDATE_SELECTION:-}" ]]; then
+  # Training-program on-policy rounds (scripts/lilith/program/serve_candidate.sh): an UNCERTIFIED stage
+  # adapter under $ROOT/program/ is served on the training pod only, pinned by sha256. Never the C2 serve pod.
+  "$PY" "$SCRIPT_DIR/serve_adapter.py" candidate --selection "$LILITH_SERVE_CANDIDATE_SELECTION" --root "$ROOT" \
+    > "$SESSION_DIR/selection.json" 2> "$SESSION_DIR/selection.err" ||
+    die lilith::serve::candidate "$(head -n1 "$SESSION_DIR/selection.err")" "$(sed -n 's/^  help: //p' "$SESSION_DIR/selection.err" | head -n1)"
+else
+  "$PY" "$SCRIPT_DIR/serve_adapter.py" select --registry "$ROOT/adapters/active" --mode "$ADAPTER_MODE" \
+    > "$SESSION_DIR/selection.json" 2> "$SESSION_DIR/selection.err" ||
+    die lilith::serve::adapter "$(head -n1 "$SESSION_DIR/selection.err")" "$(sed -n 's/^  help: //p' "$SESSION_DIR/selection.err" | head -n1)"
+fi
 sel() { "$PY" -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print("" if v is None else v)' \
           "$SESSION_DIR/selection.json" "$1"; }
 MODE="$(sel mode)"
