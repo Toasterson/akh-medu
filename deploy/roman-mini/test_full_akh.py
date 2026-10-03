@@ -1760,7 +1760,7 @@ class DojoTeacherRenderTests(RenderFixture):
         self.configure()
         self.render()
         names = fa.dojo_teacher_names()
-        self.assertEqual(names, ("dojo-teacher", "dojo-teacher-2", "dojo-teacher-3"))
+        self.assertEqual(names, ("dojo-teacher", *(f"dojo-teacher-{n}" for n in range(2, 7))))
         self.assertEqual(len(names), fa.DOJO_TEACHER_REPLICAS)
         host = self.toml(self.HOST)
         principals = {p["id"]: p for p in host["acp"]["principals"]}
