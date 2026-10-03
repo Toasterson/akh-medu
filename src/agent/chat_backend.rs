@@ -228,6 +228,24 @@ pub trait ChatBackend: Send + Sync {
         }
     }
 
+    /// Analyze audio through the selected model once before the ordinary tool
+    /// loop. The returned model observation is retained as untrusted evidence;
+    /// unsupported backends refuse instead of continuing on accompanying text.
+    fn ground_prompt_audio(
+        &self,
+        audio: &[super::prompt_audio::ChatPromptAudio],
+        _question: &str,
+    ) -> Result<Option<String>, ChatBackendError> {
+        if audio.is_empty() {
+            Ok(None)
+        } else {
+            Err(ChatBackendError::TurnFailed {
+                backend: self.label().into(),
+                reason: "this model backend does not support audio prompts; audio was not sent to the model".into(),
+            })
+        }
+    }
+
     /// One tool-enabled chat turn: the model answers `conversation`, optionally
     /// requesting tools from `tools` (OpenAI-style function schemas).
     ///

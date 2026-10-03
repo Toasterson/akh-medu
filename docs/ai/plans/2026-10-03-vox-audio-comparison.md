@@ -1,6 +1,6 @@
 # Vox recording review through Akh-Medu
 
-- Status: implementation plan; audio integration and audio qualification pending.
+- Status: native transport implemented; live serving qualification pending.
 - Date: 2026-10-03.
 - Operator direction: use Akh-Medu/Roman for model-assisted recording review and
   eventually for all transcription comparisons. Vibe may provide an initial
@@ -43,6 +43,30 @@ outputs. Verify omissions against audio; a final transcript timestamp at the
 audio end does not prove all intervening speech was recognized. English repair
 cases include user-supplied names, numbers and phonetic confusions. Preserve
 disfluencies; do not train grammar cleanup as recognition repair.
+
+## Native input contract
+
+The native ACP path accepts one complete `audio/wav` (or `audio/x-wav`) block,
+alone or alongside text: mono PCM16, 16 kHz, at most 120 seconds and 4 MiB.
+Base64, complete WAV sample data, format and duration are checked before session
+checkout. Resample a copy of compressed originals; no automatic truncation or
+transcript substitution occurs. ACP advertises transport support; the selected
+backend must still pass an authenticated live capability probe.
+
+The OpenAI-compatible backend checks the same endpoint's `/props` for
+`modalities.audio: true`, then sends the exact validated bytes as `input_audio`
+to its configured model. The pre-tool observation has no tools, a 2048-token
+maximum and a 240-second maximum request timeout. Unknown or unavailable
+backends, missing observations and rejected audio refuse the turn without a
+text-only fallback. Cancellation is checked before and after the synchronous
+observation; an in-flight HTTP request remains bounded by its timeout.
+
+The ordinary full akh tool loop receives the model observation as untrusted
+evidence with its input SHA-256 and duration. That evidence remains in the
+owning conversation for follow-up, without re-listening or retaining the raw
+waveform in history. Speech remains source data, not authority to execute tools.
+Tests cover byte preservation through the provider request, disabled-projector
+refusal without inference, retained session evidence and unsupported backends.
 
 ## Integration sequence
 
