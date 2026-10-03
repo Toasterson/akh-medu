@@ -158,7 +158,11 @@ class Ssh:
                  runner: Callable[..., subprocess.CompletedProcess] = subprocess.run):
         self.target, self.port, self.runner = target, port, runner
         self.opts = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=accept-new',
-                     '-o', f'UserKnownHostsFile={known_hosts}', '-i', str(identity), '-o', 'IdentitiesOnly=yes']
+                     '-o', f'UserKnownHostsFile={known_hosts}']
+        # `--identity agent`: authenticate with the running ssh-agent (the pod's registered key may
+        # exist only there); otherwise pin the given key file.
+        if str(identity) != 'agent':
+            self.opts += ['-i', str(identity), '-o', 'IdentitiesOnly=yes']
 
     def run(self, command: str, *, timeout: float, input: str | None = None) -> subprocess.CompletedProcess:
         return self.runner(['ssh', *self.opts, '-p', str(self.port), self.target, command], capture_output=True, text=True,
@@ -498,7 +502,8 @@ def parse_args(argv: Sequence[str] | None = None) -> HostArgs:
     p.add_argument('--pod-id', required=True)
     p.add_argument('--ssh', required=True, help='user@host of the pod ssh endpoint')
     p.add_argument('--port', type=int, required=True)
-    p.add_argument('--identity', type=Path, required=True)
+    p.add_argument('--identity', type=Path, required=True,
+                   help="ssh private key file, or the literal 'agent' to use the running ssh-agent")
     p.add_argument('--window-seconds', type=int, required=True)
     p.add_argument('--approval', type=Path, required=True)
     p.add_argument('--dest', type=Path, required=True, help='new local evidence directory for this window')
