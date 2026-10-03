@@ -252,7 +252,7 @@ def tokenize_records(records: Sequence[dict], codec: ChatCodec | None, limit: in
         try:
             if rec.get("_tokens") is not None:
                 pre = rec["_tokens"]
-                ids, mask = list(pre["input_ids"]), [int(bool(m)) for m in pre["target_mask"]]
+                ids, mask = list(pre["input_ids"]), [bool(m) for m in pre["target_mask"]]
                 if codec is not None:
                     again = encode_sft(codec, rec["messages"], rec.get("tools"), limit)
                     if again.input_ids != ids or again.target_mask != mask:
