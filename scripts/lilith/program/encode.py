@@ -55,7 +55,8 @@ class Encoded:
         return sum(self.target_mask)
 
     def to_dict(self) -> dict:
-        return {"input_ids": self.input_ids, "target_mask": self.target_mask}
+        # The trainer validates masks as booleans (first token masked, ≥1 supervised).
+        return {"input_ids": self.input_ids, "target_mask": [bool(m) for m in self.target_mask]}
 
 
 class Unfit(ProgramError):
