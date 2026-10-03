@@ -1,6 +1,7 @@
 # Vox recording review through Akh-Medu
 
-- Status: native transport implemented; live serving qualification pending.
+- Status: native transport implemented; Hephaistos waveform qualification
+  completed; native Roman release pending.
 - Date: 2026-10-03.
 - Operator direction: use Akh-Medu/Roman for model-assisted recording review and
   eventually for all transcription comparisons. Vibe may provide an initial
@@ -9,7 +10,7 @@
   [full akhs](../decisions/113-full-akh-always.md), and
   [Hephaistos serving](../decisions/121-lilith-serving-on-hephaistos-llama-cpp.md).
 
-## Verified boundary
+## Initial boundary
 
 The historical Gemma audio change (`a7c1f416d`) added
 `CandleBackend::understand_audio`, WAV decoding, an audio projector and the
@@ -24,6 +25,27 @@ no audio was supplied to it. The Hephaistos Gemma server's authenticated
 the pinned Q8_0 parent and template but no audio-projector sidecar, and its
 launch command has no projector argument. Direct calls to that server cannot
 substitute for an audio review or a canonical Roman turn.
+
+## Serving qualification on 2026-10-03
+
+The pinned parent files were fully hash-verified before converting the
+11-tensor F16 audio/vision sidecar (122,031,136 bytes) with the clean pinned
+llama.cpp converter. The existing main-sourced serving wrapper loads it via
+`--mmproj`; no second server was started. After a leased, quiet reload, the
+server returned healthy and authenticated `/props` reported `audio: true`.
+Lilith's background daemon was restored and the lease released.
+
+One complete 41.006-second, 16 kHz mono PCM16 Swiss German waveform was accepted
+without an ASR transcript in a bounded server qualification request. The model
+returned content with `finish_reason: stop` in 13.709 seconds. Private receipts
+retain the request, original/derived hashes, projector pins and raw response.
+This establishes waveform input on the serving instance, not recognition
+accuracy or native Roman audio transport.
+
+An existing text-only Roman comparison subsequently returned an unrelated
+status brief. Its WAL captured the correct comparison question; the normal
+end-turn signal is not accepted as task success. Preserve such failed runs and
+keep the literal audio observation separate from final agent synthesis.
 
 ACP previously discarded audio blocks during prompt decoding. The accompanying
 guard rejects audio-only and mixed text/audio requests before session checkout
