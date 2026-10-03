@@ -1,5 +1,7 @@
 # Project Lilith — overview
 
+Current CoS/eight-voice execution direction: [October 3 transcript-acceleration plan](2026-10-03-lilith-train-now-reconciliation.md). The dated prototype evidence below remains a historical record. Development training uses the harvested corpus and verified corrections; it does not wait for fourteen fresh recorder days.
+
 Status as of 22 September 2026: local prototype with an operational illumos test
 VM, actual training comparisons, and verified Vulkan adapter mechanics. Release
 quality and Qwen parity remain unproven.

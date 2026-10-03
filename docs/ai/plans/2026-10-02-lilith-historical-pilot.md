@@ -1,9 +1,19 @@
 # Lilith historical receipt pilot
 
-Status: prepared; Runpod start and GPU training explicitly held for operator go.
+Status: pilot completed after operator go, 2026-10-02 UTC. Next development work follows [the October 3 reconciled plan](2026-10-03-lilith-train-now-reconciliation.md).
 Anima: WI-526 (`01a0f96b-54fc-7c00-b851-1025a945beae`), under the Lilith C-series plan.
 This supplements `2026-10-01-lilith-c5-c7-dojo-and-training.md`. It does not
 replace C7's guided-RL round, its exam floors, or the fresh recorder holdout.
+
+## Completed pilot and next stage
+
+PR #510 merged as `89b1e40b73ebfbf3349c0c5771d06a8344da4642`. Pod `784ptttwzqhho2` completed 200 optimizer steps. Parent exact receipt answers: 0/12 development and 0/8 historical; candidate: 12/12 and 8/8. Fresh-process reload matched probe logits/argmax with zero additional optimizer steps. The candidate is inactive. The pod was confirmed stopped/EXITED at 2026-10-02T22:46:48Z; artifacts were copied and readback-verified on NFS.
+
+Candidate SHA-256: `d7e46c5905dbfa042810e23da7d75111acec539718840e8c3427cf9d1185b9b1`.
+Private result: `/Users/toasty/lilith-private/history-20261001/launch/pilot-summary.json`.
+Backup: `/Volumes/akh-medu-runs/lilith/history-pilot-20261001-prepared/pod-784ptttwzqhho2`.
+
+The recipe and hold/go descriptions below are the original preparation record. They do not describe current launch authorization or current GPU capacity. The receipt pilot did not train the broader voices/CoS curriculum. That is the next development stage, with no fourteen-day training-start wait.
 
 ## Authorized scope and evidence
 
@@ -123,7 +133,4 @@ out; power-off of the physical machine itself was not witnessed. The parent and
 data copies on the independently accessible NFS share remain available for the
 pilot, so prolonged Hephaistos operation is not a prerequisite.
 
-Remaining gates: Anima review/acceptance and main merge; main-only payload
-generation; explicit operator go; current H100 availability and bootstrap; real
-GPU training/evaluation/reload evidence. No training, model evaluation score,
-GPU budget result, or new adapter exists from this preparation.
+Original preparation gates were subsequently passed for this pilot: merge, go, main payload, bootstrap, training/evaluation/reload and confirmed pod stop. Anima lifecycle acceptance remains distinct from those artifact receipts. The next mixed curriculum still needs its own export, launch preparation and actual execution evidence; see the reconciled plan.

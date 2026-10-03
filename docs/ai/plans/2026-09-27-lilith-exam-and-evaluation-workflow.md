@@ -13,6 +13,10 @@
   follows `crates/grug-data/src/adaptive_exam.rs` and ADR 100/102. The run shape follows
   `scripts/p6/` and `training/results/*RESULT.md`. Statistics follow the Project Lilith plan.
 
+## Development training and release evaluation (2026-10-03)
+
+The [historical execution plan](2026-10-03-lilith-train-now-reconciliation.md) permits the next mixed CoS/eight-voice development SFT run before C3 reaches 14 days. The large sealed-release exam and full baseline are later evaluation milestones; they are not preconditions for that training run. Its checks reuse the completed receipt comparisons, finish the remaining cases in the same pod, add the four prepared behavior spots and one cold reload, then move to a supervised C2 interaction. Retrospective worlds admitted for training cannot be reported as untouched sealed evidence.
+
 ## 1. Exam anatomy, carried over from BabyLLM
 
 - **Four tiers per family** (ADR 100):

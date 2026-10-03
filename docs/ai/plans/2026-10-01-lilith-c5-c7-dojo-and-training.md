@@ -1,6 +1,6 @@
 # Lilith C5–C7: dojo v2, corpus and round-1 training (draft)
 
-- **Status:** Draft, 2026-10-01. It refines C4/C5/C7 of the [Lilith CoS plan](2026-09-27-lilith-chief-of-staff-rl-runpod.md) (Anima Plan `01a0e26f-d032`) and does not replace it.
+- **Status:** Revised 2026-10-03; development training now follows [the transcript-acceleration execution plan](2026-10-03-lilith-train-now-reconciliation.md). It refines C4/C5/C7 of the [Lilith CoS plan](2026-09-27-lilith-chief-of-staff-rl-runpod.md) (Anima Plan `01a0e26f-d032`) and does not replace it.
 - **Decisions:** ADR 116, ADR 110 (guided reward), ADR 112 (beliefs revised against data), ADR 123 (model profiles).
 - **Evidence:** C2 rounds 1 and 2, analysed in NFS `lilith/c2/analysis/2026-10-01-c2-round1.md` with operator decisions 1–8.
 
@@ -76,11 +76,11 @@ The parent plan's floors stay as they are.
 | Teacher dojo trajectories | `status ok`, no hard flag, weight ≥ 0.7, re-verified under the current labels | verifier weight |
 | Dojo corrected siblings | `corrected_episode()` per family (memory-epistemics first) | 1.0 for the sibling, paired with the failure |
 
-**Split gap:** every snapshot so far falls in one 7-day window, so the splitter puts everything in *sealed* and train/dev are empty. C7 therefore waits for **C3's exit (14 days of snapshots, about 2026-10-12)**. From then on the newest window stays sealed and older windows feed train/dev. Decontamination as in the parent plan.
+**Development training starts from historical data:** harvested receipts, admitted trajectories and verified corrected siblings provide an independent corpus. C7 development does not wait for C3's 14-day exit. The default recorder splitter still requires enough windows for its fresh evaluation protocol. The [October 3 execution plan](2026-10-03-lilith-train-now-reconciliation.md) fixes the retrospective data cutoff, source admission, mixed-source splits and preparation steps. Already examined diagnostic worlds used for training are not sealed release evidence; later recorder data stays outside this run.
 
 ## 6. Round-1 training (C7, ADR 105 run)
 
-Belt-ordered curriculum. Each belt has an exam on its dev families before the next one starts:
+CoS curriculum order below; the dojo manual §5 remains canonical for character belts. For the immediate mixed SFT stage, the October 3 plan uses bounded end-of-run development checks; these full guided-RL belt exams remain later milestones:
 
 1. **White: evidence discipline.** `read-failure`, `scope`, report refusals, read before explaining, act rather than announce.
 2. **Yellow: the CoS core.** `briefing` (counts + exceptions), `park-triage`, `chase` (role: flag and route, never "take ownership").
@@ -102,6 +102,6 @@ On-policy rounds draw episodes from the dojo and from supervised C2 sessions, wi
 ## 7. Operator decisions on the open questions (2026-10-01)
 
 - **Sealed hold-out:** the newest 7-day window stays sealed, rolling. Older windows feed train/dev. Rounds are compared on their shared episodes.
-- **Round-1 hardware:** a Runpod H100 within the account credit (about 6–10 H100-hours, $21–35), with spend reported. Earliest start is C3's exit (about 2026-10-12). Local GPUs (C6b) take over later rounds once they qualify.
+- **Round-1 hardware:** a Runpod H100 within the account credit (about 6–10 H100-hours, $21–35), with spend reported. The historical development stage can start once its mixed corpus and main-only launch are prepared; C3's elapsed-day exit is not its start gate. The October 3 plan bounds the next SFT run and folds in the remaining receipt comparisons. Local GPUs (C6b) take over later rounds once they qualify.
 - **Supervisor-driven C2 sessions:** admitted with `source: supervisor` and a lower weight (0.7). Their failures still become corrected siblings at full weight, because each correction is verified against the tracker. The operator's sessions stay the reference.
 - **Teachers:** GLM-5.3 only for round 1. Kimi K3 is added later only for families where GLM's siblings score low, judged from the pinned teacher baseline.

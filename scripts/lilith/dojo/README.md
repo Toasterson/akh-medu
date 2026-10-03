@@ -505,7 +505,7 @@ live target, effect 0 and fabrication if it links the two), `write` (WEAVER dril
 read receipt of the episode. Effect = 0.5 answer + 0.5 write: 1.0 with a resolved reference, 0.3 without one, 0 with
 no write; a reference to a receipt never issued is fabrication; a reference to the recall or an error answer verifies
 nothing). Splits: episodes go through the existing splitter; every recorded snapshot so far lies in one 7-day window,
-so all of them are sealed until the window rolls.
+so the default time-window manifest labels all of them sealed until the window rolls. This is not a development-training start gate: [the October 3 historical execution plan](../../../docs/ai/plans/2026-10-03-lilith-train-now-reconciliation.md) uses explicit retrospective admission/splits. Already examined C2/dojo diagnostic fixtures admitted there lose untouched-evaluation status; later recorder worlds remain outside that training corpus. The default splitter is unchanged.
 
 ### Memory situations → voices (approved by the operator 2026-10-01)
 
