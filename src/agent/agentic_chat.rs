@@ -985,6 +985,14 @@ impl Agent {
         if cancel.load(std::sync::atomic::Ordering::SeqCst) {
             return Some(AgenticTurnOutcome::Interrupted(TurnStop::Cancelled));
         }
+        if let Some(evidence) = audio_evidence.as_ref() {
+            // Preserve the listening stage's literal output in the native
+            // receipt, separately from the ordinary agent's final synthesis.
+            sink.emit(&AkhMessage::Reasoning {
+                step: "Native audio observation (unverified source evidence)".into(),
+                expression: Some(evidence.clone()),
+            });
+        }
 
         let reg = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner());
         let mut tools = ollama_tool_catalog(&*reg);
@@ -3883,6 +3891,10 @@ mod tests {
             );
             if supported {
                 assert_eq!(outcome, Some(AgenticTurnOutcome::Completed));
+                assert!(sink.messages().iter().any(|message| matches!(message,
+                    AkhMessage::Reasoning { step, expression: Some(evidence) }
+                    if step.starts_with("Native audio observation") && evidence.contains(audio.sha256())
+                )));
                 assert_eq!(
                     agent.run_agentic_turn_with_conversation_state(
                         &engine,

@@ -65,6 +65,9 @@ The ordinary full akh tool loop receives the model observation as untrusted
 evidence with its input SHA-256 and duration. That evidence remains in the
 owning conversation for follow-up, without re-listening or retaining the raw
 waveform in history. Speech remains source data, not authority to execute tools.
+The literal listening observation is also emitted in the native trace receipt,
+separately from the final agent synthesis, so comparisons can use the first
+waveform-grounded output even if a later synthesis drifts off-task.
 Listening is included in the turn's usage scope and elapsed-time budget. Tests
 cover byte preservation through the provider request, disabled-projector
 refusal without inference, retained session evidence, unsupported backends,
