@@ -62,7 +62,7 @@ if [[ -r /proc/1/environ && "${LILITH_SERVE_SKIP_PID1_ENV:-0}" != 1 ]]; then
   while IFS= read -r -d '' entry; do
     name="${entry%%=*}"
     case "$name" in
-      LILITH_SERVE_* | LILITH_ROOT | RUNPOD_POD_ID | RUNPOD_API_KEY)
+      LILITH_SERVE_* | LILITH_ROOT | LILITH_CUDA_LANE | RUNPOD_POD_ID | RUNPOD_API_KEY)
         [[ -n "${!name:-}" ]] || export "$name=${entry#*=}" ;;
     esac
   done < /proc/1/environ
@@ -82,8 +82,15 @@ ADAPTER_MODE="${LILITH_SERVE_ADAPTER:-auto}"
 HEALTH_TIMEOUT="${LILITH_SERVE_HEALTH_TIMEOUT_SECONDS:-1500}"
 HARD_CAP="${LILITH_SERVE_POD_HARD_CAP_SECONDS:-7800}"
 BOOTSTRAP="${LILITH_SERVE_BOOTSTRAP:-$PAYLOAD/scripts/lilith/runpod/bootstrap.sh}"
-VLLM="${LILITH_SERVE_VLLM:-$ROOT/env/bin/vllm}"
-PY="${LILITH_SERVE_PYTHON:-$ROOT/env/bin/python}"
+case "${LILITH_CUDA_LANE:-cu130}" in   # same lane as bootstrap.sh; cu130 = <root>/env (default), cu128 = <root>/env-cu128
+  cu130) ENV_NAME=env ;;
+  cu128) ENV_NAME=env-cu128 ;;
+  *) printf 'serve_pod: error[lilith::serve::lane]: unknown LILITH_CUDA_LANE=%s\n  help: use cu130 (default) or cu128\n' "$LILITH_CUDA_LANE" >&2
+     exit 1 ;;
+esac
+ENV_DIR="$ROOT/$ENV_NAME"
+VLLM="${LILITH_SERVE_VLLM:-$ENV_DIR/bin/vllm}"
+PY="${LILITH_SERVE_PYTHON:-$ENV_DIR/bin/python}"
 RUNPOD_REST="${LILITH_SERVE_RUNPOD_REST:-https://rest.runpod.io/v1}"
 SERVED_NAME=lilith
 
@@ -178,7 +185,7 @@ export VLLM_API_KEY="$KEY"
 unset KEY
 
 # ------------------------------------------------------------------ 3. bootstrap
-export LILITH_ROOT="$ROOT" PATH="$ROOT/env/bin:$PATH" HF_HOME="$ROOT/.hf-home" HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
+export LILITH_ROOT="$ROOT" PATH="$ENV_DIR/bin:$PATH" HF_HOME="$ROOT/.hf-home" HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
 export VLLM_NO_USAGE_STATS=1 DO_NOT_TRACK=1 PYTHONNOUSERSITE=1
 export LILITH_NUMERICS_SDPA_BACKEND="${LILITH_NUMERICS_SDPA_BACKEND:-efficient}"
 export LILITH_NUMERICS_SDPA_MATH_FALLBACK="${LILITH_NUMERICS_SDPA_MATH_FALLBACK:-1}"
@@ -187,15 +194,15 @@ if ! bash "$BOOTSTRAP" --check > "$SESSION_DIR/bootstrap-check.json" 2> "$SESSIO
   code="$(sed -n 's/.*error\[\(lilith::bootstrap::[a-z_]*\)\].*/\1/p' "$SESSION_DIR/bootstrap-check.err" | head -n1)"
   case "$code" in
     lilith::bootstrap::env_lock | lilith::bootstrap::ninja | lilith::bootstrap::env_versions)
-      aside="$ROOT/env.old-$(date -u +%Y%m%dT%H%M%SZ)"
-      log "bootstrap check: $code; moving $ROOT/env to $aside and rebuilding from the payload lock"
-      mv "$ROOT/env" "$aside" || die lilith::serve::bootstrap "could not move $ROOT/env aside" "move it by hand and restart"
+      aside="$ENV_DIR.old-$(date -u +%Y%m%dT%H%M%SZ)"
+      log "bootstrap check: $code; moving $ENV_DIR to $aside and rebuilding from the payload lock"
+      mv "$ENV_DIR" "$aside" || die lilith::serve::bootstrap "could not move $ENV_DIR aside" "move it by hand and restart"
       BOOT_ACTION="rebuilt ($code; old env at $aside)" ;;
     lilith::bootstrap::env_missing | lilith::bootstrap::env_incomplete)
       BOOT_ACTION="built ($code)" ;;
     *)
       die lilith::serve::bootstrap "bootstrap --check failed with ${code:-an unknown error} (see $SESSION_DIR/bootstrap-check.err)" \
-        "parent, driver and CUDA failures are not auto-repaired; fix the volume or recreate the pod on a CUDA 13 host" ;;
+        "parent, driver and CUDA failures are not auto-repaired; fix the volume or recreate the pod on a host that meets the lane ($LILITH_CUDA_LANE, default cu130 = CUDA 13, cu128 = CUDA 12.8)" ;;
   esac
   bash "$BOOTSTRAP" >> "$SESSION_DIR/bootstrap-install.log" 2>&1 ||
     die lilith::serve::bootstrap "bootstrap install failed (see $SESSION_DIR/bootstrap-install.log)" \
@@ -203,7 +210,7 @@ if ! bash "$BOOTSTRAP" --check > "$SESSION_DIR/bootstrap-check.json" 2> "$SESSIO
   bash "$BOOTSTRAP" --check > "$SESSION_DIR/bootstrap-check.json" 2>> "$SESSION_DIR/bootstrap-check.err" ||
     die lilith::serve::bootstrap "bootstrap --check still fails after the rebuild" "see $SESSION_DIR/bootstrap-check.err"
 fi
-[[ -x "$PY" ]] || PY="$ROOT/env/bin/python"
+[[ -x "$PY" ]] || PY="$ENV_DIR/bin/python"
 log "bootstrap: $BOOT_ACTION"
 
 # ------------------------------------------------------------------ 4. selection

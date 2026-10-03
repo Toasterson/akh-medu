@@ -94,6 +94,11 @@ selected() {  # selected <step>: true in a full run, or when named in --only
 if [[ "$ROOT" != /workspace/* && "${LILITH_ALLOW_NON_WORKSPACE:-0}" != 1 ]]; then
   die lilith::smoke::root "root $ROOT is not on the /workspace volume" "a pod stop wipes everything else"
 fi
+case "${LILITH_CUDA_LANE:-cu130}" in   # same lane as bootstrap.sh; checked before a run dir is claimed
+  cu130) ENV_NAME=env ;;
+  cu128) ENV_NAME=env-cu128 ;;
+  *) die lilith::smoke::lane "unknown LILITH_CUDA_LANE=${LILITH_CUDA_LANE}" "use cu130 (default) or cu128" ;;
+esac
 RUN="$ROOT/runs/$RUN_ID"
 [[ ! -e "$RUN" ]] || die lilith::smoke::exists "$RUN already exists" \
   "runs are one-shot; choose a new run id (a stopped run is never resumed in place)"
@@ -102,9 +107,9 @@ mkdir "$RUN" || die lilith::smoke::exists "could not claim $RUN" "another smoke 
 
 # ------------------------------------------------------------- claimed run dir
 unset HF_TOKEN
-PY="$ROOT/env/bin/python"
+PY="$ROOT/$ENV_NAME/bin/python"
 # Console scripts of the pinned env (ninja for the vLLM/flashinfer JIT) come first.
-export PATH="$ROOT/env/bin:$PATH"
+export PATH="$ROOT/$ENV_NAME/bin:$PATH"
 export PYTHONNOUSERSITE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_HOME="$ROOT/.hf-home"
 export CUBLAS_WORKSPACE_CONFIG=":4096:8" PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 MARKER="lilith-c6-smoke:$RUN_ID"

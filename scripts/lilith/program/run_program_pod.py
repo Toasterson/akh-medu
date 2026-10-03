@@ -35,7 +35,7 @@ HERE = Path(__file__).resolve()
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE.parents[1] / 'runpod'))
 
-from checkpoint import ProgramError, read_json, sha256_file, write_json_atomic  # noqa: E402
+from checkpoint import ProgramError, env_dir, read_json, sha256_file, write_json_atomic  # noqa: E402
 import verify_payload  # noqa: E402
 
 _RUN_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{2,79}$')
@@ -149,7 +149,8 @@ def start(args: argparse.Namespace, passthrough: Sequence[str]) -> dict[str, Any
     if provenance['status'] != 'verified':
         raise ProgramError('lilith::program::payload', 'main-only payload provenance failed: ' + '; '.join(provenance['problems']),
                            'extract a payload built by make_payload.sh from origin/main and pass its main SHA')
-    python = str(Path(args.root) / 'env/bin/python')
+    lane_env = env_dir(args.root)   # <root>/env, or <root>/env-cu128 when LILITH_CUDA_LANE=cu128
+    python = str(lane_env / 'bin/python')
     bootstrap = subprocess.run(['bash', str(payload / 'scripts/lilith/runpod/bootstrap.sh'), '--check'],
                                capture_output=True, text=True, timeout=600,
                                env={**os.environ, 'LILITH_ROOT': str(args.root)})
@@ -174,7 +175,7 @@ def start(args: argparse.Namespace, passthrough: Sequence[str]) -> dict[str, Any
     if shutil.which('nohup'):
         command = ['nohup', *command]
     env = {**os.environ, 'LILITH_ROOT': str(args.root), 'HF_HUB_OFFLINE': '1', 'PYTHONNOUSERSITE': '1',
-           'PATH': str(Path(args.root) / 'env/bin') + os.pathsep + os.environ.get('PATH', ''), 'LILITH_PROGRAM_MARKER': marker}
+           'PATH': str(lane_env / 'bin') + os.pathsep + os.environ.get('PATH', ''), 'LILITH_PROGRAM_MARKER': marker}
     log = run_dir / 'logs' / f'train-{marker}.log'
     with log.open('ab') as stream:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT, env=env,

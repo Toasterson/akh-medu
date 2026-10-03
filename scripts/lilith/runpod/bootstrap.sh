@@ -6,7 +6,7 @@
 #
 # Layout (everything on the network volume; a pod stop wipes /root):
 #   /workspace/lilith/{parent,gguf,env,data,bin,adapters,runs}
-#   env/versions.json      exact package versions + lock sha256
+#   env/versions.json      exact package versions + lane + lock sha256
 #   parent/receipt.json    pinned google/gemma-4-12B-it revision + verified sha256 pins
 #   paths.json             lilith/paths@1 for the runtime-training config/stack/worker
 #
@@ -35,6 +35,16 @@
 # Readiness (driver, driver CUDA version, torch CUDA runtime, the env's ninja) is printed
 # first, so a wrong host shows up immediately. env/bin is put first on PATH: vLLM and
 # flashinfer JIT-compile kernels by running `ninja` from PATH (round-2 smoke failure). Create pods with allowedCudaVersions >= 13.0.
+#
+# CUDA lanes (LILITH_CUDA_LANE, default cu130; any other value is refused):
+#   cu130  env/       requirements-cuda.txt      driver >= 580, driver CUDA >= 13.0  (the qualified lane)
+#   cu128  env-cu128/ requirements-cuda128.txt   driver >= 570, driver CUDA >= 12.8
+#          paths-cu128.json instead of paths.json; the cu128 wheels are CUDA 12.9 builds (the
+#          nearest torch 2.13.0 / vllm 0.30.0 pair that exists, see requirements-cuda128.in)
+#          running on a 12.8 driver through NVIDIA minor-version compatibility.
+# The lanes never share an env directory, so building cu128 cannot touch a cu130 env/. The
+# lane, its env dir and its lock sha256 are recorded in <env>/versions.json and printed by
+# --check. Use the same LILITH_CUDA_LANE for every later script that picks an env.
 set -euo pipefail
 umask 077
 
@@ -44,10 +54,31 @@ ROOT="${LILITH_ROOT:-/workspace/lilith}"
 UV_VERSION="0.12.8"
 UV_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz"
 UV_SHA256="2e2b37e9811e17675a9e70bed5e1a58fc8c0388be63d751d72cc735188c149ff"
-MIN_DRIVER_MAJOR=580
-MIN_CUDA_MAJOR=13
 PYTHON_VERSION="3.12"
-LOCK="$SCRIPT_DIR/requirements-cuda.txt"
+LANE="${LILITH_CUDA_LANE:-cu130}"
+UV_INSTALL_FLAGS=()
+case "$LANE" in
+  cu130)
+    MIN_DRIVER_MAJOR=580
+    MIN_CUDA_MAJOR=13
+    MIN_CUDA_MINOR=0
+    WHEELS="CUDA 13"
+    ENV_NAME=env
+    PATHS_NAME=paths.json
+    LOCK="$SCRIPT_DIR/requirements-cuda.txt" ;;
+  cu128)
+    MIN_DRIVER_MAJOR=570
+    MIN_CUDA_MAJOR=12
+    MIN_CUDA_MINOR=8
+    WHEELS="CUDA 12.9 (minor-version compatible with a 12.8 driver)"
+    ENV_NAME=env-cu128
+    PATHS_NAME=paths-cu128.json
+    LOCK="$SCRIPT_DIR/requirements-cuda128.txt"
+    # The lock pins +cu129 local versions that live on extra indexes (emitted into the lock).
+    UV_INSTALL_FLAGS=(--index-strategy unsafe-best-match) ;;
+  *) printf 'bootstrap: error[lilith::bootstrap::lane]: unknown LILITH_CUDA_LANE=%s\n  help: use cu130 (default) or cu128\n' "$LANE" >&2
+     exit 1 ;;
+esac
 PARENT_REPO="google/gemma-4-12B-it"
 PARENT_REVISION="5926caa4ec0cac5cbfadaf4077420520de1d5205"
 WEIGHTS_SHA256="5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d"
@@ -77,8 +108,9 @@ sha256_of() {
   if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 LOCK_SHA256="$(sha256_of "$LOCK")"
-ENV_PY="$ROOT/env/bin/python"
-export PATH="$ROOT/env/bin:$PATH"
+ENV_DIR="$ROOT/$ENV_NAME"
+ENV_PY="$ENV_DIR/bin/python"
+export PATH="$ENV_DIR/bin:$PATH"
 export UV_PYTHON_INSTALL_DIR="$ROOT/bin/python"
 export UV_NO_MODIFY_PATH=1
 export HF_HOME="$ROOT/.hf-home"
@@ -114,9 +146,9 @@ PY
 }
 
 env_state() {  # absent | incomplete | complete (python + lock marker; the marker is written last)
-  if [[ ! -e "$ROOT/env" && ! -L "$ROOT/env" ]]; then
+  if [[ ! -e "$ENV_DIR" && ! -L "$ENV_DIR" ]]; then
     echo absent
-  elif [[ -d "$ROOT/env" && ! -L "$ROOT/env" && -x "$ENV_PY" && -f "$ROOT/env/.lilith-lock-sha256" ]]; then
+  elif [[ -d "$ENV_DIR" && ! -L "$ENV_DIR" && -x "$ENV_PY" && -f "$ENV_DIR/.lilith-lock-sha256" ]]; then
     echo complete
   else
     echo incomplete
@@ -127,18 +159,18 @@ check_env() {
   case "$(env_state)" in
     absent) die lilith::bootstrap::env_missing "$ENV_PY does not exist" "run bootstrap.sh without --check" ;;
     incomplete) die lilith::bootstrap::env_incomplete \
-      "$ROOT/env exists but never finished building (no python or no lock marker)" \
+      "$ENV_DIR exists but never finished building (no python or no lock marker)" \
       "run bootstrap.sh without --check: it moves the partial env aside and rebuilds" ;;
   esac
-  [[ -f "$ROOT/env/.lilith-lock-sha256" && "$(cat "$ROOT/env/.lilith-lock-sha256")" == "$LOCK_SHA256" ]] ||
+  [[ -f "$ENV_DIR/.lilith-lock-sha256" && "$(cat "$ENV_DIR/.lilith-lock-sha256")" == "$LOCK_SHA256" ]] ||
     die lilith::bootstrap::env_lock "env was not built from $LOCK (sha $LOCK_SHA256)" \
-      "move it aside (mv $ROOT/env $ROOT/env.old-\$(date +%s)) and rerun bootstrap.sh"
-  [[ -f "$ROOT/env/versions.json" ]] || die lilith::bootstrap::env_versions "env/versions.json missing" \
+      "move it aside (mv $ENV_DIR $ENV_DIR.old-\$(date +%s)) and rerun bootstrap.sh"
+  [[ -f "$ENV_DIR/versions.json" ]] || die lilith::bootstrap::env_versions "$ENV_NAME/versions.json missing" \
     "the env build did not finish; move it aside and rerun"
 }
 
 write_versions() {
-  LOCK_SHA256="$LOCK_SHA256" LOCK_PATH="$LOCK" "$ENV_PY" - "$ROOT/env/versions.json" <<'PY'
+  LANE="$LANE" LOCK_SHA256="$LOCK_SHA256" LOCK_PATH="$LOCK" "$ENV_PY" - "$ENV_DIR/versions.json" <<'PY'
 import importlib.metadata as metadata, json, os, platform, subprocess, sys
 packages = ['torch', 'transformers', 'peft', 'trl', 'bitsandbytes', 'vllm', 'accelerate', 'safetensors',
             'tokenizers', 'huggingface_hub', 'jsonschema', 'triton', 'flashinfer-python', 'nvidia-cuda-runtime']
@@ -152,7 +184,7 @@ import torch
 record = {'schema': 'lilith/env-versions@1', 'python': sys.version, 'platform': platform.platform(),
           'packages': versions, 'torch_cuda': torch.version.cuda, 'cuda_available': torch.cuda.is_available(),
           'device': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-          'lock_sha256': os.environ['LOCK_SHA256'], 'lock': os.environ['LOCK_PATH']}
+          'lane': os.environ['LANE'], 'lock_sha256': os.environ['LOCK_SHA256'], 'lock': os.environ['LOCK_PATH']}
 try:
     record['nvidia_smi'] = subprocess.run(
         ['nvidia-smi', '--query-gpu=name,driver_version,memory.total', '--format=csv,noheader'],
@@ -171,17 +203,21 @@ gpu_readiness() {  # printed before anything else; refuses an old driver early
   if ! command -v nvidia-smi >/dev/null; then
     [[ "$allow" == 1 ]] && { log "readiness: no nvidia-smi (LILITH_ALLOW_NO_CUDA=1)"; return 0; }
     die lilith::bootstrap::no_gpu "nvidia-smi not found" \
-      "run on a GPU pod created with allowedCudaVersions >= $MIN_CUDA_MAJOR.0"
+      "run on a GPU pod created with allowedCudaVersions >= $MIN_CUDA_MAJOR.$MIN_CUDA_MINOR"
   fi
-  local name driver cuda
+  local name driver cuda cuda_minor
   name="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n1)"
   driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1)"
   cuda="$(nvidia-smi | sed -n 's/.*CUDA Version: *\([0-9][0-9.]*\).*/\1/p' | head -n1)"
-  log "readiness: gpu='$name' driver=$driver driver_cuda=${cuda:-unknown} (lock needs driver >= $MIN_DRIVER_MAJOR, CUDA >= $MIN_CUDA_MAJOR.0)"
+  cuda_minor=0
+  [[ "$cuda" == *.* ]] && cuda_minor="${cuda#*.}"
+  cuda_minor="${cuda_minor%%.*}"
+  log "readiness: gpu='$name' driver=$driver driver_cuda=${cuda:-unknown} (lane $LANE needs driver >= $MIN_DRIVER_MAJOR, CUDA >= $MIN_CUDA_MAJOR.$MIN_CUDA_MINOR)"
   if [[ "$allow" != 1 ]] && { [[ ! "$driver" =~ ^[0-9]+ || ! "$cuda" =~ ^[0-9]+ ]] ||
-                             (( ${driver%%.*} < MIN_DRIVER_MAJOR )) || (( ${cuda%%.*} < MIN_CUDA_MAJOR )); }; then
-    die lilith::bootstrap::cuda_version "driver $driver / CUDA ${cuda:-unknown} is too old for the CUDA 13 wheels" \
-      "stop this pod and recreate it with allowedCudaVersions >= $MIN_CUDA_MAJOR.0"
+                             (( ${driver%%.*} < MIN_DRIVER_MAJOR )) || (( ${cuda%%.*} < MIN_CUDA_MAJOR )) ||
+                             (( ${cuda%%.*} == MIN_CUDA_MAJOR && 10#${cuda_minor} < MIN_CUDA_MINOR )); }; then
+    die lilith::bootstrap::cuda_version "driver $driver / CUDA ${cuda:-unknown} is too old for the $WHEELS wheels (lane $LANE)" \
+      "stop this pod and recreate it with allowedCudaVersions >= $MIN_CUDA_MAJOR.$MIN_CUDA_MINOR"
   fi
 }
 
@@ -192,15 +228,15 @@ require_cuda() {
   if [[ "${LILITH_ALLOW_NO_CUDA:-0}" == 1 ]]; then return; fi
   "$ENV_PY" -c 'import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)' ||
     die lilith::bootstrap::no_cuda "torch sees no CUDA device ($runtime)" \
-      "the lock uses CUDA 13 wheels (driver >= $MIN_DRIVER_MAJOR); pick a pod host with a newer driver"
+      "the lock uses $WHEELS wheels (driver >= $MIN_DRIVER_MAJOR); pick a pod host with a newer driver"
 }
 
 require_ninja() {  # the env's own ninja must be the one on PATH, and it must run
   local found version
   found="$(command -v ninja || true)"
-  [[ "$found" == "$ROOT/env/bin/ninja" ]] ||
-    die lilith::bootstrap::ninja "ninja on PATH is '${found:-missing}', not $ROOT/env/bin/ninja" \
-      "the lock pins ninja (requirements-cuda.in); rebuild the env: mv $ROOT/env $ROOT/env.old-\$(date +%s) and rerun"
+  [[ "$found" == "$ENV_DIR/bin/ninja" ]] ||
+    die lilith::bootstrap::ninja "ninja on PATH is '${found:-missing}', not $ENV_DIR/bin/ninja" \
+      "the lock pins ninja (requirements-cuda.in / requirements-cuda128.in); rebuild the env: mv $ENV_DIR $ENV_DIR.old-\$(date +%s) and rerun"
   version="$(ninja --version 2>&1)" ||
     die lilith::bootstrap::ninja "$found --version failed: $version" "rebuild the env from the lock"
   log "readiness: ninja $version ($found)"
@@ -217,12 +253,12 @@ if [[ "$MODE" == check ]]; then
     "run bootstrap.sh with HF_TOKEN set to download the pinned parent"
   verify_parent "$ROOT/parent" >/dev/null ||
     die lilith::bootstrap::parent_pin "parent files differ from the pins" "never train on a drifted parent; re-download"
-  "$ENV_PY" - "$ROOT" <<'PY'
+  "$ENV_PY" - "$ROOT" "$ENV_NAME" "$LANE" <<'PY'
 import json, sys
 from pathlib import Path
 root = Path(sys.argv[1])
-print(json.dumps({'status': 'ok', 'root': str(root),
-                  'versions': json.loads((root / 'env/versions.json').read_text())['packages'],
+print(json.dumps({'status': 'ok', 'root': str(root), 'lane': sys.argv[3], 'env': sys.argv[2],
+                  'versions': json.loads((root / sys.argv[2] / 'versions.json').read_text())['packages'],
                   'parent_receipt': json.loads((root / 'parent/receipt.json').read_text())['revision']}))
 PY
   exit 0
@@ -254,24 +290,24 @@ fi
 
 # 2. Pinned CUDA venv; never mutated in place once built.
 if [[ "$(env_state)" == incomplete ]]; then
-  ASIDE="$ROOT/env.incomplete-$(date -u +%Y%m%dT%H%M%SZ)"
+  ASIDE="$ENV_DIR.incomplete-$(date -u +%Y%m%dT%H%M%SZ)"
   [[ ! -e "$ASIDE" ]] || ASIDE="$ASIDE-$$"
-  log "env: $ROOT/env never finished building (no python or no lock marker); moving it to $ASIDE and rebuilding"
-  mv "$ROOT/env" "$ASIDE" || die lilith::bootstrap::env_incomplete "could not move $ROOT/env aside" \
-    "move it by hand (mv $ROOT/env $ROOT/env.incomplete-\$(date +%s)) and rerun"
+  log "env: $ENV_DIR never finished building (no python or no lock marker); moving it to $ASIDE and rebuilding"
+  mv "$ENV_DIR" "$ASIDE" || die lilith::bootstrap::env_incomplete "could not move $ENV_DIR aside" \
+    "move it by hand (mv $ENV_DIR $ENV_DIR.incomplete-\$(date +%s)) and rerun"
 fi
 if [[ "$(env_state)" == complete ]]; then
   check_env
   log "env already built from lock $LOCK_SHA256; reusing"
 else
-  log "creating $ROOT/env (python $PYTHON_VERSION) from $LOCK"
-  "$UV" venv --python "$PYTHON_VERSION" "$ROOT/env" >&2
-  if ! "$UV" pip install --python "$ENV_PY" --require-hashes --no-cache -r "$LOCK" >&2; then
-    rm -rf "$ROOT/env"
+  log "creating $ENV_DIR (python $PYTHON_VERSION) from $LOCK"
+  "$UV" venv --python "$PYTHON_VERSION" "$ENV_DIR" >&2
+  if ! "$UV" pip install --python "$ENV_PY" --require-hashes --no-cache ${UV_INSTALL_FLAGS[@]+"${UV_INSTALL_FLAGS[@]}"} -r "$LOCK" >&2; then
+    rm -rf "$ENV_DIR"
     die lilith::bootstrap::install "package installation from the lock failed" "inspect the log above; the partial env was removed"
   fi
   write_versions >&2
-  printf '%s\n' "$LOCK_SHA256" > "$ROOT/env/.lilith-lock-sha256"
+  printf '%s\n' "$LOCK_SHA256" > "$ENV_DIR/.lilith-lock-sha256"
 fi
 require_cuda
 require_ninja
@@ -324,18 +360,18 @@ PY
 fi
 
 # 4. paths.json for the runtime-training config/stack/worker (written once).
-if [[ ! -f "$ROOT/paths.json" ]]; then
-  "$ENV_PY" - "$ROOT" <<'PY'
+if [[ ! -f "$ROOT/$PATHS_NAME" ]]; then
+  "$ENV_PY" - "$ROOT" "$ENV_NAME" "$PATHS_NAME" <<'PY'
 import json, sys
 from pathlib import Path
-root = Path(sys.argv[1])
+root, env_name, paths_name = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 paths = {'schema': 'lilith/paths@1', 'parent_dir': str(root / 'parent'),
          'transcript_dataset': str(root / 'data/sft-subset-v1.jsonl'),
-         'templates_dir': str(root / 'data/stack-templates'), 'venv_python': str(root / 'env/bin/python'),
+         'templates_dir': str(root / 'data/stack-templates'), 'venv_python': str(root / env_name / 'bin/python'),
          'runtime_bin_dir': str(root / 'bin'), 'reviewer_runtime_binary': str(root / 'bin/akhrtd'),
          'private_root': str(root / 'private'), 'output_root': str(root / 'runs'),
          'cache_offloading': False}
-with open(root / 'paths.json', 'x') as stream:
+with open(root / paths_name, 'x') as stream:
     json.dump(paths, stream, indent=2)
     stream.write('\n')
 PY

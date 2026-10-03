@@ -50,7 +50,12 @@ if [[ "$ROOT" != /workspace/* && "${LILITH_ALLOW_NON_WORKSPACE:-0}" != 1 ]]; the
   die lilith::candidate::root "root $ROOT is not on the /workspace volume" "a pod stop wipes everything else"
 fi
 SERVE="$ROOT/serve"
-PY="${LILITH_SERVE_PYTHON:-$ROOT/env/bin/python}"
+case "${LILITH_CUDA_LANE:-cu130}" in   # the same lane serve_pod.sh and bootstrap.sh read
+  cu130) ENV_NAME=env ;;
+  cu128) ENV_NAME=env-cu128 ;;
+  *) die lilith::candidate::lane "unknown LILITH_CUDA_LANE=${LILITH_CUDA_LANE}" "use cu130 (default) or cu128" ;;
+esac
+PY="${LILITH_SERVE_PYTHON:-$ROOT/$ENV_NAME/bin/python}"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 
 case "$ACTION" in
