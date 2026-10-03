@@ -77,6 +77,7 @@ class Config:
     repo: Path = SRC.REPO_ROOT
     skip_dojo: bool = False
     dojo_prompt: str = "compact"
+    context_limit: int = S.CONTEXT_LIMIT
 
 
 # -- collection -----------------------------------------------------------------------------------------------
@@ -99,6 +100,16 @@ def merge_exposure(into: SPL.Exposure, other: SPL.Exposure) -> None:
     into.origins.update(other.origins)
     for k, v in other.wi_origin.items():
         into.wi_origin.setdefault(k, v)
+
+
+MAX_CONTEXT_LIMIT = 32768
+
+
+def check_context_limit(limit: int) -> int:
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_CONTEXT_LIMIT:
+        raise ProgramError(f"--context-limit {limit!r} is outside 1..{MAX_CONTEXT_LIMIT}",
+                           help="the trainer core supports up to 32K chunked attention; pick a limit within that")
+    return limit
 
 
 def collect(cfg: Config, log: Callable[[str], None] = lambda s: None) -> Collected:
@@ -342,7 +353,7 @@ def build_manifest(cfg: Config, col: Collected, kept: Sequence[dict], toks: Mapp
     by_unfit = collections.Counter(u["stage"] for u in unfit)
     live = [r for r in kept if r["split"] != "excluded" and r["record_id"] in toks]
     return {
-        "schema": S.MANIFEST_SCHEMA, "run_id": S.RUN_ID,
+        "schema": S.MANIFEST_SCHEMA, "run_id": S.RUN_ID, "context_limit": cfg.context_limit,
         "parent": {"model": "gemma-4-12b", **{k: v for k, v in codec_info.items() if k != "enable_thinking"},
                    "revision": codec_info.get("parent_revision"), "enable_thinking": codec_info.get("enable_thinking"),
                    "chat_template_sha256": template_sha},
@@ -353,7 +364,7 @@ def build_manifest(cfg: Config, col: Collected, kept: Sequence[dict], toks: Mapp
         "preference_records": sum(1 for r in live if r["kind"] == "preference"),
         "exclusions": {"total": len(exclusions), "by_reason": dict(sorted(reasons.items())), "file": "exclusions.jsonl",
                        "exposure_index": col.exposure.summary()},
-        "unfit": {"count": len(unfit), "by_stage": dict(by_unfit), "limit": S.CONTEXT_LIMIT, "file": "unfit.jsonl",
+        "unfit": {"count": len(unfit), "by_stage": dict(by_unfit), "limit": cfg.context_limit, "file": "unfit.jsonl",
                   "policy": "reported, never truncated"},
         "reused_tokens": {"historical_reencode_mismatches": mismatches},
         "sources": col.sources, "coverage": "coverage.json", "coverage_sha256": hashes.get("coverage.json"),
@@ -395,7 +406,7 @@ def export_corpus(cfg: Config, codec: ChatCodec | None, log: Callable[[str], Non
     exclusions = col.exclusions + boundary_rows + conflicts
     live = [r for r in kept if r["split"] != "excluded"]
     log("tokenize %d records" % len(live))
-    toks, unfit, mismatches = tokenize_records(live, codec)
+    toks, unfit, mismatches = tokenize_records(live, codec, check_context_limit(cfg.context_limit))
     kept = apply_rehearsal_cap(kept, toks)
     unfit_ids = {u["record_id"] for u in unfit}
     for r in kept:
@@ -436,6 +447,7 @@ def export_corpus(cfg: Config, codec: ChatCodec | None, log: Callable[[str], Non
     hashes["unfit.jsonl"] = sha256_hex(unfit_text)
     info = getattr(codec, "info", {}) if codec is not None else {}
     template_sha = info.get("tokenizer_pins", {}).get("chat_template.jinja")
+    info = {**info, "context_limit": cfg.context_limit} if info else info
     manifest = build_manifest(cfg, col, kept, toks, unfit, exclusions, info, cov, hashes, mismatches, template_sha)
     manifest["exclusions"]["sentinels"] = (None if sentinels is None else sum(1 for e in exclusions if e["reason"] == "sentinel"))
     manifest["exclusions"]["sentinel_file"] = ({"path": str(cfg.sentinel_exclusions), "sha256": SRC.file_sha(cfg.sentinel_exclusions),
@@ -478,7 +490,7 @@ def onpolicy_export(cfg: Config, codec: ChatCodec, run: Path, stage: str, log: C
         splits = {existing[k] for k in keys if k in existing}
         r["component_id"] = "c-onpolicy-" + sha256_hex(sorted(keys) or [r["record_id"]])[:12]
         r["split"] = "dev" if splits == {"dev"} else "train"
-    toks, unfit, _ = tokenize_records(kept, codec)
+    toks, unfit, _ = tokenize_records(kept, codec, check_context_limit(cfg.context_limit))
     rows_sorted = sorted((toks[r["record_id"]] for r in kept if r["record_id"] in toks), key=lambda t: order_key(t["record_id"]))
     for t in rows_sorted:
         problems = S.validate_tokens(t)
@@ -522,6 +534,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--illumos-pack", type=Path, default=None)
     p.add_argument("--sentinel-exclusions", type=Path, default=Config.sentinel_exclusions,
                    help="exam-freeze sentinel ids/hashes to exclude from every stage (null in the manifest when the file is absent)")
+    p.add_argument("--context-limit", type=int, default=S.CONTEXT_LIMIT,
+                   help=f"token limit per record (default {S.CONTEXT_LIMIT}, at most {MAX_CONTEXT_LIMIT}); longer records are listed in unfit.jsonl")
     p.add_argument("--skip-dojo", action="store_true")
     p.add_argument("--dojo-prompt", choices=("compact", "full"), default="compact",
                    help="system prompt of dojo-derived records: compact = role + dojo addendum, full = + chief-of-staff procedures")
@@ -540,9 +554,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                  cos_trajectories=a.cos_trajectories,
                  teacher_runs=tuple(a.teacher_run) if a.teacher_run else Config.teacher_runs, c2_sessions=a.c2_sessions,
                  memory_sessions=a.memory_sessions, generated_dir=gen, snapshot_root=a.snapshot_root,
-                 snapshot_until=a.snapshot_until, parent=a.parent, illumos_pack=illumos, sentinel_exclusions=a.sentinel_exclusions, skip_dojo=a.skip_dojo, dojo_prompt=a.dojo_prompt)
+                 snapshot_until=a.snapshot_until, parent=a.parent, illumos_pack=illumos, sentinel_exclusions=a.sentinel_exclusions, skip_dojo=a.skip_dojo, dojo_prompt=a.dojo_prompt, context_limit=a.context_limit)
     log = lambda s: print(f"[export] {s}", file=sys.stderr, flush=True)
     try:
+        check_context_limit(cfg.context_limit)
         from program.encode import load_gemma_codec
 
         codec = load_gemma_codec(cfg.parent)

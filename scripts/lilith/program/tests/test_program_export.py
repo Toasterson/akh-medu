@@ -273,3 +273,16 @@ def test_sentinels_absent_is_null_and_present_excludes_from_every_stage(world, c
     for i, st in enumerate(S.STAGES, 1):
         for line in (held.out / f"stage-{i}-{st}.tokens.jsonl").read_text().splitlines():
             assert json.loads(line)["record_id"] not in {e["record_id"] for e in ex}
+
+
+def test_context_limit_is_validated_and_recorded(world, codec, tmp_path):
+    from program.export import check_context_limit, main
+
+    assert check_context_limit(32768) == 32768 and check_context_limit(8192) == 8192
+    for bad in (0, -1, 32769):
+        with pytest.raises(S.ProgramError):
+            check_context_limit(bad)
+    assert main(["--out", str(tmp_path / "o"), "--context-limit", "40000"]) == 2
+    m = export_corpus(Config(**{**world.__dict__, "context_limit": 16384}), codec)
+    assert m["context_limit"] == 16384 and m["unfit"]["limit"] == 16384 and m["parent"]["context_limit"] == 16384
+    assert export_corpus(world, codec)["context_limit"] == 8192
