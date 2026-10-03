@@ -1403,7 +1403,7 @@ DOJO_TEACHER_KEY_FILE = "secrets/dojo-teacher.key"
 # A sealed teacher answers one turn at a time ("workspace busy"), which serializes curriculum
 # generation. Identical replicas `dojo-teacher-2..N` (same model, prompt, surface and budgets; each
 # its own ACP principal and key) let the runner fan out. The first keeps its historical name.
-DOJO_TEACHER_REPLICAS = 3
+DOJO_TEACHER_REPLICAS = 6
 
 
 def dojo_teacher_names(replicas: int = DOJO_TEACHER_REPLICAS) -> tuple[str, ...]:

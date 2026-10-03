@@ -368,7 +368,7 @@ def records_ctx():
 
 def test_cli_validates_akhs_and_order(tmp_path):
     assert cli.validate(cli_args(tmp_path, akhs="a,a")) == "--akhs needs one or more distinct akh names, got ['a', 'a']"
-    assert "at most 4" in cli.validate(cli_args(tmp_path, akhs="a,b,c,d,e"))
+    assert "at most 6" in cli.validate(cli_args(tmp_path, akhs="a,b,c,d,e,f,g"))
     assert "--order" in cli.validate(cli_args(tmp_path, order="guidance,nonsense"))
     assert cli.validate(cli_args(tmp_path, akhs="a,b", order=",".join(cli.DEFAULT_ORDER))) == (["a", "b"], list(cli.DEFAULT_ORDER))
     assert cli.DEFAULT_ORDER == ("guidance", "sparring", "lineage", "variation")

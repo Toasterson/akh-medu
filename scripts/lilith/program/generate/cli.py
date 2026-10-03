@@ -30,7 +30,7 @@ SPARRING_SEEDS = REPO_ROOT / "data" / "phase51" / "character" / "sparring-green.
 DEFAULT_OUT = Path.home() / "lilith-private" / PRIVATE_ROOT_NAME / "generated"
 DEFAULT_SNAPSHOTS = Path.home() / "Library" / "Application Support" / "akh-medu" / "lilith" / "cos-snapshots"
 DEFAULT_GATE = Path.home() / "ws" / "illumos" / "repos" / "illumos" / "illumos-gate"
-MAX_WORKERS = 4
+MAX_WORKERS = 6
 
 
 def language_profiles(drills: Path = DRILLS, sparring_seeds: Path = SPARRING_SEEDS) -> LanguageProfiles:
