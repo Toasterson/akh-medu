@@ -1,0 +1,29 @@
+{
+  "schema": "lilith/c2-turn-verdicts@1",
+  "analysis_file": "lilith/c2/analysis/2026-10-01-c2-round1.md (NFS akh-medu-runs)",
+  "analysis_sha256": "184c1e746cb9bde96a8aea6fcb25f2cc4500d77ff9d3f78c381462399d48ef36",
+  "derivation": "One entry per cached operator turn, transcribed from the analysis scorecard and its round-2 table. verdict: correct | wrong | unassessed. Only `correct` turns become positive records; `wrong` turns appear only as rejected sides where raw_of names the corrected-sibling episode they are the raw attempt of.",
+  "round_of_session": {
+    "20260930T205831Z-s5297": 1,
+    "20260930T215407Z-s5345": 1,
+    "20261001T184327Z-s6030": 2
+  },
+  "round_weight": {"1": 1.0, "2": 0.7},
+  "weight_basis": {
+    "1": "operator-driven round 1: full weight",
+    "2": "supervisor-driven round 2 (operator decision 2026-10-01): weight 0.7"
+  },
+  "turns": [
+    {"session": "20260930T205831Z-s5297", "seq": 5297, "verdict": "unassessed", "reason": "greeting; not a scorecard row"},
+    {"session": "20260930T205831Z-s5297", "seq": 5298, "verdict": "wrong", "reason": "wrong scope: all-project list, illumos items listed as Ready"},
+    {"session": "20260930T205831Z-s5297", "seq": 5299, "verdict": "wrong", "reason": "correction not applied; invented project labels"},
+    {"session": "20260930T205831Z-s5297", "seq": 5300, "verdict": "wrong", "reason": "false filter claim; wrong counts; not the cos-briefing format"},
+    {"session": "20260930T215407Z-s5345", "seq": 5345, "verdict": "wrong", "reason": "wrong scope: 24 parked items, none in the Anima project"},
+    {"session": "20260930T215407Z-s5345", "seq": 5346, "verdict": "wrong", "reason": "claimed a move that did not happen; false capability claim"},
+    {"session": "20260930T215407Z-s5345", "seq": 5347, "verdict": "wrong", "reason": "fabricated park reasons with no receipt", "raw_of": "c2-r1-why-parked-four"},
+    {"session": "20261001T184327Z-s6030", "seq": 6030, "verdict": "correct", "family": "chase", "reason": "identified WI-135 as the longest-stuck item (stranded 1503 h); the later chase turn is judged separately"},
+    {"session": "20261001T184327Z-s6030", "seq": 6043, "verdict": "wrong", "reason": "chase framed as taking ownership: role drift"},
+    {"session": "20261001T184327Z-s6030", "seq": 6044, "verdict": "wrong", "reason": "ignored the guidance ask; fabricated WI-409 = WI-135 identity"},
+    {"session": "20261001T184327Z-s6030", "seq": 6045, "verdict": "wrong", "reason": "recalled chat listed as commitments; overstated progress"}
+  ]
+}

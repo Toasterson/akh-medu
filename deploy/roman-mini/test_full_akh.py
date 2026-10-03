@@ -1756,6 +1756,47 @@ class DojoTeacherRenderTests(RenderFixture):
         self.assertIn('include_str!("../deploy/roman-mini/fixtures/golden/dojo-teacher.toml")', rust)
 
 
+    def test_replicas_are_identical_sealed_workspaces_with_their_own_principals(self):
+        self.configure()
+        self.render()
+        names = fa.dojo_teacher_names()
+        self.assertEqual(names, ("dojo-teacher", "dojo-teacher-2", "dojo-teacher-3"))
+        self.assertEqual(len(names), fa.DOJO_TEACHER_REPLICAS)
+        host = self.toml(self.HOST)
+        principals = {p["id"]: p for p in host["acp"]["principals"]}
+        first = self.toml(self.WS)
+        keys = self.text("secrets/acp-clients.keys").splitlines()
+        for name in names:
+            with self.subTest(name=name):
+                ws = self.toml(f"core-config/akh-medu/workspaces/{name}.toml")
+                self.assertEqual(ws.pop("name"), name)
+                expected = dict(first)
+                expected.pop("name")
+                self.assertEqual(ws, expected)
+                self.assertEqual(principals[name]["akhs"], [name])
+                self.assertNotIn("control", principals[name])
+                self.assertTrue(principals[name]["token_file"].endswith(f"secrets/{name}.key"))
+                key = self.root / f"secrets/{name}.key"
+                self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+                self.assertIn(key.read_text().strip(), keys)
+                self.assertIn(name, host["daemon"]["auto_start"])
+                self.assertIn(name, principals["operator"]["akhs"])
+                self.assertNotIn(name, json.loads(self.text("config/t3-acp.json"))["akhs"])
+        self.assertEqual(len({(self.root / f"secrets/{n}.key").read_text() for n in names}), len(names))
+        with self.assertRaisesRegex(fa.RenderError, "at least 1"):
+            fa.dojo_teacher_names(0)
+
+    def test_replica_goldens(self):
+        self.configure()
+        self.render()
+        for name in fa.dojo_teacher_names()[1:]:
+            rel = f"core-config/akh-medu/workspaces/{name}.toml"
+            if os.environ.get("ROMAN_GOLDEN_REGEN") == "1":
+                (GOLDEN / f"{name}.toml").write_text(golden(self.root, rel))
+            with self.subTest(name=name):
+                self.assertEqual(golden(self.root, rel), (GOLDEN / f"{name}.toml").read_text())
+
+
 @NEEDS_TOMLLIB
 class LilithServingTests(RenderFixture):
     """ADR 121: her model server is llama-server on hephaistos, plain HTTP on the LAN."""

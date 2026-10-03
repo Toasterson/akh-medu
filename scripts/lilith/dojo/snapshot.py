@@ -385,6 +385,24 @@ class Snapshot:
     def work_items(self) -> dict[str, WorkItemState]:
         return self.work_items_of()
 
+    @cached_property
+    def all_project_work_items(self) -> dict[str, WorkItemState]:
+        """Work items of every recorded Anima project collector. The primary (Akh-Medu) project wins
+        on an id collision, so Akh-Medu behaviour is unchanged. For lookups by id only: the Akh-Medu
+        families keep reading `work_items`."""
+        items = dict(self.work_items)
+        for cname in self.project_collectors.values():
+            if cname == PRIMARY_ANIMA_COLLECTOR:
+                continue
+            for wid, state in self.work_items_of(cname).items():
+                items.setdefault(wid, state)
+        return items
+
+    def work_item_any_project(self, wid: str) -> WorkItemState | None:
+        """`wid` as listed by the primary project, else by any other recorded project collector."""
+        found = self.work_items.get(wid)
+        return found if found is not None else self.all_project_work_items.get(wid)
+
     def work_items_of(self, collector: str | None = None) -> dict[str, WorkItemState]:
         """Work items of one Anima collector (`None` = the primary Akh-Medu one)."""
         items: dict[str, WorkItemState] = {}
