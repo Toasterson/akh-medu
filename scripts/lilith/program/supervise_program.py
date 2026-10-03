@@ -240,6 +240,7 @@ class HostArgs:
     poll_seconds: float = 300.0
     stall_seconds: float = 1800.0
     onpolicy_wait_mode: str = 'poll'
+    serve_env: tuple[str, ...] = ()   # KEY=VALUE pairs prefixed to serve_candidate.sh (e.g. LILITH_SERVE_MAX_MODEL_LEN=65536)
     init_adapter: str | None = None
     init_adapter_sha256: str | None = None
     root: str = '/workspace/lilith'
@@ -275,7 +276,12 @@ class Supervisor:
         # so bootstrap --check, the trainer and vLLM all pick <root>/env-cu128 on the pod.
         lane_prefix = '' if self.lane == DEFAULT_CUDA_LANE else f'{CUDA_LANE_ENV}={self.lane} '
         self.pod_script = f'{lane_prefix}python3 {shlex.quote(self.payload)}/scripts/lilith/program/run_program_pod.py --root {shlex.quote(args.root)}'
-        self.serve_script = f'{lane_prefix}bash {shlex.quote(self.payload)}/scripts/lilith/program/serve_candidate.sh'
+        for pair in args.serve_env:
+            if not re.fullmatch(r'LILITH_SERVE_[A-Z0-9_]+=[A-Za-z0-9._-]+', pair):
+                raise HostError('lilith::supervise::serve_env', f'--serve-env {pair!r} is not a LILITH_SERVE_* KEY=VALUE pair',
+                                'only vLLM serve settings may be injected, as plain values')
+        serve_prefix = ''.join(f'{pair} ' for pair in args.serve_env)
+        self.serve_script = f'{lane_prefix}{serve_prefix}bash {shlex.quote(self.payload)}/scripts/lilith/program/serve_candidate.sh'
         self.t0 = clock()
         self.deadline = self.t0 + args.window_seconds
         self.stall_strikes = 0
@@ -522,6 +528,8 @@ def parse_args(argv: Sequence[str] | None = None) -> HostArgs:
     p.add_argument('--poll-seconds', type=float, default=300.0)
     p.add_argument('--stall-seconds', type=float, default=1800.0)
     p.add_argument('--onpolicy-wait-mode', choices=('poll', 'exit'), default='poll')
+    p.add_argument('--serve-env', action='append', default=[], metavar='LILITH_SERVE_KEY=VALUE',
+                   help='vLLM serve setting prefixed to serve_candidate.sh (repeatable), e.g. LILITH_SERVE_MAX_MODEL_LEN=65536')
     p.add_argument('--init-adapter', default=None, help='pod path of the starting adapter (first window only)')
     p.add_argument('--init-adapter-sha256', default=None)
     p.add_argument('--root', default='/workspace/lilith')
