@@ -879,6 +879,9 @@ impl Agent {
         conversation_state: &std::sync::Mutex<ConversationState>,
         wake: Option<&super::model_profile::WakeScope>,
     ) -> Option<AgenticTurnOutcome> {
+        if !prompt_audio.is_empty() && cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Some(AgenticTurnOutcome::Interrupted(TurnStop::Cancelled));
+        }
         if let Some(runtime) = &self.agent_runtime {
             if !prompt_audio.is_empty() {
                 sink.emit(&AkhMessage::error("audio_prompt", "this runtime backend does not accept inline audio; audio was not sent to the model"));
@@ -899,25 +902,23 @@ impl Agent {
         // configured backend (e.g. Candle) wins; otherwise wrap the Ollama model
         // manager. Either way the loop is backend-agnostic. `None` ⇒ no usable
         // backend, so the caller falls back to the symbolic ChatProcessor.
-        let backend: std::sync::Arc<dyn super::chat_backend::ChatBackend> = match self
-            .chat_backend
-            .clone()
-        {
-            Some(b) => b,
-            None => {
-                let Some(mgr) = self.model_manager.clone() else {
-                    if !prompt_audio.is_empty() {
-                        sink.emit(&AkhMessage::error(
+        let backend: std::sync::Arc<dyn super::chat_backend::ChatBackend> =
+            match self.chat_backend.clone() {
+                Some(b) => b,
+                None => {
+                    let Some(mgr) = self.model_manager.clone() else {
+                        if !prompt_audio.is_empty() {
+                            sink.emit(&AkhMessage::error(
                             "audio_prompt",
                             "no audio model backend is configured; audio was not sent to the model",
                         ));
-                        return Some(AgenticTurnOutcome::Refused);
-                    }
-                    return None;
-                };
-                std::sync::Arc::new(super::chat_backend::OllamaChatBackend::new(mgr))
-            }
-        };
+                            return Some(AgenticTurnOutcome::Refused);
+                        }
+                        return None;
+                    };
+                    std::sync::Arc::new(super::chat_backend::OllamaChatBackend::new(mgr))
+                }
+            };
         if !backend.available() {
             if !prompt_audio.is_empty() {
                 sink.emit(&AkhMessage::error(
@@ -953,6 +954,10 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .list_advertised_manifests();
+        // Listening belongs to this turn's usage and elapsed-time budget, not
+        // an unmetered prelude to the ordinary agent loop.
+        let audio_started = (!prompt_audio.is_empty()).then(Instant::now);
+        let turn_usage = super::llm_metrics::UsageScope::open();
         let visual_evidence = match backend.ground_prompt_images(prompt_images) {
             Ok(evidence) => evidence,
             Err(error) => {
@@ -1358,6 +1363,9 @@ impl Agent {
             Some(profile) => RoundBudget::from_profile(profile, context_window),
             None => RoundBudget::new(context_window),
         };
+        if let Some(started) = audio_started {
+            budget.started = started;
+        }
         if is_autonomous_dispatch {
             budget = budget.for_dispatch();
         }
@@ -1374,7 +1382,6 @@ impl Agent {
                 )
                 .cap_deadline(wake.lease_secs.map(Duration::from_secs));
         }
-        let turn_usage = super::llm_metrics::UsageScope::open();
         // Turn-level metrics: track total prompt size and request count for diagnosing
         // pathological latency (work item "turns die quietly", ask 2).
         let mut turn_metrics = super::llm_metrics::TurnMetrics::new();
@@ -3469,6 +3476,7 @@ mod tests {
             assert_eq!(question, "Listen to the recording");
             self.ground_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::agent::llm_metrics::record_usage(10, 5);
             if let Some(cancel) = &self.cancel_after_ground {
                 cancel.store(true, std::sync::atomic::Ordering::SeqCst);
             }
@@ -3953,6 +3961,73 @@ mod tests {
             assert!(observed.lock().unwrap().is_empty());
             assert!(state.lock().unwrap().turns.is_empty());
         }
+    }
+
+    #[test]
+    fn native_audio_spend_counts_before_the_wake_tool_loop() {
+        use crate::agent::model_profile::{
+            AkhOverrides, GlobalDefaults, ModelCatalog, ModelProfile, ProfileRequest,
+            ResolvedModelProfile, WakeScope,
+        };
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent.set_model_profile(
+            ResolvedModelProfile::resolve_with_env(
+                ModelCatalog::builtin().unwrap(),
+                &ProfileRequest {
+                    akh: "thoth",
+                    model: Some("lilith"),
+                    effort: None,
+                    overrides: AkhOverrides {
+                        profile: ModelProfile {
+                            max_tokens_per_wake: Some(10),
+                            ..Default::default()
+                        },
+                        locations: Default::default(),
+                    },
+                    defaults: GlobalDefaults::OPENAI,
+                },
+                &|_| None,
+            )
+            .unwrap(),
+        );
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        agent.set_chat_backend(std::sync::Arc::new(RecordingAudioBackend {
+            inner: RecordingAnswerBackend {
+                conversations: std::sync::Arc::clone(&observed),
+                answer_seq: std::sync::atomic::AtomicUsize::new(0),
+            },
+            ground_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            cancel_after_ground: None,
+        }));
+        let audio = crate::agent::prompt_audio::ChatPromptAudio::from_wav(
+            crate::agent::prompt_audio::fixture_wav(),
+        )
+        .unwrap();
+        let outcome = agent.run_agentic_turn_scoped(
+            &engine,
+            "thoth",
+            "Listen to the recording",
+            &[],
+            &[audio],
+            &crate::message::VecSink::new(),
+            &std::sync::atomic::AtomicBool::new(false),
+            true,
+            &std::sync::Mutex::new(ConversationState::new("audio-budget", "narrative")),
+            Some(&WakeScope {
+                required_tools: vec![],
+                trusted_text: String::new(),
+                lease_secs: None,
+            }),
+        );
+        assert_eq!(
+            outcome,
+            Some(AgenticTurnOutcome::Interrupted(TurnStop::TokenBudget))
+        );
+        assert!(
+            observed.lock().unwrap().is_empty(),
+            "spent listening budget must stop before another model/tool round"
+        );
     }
 
     #[test]
