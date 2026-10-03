@@ -276,17 +276,24 @@ class FamilySampling:
     min_difficulty: int = 0
     max_difficulty: int = 0
     initial_difficulty: int = 0
+    # An acceptance-only family (the held-out belt drills, the receipt comparisons, the behavior spots, the
+    # coding pack): it exists as a frozen sentinel set and nothing else, so the other three tiers need no
+    # sample counts. Serialized only when set, so every manifest frozen before this field keeps its hash.
+    sentinel_only: bool = False
 
     def to_dict(self) -> dict:
-        return {"family": self.family, "tiers": {t.value: self.tiers[t] for t in sorted(self.tiers, key=lambda t: t.rank)},
+        body = {"family": self.family, "tiers": {t.value: self.tiers[t] for t in sorted(self.tiers, key=lambda t: t.rank)},
                 "min_difficulty": self.min_difficulty, "max_difficulty": self.max_difficulty,
                 "initial_difficulty": self.initial_difficulty}
+        if self.sentinel_only:
+            body["sentinel_only"] = True
+        return body
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "FamilySampling":
         return cls(str(data["family"]), {Tier(k): int(v) for k, v in data["tiers"].items()},
                    int(data.get("min_difficulty", 0)), int(data.get("max_difficulty", 0)),
-                   int(data.get("initial_difficulty", 0)))
+                   int(data.get("initial_difficulty", 0)), bool(data.get("sentinel_only", False)))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -341,6 +348,10 @@ class ExamManifest:
     floors_sha256: str = FLOORS_V1_SHA256
     seed_namespace: str = LILITH_SEED_NAMESPACE
     gate_overrides: Mapping[str, FamilyGate] = dataclasses.field(default_factory=dict)
+    # Free-form frozen facts the freeze step records (the sealed snapshot window, the families that could not
+    # be frozen and why, the sealed-n shortfall per family). Hashed with the manifest; included in the body
+    # only when non-empty, so a manifest without notes keeps its hash.
+    notes: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
     # -- derived -------------------------------------------------------------------------
 
@@ -408,6 +419,8 @@ class ExamManifest:
         floor = self.statistics.sealed_min_worlds_per_core_family
         for family, sampling in sorted(self.sampling.items()):
             for tier in Tier:
+                if sampling.sentinel_only and tier is not Tier.SENTINEL:
+                    continue
                 if sampling.tiers.get(tier, 0) <= 0:
                     missing.append(f"sampling[{family}].{tier.value}")
             sentinel_n = sampling.tiers.get(Tier.SENTINEL, 0)
@@ -447,7 +460,7 @@ class ExamManifest:
 
     def body(self) -> dict:
         floors_doc = self.floors_document()
-        return {
+        body = {
             "schema": MANIFEST_SCHEMA,
             "exam_id": self.exam_id,
             "run_id": self.run_id,
@@ -467,6 +480,9 @@ class ExamManifest:
             "decontamination": self.decontamination.to_dict(),
             "controller": dict(self.controller),
         }
+        if self.notes:
+            body["notes"] = json.loads(canonical_json(dict(self.notes)))
+        return body
 
     @property
     def manifest_sha256(self) -> str:
@@ -504,6 +520,7 @@ class ExamManifest:
             decontamination=DecontaminationPolicy(**data["decontamination"]),
             floors_path=str(_resolve_repo_path(floors_path)), floors_sha256=data["floors"]["sha256"],
             seed_namespace=data.get("seed_namespace", LILITH_SEED_NAMESPACE), gate_overrides=overrides,
+            notes=data.get("notes", {}),
         )
 
     @classmethod

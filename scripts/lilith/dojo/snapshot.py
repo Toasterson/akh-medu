@@ -247,6 +247,7 @@ class Snapshot:
         # Set by the `SnapshotStore` that opened this snapshot: a lookup that reaches for *other* snapshots
         # (project metadata) must stay below the same cutoff.
         self.visible_until: datetime | None = None
+        self.visible_since: datetime | None = None
 
     def __repr__(self) -> str:
         return f"Snapshot({self.id})"
@@ -505,11 +506,18 @@ class SnapshotStore:
     (spec building, hindsight labels, replay lookups, "newest" and "first at or after") goes through `ids`, so a
     later snapshot cannot leak in. `until=None` sees the whole root (the recorder keeps adding to it)."""
 
-    def __init__(self, root: Path, until: datetime | None = None):
+    def __init__(self, root: Path, until: datetime | None = None, since: datetime | None = None):
         self.root = Path(root)
         if not self.root.is_dir():
             raise SnapshotFormatError(f"snapshot root {self.root} does not exist")
         self.until = until.astimezone(timezone.utc) if until is not None else None
+        # `since` is the lower bound: a snapshot taken before it does not exist for this store (the sealed
+        # exam window: worlds recorded after the training cutoff). Same visibility rule as `until`, mirrored.
+        self.since = since.astimezone(timezone.utc) if since is not None else None
+        if self.since is not None and self.until is not None and self.since > self.until:
+            raise SnapshotFormatError(
+                f"--snapshot-since {cutoff_label(self.since)} is after --snapshot-until {cutoff_label(self.until)}",
+                help="the window is [since, until]; swap them or drop one")
         ids = []
         for child in sorted(self.root.iterdir()):
             if child.is_dir() and (child / "manifest.json").is_file():
@@ -519,32 +527,43 @@ class SnapshotStore:
                     continue
                 if self.until is not None and taken > self.until:
                     continue
+                if self.since is not None and taken < self.since:
+                    continue
                 ids.append(child.name)
         self._ids = tuple(ids)
         self._cache: dict[str, Snapshot] = {}
-        if self.until is not None and not self._ids:
+        if (self.until is not None or self.since is not None) and not self._ids:
+            window = " and ".join(part for part in (
+                f"at or after {cutoff_label(self.since)}" if self.since is not None else "",
+                f"at or before {cutoff_label(self.until)}" if self.until is not None else "") if part)
             raise SnapshotFormatError(
-                f"no snapshot under {self.root} is at or before {cutoff_label(self.until)}",
-                help="pick a cutoff at or after the first snapshot id, or drop --snapshot-until")
+                f"no snapshot under {self.root} is {window}",
+                help="pick a window that holds at least one snapshot id, or drop --snapshot-since / --snapshot-until")
 
     @classmethod
-    def open(cls, root: Path, until: str | None = None) -> "SnapshotStore":
+    def open(cls, root: Path, until: str | None = None, since: str | None = None) -> "SnapshotStore":
         """`until`: None (whole root), `auto` (the newest snapshot now; the resolved id is `store.cutoff`) or a
-        snapshot id / ISO timestamp."""
+        snapshot id / ISO timestamp. `since`: None or a snapshot id / ISO timestamp (the lower bound, inclusive)."""
+        lower = parse_cutoff(since) if since is not None else None
         if until is None:
-            return cls(root)
+            return cls(root, None, lower)
         if until.strip().lower() == CUTOFF_AUTO:
-            newest = cls(root)
+            newest = cls(root, None, lower)
             if not newest.ids:
                 raise SnapshotFormatError(f"snapshot root {newest.root} holds no snapshot",
                                           help="record one first, or drop --snapshot-until auto")
-            return cls(root, parse_snapshot_time(newest.ids[-1]))
-        return cls(root, parse_cutoff(until))
+            return cls(root, parse_snapshot_time(newest.ids[-1]), lower)
+        return cls(root, parse_cutoff(until), lower)
 
     @property
     def cutoff(self) -> str | None:
         """The recorded cutoff (None = the whole root)."""
         return cutoff_label(self.until)
+
+    @property
+    def floor(self) -> str | None:
+        """The recorded lower bound (None = from the first snapshot)."""
+        return cutoff_label(self.since)
 
     @property
     def ids(self) -> tuple[str, ...]:
@@ -559,6 +578,7 @@ class SnapshotStore:
         if snapshot_id not in self._cache:
             snapshot = Snapshot(self.root, snapshot_id)
             snapshot.visible_until = self.until
+            snapshot.visible_since = self.since
             self._cache[snapshot_id] = snapshot
         return self._cache[snapshot_id]
 

@@ -277,11 +277,11 @@ def project_metadata(snapshot: Snapshot) -> tuple[str, dict[str, dict]] | None:
     that recorded `list_projects` itself. Project metadata (name, git remote) is stable across snapshots;
     a snapshot made before the recorder captured the call still has the project ids and lacks the names."""
     # Below the same snapshot cutoff as the store that opened `snapshot`: a later snapshot must not supply names.
-    key = f"{snapshot.root}|{snapshot.visible_until}"
+    key = f"{snapshot.root}|{snapshot.visible_since}|{snapshot.visible_until}"
     if key not in _NAMES:
         found = None
         try:
-            store = SnapshotStore(snapshot.root, snapshot.visible_until)
+            store = SnapshotStore(snapshot.root, snapshot.visible_until, snapshot.visible_since)
             for candidate in store.snapshots():
                 entries: dict[str, dict] = {}
                 for response in candidate.by_call("list_projects"):
