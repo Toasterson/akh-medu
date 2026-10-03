@@ -1,5 +1,7 @@
 # Project Lilith — Gemma-based human interface and Akh coordinator
 
+Current CoS/eight-voice execution direction: [October 3 transcript-acceleration plan](2026-10-03-lilith-train-now-reconciliation.md). The dated prototype evidence below remains a historical record. Development training uses the harvested corpus and verified corrections; it does not wait for fourteen fresh recorder days.
+
 Date: 2026-09-21. Status: implementation proposal with an open decision map. No model training or deployment performed. User decisions: use the Gemma 4 track; carry forward ADAM/Kaine capabilities; prioritize human interaction and coordination; support preliminary coding and VSA-mediated learning from existing agents; **execute end-to-end within assigned scope**. Addition: **match or beat Qwen 3.8 27B on the agreed benchmarks**, diagnose failures to improve understanding and coding quality, and make **illumos the primary operating system**.
 
 ## Product outcome

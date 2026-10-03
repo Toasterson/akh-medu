@@ -1,6 +1,6 @@
 # Lilith as Chief of Staff — guided RL on Runpod
 
-- **Date:** 2026-09-27 (revision 2, after the operator's answers)
+- **Date:** 2026-09-27 (revision 3, reconciled 2026-10-03)
 - **Status:** Proposed. Slices are drafts in Anima Plan `01a0e26f-d032-7541-80cb-34e3f29c8842` on
   the **Local implementation — human pickup** workflow (claim with `claim_local_work_item`, hand back
   through `submit_local_work`).
@@ -9,6 +9,12 @@
 - **Builds on:** [Project Lilith](2026-09-21-project-lilith.md), [overview](2026-09-22-lilith-overview.md),
   [runtime training](2026-09-22-lilith-runtime-training.md), [Runpod handoff](2026-09-22-lilith-runpod-handoff.md),
   [dojo curriculum](../manuals/2026-09-01-babyllm-dojo-curriculum.md)
+
+## Current execution direction (2026-10-03)
+
+Follow [transcript acceleration and the next training run](2026-10-03-lilith-train-now-reconciliation.md) for C5/C7 development. The historical receipt pilot has completed, while the mixed CoS/eight-voice export and launch are still missing. Finish those artifacts and train on the historical curriculum without waiting for C3's fourteenth day. Fresh recorder evaluation and release/canary gates continue independently. The earlier C3/C4 dependency describes the recorder-derived fresh evaluation path, not a ban on historical development training.
+
+Execute the full existing guided curriculum: White forms → Yellow variation → Green sparring → Brown captain selection → Black guidance/transmission. Weighted SFT opens the program; on-policy experience and corrected-sibling preference remain in its execution scope. Include real memory corrections and Double Diamond/ERRC behaviors. Finish the declared stages before the existing final acceptance tests; no evaluation-only stop is inserted after the first SFT pass. Resource windows checkpoint/resume the same program within account credit. KLPO remains optional. Hephaistos uptime is not a training prerequisite.
 
 ## Goal
 
@@ -121,8 +127,7 @@ Lilith is reported next to the frozen parent and the teacher.
 - **Supervisor.** The architect session (Claude) is Lilith's supervisor. It starts and stops her pods
   and evaluates training (operator decision 2026-09-27). It follows the [exam and evaluation
   workflow](2026-09-27-lilith-exam-and-evaluation-workflow.md).
-- **Access.** The agent API key comes from 1Password `Homelab / Runpod API Key`, read at call time
-  and never written to disk. The hosted Runpod MCP uses it through a `headersHelper`.
+- **Access.** Use the caller's enrolled OpenBao-backed `agent-tools runpod` delivery or hosted MCP headers helper. See the fleet-secrets skill; migrated credentials have no 1Password fallback.
 - **Budget.** The cap is the account's prepaid credit: $66.73 on 2026-09-27, with an $80 spend limit.
   The operator tops it up when needed. The supervisor never adds funds, reports spend in every run
   report, and stops pods before the credit runs out.
