@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -185,6 +186,12 @@ class VerifyPayloadTests(unittest.TestCase):
                     'lilith_adapter_mechanics.py', 'lilith_lora_trainer.py', 'reference_microrun.py',
                     'verify_payload.py', 'bootstrap.sh', 'run_smoke.sh', 'requirements-cuda.txt'}
         self.assertTrue(required <= {Path(name).name for name in verify_payload.PAYLOAD_FILES})
+
+    def test_payload_carries_both_cuda_lanes(self):
+        names = {Path(name).name for name in verify_payload.PAYLOAD_FILES}
+        self.assertTrue({'requirements-cuda.txt', 'requirements-cuda128.txt', 'requirements-cuda128.in'} <= names)
+        for name in verify_payload.PAYLOAD_FILES:
+            self.assertTrue((REPOSITORY / name).is_file(), name)
 
 
 @unittest.skipUnless(shutil.which('git'), 'git not installed')
@@ -444,7 +451,7 @@ case "$1" in
     printf '%s\n' '__version__ = "0.0+fake"' 'class version:' '    cuda = None' '    hip = None' \
       'class cuda:' '    @staticmethod' '    def is_available():' '        return False' \
       '    @staticmethod' '    def get_device_name(index):' '        return "fake"' > "$target/fake-site/torch.py" ;;
-  pip) exit 0 ;;
+  pip) [[ -z "${FAKE_UV_LOG:-}" ]] || printf '%s\n' "$*" >> "$FAKE_UV_LOG"; exit 0 ;;
   *) exit 64 ;;
 esac
 """
@@ -515,6 +522,150 @@ class BootstrapEnvStateTests(unittest.TestCase):
         self.assertIn('lilith::bootstrap::env_lock', result.stderr)
         self.assertEqual((root / 'env/.lilith-lock-sha256').read_text(), '0' * 64 + '\n')
         self.assertFalse(list(root.glob('env.incomplete-*')))
+
+
+FAKE_NVIDIA_SMI = r"""#!/usr/bin/env bash
+case "$*" in
+  *--query-gpu=name*) echo "NVIDIA H100 80GB HBM3" ;;
+  *--query-gpu=driver_version*) echo "$FAKE_DRIVER" ;;
+  *) echo "| NVIDIA-SMI $FAKE_DRIVER      Driver Version: $FAKE_DRIVER      CUDA Version: $FAKE_CUDA     |" ;;
+esac
+"""
+
+
+class BootstrapLaneTests(BootstrapEnvStateTests):
+    """LILITH_CUDA_LANE selects the lock, env dir and CUDA floor; the default lane is untouched."""
+
+    def with_gpu(self, driver, cuda):
+        bin_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, bin_dir, True)
+        (bin_dir / 'nvidia-smi').write_text(FAKE_NVIDIA_SMI)
+        (bin_dir / 'nvidia-smi').chmod(0o755)
+        return {'PATH': f'{bin_dir}{os.pathsep}{os.environ["PATH"]}', 'FAKE_DRIVER': driver, 'FAKE_CUDA': cuda}
+
+    def check(self, root, lane, driver, cuda):
+        extra = self.with_gpu(driver, cuda)
+        if lane:
+            extra['LILITH_CUDA_LANE'] = lane
+        return run('bootstrap.sh', '--check', root=root, REAL_PYTHON=sys.executable, **extra)
+
+    def test_unknown_lane_is_refused_before_anything_else(self):
+        root = self.root_with_uv()
+        result = run('bootstrap.sh', '--check', root=root, LILITH_CUDA_LANE='cu12', LILITH_ALLOW_NO_CUDA='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('lilith::bootstrap::lane', result.stderr)
+        self.assertNotIn('readiness:', result.stderr)
+
+    def test_default_lane_is_cu130_and_needs_cuda_13(self):
+        root = self.root_with_uv()
+        ok = self.check(root, None, '580.95.05', '13.0')
+        self.assertIn('lane cu130 needs driver >= 580, CUDA >= 13.0', ok.stderr)
+        self.assertIn('lilith::bootstrap::env_missing', ok.stderr)        # past the CUDA gate
+        self.assertIn(str(root / 'env/bin/python'), ok.stderr)
+        for lane in (None, 'cu130'):
+            old = self.check(root, lane, '570.86.15', '12.8')
+            self.assertIn('lilith::bootstrap::cuda_version', old.stderr)
+        self.assertIn('lilith::bootstrap::cuda_version', self.check(root, None, '580.95.05', '12.9').stderr)
+
+    def test_cu128_lane_accepts_cuda_12_8_and_up_and_refuses_older(self):
+        root = self.root_with_uv()
+        for driver, cuda in (('570.86.15', '12.8'), ('575.51.03', '12.9'), ('580.95.05', '13.0')):
+            result = self.check(root, 'cu128', driver, cuda)
+            self.assertIn('lane cu128 needs driver >= 570, CUDA >= 12.8', result.stderr)
+            self.assertIn('lilith::bootstrap::env_missing', result.stderr, (driver, cuda, result.stderr))
+            self.assertIn(str(root / 'env-cu128/bin/python'), result.stderr)
+        for driver, cuda in (('565.57.01', '12.7'), ('560.35.03', '12.6'), ('535.1', '12.2'), ('550.1', '11.8')):
+            result = self.check(root, 'cu128', driver, cuda)
+            self.assertIn('lilith::bootstrap::cuda_version', result.stderr, (driver, cuda))
+        self.assertIn('lilith::bootstrap::cuda_version', self.check(root, 'cu128', '560.1', '12.8').stderr)   # driver too old
+
+    def test_cu128_install_builds_its_own_env_and_never_touches_the_cu130_env(self):
+        root = self.root_with_uv()
+        (root / 'env/bin').mkdir(parents=True)
+        (root / 'env/bin/python').write_text('#!/bin/sh\n')
+        (root / 'env/.lilith-lock-sha256').write_text('0' * 64 + '\n')   # a cu130 env from some other lock
+        uv_log = root.parent / 'uv.log'
+        result = run('bootstrap.sh', root=root, LILITH_ALLOW_NO_CUDA='1', REAL_PYTHON=sys.executable,
+                     LILITH_CUDA_LANE='cu128', FAKE_UV_LOG=str(uv_log))
+        self.assertIn('lilith::bootstrap::hf_token', result.stderr, result.stderr)   # got through the env build
+        self.assertNotIn('env_lock', result.stderr)
+        self.assertEqual((root / 'env/.lilith-lock-sha256').read_text(), '0' * 64 + '\n')
+        self.assertEqual(sorted(path.name for path in (root / 'env').iterdir()), ['.lilith-lock-sha256', 'bin'])
+        lock = hashlib.sha256((HERE / 'requirements-cuda128.txt').read_bytes()).hexdigest()
+        self.assertEqual((root / 'env-cu128/.lilith-lock-sha256').read_text().strip(), lock)
+        record = json.loads((root / 'env-cu128/versions.json').read_text())
+        self.assertEqual((record['lane'], record['lock_sha256']), ('cu128', lock))
+        self.assertTrue(record['lock'].endswith('requirements-cuda128.txt'))
+        install = [line for line in uv_log.read_text().splitlines() if line.startswith('pip install')]
+        self.assertEqual(len(install), 1)
+        self.assertIn('--require-hashes', install[0])
+        self.assertIn('--index-strategy unsafe-best-match', install[0])
+        self.assertTrue(install[0].endswith('requirements-cuda128.txt'))
+        self.assertIn(f'readiness: ninja 1.13.2 ({root}/env-cu128/bin/ninja)', result.stderr)
+
+    def test_default_lane_install_is_unchanged(self):
+        root = self.root_with_uv()
+        uv_log = root.parent / 'uv.log'
+        result = run('bootstrap.sh', root=root, LILITH_ALLOW_NO_CUDA='1', REAL_PYTHON=sys.executable, FAKE_UV_LOG=str(uv_log))
+        self.assertIn('lilith::bootstrap::hf_token', result.stderr)
+        self.assertFalse((root / 'env-cu128').exists())
+        record = json.loads((root / 'env/versions.json').read_text())
+        self.assertEqual(record['lane'], 'cu130')
+        install = [line for line in uv_log.read_text().splitlines() if line.startswith('pip install')]
+        self.assertNotIn('--index-strategy', install[0])
+        self.assertTrue(install[0].endswith('requirements-cuda.txt'))
+
+    def test_cu128_incomplete_env_is_moved_aside_next_to_itself(self):
+        root = self.root_with_uv()
+        (root / 'env-cu128').mkdir()
+        result = run('bootstrap.sh', root=root, LILITH_ALLOW_NO_CUDA='1', REAL_PYTHON=sys.executable, LILITH_CUDA_LANE='cu128')
+        self.assertEqual(len(list(root.glob('env-cu128.incomplete-*'))), 1, result.stderr)
+        self.assertFalse(list(root.glob('env.incomplete-*')))
+
+
+class Cu128LockTests(unittest.TestCase):
+    """The cu128 lock keeps the qualified versions wherever the CUDA build does not force a difference."""
+
+    CUDA_BUILT = ('torch', 'torchvision', 'torchaudio', 'vllm', 'torchcodec')
+
+    @staticmethod
+    def pins(path):
+        pinned = {}
+        for line in path.read_text().splitlines():
+            match = re.match(r'^([A-Za-z0-9_.-]+)==([^ ]+)', line)
+            if match:
+                pinned[match.group(1).lower()] = match.group(2)
+        return pinned
+
+    def test_non_cuda_pins_equal_the_cu130_lock(self):
+        base, lane = self.pins(HERE / 'requirements-cuda.txt'), self.pins(HERE / 'requirements-cuda128.txt')
+        for name, version in base.items():
+            if name.startswith(('nvidia-', 'cuda-')):
+                continue
+            self.assertIn(name, lane, name)
+            self.assertEqual(lane[name].split('+')[0], version, name)
+            if name not in self.CUDA_BUILT:
+                self.assertEqual(lane[name], version, name)
+
+    def test_cuda_built_packages_are_the_cu129_wheels(self):
+        lane = self.pins(HERE / 'requirements-cuda128.txt')
+        self.assertEqual(lane['torch'], '2.13.0+cu129')
+        self.assertEqual(lane['vllm'], '0.30.0+cu129')
+        self.assertEqual(lane['transformers'], '5.10.4')
+        self.assertEqual(lane['tokenizers'], '0.22.2')
+        self.assertEqual(lane['peft'], '0.21.0')
+        # nvidia-cutlass-dsl-libs-cu13 rides along in both locks (a cutlass-dsl extra, not a torch/vLLM runtime lib).
+        cuda13 = [name for name in lane if name.endswith('-cu13') and name != 'nvidia-cutlass-dsl-libs-cu13']
+        self.assertFalse(cuda13, 'no CUDA 13 runtime wheel in the 12.x lane')
+
+    def test_every_requirement_is_hashed_and_the_indexes_are_in_the_lock(self):
+        text = (HERE / 'requirements-cuda128.txt').read_text()
+        self.assertIn('--extra-index-url https://download.pytorch.org/whl/cu129', text)
+        self.assertIn('--extra-index-url https://wheels.vllm.ai/0.30.0/cu129', text)
+        blocks = re.split(r'\n(?=[A-Za-z0-9_.-]+==)', text)[1:]
+        self.assertGreater(len(blocks), 150)
+        for block in blocks:
+            self.assertIn('--hash=sha256:', block, block.splitlines()[0])
 
 
 class EnvBinPathTest(unittest.TestCase):

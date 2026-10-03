@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 PROGRAM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAM))
@@ -664,6 +665,59 @@ class PodScriptTests(Temp):
             argv[argv.index(flag) + 1] = value
             with self.assertRaises(ckpt.ProgramError):
                 run_program_pod.onpolicy_ready(parser.parse_args(argv))
+
+
+class CudaLaneTests(Temp):
+    def test_lane_defaults_to_cu130_and_maps_to_the_env_dir(self):
+        self.assertEqual(ckpt.cuda_lane({}), 'cu130')
+        self.assertEqual(ckpt.cuda_lane({'LILITH_CUDA_LANE': ''}), 'cu130')
+        self.assertEqual(ckpt.cuda_lane({'LILITH_CUDA_LANE': 'cu128'}), 'cu128')
+        self.assertEqual(ckpt.env_dir('/workspace/lilith', 'cu130'), Path('/workspace/lilith/env'))
+        self.assertEqual(ckpt.env_dir('/workspace/lilith', 'cu128'), Path('/workspace/lilith/env-cu128'))
+        with self.assertRaises(ckpt.ProgramError) as caught:
+            ckpt.cuda_lane({'LILITH_CUDA_LANE': 'cu12'})
+        self.assertEqual(caught.exception.code, 'lilith::program::cuda_lane')
+
+    def test_env_dir_reads_the_process_environment(self):
+        with unittest.mock.patch.dict(os.environ, {'LILITH_CUDA_LANE': 'cu128'}):
+            self.assertEqual(ckpt.env_dir('/w'), Path('/w/env-cu128'))
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('LILITH_CUDA_LANE', None)
+            self.assertEqual(ckpt.env_dir('/w'), Path('/w/env'))
+
+    def test_start_uses_the_lane_python_and_path(self):
+        source = (PROGRAM / 'run_program_pod.py').read_text()
+        self.assertIn("lane_env = env_dir(args.root)", source)
+        self.assertIn("python = str(lane_env / 'bin/python')", source)
+        self.assertIn("'PATH': str(lane_env / 'bin')", source)
+        self.assertNotIn("'env/bin", source)
+
+    def test_serve_scripts_pick_the_lane_env_for_vllm(self):
+        for rel, needle in (('program/serve_candidate.sh', '$ROOT/$ENV_NAME/bin/python'),
+                            ('serve/serve_pod.sh', '$ENV_DIR/bin/vllm')):
+            text = (PROGRAM.parent / rel).read_text()
+            self.assertIn('cu128) ENV_NAME=env-cu128', text, rel)
+            self.assertIn('cu130) ENV_NAME=env ;;', text, rel)
+            self.assertIn(needle, text, rel)
+            self.assertNotIn('$ROOT/env/bin', text, rel)
+
+    def test_supervisor_forwards_only_a_non_default_lane(self):
+        args = supervise_program.HostArgs(pod_id='pod123', ssh='root@1.2.3.4', port=2222, identity=Path('/nonexistent'), window_seconds=18000,
+                                          approval=HostSupervisorTests.approval(self), dest=self.base / 'lane')
+        approval = supervise_program.load_host_approval(args.approval, 'pod123', 18000)
+        with unittest.mock.patch.dict(os.environ):
+            os.environ.pop('LILITH_CUDA_LANE', None)
+            default = supervise_program.Supervisor(args, approval, ssh=object())
+            self.assertTrue(default.pod_script.startswith('python3 '))
+            self.assertTrue(default.serve_script.startswith('bash '))
+            os.environ['LILITH_CUDA_LANE'] = 'cu128'
+            lane = supervise_program.Supervisor(args, approval, ssh=object())
+            self.assertTrue(lane.pod_script.startswith('LILITH_CUDA_LANE=cu128 python3 '))
+            self.assertTrue(lane.serve_script.startswith('LILITH_CUDA_LANE=cu128 bash '))
+            os.environ['LILITH_CUDA_LANE'] = 'nope'
+            with self.assertRaises(supervise_program.HostError) as caught:
+                supervise_program.Supervisor(args, approval, ssh=object())
+            self.assertEqual(caught.exception.code, 'lilith::program::cuda_lane')
 
 
 class HostSupervisorTests(Temp):

@@ -46,6 +46,9 @@ from typing import Any, Callable, Sequence
 
 HERE = Path(__file__).resolve()
 sys.path.insert(0, str(HERE.parents[1] / 'history'))
+sys.path.insert(0, str(HERE.parent))
+
+from checkpoint import DEFAULT_CUDA_LANE, CUDA_LANE_ENV, ProgramError, cuda_lane  # noqa: E402
 
 AGENT_TOOLS = Path.home() / '.local/bin/agent-tools'
 TRAINER_MARGIN_SECONDS = 300
@@ -251,8 +254,15 @@ class Supervisor:
         self.payload = args.pod_payload or f'{args.root}/payload/main-{short}'
         self.data_dir = args.pod_data_dir or f'{args.root}/program-data/{self.run_id}'
         self.run_dir = f'{args.root}/program/{self.run_id}'
-        self.pod_script = f'python3 {shlex.quote(self.payload)}/scripts/lilith/program/run_program_pod.py --root {shlex.quote(args.root)}'
-        self.serve_script = f'bash {shlex.quote(self.payload)}/scripts/lilith/program/serve_candidate.sh'
+        try:
+            self.lane = cuda_lane()
+        except ProgramError as error:
+            raise HostError(error.code, str(error), error.help) from error
+        # The default lane adds nothing to the pod commands (byte-for-byte as before); cu128 is forwarded
+        # so bootstrap --check, the trainer and vLLM all pick <root>/env-cu128 on the pod.
+        lane_prefix = '' if self.lane == DEFAULT_CUDA_LANE else f'{CUDA_LANE_ENV}={self.lane} '
+        self.pod_script = f'{lane_prefix}python3 {shlex.quote(self.payload)}/scripts/lilith/program/run_program_pod.py --root {shlex.quote(args.root)}'
+        self.serve_script = f'{lane_prefix}bash {shlex.quote(self.payload)}/scripts/lilith/program/serve_candidate.sh'
         self.t0 = clock()
         self.deadline = self.t0 + args.window_seconds
         self.stall_strikes = 0

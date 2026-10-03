@@ -1,0 +1,47 @@
+# Lilith C6 CUDA training + serving environment, LANE cu128: hosts whose NVIDIA driver
+# reports CUDA 12.8 (Runpod EU-FR-1 H100 hosts, 2026-10). Selected with
+# LILITH_CUDA_LANE=cu128; built into $LILITH_ROOT/env-cu128, never over the cu130 env/.
+#
+# Regenerate the lock with (uv 0.12.8; the three indexes and the strategy are part of the
+# lock's provenance, bootstrap.sh passes the same ones at install time):
+#   uv pip compile --python-platform x86_64-manylinux_2_28 --python-version 3.12 \
+#     --generate-hashes --emit-index-url --index-strategy unsafe-best-match \
+#     -c scripts/lilith/runpod/requirements-cuda128.constraints.txt \
+#     --index https://download.pytorch.org/whl/cu129 \
+#     --index https://wheels.vllm.ai/0.30.0/cu129 \
+#     --default-index https://pypi.org/simple \
+#     scripts/lilith/runpod/requirements-cuda128.in \
+#     -o scripts/lilith/runpod/requirements-cuda128.txt
+#
+# WHY THESE WHEELS ARE cu129, NOT cu128 (resolved 2026-10-03, nothing here is a guess):
+#   * The PyTorch cu128 index stops at torch 2.11.0; torch 2.13.0 (the exact build vLLM
+#     0.30 pins) exists only for cu126, cu129 and cu130. No torch 2.13.0+cu128 exists.
+#   * No vLLM release since 0.20 ships a cu128 wheel (GitHub release assets and
+#     wheels.vllm.ai carry cu129 and, as the PyPI default, cu130). cu126 torch cannot host
+#     them. The cu129 pair (torch 2.13.0+cu129 + vllm 0.30.0+cu129) is the nearest
+#     combination that keeps the qualified stack (vllm 0.30.0 / torch 2.13.0 /
+#     transformers 5.10.4) unchanged.
+#   * A CUDA 12.9 runtime on a CUDA 12.8 driver relies on NVIDIA minor-version
+#     compatibility (driver >= 525 runs any CUDA 12.x runtime; SASS cubins run, PTX newer than
+#     the driver's JIT does not). It is expected to work for torch/vLLM/flashinfer here
+#     (sm_90 cubins; flashinfer's nvcc emits sm_90a SASS) but is NOT verified without a
+#     12.8-driver GPU: bootstrap.sh's require_cuda (torch sees a device) is the first
+#     gate and the smoke is the second. If it fails, the fallback is a true-cu128 stack
+#     (torch 2.11.0+cu128) with an older vLLM, which needs its own qualification.
+#
+# Same top-level pins as requirements-cuda.in; only the wheel build (CUDA 12.9 vs 13.0)
+# differs: torch 2.13.0 resolves to 2.13.0+cu129 from the PyTorch cu129 index and
+# vllm 0.30.0 to 0.30.0+cu129 from the vLLM wheel index.
+torch==2.13.0
+transformers==5.10.4
+peft==0.21.0
+trl==1.14.0
+bitsandbytes==0.50.2
+vllm==0.30.0
+accelerate==1.15.0
+safetensors==0.8.0
+huggingface_hub==1.33.0
+jsonschema==4.26.0
+# vLLM/flashinfer JIT-compile sampler kernels at warmup and exec the `ninja` console
+# script from PATH; pinned explicitly (see requirements-cuda.in).
+ninja==1.13.2

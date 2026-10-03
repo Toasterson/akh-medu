@@ -37,6 +37,29 @@ class ProgramError(RuntimeError):
         self.help = help
 
 
+# ------------------------------------------------------------------- CUDA lane
+
+# LILITH_CUDA_LANE selects the volume env: cu130 (default) -> <root>/env, cu128 -> <root>/env-cu128.
+# Mirrors scripts/lilith/runpod/bootstrap.sh; a lane is never guessed from the host.
+CUDA_LANE_ENV = 'LILITH_CUDA_LANE'
+DEFAULT_CUDA_LANE = 'cu130'
+CUDA_LANE_ENV_DIRS = {'cu130': 'env', 'cu128': 'env-cu128'}
+
+
+def cuda_lane(environ: 'os._Environ[str] | dict[str, str] | None' = None) -> str:
+    """The selected lane (default cu130); an unknown value fails closed."""
+    lane = (os.environ if environ is None else environ).get(CUDA_LANE_ENV) or DEFAULT_CUDA_LANE
+    if lane not in CUDA_LANE_ENV_DIRS:
+        raise ProgramError('lilith::program::cuda_lane', f'{CUDA_LANE_ENV}={lane!r} is not a known CUDA lane',
+                           f'use one of {sorted(CUDA_LANE_ENV_DIRS)} (default {DEFAULT_CUDA_LANE})')
+    return lane
+
+
+def env_dir(root: Path | str, lane: str | None = None) -> Path:
+    """``<root>/env`` for cu130, ``<root>/env-cu128`` for cu128."""
+    return Path(root) / CUDA_LANE_ENV_DIRS[lane or cuda_lane()]
+
+
 # ------------------------------------------------------------------- atomic files
 
 def fsync_directory(directory: Path) -> None:

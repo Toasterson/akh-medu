@@ -46,6 +46,9 @@ PAYLOAD_FILES = (
     'scripts/lilith/runpod/lilith_lora_trainer.py',
     'scripts/lilith/runpod/reference_microrun.py',
     'scripts/lilith/runpod/requirements-cuda.txt',
+    # CUDA 12.8-driver lane (LILITH_CUDA_LANE=cu128): hash-locked cu129 wheels + the file that regenerates them.
+    'scripts/lilith/runpod/requirements-cuda128.in',
+    'scripts/lilith/runpod/requirements-cuda128.txt',
     'scripts/session-platform/lilith_adapter_mechanics.py',
     'scripts/session-platform/lilith_training_engine.py',
     'scripts/session-platform/lilith_training_cache_control.py',
