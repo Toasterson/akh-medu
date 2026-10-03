@@ -1409,6 +1409,7 @@ impl AkhAcpAgent {
         agent_id: String,
         text: String,
         prompt_images: Vec<crate::agent::chat_backend::ChatPromptImage>,
+        prompt_audio: Vec<crate::agent::prompt_audio::ChatPromptAudio>,
         asker: Option<Arc<dyn crate::agent::permission::PermissionAsker>>,
         session_id: String,
         mcp_cfgs: Vec<mcp_bridge::SessionMcpServerCfg>,
@@ -1584,11 +1585,12 @@ impl AkhAcpAgent {
                 source = mode_source,
                 "turn mode resolved"
             );
-            let agentic_outcome = agent_r.run_agentic_turn_with_conversation_state_and_images(
+            let agentic_outcome = agent_r.run_agentic_turn_with_conversation_state_and_media(
                 &engine,
                 &agent_id,
                 &text,
                 &prompt_images,
+                &prompt_audio,
                 &*sink,
                 &cancel,
                 is_dispatch,
@@ -4980,7 +4982,8 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                                     .load_session(true)
                                     .prompt_capabilities(
                                         PromptCapabilities::new()
-                                            .image(cfg!(feature = "grug-backend")),
+                                            .image(cfg!(feature = "grug-backend"))
+                                            .audio(true),
                                     )
                                     .mcp_capabilities(McpCapabilities::new().http(true)),
                             )
@@ -5405,6 +5408,7 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                             ws.clone(),
                             text,
                             prompt.images,
+                            prompt.audio,
                             Some(asker),
                             session_id.to_string(),
                             mcp_cfgs,
@@ -6379,16 +6383,19 @@ const MAX_PROMPT_IMAGE_BYTES_TOTAL: usize = 48 * 1024 * 1024;
 struct DecodedPrompt {
     text: String,
     images: Vec<crate::agent::chat_backend::ChatPromptImage>,
+    audio: Vec<crate::agent::prompt_audio::ChatPromptAudio>,
 }
 
 /// Decode ACP prompt blocks at the transport boundary. Images are bounded
 /// before and after base64 decoding and never written to disk. Unsupported
-/// image formats fail closed instead of being silently discarded.
+/// formats fail closed. Audio is carried to the selected backend, which must
+/// accept it explicitly; accompanying text cannot trigger a text-only fallback.
 fn decode_prompt(blocks: &[ContentBlock]) -> Result<DecodedPrompt, String> {
     use base64::Engine as _;
 
     let mut text = Vec::new();
     let mut images = Vec::new();
+    let mut audio = Vec::new();
     let mut decoded_total = 0usize;
     for block in blocks {
         match block {
@@ -6433,14 +6440,45 @@ fn decode_prompt(blocks: &[ContentBlock]) -> Result<DecodedPrompt, String> {
                     bytes,
                 });
             }
+            ContentBlock::Audio(content) => {
+                use crate::agent::prompt_audio::{ChatPromptAudio, MAX_AUDIO_BYTES};
+                if !audio.is_empty() {
+                    return Err("one audio recording per prompt is supported".into());
+                }
+                if !matches!(
+                    content.mime_type.trim().to_ascii_lowercase().as_str(),
+                    "audio/wav" | "audio/x-wav"
+                ) {
+                    return Err(
+                        "unsupported audio MIME type; native audio accepts audio/wav".into(),
+                    );
+                }
+                if content.data.is_empty()
+                    || content.data.len() > MAX_AUDIO_BYTES.div_ceil(3) * 4 + 4
+                {
+                    return Err(format!(
+                        "audio payload is empty or exceeds {MAX_AUDIO_BYTES} decoded bytes"
+                    ));
+                }
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&content.data)
+                    .map_err(|error| format!("audio payload is not valid base64: {error}"))?;
+                audio.push(ChatPromptAudio::from_wav(bytes)?);
+            }
             _ => {}
         }
     }
     let mut text = text.join(" ");
-    if text.trim().is_empty() && !images.is_empty() {
+    if text.trim().is_empty() && !audio.is_empty() {
+        text = "Transcribe the attached recording in its spoken language. Preserve dialect and disfluencies, and mark uncertain or inaudible spans instead of guessing.".into();
+    } else if text.trim().is_empty() && !images.is_empty() {
         text = "Read the text in the attached image and use it to answer.".into();
     }
-    Ok(DecodedPrompt { text, images })
+    Ok(DecodedPrompt {
+        text,
+        images,
+        audio,
+    })
 }
 
 /// Mint a fresh, unguessable ACP session id: `akh-<UUIDv4>`, 122 bits from
@@ -7132,6 +7170,60 @@ mod tests {
         let prompt =
             decode_prompt(&[ContentBlock::Image(ImageContent::new("AA==", "image/png"))]).unwrap();
         assert!(prompt.text.contains("attached image"));
+    }
+
+    #[test]
+    fn prompt_decoder_rejects_invalid_audio_instead_of_running_without_it() {
+        use agent_client_protocol::schema::AudioContent;
+
+        let audio = ContentBlock::Audio(AudioContent::new("AA==", "audio/wav"));
+        for blocks in [
+            vec![audio.clone()],
+            vec![
+                ContentBlock::Text(TextContent::new("Compare this recording")),
+                audio,
+            ],
+        ] {
+            let error = decode_prompt(&blocks).unwrap_err();
+            assert!(error.contains("invalid audio WAV"));
+        }
+    }
+
+    #[test]
+    fn prompt_decoder_preserves_complete_audio_and_rejects_unsupported_inputs() {
+        use agent_client_protocol::schema::AudioContent;
+        use base64::Engine as _;
+        let bytes = crate::agent::prompt_audio::fixture_wav();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let block = ContentBlock::Audio(AudioContent::new(encoded, "audio/wav"));
+        let prompt = decode_prompt(&[block.clone()]).unwrap();
+        assert!(prompt.text.contains("spoken language"));
+        assert_eq!(prompt.audio[0].bytes(), bytes);
+        let prompt = decode_prompt(&[
+            ContentBlock::Text(TextContent::new("Listen literally")),
+            block.clone(),
+        ])
+        .unwrap();
+        assert_eq!(prompt.text, "Listen literally");
+        assert_eq!(prompt.audio.len(), 1);
+        assert!(
+            decode_prompt(&[block.clone(), block])
+                .unwrap_err()
+                .contains("one audio")
+        );
+        assert!(
+            decode_prompt(&[ContentBlock::Audio(AudioContent::new("AA==", "audio/mp4"))])
+                .unwrap_err()
+                .contains("MIME")
+        );
+        assert!(
+            decode_prompt(&[ContentBlock::Audio(AudioContent::new(
+                "not base64",
+                "audio/wav"
+            ))])
+            .unwrap_err()
+            .contains("base64")
+        );
     }
 
     // ── StepKind / LastStepTracker (work item "Turns die quietly" defect 1) ──
