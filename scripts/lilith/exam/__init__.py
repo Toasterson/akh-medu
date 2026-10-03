@@ -13,6 +13,11 @@ CPU-only, stdlib-only (plus the dojo package next to it).
 - `panel`           judging-panel work orders + result ingestion, adjudication, Cohen's κ
 - `result_doc`      RESULT.md skeleton in the 8k-lane / P6.4 template
 - `decontam`        P6.3 decontamination hook against the frozen sentinels
+- `belts`           held-out belt drills, sparring, receipt comparisons, behavior spots, coding pack:
+                    sentinel rows, deterministic scoring, the exporter's exclusion rows
+- `freeze`          writes the frozen exam (manifest, sentinels, rubric, exclusions) before any candidate
+                    is scored; `verify`; `decontam` against the training archives
+- `run_acceptance`  the acceptance driver: workflow §4 steps 6-9 for one frozen candidate
 
 Modules import each other as the top-level packages `exam` and `dojo`; entry points put
 `scripts/lilith` on `sys.path` first.

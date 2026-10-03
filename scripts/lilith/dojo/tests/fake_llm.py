@@ -47,12 +47,20 @@ class FakeLLM:
         self.kind = kind
         self.script = script
         self.requests: list[dict] = []  # {"path", "headers", "body"}
+        self.models: list[str] = ["lilith", "lilith-parent"]  # what GET /v1/models lists (openai kind)
         self._lock = threading.Lock()
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *a):  # silence
                 pass
+
+            def do_GET(self):
+                with outer._lock:
+                    outer.requests.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": None})
+                if self.headers.get("User-Agent", "").startswith("Python-urllib"):
+                    return self._send(403, {"error": "python UA blocked"})
+                self._send(200, {"object": "list", "data": [{"id": m, "object": "model"} for m in outer.models]})
 
             def do_POST(self):
                 raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))

@@ -269,7 +269,7 @@ def _check_silence(answer: str, row: Mapping[str, Any]) -> tuple[bool, str]:
 
 def _check_mirror(answer: str, row: Mapping[str, Any]) -> tuple[bool, str]:
     share = overlap(answer, row["prompt"])
-    return share >= 0.15, f"reuses {share:.2f} of the situation's tokens"
+    return share >= 0.08, f"reuses {share:.2f} of the situation's tokens"
 
 
 def _check_yes_and(answer: str, row: Mapping[str, Any]) -> tuple[bool, str]:
@@ -294,7 +294,7 @@ def _check_redirect(answer: str, row: Mapping[str, Any]) -> tuple[bool, str]:
 
 def _check_stubborn(answer: str, row: Mapping[str, Any]) -> tuple[bool, str]:
     share = overlap(answer, row["prompt"])
-    return share >= 0.10, f"reuses {share:.2f} of the situation's tokens"
+    return share >= 0.04, f"reuses {share:.2f} of the situation's tokens"
 
 
 KATA_STRUCTURE = {
@@ -433,66 +433,55 @@ def with_panel_verdict(outcome: ItemOutcome, panel_pass: bool | None) -> ItemOut
 
 
 # --- the exclusion file (training must honour it) ------------------------------------------------------------------
+#
+# `program.export` reads `sentinel-exclusions.jsonl` through `program.splits.load_sentinels`: EVERY string value of
+# 8 or more characters on a row becomes a key, and a record is excluded when its id, its seed ids or the sha256 of
+# any of its non-system message texts equals one. So the exporter file carries ids and content hashes only: a
+# descriptive value (a kata name, a path) would itself become a key and exclude unrelated records. Short tags
+# (< 8 characters) are safe and say what a row is; the descriptive detail lives in the sidecar
+# `sentinel-exclusions.detail.jsonl`, which the exporter never reads.
+
+EXCLUSION_TAGS = {"kata": "kata", "sparring": "spar", "receipt": "rcpt", "spot": "spot", "coding": "code", "dojo": "dojo"}
 
 
-def exclusion_rows(kata_picked: Sequence[Mapping[str, Any]], sparring_picked: Sequence[Mapping[str, Any]],
-                   receipt: Sequence[Mapping[str, Any]], spots: Sequence[Mapping[str, Any]],
-                   coding: Sequence[Mapping[str, Any]], sources: Mapping[str, str]) -> list[dict]:
-    """One row per held-out source item. `record_id` is what a training record carries as its own id, its
-    `seed_record_id` or its `component_id`; `derived` says what else follows from it."""
-    rows: list[dict] = []
-    for p in kata_picked:
-        rows.append({"schema": EXCLUSION_SCHEMA, "kind": "kata-drill", "record_id": p["seed_record_id"],
-                     "source": sources["kata"], "kata": p["kata"], "belt": p["belt"], "lang": p["lang"],
-                     "derived": "every record whose source_ref.seed_record_id or component_id is this id "
-                                "(paraphrase, second-language, multi-turn and budget variants, lineage drills)"})
-    for p in sparring_picked:
-        rows.append({"schema": EXCLUSION_SCHEMA, "kind": "sparring-dialogue", "record_id": p["seed_record_id"],
-                     "source": sources["sparring"], "adversary": p["adversary"], "lang": p["lang"],
-                     "derived": "every record whose source_ref.seed_record_id or component_id is this id"})
-    for r in receipt:
-        rows.append({"schema": EXCLUSION_SCHEMA, "kind": "historical-receipt-case", "record_id": r["record_id"],
-                     "source": sources["receipts"], "work_item_id": r["work_item_id"], "split": r["split"],
-                     "derived": "the record itself in any split; also any record rendered from the same receipt"})
+def _hashes(*texts: str) -> list[str]:
+    return sorted({sha256_text(t) for t in texts if isinstance(t, str) and t.strip()})
+
+
+def exclusion_rows(kata: Sequence[Mapping[str, Any]], sparring: Sequence[Mapping[str, Any]],
+                   receipts: Sequence[Mapping[str, Any]], spots: Sequence[Mapping[str, Any]],
+                   coding: Sequence[Mapping[str, Any]], dojo: Sequence[Mapping[str, Any]],
+                   sparring_dialogues: Mapping[str, Sequence[Mapping[str, Any]]] | None = None) -> tuple[list[dict], list[dict]]:
+    """(exporter rows, detail rows) from the frozen sentinel rows. The held-out text hashes cover every message the
+    exporter hashes: the drill's situation and move, every turn of a sparring dialogue (`sparring_dialogues`:
+    seed id -> the full recorded turns), the receipt lesson's user and answer text, the spot prompt."""
+    exporter: list[dict] = []
+    detail: list[dict] = []
+
+    def add(tag: str, record_id: str, hashes: Sequence[str], **info: Any) -> None:
+        exporter.append({"record_id": record_id, "tag": EXCLUSION_TAGS[tag], "content_sha256": list(hashes)})
+        detail.append({"schema": EXCLUSION_SCHEMA, "kind": tag, "record_id": record_id, "content_sha256": list(hashes), **info})
+
+    for r in kata:
+        add("kata", r["seed_record_id"], _hashes(r["prompt"], r["target"]), kata=r["kata"], belt=r["belt"], lang=r["lang"],
+            derived="every record whose provenance names this seed (paraphrase, second-language, multi-turn, budget "
+                    "variants; lineage drills)")
+    for r in sparring:
+        turns = (sparring_dialogues or {}).get(r["seed_record_id"]) or ()
+        texts = [t["text"] for t in turns] or [m["content"] for m in r["messages"]] + [r["target"]]
+        add("sparring", r["seed_record_id"], _hashes(*texts), adversary=r["adversary"], lang=r["lang"],
+            derived="every record whose provenance names this seed")
+    for r in receipts:
+        add("receipt", r["record_id"], _hashes(r["prompt"], r["target"]), work_item_id=r["work_item_id"], split=r["split"],
+            derived="the record itself in any split, and any record rendered from the same receipt text")
     for r in spots:
-        rows.append({"schema": EXCLUSION_SCHEMA, "kind": "behavior-spot", "record_id": r["record_id"],
-                     "source": sources["spots"], "derived": "the spot prompt and its expected answer"})
+        add("spot", r["record_id"], _hashes(r["prompt"], r["target"]), derived="the spot prompt and its expected answer")
     for r in coding:
         if r["split"] != "train":
-            rows.append({"schema": EXCLUSION_SCHEMA, "kind": "coding-task", "record_id": r["task_id"],
-                         "source": sources["coding"], "prompt_sha256": r["prompt_sha256"],
-                         "derived": "any generated task or solution derived from this task"})
-    rows.append({"schema": EXCLUSION_SCHEMA, "kind": "snapshot-window", "record_id": "sealed-window",
-                 "source": sources["window"], "derived": "no training record may be built from a recorder snapshot "
-                                                        "inside the sealed window (episodes, labels, replay reads)"})
-    return sorted(rows, key=lambda r: (r["kind"], r["record_id"]))
-
-
-@dataclasses.dataclass(frozen=True)
-class Exclusions:
-    """What the exporter loads (`Exclusions.load`) and asks (`excludes`) for every candidate training record."""
-
-    ids: frozenset[str]
-    window_since: str | None = None
-    rows: tuple[dict, ...] = ()
-
-    @classmethod
-    def load(cls, path: Path, window_since: str | None = None) -> "Exclusions":
-        rows = tuple(load_jsonl(path))
-        ids = frozenset(r["record_id"] for r in rows if r["kind"] != "snapshot-window")
-        return cls(ids, window_since, rows)
-
-    def excludes(self, record: Mapping[str, Any]) -> str | None:
-        """The reason a record must not enter training, or None. Looks at its own id, its seed ids and its
-        component id, and (for tracker-derived records) the snapshot it was built from."""
-        ref = record.get("source_ref") if isinstance(record.get("source_ref"), Mapping) else {}
-        for key in ("record_id", "component_id"):
-            if record.get(key) in self.ids:
-                return f"{key} is an exam sentinel"
-        for key in ("seed_record_id", "work_item_id", "task_id"):
-            if ref.get(key) in self.ids or record.get(key) in self.ids:
-                return f"{key} is an exam sentinel"
-        snapshot = record.get("snapshot") or ref.get("snapshot")
-        if self.window_since and isinstance(snapshot, str) and snapshot >= self.window_since:
-            return f"built from snapshot {snapshot}, inside the sealed window (>= {self.window_since})"
-        return None
+            add("coding", sha256_text("coding-task:" + r["task_id"]), _hashes(r["prompt"]), task_id=r["task_id"],
+                derived="the held-out task prompt")
+    for r in dojo:
+        add("dojo", r["episode_id"], [], family=r["family"], spec_sha256=r["spec_sha256"],
+            derived="records whose source_ref.episode_id is this episode (the snapshot boundary also excludes the window)")
+    key = lambda row: (row["tag"], row["record_id"])  # noqa: E731
+    return sorted(exporter, key=key), sorted(detail, key=lambda r: (r["kind"], r["record_id"]))

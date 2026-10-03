@@ -104,6 +104,14 @@ python3 scripts/lilith/dojo/runner.py compare runs/c4/parent-sealed runs/c4/teac
   `reverify.source_snapshot_until`), `--dry-run`, `dojo_report.py` and `replay_server.py serve`. `compare` prints
   each arm's cutoff and episode count, warns when cutoffs or episode-id sets differ, reports the intersection it
   pairs on (`intersection` in `--json`), and `compare --strict` refuses such arms.
+- **`--snapshot-since FLOOR` is the mirror lower bound** (a snapshot id or ISO timestamp, inclusive). Together with
+  `--snapshot-until` it names the closed window `[FLOOR, CUTOFF]`: a snapshot outside it does not exist for spec
+  building, hindsight labels or replay lookups. The Lilith acceptance exam's sealed window is
+  `--snapshot-since 20261002T000000Z --snapshot-until <pinned newest id>` (the training cutoff `20261001T235959Z`
+  is exclusive), so sealed specs come only from worlds recorded after training data stopped. Recorded in
+  `provenance.json` as `snapshot_since` (absent = from the first snapshot), part of the run identity (a resume with
+  another floor is refused), accepted by `run`, `reverify` (no flag = the run's own floor), `--dry-run`,
+  `dojo_report.py` and `replay_server.py serve`.
 - Add `--dry-run` first: it selects the episodes, prints the prompt and tool-list size and the prompt
   sha256, and calls no model. Add `--limit 3` for a smoke run.
 - The key is read from the env var or a 0600 file; it is never an argument, never logged, and is scrubbed
