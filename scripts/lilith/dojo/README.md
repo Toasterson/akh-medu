@@ -326,6 +326,11 @@ comparable to runs after it: rerun the baselines.
   `coordination/request@v1` payload (`objective`, plus `about`, `receipts` and `ack_deadline`).
 - **Captain-selection labels** follow the ADR 110 table and use structural features only
   (`FEATURE_VOICE`). Operator holds have no structural voice label and are excluded.
+- **Illumos guidance spans projects.** A pack entry's work item (and its later outcome) is looked up in the
+  primary Akh-Medu listing first, then in every recorded `anima:<project_id>` collector (illumos, OpenIndiana,
+  ...), so those projects produce `illumos-guidance` episodes. Replay answers `list_work_items` and
+  `get_work_item_detail` for them from the same recordings. The Akh-Medu families still read only the primary
+  project (`Snapshot.work_items`); the cross-project lookup is `Snapshot.work_item_any_project`.
 - **Splits.** A multi-plan episode (the briefing) is split by time only. A train or dev episode
   whose labels read a later split's window is dropped, never reassigned.
 

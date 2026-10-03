@@ -802,11 +802,11 @@ FAILURE_CAUSES = frozenset({ParkCause.CI_RED, ParkCause.CONFLICT, ParkCause.BUDG
 
 def later_outcome(store: SnapshotStore, wid: str, snapshot_id: str) -> OutcomeLabel:
     snap = store.get(snapshot_id)
-    start = snap.work_items.get(wid)
+    start = snap.work_item_any_project(wid)
     prov = start.provenance if start else Provenance()
     base_revisions = snap.change_revision_count(wid)
     for other in store.later(snapshot_id):
-        wi = other.work_items.get(wid)
+        wi = other.work_item_any_project(wid)
         if wi is None:
             continue
         prov = prov.merge(wi.provenance)

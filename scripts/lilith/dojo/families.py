@@ -1227,7 +1227,8 @@ def build_illumos_guidance(store: SnapshotStore, sid: str, ctx: BuildContext) ->
     snap = store.get(sid)
     out = BuildResult()
     for entry in ctx.illumos_pack:
-        wi = snap.work_items.get(entry.work_item_id)
+        # The pack names items of any recorded project (Akh-Medu, illumos, OpenIndiana ...).
+        wi = snap.work_item_any_project(entry.work_item_id)
         if wi is None or wi.is_terminal:
             continue
         outcome = H.later_outcome(store, entry.work_item_id, sid)
