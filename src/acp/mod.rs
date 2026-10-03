@@ -6383,7 +6383,9 @@ struct DecodedPrompt {
 
 /// Decode ACP prompt blocks at the transport boundary. Images are bounded
 /// before and after base64 decoding and never written to disk. Unsupported
-/// image formats fail closed instead of being silently discarded.
+/// image formats and unsupported audio fail closed instead of being silently
+/// discarded. An audio attachment must never become a text-only turn whose
+/// response could be mistaken for an audio-grounded answer.
 fn decode_prompt(blocks: &[ContentBlock]) -> Result<DecodedPrompt, String> {
     use base64::Engine as _;
 
@@ -6432,6 +6434,14 @@ fn decode_prompt(blocks: &[ContentBlock]) -> Result<DecodedPrompt, String> {
                     mime_type: "image/png".into(),
                     bytes,
                 });
+            }
+            ContentBlock::Audio(_) => {
+                return Err(
+                    "audio prompts are not supported by this runtime path; the audio was not \
+                     sent to the model. Native Gemma audio support currently exists only in \
+                     the Candle library/example, not the ACP turn pipeline"
+                        .into(),
+                );
             }
             _ => {}
         }
@@ -7132,6 +7142,24 @@ mod tests {
         let prompt =
             decode_prompt(&[ContentBlock::Image(ImageContent::new("AA==", "image/png"))]).unwrap();
         assert!(prompt.text.contains("attached image"));
+    }
+
+    #[test]
+    fn prompt_decoder_rejects_audio_instead_of_running_without_it() {
+        use agent_client_protocol::schema::AudioContent;
+
+        let audio = ContentBlock::Audio(AudioContent::new("AA==", "audio/wav"));
+        for blocks in [
+            vec![audio.clone()],
+            vec![
+                ContentBlock::Text(TextContent::new("Compare this recording")),
+                audio,
+            ],
+        ] {
+            let error = decode_prompt(&blocks).unwrap_err();
+            assert!(error.contains("audio prompts are not supported"));
+            assert!(error.contains("not sent to the model"));
+        }
     }
 
     // ── StepKind / LastStepTracker (work item "Turns die quietly" defect 1) ──
