@@ -80,8 +80,8 @@ def run_task(ctx: Context, teacher: Teacher, kind: str, key: str, build_prompt: 
                 break
             prompt = base + feedback_suffix(bad)
     except TeacherError as error:
-        ctx.run.mark(kind, key, "error", detail=str(error)[:200])
-        return Outcome(kind, key, "error", detail=str(error)[:200])
+        ctx.run.mark(kind, key, "error", detail=str(error)[:200], error_kind=error.kind)
+        return Outcome(kind, key, "error", detail=str(error)[:200], extra={"error_kind": error.kind})
     assert assessment is not None
     transcript_sha = ctx.run.save_transcript(kind, key, attempts)
     bad = failed(assessment.checks)

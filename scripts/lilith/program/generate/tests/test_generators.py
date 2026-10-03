@@ -12,15 +12,10 @@ REPO = cli.REPO_ROOT
 
 
 def run_all(tasks, responder_fn=responder, workers=3):
-    teachers = []
-
-    def make():
-        t = FakeTeacher(responder_fn)
-        teachers.append(t)
-        return t
-
+    """`workers` fake akhs, one worker each."""
     outcomes = []
-    run_pool(tasks, make, lambda teacher, task: outcomes.append(task.run(teacher)), workers)
+    run_pool(tasks, [lambda: FakeTeacher(responder_fn) for _ in range(workers)],
+             lambda teacher, task: outcomes.append(task.run(teacher)))
     return outcomes
 
 
@@ -226,7 +221,7 @@ def test_guidance_waves_stop_at_the_quota(tmp_path):
     ctx = Context(records.RunDir(tmp_path), LanguageProfiles({}), resolver_ok(), REPO)
     cands = [candidate(work_item_id=f"wi-{i}", code=f"WI-{i}") for i in range(10)]
     progress = cli.Progress(lambda line: None)
-    cli.run_guidance_waves(ctx, cands, 4, lambda: FakeTeacher(responder), 2, progress)
+    cli.run_guidance_waves(ctx, cands, 4, [lambda: FakeTeacher(responder)] * 2, progress)
     assert len(ctx.run.read("guidance.jsonl")) == 4
     assert cli.write_pack(ctx) == 4
     pack = cli.guidance.pack_entries(ctx.run.read("guidance.jsonl"))
@@ -242,15 +237,22 @@ def test_teacher_errors_are_not_recorded_and_retry_on_resume(ctx):
     assert len(variation.plan(ctx, cli.DRILLS)) == 240  # errors are not finished seeds
 
 
+def cli_args(out, **over):
+    base = dict(out=str(out), order="variation", akhs="dojo-teacher", guidance_quota=0, snapshots="", snapshot_cutoff="20261002T000000Z",
+                gate=None, acp_bin=None, retry_excluded=False, allow_any_out=True)
+    base.update(over)
+    return cli.argparse.Namespace(**base)
+
+
 # --- end to end ------------------------------------------------------------------------------------------------
 
 
 def test_cli_run_end_to_end_without_network(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(cli, "language_profiles", lambda: LanguageProfiles({}))
     out = tmp_path / "out"
-    args = cli.argparse.Namespace(out=str(out), kinds="variation,sparring,lineage", workers=9, guidance_quota=0, snapshots=str(tmp_path),
-                                  snapshot_cutoff="20261002T000000Z", gate=None, acp_bin=None, retry_excluded=False, allow_any_out=True)
-    assert cli.run(args, make_teacher=lambda: FakeTeacher(responder)) == 0
+    args = cli_args(out, order="variation,sparring,lineage", akhs="dojo-teacher,dojo-teacher-2,dojo-teacher-3", guidance_quota=0,
+                    snapshots=str(tmp_path))
+    assert cli.run(args, make_teacher=lambda akh: FakeTeacher(responder)) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["admitted"]["variation"] == 240 and report["admitted"]["sparring"] == 120
     assert report["lineage_by_generator"]["program.generate.lineage@1"] == 60
@@ -260,7 +262,161 @@ def test_cli_run_end_to_end_without_network(tmp_path, capsys, monkeypatch):
 
 def test_cli_refuses_outputs_outside_the_private_root(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "language_profiles", lambda: LanguageProfiles({}))
-    args = cli.argparse.Namespace(out=str(tmp_path / "repo-data"), kinds="variation", workers=1, guidance_quota=0, snapshots="", snapshot_cutoff="",
-                                  gate=None, acp_bin=None, retry_excluded=False, allow_any_out=False)
-    assert cli.run(args, make_teacher=lambda: FakeTeacher(responder)) == 2
+    args = cli_args(tmp_path / "repo-data", order="variation", allow_any_out=False)
+    assert cli.run(args, make_teacher=lambda akh: FakeTeacher(responder)) == 2
     assert not (tmp_path / "repo-data").exists()
+
+
+# --- retry classification, backoff, per-akh workers, order, error handling -----------------------------------------
+
+
+def test_busy_workspace_and_refusal_are_retryable_other_errors_are_not():
+    from program.generate import acp_worker as aw
+
+    busy = aw.classify_rpc_error("session/prompt", {"code": -32603, "message": "Internal error",
+                                                   "data": 'workspace busy: a previous turn is still running for "dojo-teacher" (running 516s)'})
+    assert busy.retryable and busy.kind == aw.BUSY
+    boom = aw.classify_rpc_error("session/prompt", {"code": -32603, "message": "Internal error", "data": "index out of bounds"})
+    assert not boom.retryable and boom.kind == aw.OTHER
+    assert not aw.classify_rpc_error("session/new", {"code": -32601, "message": "method not found"}).retryable
+    assert aw.TeacherError("connection refused", retryable=True).kind == aw.TRANSPORT
+
+
+def test_backoff_is_exponential_capped_jittered_and_50_attempts():
+    from program.generate.acp_worker import Backoff
+
+    delays = Backoff().delays(rand=lambda: 0.5)  # zero jitter
+    assert len(delays) == 50 and delays[0] == 5.0 and delays[1] == 8.0 and max(delays) == 60.0
+    low, high = Backoff().delays(rand=lambda: 0.0), Backoff().delays(rand=lambda: 1.0)
+    assert low[0] == 3.75 and high[0] == 6.25
+
+
+def test_teacher_retries_busy_without_dropping_the_connection_and_gives_up_after_the_cap():
+    from program.generate import acp_worker as aw
+
+    sleeps, retries = [], []
+    teacher = aw.AcpTeacher(backoff=aw.Backoff(attempts=3), sleep=sleeps.append, on_retry=lambda k, d, n: retries.append((k, n)))
+    state = {"calls": 0, "drops": 0}
+
+    def once(prompt):
+        state["calls"] += 1
+        if state["calls"] <= 2:
+            raise aw.TeacherError("workspace busy", retryable=True, kind=aw.BUSY)
+        return aw.TeacherReply("ok", 0.0)
+
+    teacher._once = once
+    teacher._drop = lambda: state.__setitem__("drops", state["drops"] + 1)
+    assert teacher.ask("p").text == "ok"
+    assert state == {"calls": 3, "drops": 0} and retries == [("busy", 1), ("busy", 2)] and len(sleeps) == 2
+
+    def refused(prompt):
+        raise aw.TeacherError("connection refused", retryable=True)
+
+    teacher._once = refused
+    try:
+        teacher.ask("p")
+        raise AssertionError("expected TeacherError")
+    except aw.TeacherError as error:
+        assert error.retryable and state["drops"] == 4  # dropped on every transport failure; gave up after 3 retries
+
+    def fatal(prompt):
+        raise aw.TeacherError("bad request")
+
+    teacher._once, slept = fatal, len(sleeps)
+    try:
+        teacher.ask("p")
+    except aw.TeacherError as error:
+        assert not error.retryable and len(sleeps) == slept  # not retried
+
+
+def test_one_worker_per_akh_and_each_akh_runs_one_turn_at_a_time():
+    import threading
+
+    active, peak, handled = collections.Counter(), collections.Counter(), collections.defaultdict(list)
+    lock = threading.Lock()
+
+    class Akh:
+        def __init__(self, name):
+            self.name = name
+
+        def ask(self, prompt):
+            with lock:
+                active[self.name] += 1
+                peak[self.name] = max(peak[self.name], active[self.name])
+                handled[self.name].append(threading.get_ident())
+            with lock:
+                active[self.name] -= 1
+            return FakeTeacher(responder).ask(prompt)
+
+        def close(self):
+            pass
+
+    names = ["dojo-teacher", "dojo-teacher-2", "dojo-teacher-3"]
+    tasks = variation.plan(records_ctx(), cli.DRILLS)[:30]
+    run_pool(tasks, [lambda n=n: Akh(n) for n in names], lambda teacher, task: task.run(teacher))
+    assert set(handled) == set(names) and all(len(set(ids)) == 1 for ids in handled.values())  # one thread per akh
+    assert all(peak[n] == 1 for n in names)
+    assert sum(len(v) for v in handled.values()) == 30
+
+
+def records_ctx():
+    import tempfile
+    from pathlib import Path
+
+    return Context(records.RunDir(Path(tempfile.mkdtemp())), LanguageProfiles({}), CitationResolver(None, get=lambda url: (404, "")), REPO)
+
+
+def test_cli_validates_akhs_and_order(tmp_path):
+    assert cli.validate(cli_args(tmp_path, akhs="a,a")) == "--akhs needs one or more distinct akh names, got ['a', 'a']"
+    assert "at most 4" in cli.validate(cli_args(tmp_path, akhs="a,b,c,d,e"))
+    assert "--order" in cli.validate(cli_args(tmp_path, order="guidance,nonsense"))
+    assert cli.validate(cli_args(tmp_path, akhs="a,b", order=",".join(cli.DEFAULT_ORDER))) == (["a", "b"], list(cli.DEFAULT_ORDER))
+    assert cli.DEFAULT_ORDER == ("guidance", "sparring", "lineage", "variation")
+
+
+def test_cli_runs_kinds_in_the_requested_order_and_akh_names_reach_the_factory(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "language_profiles", lambda: LanguageProfiles({}))
+    seen = []
+
+    def make(akh):
+        def respond(prompt):
+            seen.append((akh, "sparring" if "sparring round" in prompt else "transmit" if "transmitting a technique" in prompt else "variation"))
+            return responder(prompt)
+
+        return FakeTeacher(respond)
+
+    args = cli_args(tmp_path / "o", order="sparring,variation", akhs="dojo-teacher,dojo-teacher-2")
+    assert cli.run(args, make_teacher=make) == 0
+    kinds = [k for _, k in seen]
+    assert kinds.index("variation") > max(i for i, k in enumerate(kinds) if k == "sparring")  # sparring finished first
+    assert {a for a, _ in seen} == {"dojo-teacher", "dojo-teacher-2"} and "transmit" not in kinds
+
+
+def test_exhausted_seeds_stop_the_run_and_error_lines_are_dropped_on_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "language_profiles", lambda: LanguageProfiles({}))
+
+    def dead(prompt):
+        raise TeacherError("workspace busy", retryable=True, kind="busy")
+
+    args = cli_args(tmp_path / "o", order="variation,sparring")
+    assert cli.run(args, make_teacher=lambda akh: FakeTeacher(dead)) == 1  # stopped by the consecutive-error breaker
+    run_dir = records.RunDir(tmp_path / "o")
+    errors = [v for v in run_dir.progress("variation").values() if v["status"] == "error"]
+    assert len(errors) == cli.MAX_CONSECUTIVE_ERRORS and errors[0]["error_kind"] == "busy"
+    assert not run_dir.progress("sparring")  # never reached
+    # restart: the errored seeds are not finished, their error lines are dropped, and the run completes
+    assert cli.run(cli_args(tmp_path / "o", order="variation"), make_teacher=lambda akh: FakeTeacher(responder)) == 0
+    assert len(records.RunDir(tmp_path / "o").read("variation.jsonl")) == 240
+    assert all(v["status"] != "error" for v in records.RunDir(tmp_path / "o").progress("variation").values())
+
+
+def test_guidance_waves_terminate_when_candidates_keep_erroring(tmp_path):
+    ctx = Context(records.RunDir(tmp_path), LanguageProfiles({}), resolver_ok(), REPO)
+    cands = [candidate(work_item_id=f"wi-{i}", code=f"WI-{i}") for i in range(30)]
+    progress = cli.Progress(lambda line: None, max_consecutive_errors=1000)  # breaker off: termination must not depend on it
+
+    def down(prompt):
+        raise TeacherError("busy", retryable=True, kind="busy")
+
+    cli.run_guidance_waves(ctx, cands, 5, [lambda: FakeTeacher(down)], progress)  # returns instead of looping forever
+    assert len(progress.errored) == 30 and not ctx.run.read("guidance.jsonl")

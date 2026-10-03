@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import queue
+import random
 import subprocess
 import threading
 import time
@@ -24,12 +25,32 @@ DEFAULT_ROOT = Path.home() / "Library" / "Application Support" / "roman-akhs"
 DEFAULT_ENDPOINT = "tcp://127.0.0.1:18444"
 
 
-class TeacherError(Exception):
-    """The teacher could not answer. `retryable` marks transport trouble (refused connection, EOF, timeout)."""
+BUSY = "busy"            # the akh's workspace runs one turn at a time and one is still running (JSON-RPC -32603 "workspace busy")
+TRANSPORT = "transport"  # refused/closed connection, pipe closed, no answer within the timeout
+OTHER = "other"          # anything the teacher answered that retrying will not fix
+BUSY_MARKER = "workspace busy"
+INTERNAL_ERROR_CODE = -32603
 
-    def __init__(self, message: str, *, retryable: bool = False):
+
+class TeacherError(Exception):
+    """The teacher could not answer. `retryable` marks trouble that waiting fixes (busy workspace, refused connection,
+    EOF, timeout); `kind` names the class (busy | transport | other) for the run report."""
+
+    def __init__(self, message: str, *, retryable: bool = False, kind: str | None = None):
         super().__init__(message)
         self.retryable = retryable
+        self.kind = kind or (TRANSPORT if retryable else OTHER)
+
+
+def classify_rpc_error(method: str, error: dict) -> TeacherError:
+    """JSON-RPC error object -> `TeacherError`. -32603 whose message or data says the workspace is busy is retryable."""
+    text = " ".join(str(error.get(k) or "") for k in ("message", "data"))
+    code = error.get("code")
+    summary = f"{method}: JSON-RPC error {code}: {str(error.get('message'))[:120]}" + (
+        f" ({str(error.get('data'))[:200]})" if error.get("data") else "")
+    if code == INTERNAL_ERROR_CODE and BUSY_MARKER in text.lower():
+        return TeacherError(summary, retryable=True, kind=BUSY)
+    return TeacherError(summary, retryable=False, kind=OTHER)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -58,15 +79,19 @@ class AcpConfig:
 
 @dataclasses.dataclass(frozen=True)
 class Backoff:
-    attempts: int = 6
-    initial_s: float = 5.0
-    factor: float = 2.0
-    max_s: float = 120.0
+    """Exponential backoff with jitter. A seed is retried up to `attempts` times on retryable trouble (busy workspace,
+    refused connection, timeout) before the task reports an error; the error is never recorded as a finished seed."""
 
-    def delays(self) -> list[float]:
+    attempts: int = 50
+    initial_s: float = 5.0
+    factor: float = 1.6
+    max_s: float = 60.0
+    jitter: float = 0.25  # +- fraction of each delay
+
+    def delays(self, rand: Callable[[], float] = random.random) -> list[float]:
         out, d = [], self.initial_s
         for _ in range(self.attempts):
-            out.append(min(d, self.max_s))
+            out.append(min(d, self.max_s) * (1.0 + self.jitter * (2.0 * rand() - 1.0)))
             d *= self.factor
         return out
 
@@ -124,8 +149,7 @@ class _Connection:
                 raise TeacherError(f"{method}: akh-acp closed the connection", retryable=True)
             if message.get("id") == rid and ("result" in message or "error" in message):
                 if "error" in message:
-                    error = message["error"] or {}
-                    raise TeacherError(f"{method}: JSON-RPC error {error.get('code')}: {str(error.get('message'))[:200]}")
+                    raise classify_rpc_error(method, message["error"] or {})
                 return message.get("result") or {}
             if message.get("method") == "session/update" and chunks is not None:
                 update = (message.get("params") or {}).get("update") or {}
@@ -152,10 +176,12 @@ class AcpTeacher:
     """A teacher bound to one worker. Not thread-safe: one instance per worker thread."""
 
     def __init__(self, config: AcpConfig = AcpConfig(), backoff: Backoff = Backoff(),
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep,
+                 on_retry: Callable[[str, float, int], None] | None = None):
         self.config = config
         self.backoff = backoff
         self._sleep = sleep
+        self._on_retry = on_retry
         self._conn: _Connection | None = None
 
     def _connect(self) -> _Connection:
@@ -192,9 +218,12 @@ class AcpTeacher:
             try:
                 return self._once(prompt)
             except TeacherError as error:
-                self._drop()
+                if error.kind != BUSY:  # a busy workspace leaves the connection healthy; transport trouble does not
+                    self._drop()
                 if not error.retryable or attempt == len(delays):
                     raise
+                if self._on_retry is not None:
+                    self._on_retry(error.kind, delays[attempt], attempt + 1)
                 self._sleep(delays[attempt])
         raise TeacherError("unreachable")  # pragma: no cover
 
@@ -217,18 +246,26 @@ class FakeTeacher:
         pass
 
 
-def run_pool(items: Sequence, make_teacher: Callable[[], Teacher], work: Callable[[Teacher, object], None],
-             workers: int, on_error: Callable[[object, Exception], None] | None = None) -> None:
-    """Run `work(teacher, item)` over `items` with at most `workers` threads, one teacher each. A worker's
-    failure on one item is reported through `on_error` and does not stop the others."""
+def akh_config(akh: str, binary: Path | None = None, root: Path = DEFAULT_ROOT) -> AcpConfig:
+    """One akh's ACP settings: its principal token is `secrets/<akh>.key` (read by akh-acp, never printed)."""
+    base = AcpConfig(akh=akh, token_file=root / "secrets" / f"{akh}.key")
+    return dataclasses.replace(base, binary=binary) if binary is not None else base
+
+
+def run_pool(items: Sequence, makers: Sequence[Callable[[], Teacher]], work: Callable[[Teacher, object], None],
+             on_error: Callable[[object, Exception], None] | None = None,
+             stop: Callable[[], bool] = lambda: False) -> None:
+    """Run `work(teacher, item)` over `items` with exactly one worker thread per maker (one teacher each; a
+    workspace runs one turn at a time, so concurrency is the number of akhs). A worker's failure on one item is
+    reported through `on_error` and does not stop the others; `stop()` ends all workers before their next item."""
     todo: "queue.Queue" = queue.Queue()
     for item in items:
         todo.put(item)
 
-    def loop() -> None:
+    def loop(make_teacher: Callable[[], Teacher]) -> None:
         teacher = make_teacher()
         try:
-            while True:
+            while not stop():
                 try:
                     item = todo.get_nowait()
                 except queue.Empty:
@@ -241,7 +278,7 @@ def run_pool(items: Sequence, make_teacher: Callable[[], Teacher], work: Callabl
         finally:
             teacher.close()
 
-    threads = [threading.Thread(target=loop, daemon=False) for _ in range(max(1, min(workers, len(items) or 1)))]
+    threads = [threading.Thread(target=loop, args=(m,), daemon=False) for m in list(makers)[: max(1, len(items))]]
     for t in threads:
         t.start()
     for t in threads:

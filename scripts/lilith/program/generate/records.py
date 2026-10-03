@@ -126,6 +126,21 @@ class RunDir:
         keep = {"done"} if retry_excluded else {"done", "excluded"}
         return {key for key, line in self.progress(kind).items() if line.get("status") in keep}
 
+    def drop_errors(self, kind: str) -> int:
+        """Rewrite progress/<kind>.jsonl without error lines (a seed that errored is simply not finished). Returns the
+        number of lines dropped."""
+        path = self.out / "progress" / f"{kind}.jsonl"
+        if not path.is_file():
+            return 0
+        lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        kept = [line for line in lines if line.get("status") != "error"]
+        if len(kept) != len(lines):
+            with self._lock:
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text("".join(json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n" for line in kept), encoding="utf-8")
+                tmp.replace(path)
+        return len(lines) - len(kept)
+
     def mark(self, kind: str, key: str, status: str, **fields: Any) -> None:
         self._append(self.out / "progress" / f"{kind}.jsonl", {"key": key, "status": status, **fields})
 
