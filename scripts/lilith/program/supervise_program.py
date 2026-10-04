@@ -422,8 +422,13 @@ class Supervisor:
                 if outcome == 'deadline':
                     self.report['run_status'] = 'window_ended'
                     return
-                if not probe.get('alive'):       # exit wait mode: the trainer left its GPU free; resume it now
+                # Exit wait mode: the trainer writes onpolicy-needed.json and then exits 75, so the probe
+                # taken before the hand-off may still say alive. Re-probe now; if the trainer is gone,
+                # resume it in this window instead of ending the window on its stale exit record.
+                after = self.status()
+                if not after.get('alive'):
                     self.launch(resume=True)
+                    self.report.setdefault('resumed_after_handshake', []).append(decision.stage)
             else:
                 self.report['run_status'] = {'complete': 'complete', 'window_ended': 'window_ended', 'failed': 'failed',
                                              'crashed': 'crashed', 'stalled': 'stalled'}[decision.action]
