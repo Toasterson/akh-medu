@@ -1,15 +1,15 @@
 use super::*;
-use crate::runtime::Runtime;
+use crate::runtime::{QuarantineQuery, Runtime};
 use crate::{config::Principal, http::Api, types::*};
 use axum::{
     Extension,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 pub fn runtime_router(runtime: Runtime) -> Router {
     let config = runtime.config.clone();
     protect(
         Router::new()
-            .route("/v1/jobs", post(start_job))
+            .route("/v1/jobs", get(quarantine_inventory).post(start_job))
             .route("/v1/jobs/cancel-unsubmitted", post(cancel_unsubmitted))
             .route("/v1/jobs/{id}", get(get_job))
             .route("/v1/jobs/{id}/cancel", post(cancel_job))
@@ -17,6 +17,13 @@ pub fn runtime_router(runtime: Runtime) -> Router {
             .with_state(runtime),
         config,
     )
+}
+async fn quarantine_inventory(
+    State(runtime): State<Runtime>,
+    Extension(p): Extension<Principal>,
+    Query(query): Query<QuarantineQuery>,
+) -> Api<RuntimeQuarantinePage> {
+    Ok(Json(runtime.quarantine_inventory(&p, &query)?))
 }
 async fn reconcile_job(
     State(runtime): State<Runtime>,
@@ -80,6 +87,89 @@ fn legacy_events(events: &mut Vec<RuntimeEvent>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn quarantine_collection_requires_existing_session_auth_and_rejects_unknown_queries() {
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let session_token = "session-fixture-token-with-32-characters";
+        let client_token = "client-fixture-token-with-32-characters";
+        let session_file = dir.path().join("session-token");
+        let client_file = dir.path().join("client-token");
+        std::fs::write(&session_file, session_token).unwrap();
+        std::fs::write(&client_file, client_token).unwrap();
+        let config = Arc::new(
+            serde_json::from_value::<Config>(json!({
+                "service_id":"runtime-1", "listen":"127.0.0.1:0", "data_dir":dir.path(),
+                "principals":[
+                    {"id":"sessions","token_file":session_file,"roles":["session"]},
+                    {"id":"client","token_file":client_file,"roles":["client"]}
+                ]
+            }))
+            .unwrap(),
+        );
+        let runtime =
+            Runtime::new(config, Store::open(&dir.path().join("state.redb")).unwrap()).unwrap();
+        let app = runtime_router(runtime);
+        for (path, token, expected) in [
+            ("/v1/jobs?status=unknown", None, StatusCode::UNAUTHORIZED),
+            (
+                "/v1/jobs?status=unknown",
+                Some(client_token),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "/v1/jobs?status=unknown",
+                Some(session_token),
+                StatusCode::OK,
+            ),
+            (
+                "/v1/jobs?status=running",
+                Some(session_token),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/v1/jobs?limit=0",
+                Some(session_token),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/v1/jobs?limit=101",
+                Some(session_token),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/v1/jobs?limit=-1",
+                Some(session_token),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/v1/jobs?runtime=foreign",
+                Some(session_token),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/v1/jobs?profile=a&profile=b",
+                Some(session_token),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let mut request = Request::builder().uri(path);
+            if let Some(token) = token {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{path}");
+        }
+    }
     #[test]
     fn legacy_projection_preserves_results_and_supported_event_order() {
         // Exercise serialization against the actual legacy event variants.

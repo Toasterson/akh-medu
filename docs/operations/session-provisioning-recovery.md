@@ -27,6 +27,31 @@ supported `GET /v1/akhs/{akh}/tools` with an adequate deadline can warm the core
 without starting model work. Verify a subsequent catalog/context response and
 actual session execution; do not reset or discard saved memory.
 
+## Runtime quarantine inventory
+
+When central events report `dispatch_deferred` / `unknown_outcome` with the
+runtime quarantine message, a compact sessions list is insufficient: a runtime
+job can be Unknown before its status reaches the session projection. Query the
+owning runtime's authenticated `GET /v1/jobs?status=unknown`, using the existing
+`session` role. This endpoint only lists live Unknown jobs owned by that runtime;
+it never expires, cancels, reconciles or otherwise writes a job.
+
+The response contains `jobs` and an optional `next_cursor`. Each job contains its
+job/session/turn IDs, generation, Unknown status, runtime/profile/revision/kind/
+execution-mode binding, recognized static error code, canonical `request_sha256`, and
+nullable `unknown_since` clock. Model/provider details, workspace, input, tools,
+output, events and raw error messages are excluded. Missing legacy clocks remain
+missing. Use optional `profile`, `limit` (1–100; default 50), and `after` (the
+URL-encoded `next_cursor`) while keeping the profile unchanged. Jobs are ordered
+by ID; cursors are scoped to the runtime and profile. Pages reflect live state,
+not a frozen snapshot. Unsupported filters/cursors and oversized metadata are
+rejected; responses are capped at 256 KiB.
+
+Use the discovered exact job ID with the established job GET and administrator
+reconciliation path. The request hash identifies the original request; it is
+not proof of stopped providers, quiescent owners or resolved tool effects.
+Preserve Unknown outcomes until those independent recovery conditions are met.
+
 ## Executor already gone
 
 A sandbox allocation can remain `ready` or `attaching` after its executor stops.

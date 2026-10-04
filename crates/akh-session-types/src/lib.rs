@@ -710,6 +710,41 @@ pub struct RuntimeJob {
     pub events: Vec<RuntimeEvent>,
 }
 
+/// Public quarantine metadata. Deliberately excludes the model/provider session,
+/// workspace, input, instructions, tools, output, events and raw error message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeQuarantineBinding {
+    pub runtime: String,
+    pub profile: String,
+    pub revision: String,
+    pub kind: RuntimeKind,
+    pub execution_mode: ExecutionMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeQuarantineJob {
+    pub id: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub generation: u64,
+    pub status: TurnStatus,
+    pub binding: RuntimeQuarantineBinding,
+    pub error_code: Option<String>,
+    pub request_sha256: String,
+    /// None for legacy Unknown records without a saved clock. Reading inventory
+    /// never creates that clock or otherwise settles the job.
+    pub unknown_since: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeQuarantinePage {
+    pub jobs: Vec<RuntimeQuarantineJob>,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RuntimeEvent {
