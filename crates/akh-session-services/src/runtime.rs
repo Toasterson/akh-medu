@@ -164,6 +164,34 @@ pub struct Runtime {
     client: Client,
     active: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
+
+/// The collection supports only Unknown jobs; it is not a provider/job export.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuarantineQuery {
+    pub status: Option<String>,
+    pub profile: Option<String>,
+    pub limit: Option<u16>,
+    pub after: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuarantineCursor {
+    version: u8,
+    runtime: String,
+    profile: Option<String>,
+    id: String,
+}
+
+// Deserialize only the request needed by the established recovery fingerprint.
+// serde skips the potentially large private output/event fields in stored jobs.
+#[derive(Deserialize)]
+struct QuarantineStoredJob {
+    request: RuntimeJobRequest,
+    status: TurnStatus,
+    error: Option<Fault>,
+}
 fn job_key(id: &str) -> String {
     key("job", &[id])
 }
@@ -336,6 +364,134 @@ impl Runtime {
             ));
         }
         Ok(job)
+    }
+
+    /// Read only the owning runtime's live Unknown-job metadata. In particular,
+    /// do not call the expiry sweep, write clocks, or settle continuations here.
+    pub fn quarantine_inventory(
+        &self,
+        principal: &Principal,
+        query: &QuarantineQuery,
+    ) -> Result<RuntimeQuarantinePage> {
+        crate::http::role(principal, "session")?;
+        if query.status.as_deref().is_some_and(|s| s != "unknown") {
+            return Err(Fault::invalid("only status=unknown is supported"));
+        }
+        let limit = query.limit.unwrap_or(50) as usize;
+        if !(1..=100).contains(&limit) {
+            return Err(Fault::invalid("inventory limit must be 1..100"));
+        }
+        if let Some(profile) = &query.profile {
+            validate_key(profile)?;
+        }
+        let cursor = query
+            .after
+            .as_ref()
+            .map(|value| {
+                if value.len() > 4096 {
+                    return Err(Fault::invalid("invalid quarantine cursor"));
+                }
+                let cursor: QuarantineCursor = serde_json::from_str(value)
+                    .map_err(|_| Fault::invalid("invalid quarantine cursor"))?;
+                validate_key(&cursor.id)?;
+                if cursor.version != 1
+                    || cursor.runtime != self.config.service_id
+                    || cursor.profile != query.profile
+                {
+                    return Err(Fault::invalid("quarantine cursor belongs to another scope"));
+                }
+                Ok(cursor)
+            })
+            .transpose()?;
+        let mut jobs = self
+            .store
+            .scan::<QuarantineStoredJob>("job/")
+            .map_err(|_| Fault::invalid("cannot read runtime quarantine inventory"))?;
+        jobs.retain(|job| {
+            job.request.binding.runtime == self.config.service_id
+                && job.status == TurnStatus::Unknown
+                && query
+                    .profile
+                    .as_ref()
+                    .is_none_or(|p| p == &job.request.binding.profile)
+                && cursor.as_ref().is_none_or(|c| job.request.id > c.id)
+        });
+        jobs.sort_by(|a, b| a.request.id.cmp(&b.request.id));
+        let more = jobs.len() > limit;
+        jobs.truncate(limit);
+        let next_cursor = if more {
+            Some(
+                serde_json::to_string(&QuarantineCursor {
+                    version: 1,
+                    runtime: self.config.service_id.clone(),
+                    profile: query.profile.clone(),
+                    id: jobs.last().unwrap().request.id.clone(),
+                })
+                .map_err(|_| Fault::invalid("cannot encode quarantine cursor"))?,
+            )
+        } else {
+            None
+        };
+        let jobs = jobs
+            .into_iter()
+            .map(|job| {
+                let r = job.request;
+                for id in [
+                    &r.id,
+                    &r.session_id,
+                    &r.turn_id,
+                    &r.binding.runtime,
+                    &r.binding.profile,
+                    &r.binding.revision,
+                ] {
+                    validate_key(id)?;
+                }
+                // Only expose known static runtime classifications. Historical
+                // custom codes could carry provider text or even a capability;
+                // an unrecognized code does not hide the job itself.
+                let error_code = job.error.map(|e| e.code).filter(|code| {
+                    matches!(
+                        code.as_str(),
+                        "unknown_outcome"
+                            | "cancelled"
+                            | "operator_resolved"
+                            | "model_incomplete"
+                            | "model_cancelled"
+                    )
+                });
+                Ok(RuntimeQuarantineJob {
+                    request_sha256: crate::recovery::fingerprint(&r)?,
+                    unknown_since: self
+                        .store
+                        .get(&unknown_since_key(&r.id))
+                        .map_err(|_| Fault::invalid("cannot read quarantine clock"))?,
+                    id: r.id,
+                    session_id: r.session_id,
+                    turn_id: r.turn_id,
+                    generation: r.generation,
+                    status: job.status,
+                    binding: RuntimeQuarantineBinding {
+                        runtime: r.binding.runtime,
+                        profile: r.binding.profile,
+                        revision: r.binding.revision,
+                        kind: r.binding.kind,
+                        execution_mode: r.binding.execution_mode,
+                    },
+                    error_code,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let page = RuntimeQuarantinePage { jobs, next_cursor };
+        if serde_json::to_vec(&page)
+            .map_err(|_| Fault::invalid("cannot encode quarantine inventory"))?
+            .len()
+            > 256 * 1024
+        {
+            return Err(Fault::invalid(
+                "quarantine inventory response exceeds bound",
+            ));
+        }
+        Ok(page)
     }
     /// Atomically fence a dispatch that was cancelled before admission. A late
     /// submit observes this exact tombstone and cannot start a model or tool.
@@ -1203,6 +1359,333 @@ mod tests {
             error: None,
             events: vec![],
         }
+    }
+
+    fn inventory_snapshot(store: &Store) -> Vec<String> {
+        let mut rows: Vec<_> = store
+            .scan::<Value>("")
+            .unwrap()
+            .iter()
+            .map(|v| serde_json::to_string(v).unwrap())
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn quarantine_inventory_discovers_restart_and_legacy_jobs_without_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        let mut running = unknown_job("restart");
+        running.status = TurnStatus::Running;
+        let mut foreign = unknown_job("foreign");
+        foreign.request.binding.runtime = "runtime-2".into();
+        store
+            .transaction(|tx| {
+                tx.put(&job_key("restart"), &running)?;
+                tx.put(&job_key("legacy"), &unknown_job("legacy"))?;
+                tx.put(&job_key("foreign"), &foreign)?;
+                tx.put(&archived_job_key("archived"), &unknown_job("archived"))
+            })
+            .unwrap();
+        let runtime = Runtime::new(cfg.clone(), store.clone()).unwrap();
+        let before = inventory_snapshot(&store);
+        let page = runtime
+            .quarantine_inventory(&cfg.principals[0], &QuarantineQuery::default())
+            .unwrap();
+        assert_eq!(
+            page.jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(),
+            ["legacy", "restart"]
+        );
+        assert!(page.jobs[0].unknown_since.is_none());
+        assert!(page.jobs[1].unknown_since.is_some());
+        assert_eq!(page.jobs[1].error_code.as_deref(), Some("unknown_outcome"));
+        assert_eq!(inventory_snapshot(&store), before);
+        assert_eq!(runtime.get("foreign").unwrap_err().code, "forbidden");
+    }
+
+    #[test]
+    fn quarantine_inventory_pages_are_deterministic_and_scope_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        let runtime = Runtime::new(cfg.clone(), store.clone()).unwrap();
+        store
+            .transaction(|tx| {
+                for id in ["c", "a", "b"] {
+                    tx.put(&job_key(id), &unknown_job(id))?;
+                }
+                let mut legacy_profile = unknown_job("d");
+                legacy_profile.request.binding.profile = "removed-profile".into();
+                tx.put(&job_key("d"), &legacy_profile)
+            })
+            .unwrap();
+        let principal = &cfg.principals[0];
+        let mut query = QuarantineQuery {
+            status: Some("unknown".into()),
+            profile: Some("claude".into()),
+            limit: Some(2),
+            after: None,
+        };
+        let first = runtime.quarantine_inventory(principal, &query).unwrap();
+        assert_eq!(
+            first.jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(
+            runtime.quarantine_inventory(principal, &query).unwrap(),
+            first
+        );
+        query.after = first.next_cursor;
+        let second = runtime.quarantine_inventory(principal, &query).unwrap();
+        assert_eq!(second.jobs[0].id, "c");
+        assert!(second.next_cursor.is_none());
+        query.profile = Some("removed-profile".into());
+        assert!(runtime.quarantine_inventory(principal, &query).is_err());
+        query.after = None;
+        assert_eq!(
+            runtime
+                .quarantine_inventory(principal, &query)
+                .unwrap()
+                .jobs[0]
+                .id,
+            "d"
+        );
+        for value in [0, 101, u16::MAX] {
+            query.limit = Some(value);
+            assert!(runtime.quarantine_inventory(principal, &query).is_err());
+        }
+        query.limit = Some(100);
+        query.profile = None;
+        for after in [
+            "",
+            "{}",
+            "null",
+            "{\"version\":2,\"runtime\":\"runtime-1\",\"profile\":null,\"id\":\"a\"}",
+            "{\"version\":1,\"runtime\":\"runtime-2\",\"profile\":null,\"id\":\"a\"}",
+        ] {
+            query.after = Some(after.into());
+            assert!(runtime.quarantine_inventory(principal, &query).is_err());
+        }
+        query.after = Some("x".repeat(4097));
+        assert!(runtime.quarantine_inventory(principal, &query).is_err());
+        query.after = None;
+        query.status = Some("running".into());
+        assert!(runtime.quarantine_inventory(principal, &query).is_err());
+        query.status = None;
+        query.profile = Some(String::new());
+        assert!(runtime.quarantine_inventory(principal, &query).is_err());
+    }
+
+    #[test]
+    fn quarantine_inventory_exposes_only_bounded_metadata_and_request_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        let runtime = Runtime::new(cfg.clone(), store.clone()).unwrap();
+        let mut job = unknown_job("private");
+        job.request.input.text = "PRIVATE-INPUT-CANARY".into();
+        job.request.instructions = "PRIVATE-INSTRUCTIONS-CANARY".into();
+        job.request.workspace.root = "/PRIVATE-WORKSPACE-CANARY".into();
+        job.request.binding.model = Some("PRIVATE-MODEL-CANARY".into());
+        job.request.provider_session = Some("PRIVATE-REQUEST-PROVIDER-CANARY".into());
+        job.provider_session = Some("PRIVATE-PROVIDER-CANARY".into());
+        job.output = Some("PRIVATE-OUTPUT-CANARY".into());
+        job.events = vec![RuntimeEvent::Reasoning {
+            text: "PRIVATE-EVENT-CANARY".into(),
+        }];
+        job.error = Some(Fault::new("unknown_outcome", "PRIVATE-ERROR-CANARY"));
+        store
+            .transaction(|tx| tx.put(&job_key("private"), &job))
+            .unwrap();
+        let page = runtime
+            .quarantine_inventory(&cfg.principals[0], &QuarantineQuery::default())
+            .unwrap();
+        assert_eq!(
+            page.jobs[0].request_sha256,
+            crate::recovery::fingerprint(&job.request).unwrap()
+        );
+        let wire = serde_json::to_string(&page).unwrap();
+        assert!(!wire.contains("PRIVATE-"));
+        let value = serde_json::to_value(&page.jobs[0]).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 9);
+        assert_eq!(value["binding"].as_object().unwrap().len(), 5);
+        // A historical custom error code cannot leak provider text either.
+        job.error = Some(Fault::new("mcp-PRIVATE-ERROR-CODE-CANARY", "ignored"));
+        store
+            .transaction(|tx| tx.put(&job_key("private"), &job))
+            .unwrap();
+        assert!(
+            runtime
+                .quarantine_inventory(&cfg.principals[0], &QuarantineQuery::default())
+                .unwrap()
+                .jobs[0]
+                .error_code
+                .is_none()
+        );
+        job.request.session_id = "s".repeat(257);
+        store
+            .transaction(|tx| tx.put(&job_key("private"), &job))
+            .unwrap();
+        assert_eq!(
+            runtime
+                .quarantine_inventory(&cfg.principals[0], &QuarantineQuery::default())
+                .unwrap_err()
+                .code,
+            "invalid_request"
+        );
+    }
+
+    #[test]
+    fn quarantine_inventory_never_weakens_submit_or_reconciliation_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = (*config(dir.path())).clone();
+        cfg.runtimes.insert(
+            "claude".into(),
+            serde_json::from_value(json!({
+                "revision":"1", "kind":"claude", "working_dir":dir.path(),
+                "binary":"/not-invoked", "execution_mode":"brokered"
+            }))
+            .unwrap(),
+        );
+        let principal = cfg.principals[0].clone();
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        let runtime = Runtime::new(Arc::new(cfg), store.clone()).unwrap();
+        let job = unknown_job("uncertain");
+        store
+            .transaction(|tx| tx.put(&job_key("uncertain"), &job))
+            .unwrap();
+        let resolution = Reconciliation {
+            request_id: "resolution".into(),
+            expected_request_sha256: crate::recovery::fingerprint(&job.request).unwrap(),
+            status: TurnStatus::Failed,
+            quiescent: true,
+            evidence: vec!["fixture-owned-processes-stopped".into()],
+            output: None,
+            result: None,
+        };
+        assert_eq!(
+            runtime
+                .submit(&principal, request("next"))
+                .unwrap_err()
+                .code,
+            "unknown_outcome"
+        );
+        runtime
+            .quarantine_inventory(&principal, &QuarantineQuery::default())
+            .unwrap();
+        assert_eq!(
+            runtime
+                .submit(&principal, request("next"))
+                .unwrap_err()
+                .code,
+            "unknown_outcome"
+        );
+        let mut unauthorized = principal.clone();
+        unauthorized.roles = vec!["client".into()];
+        assert_eq!(
+            runtime
+                .quarantine_inventory(&unauthorized, &QuarantineQuery::default())
+                .unwrap_err()
+                .code,
+            "forbidden"
+        );
+        assert_eq!(
+            runtime
+                .reconcile(&principal, "uncertain", &resolution)
+                .unwrap_err()
+                .code,
+            "forbidden"
+        );
+        let admin = admin_principal();
+        let mut wrong_hash = resolution.clone();
+        wrong_hash.expected_request_sha256 = "0".repeat(64);
+        assert_eq!(
+            runtime
+                .reconcile(&admin, "uncertain", &wrong_hash)
+                .unwrap_err()
+                .code,
+            "conflict"
+        );
+        let mut not_quiescent = resolution.clone();
+        not_quiescent.quiescent = false;
+        assert_eq!(
+            runtime
+                .reconcile(&admin, "uncertain", &not_quiescent)
+                .unwrap_err()
+                .code,
+            "invalid_request"
+        );
+        runtime
+            .active
+            .lock()
+            .unwrap()
+            .insert("uncertain".into(), Arc::new(AtomicBool::new(false)));
+        assert_eq!(
+            runtime
+                .reconcile(&admin, "uncertain", &resolution)
+                .unwrap_err()
+                .code,
+            "busy"
+        );
+        runtime.active.lock().unwrap().clear();
+        assert_eq!(runtime.get("uncertain").unwrap(), job);
+        runtime.reconcile(&admin, "uncertain", &resolution).unwrap();
+        assert!(
+            runtime
+                .quarantine_inventory(&principal, &QuarantineQuery::default())
+                .unwrap()
+                .jobs
+                .is_empty()
+        );
+        assert!(
+            store
+                .get::<RuntimeJob>(&job_key("uncertain"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(runtime.get("uncertain").unwrap().status, TurnStatus::Failed);
+    }
+
+    #[test]
+    fn quarantine_inventory_refuses_an_oversized_metadata_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = (*config(dir.path())).clone();
+        cfg.service_id = "\"".repeat(256);
+        let principal = cfg.principals[0].clone();
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        let runtime = Runtime::new(Arc::new(cfg), store.clone()).unwrap();
+        store
+            .transaction(|tx| {
+                for i in 0..100 {
+                    let id = format!("{}-{i:03}", "\"".repeat(250));
+                    let mut job = unknown_job(&id);
+                    job.request.binding.runtime = runtime.config.service_id.clone();
+                    job.request.session_id = "\"".repeat(256);
+                    job.request.turn_id = "\"".repeat(256);
+                    job.request.binding.profile = "\"".repeat(256);
+                    job.request.binding.revision = "\"".repeat(256);
+                    tx.put(&job_key(&id), &job)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let before = inventory_snapshot(&store);
+        let mut query = QuarantineQuery {
+            limit: Some(100),
+            ..Default::default()
+        };
+        let error = runtime
+            .quarantine_inventory(&principal, &query)
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_request");
+        assert_eq!(error.message, "quarantine inventory response exceeds bound");
+        query.limit = Some(1);
+        let page = runtime.quarantine_inventory(&principal, &query).unwrap();
+        assert_eq!(page.jobs.len(), 1);
+        assert!(page.next_cursor.is_some());
+        assert_eq!(inventory_snapshot(&store), before);
     }
 
     #[test]
